@@ -9,8 +9,8 @@ This project is designed for efficient exploratory QC (preview in the GUI) while
 ## Key Features
 
 ### Data IO
-- Load Doric `.h5` exports (analog 465 / 405 and optional DigitalIO).
-- Multi-channel support (e.g., `AIN01`, `AIN02`, …).
+- Supports raw data in .doric, .h5 or .csv.
+- Multi-channel support (e.g., AIN01, AIN02, DIO channels …).
 - Optional alignment of analog traces to the DigitalIO timebase when a DIO is selected.
 
 ### Artifact Handling
@@ -123,6 +123,7 @@ Tune lambda and other parameters to avoid baseline leakage into fast transients.
 Pick one of the 7 output modes.
 
 For “fitted ref” modes, choose the fit method (OLS/Lasso/RLM-HuberT).
+
 
 ### Export
 
