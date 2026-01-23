@@ -160,7 +160,7 @@ You can optionally set a start time, end time, or both:
 
 ### Behavior file formats
 - **CSV**: must include a time column and one or more binary behavior columns
-- **Ethovision XLSX**: the loader uses `ethovision_process_gui.py` cleaning logic; select the sheet when loading
+- **Ethovision XLSX**: the loader preprocess and clean the file, the user has to select the sheet when loading
 
 ### PSTH/Heatmap
 - Heatmap and PSTH refresh automatically when alignment settings change
@@ -204,4 +204,5 @@ PowerShell helper:
 ```
 
 This will create a `pyBer.exe` in the `dist/` folder.
+
 
