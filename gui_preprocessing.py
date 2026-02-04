@@ -283,24 +283,40 @@ class ArtifactPanel(QtWidgets.QDialog):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Manual Artifact Regions")
+        self.setWindowTitle("Artifact Regions")
         self.setModal(False)
-        self.resize(520, 360)
+        self.resize(560, 520)
 
         self._regions: List[Tuple[float, float]] = []
+        self._auto_regions: List[Tuple[float, float]] = []
+        self._auto_checked: List[bool] = []
+        self._auto_updating = False
         self._build_ui()
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
 
+        auto_group = QtWidgets.QGroupBox("Auto-detected (threshold)")
+        auto_layout = QtWidgets.QVBoxLayout(auto_group)
+        self.table_auto = QtWidgets.QTableWidget(0, 4)
+        self.table_auto.setHorizontalHeaderLabels(["ID", "Remove", "Start (s)", "End (s)"])
+        self.table_auto.horizontalHeader().setStretchLastSection(True)
+        self.table_auto.verticalHeader().setVisible(False)
+        self.table_auto.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table_auto.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        auto_layout.addWidget(self.table_auto)
+        layout.addWidget(auto_group)
+
+        manual_group = QtWidgets.QGroupBox("Manual artifacts")
+        manual_layout = QtWidgets.QVBoxLayout(manual_group)
         self.table = QtWidgets.QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["ID", "Start (s)", "End (s)"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
 
-        layout.addWidget(self.table)
+        manual_layout.addWidget(self.table)
 
         addrow = QtWidgets.QHBoxLayout()
         self.ed_start = QtWidgets.QDoubleSpinBox()
@@ -314,7 +330,7 @@ class ArtifactPanel(QtWidgets.QDialog):
         self.btn_add = QtWidgets.QPushButton("Add")
         self.btn_update = QtWidgets.QPushButton("Update selected")
         self.btn_del = QtWidgets.QPushButton("Delete selected")
-        self.btn_clear = QtWidgets.QPushButton("Clear all")
+        self.btn_clear = QtWidgets.QPushButton("Clear manual")
 
         addrow.addWidget(QtWidgets.QLabel("Start:"))
         addrow.addWidget(self.ed_start)
@@ -322,7 +338,7 @@ class ArtifactPanel(QtWidgets.QDialog):
         addrow.addWidget(self.ed_end)
         addrow.addStretch(1)
         addrow.addWidget(self.btn_add)
-        layout.addLayout(addrow)
+        manual_layout.addLayout(addrow)
 
         btnrow = QtWidgets.QHBoxLayout()
         btnrow.addWidget(self.btn_update)
@@ -332,7 +348,8 @@ class ArtifactPanel(QtWidgets.QDialog):
 
         self.btn_close = QtWidgets.QPushButton("Close")
         btnrow.addWidget(self.btn_close)
-        layout.addLayout(btnrow)
+        manual_layout.addLayout(btnrow)
+        layout.addWidget(manual_group)
 
         self.btn_add.clicked.connect(self._on_add)
         self.btn_update.clicked.connect(self._on_update_selected)
@@ -341,14 +358,46 @@ class ArtifactPanel(QtWidgets.QDialog):
         self.btn_close.clicked.connect(self.close)
 
         self.table.itemSelectionChanged.connect(self._sync_edits_from_selected)
+        self.table_auto.itemChanged.connect(self._on_auto_item_changed)
 
     def set_regions(self, regions: List[Tuple[float, float]]) -> None:
         self._regions = [(float(a), float(b)) for a, b in (regions or [])]
         self._regions = [(min(a, b), max(a, b)) for a, b in self._regions]
         self._rebuild_table()
 
+    def set_auto_regions(
+        self,
+        regions: List[Tuple[float, float]],
+        checked_regions: Optional[List[Tuple[float, float]]] = None,
+    ) -> None:
+        self._auto_regions = [(float(a), float(b)) for a, b in (regions or [])]
+        self._auto_regions = [(min(a, b), max(a, b)) for a, b in self._auto_regions]
+        self._auto_regions.sort(key=lambda x: x[0])
+
+        if checked_regions is None:
+            self._auto_checked = [True for _ in self._auto_regions]
+        else:
+            checked = [(min(a, b), max(a, b)) for a, b in (checked_regions or [])]
+            self._auto_checked = [self._region_in_list(r, checked) for r in self._auto_regions]
+        self._rebuild_auto_table()
+
     def regions(self) -> List[Tuple[float, float]]:
         return list(self._regions)
+
+    def _region_in_list(self, target: Tuple[float, float], regions: List[Tuple[float, float]], tol: float = 1e-3) -> bool:
+        return any((abs(target[0] - a) <= tol and abs(target[1] - b) <= tol) for a, b in regions)
+
+    def _auto_checked_regions(self) -> List[Tuple[float, float]]:
+        out = []
+        for keep, reg in zip(self._auto_checked, self._auto_regions):
+            if keep:
+                out.append(reg)
+        return out
+
+    def _combined_regions(self) -> List[Tuple[float, float]]:
+        regs = self._auto_checked_regions() + list(self._regions)
+        regs.sort(key=lambda x: x[0])
+        return regs
 
     def _rebuild_table(self) -> None:
         self.table.setRowCount(0)
@@ -362,8 +411,36 @@ class ArtifactPanel(QtWidgets.QDialog):
             self.table.setItem(r, 1, QtWidgets.QTableWidgetItem(f"{a:.3f}"))
             self.table.setItem(r, 2, QtWidgets.QTableWidgetItem(f"{b:.3f}"))
 
+    def _rebuild_auto_table(self) -> None:
+        self._auto_updating = True
+        try:
+            self.table_auto.setRowCount(0)
+            for i, (a, b) in enumerate(self._auto_regions, start=1):
+                r = self.table_auto.rowCount()
+                self.table_auto.insertRow(r)
+                id_item = QtWidgets.QTableWidgetItem(str(i))
+                id_item.setFlags(id_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                id_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                self.table_auto.setItem(r, 0, id_item)
+
+                chk = QtWidgets.QTableWidgetItem("")
+                chk.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                chk.setCheckState(QtCore.Qt.CheckState.Checked if self._auto_checked[i - 1] else QtCore.Qt.CheckState.Unchecked)
+                chk.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                self.table_auto.setItem(r, 1, chk)
+
+                start_item = QtWidgets.QTableWidgetItem(f"{a:.3f}")
+                start_item.setFlags(start_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                self.table_auto.setItem(r, 2, start_item)
+
+                end_item = QtWidgets.QTableWidgetItem(f"{b:.3f}")
+                end_item.setFlags(end_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                self.table_auto.setItem(r, 3, end_item)
+        finally:
+            self._auto_updating = False
+
     def _emit(self) -> None:
-        self.regionsChanged.emit(self.regions())
+        self.regionsChanged.emit(self._combined_regions())
 
     def _sync_edits_from_selected(self) -> None:
         rows = self.table.selectionModel().selectedRows()
@@ -374,6 +451,16 @@ class ArtifactPanel(QtWidgets.QDialog):
             a, b = self._regions[r]
             self.ed_start.setValue(float(a))
             self.ed_end.setValue(float(b))
+
+    def _on_auto_item_changed(self, item: QtWidgets.QTableWidgetItem) -> None:
+        if self._auto_updating:
+            return
+        if item.column() != 1:
+            return
+        row = item.row()
+        if 0 <= row < len(self._auto_checked):
+            self._auto_checked[row] = (item.checkState() == QtCore.Qt.CheckState.Checked)
+            self._emit()
 
     def _on_add(self) -> None:
         a = float(self.ed_start.value())
@@ -404,9 +491,13 @@ class ArtifactPanel(QtWidgets.QDialog):
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return
-        r = rows[0].row()
-        if 0 <= r < len(self._regions):
-            del self._regions[r]
+        idx = sorted({r.row() for r in rows}, reverse=True)
+        changed = False
+        for r in idx:
+            if 0 <= r < len(self._regions):
+                del self._regions[r]
+                changed = True
+        if changed:
             self._rebuild_table()
             self._emit()
 
@@ -1021,6 +1112,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 "Output mode selects dFF/z-score and motion correction strategy.\n"
                 "Options include non-corrected, subtraction-based, and fitted-reference modes."
             ),
+            "invert_polarity": (
+                "Invert the polarity of both 465 and 405 signals.\n"
+                "Useful if your acquisition wiring produced inverted traces."
+            ),
             "reference_fit": (
                 "Reference fit method for fitted-reference outputs:\n"
                 "- OLS: standard linear fit (recommended).\n"
@@ -1115,6 +1210,9 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_target_fs = mk_dspin(decimals=1)
         self.spin_target_fs.setRange(1.0, 1000.0)
         self.spin_target_fs.setValue(100.0)
+
+        self.cb_invert = QtWidgets.QCheckBox("Invert polarity (sign flip)")
+        self.cb_invert.setChecked(False)
 
         # Baseline method and lambda (main parameters)
         baseline_main_row = QtWidgets.QHBoxLayout()
@@ -1224,6 +1322,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         form.addRow(self._label_with_help("Low-pass cutoff (Hz)", "lowpass_hz"), self.spin_lowpass)
         form.addRow(self._label_with_help("Filter order", "filter_order"), self.spin_filt_order)
         form.addRow(self._label_with_help("Target FS (Hz)", "target_fs_hz"), self.spin_target_fs)
+        form.addRow(self._label_with_help("Invert polarity", "invert_polarity"), self.cb_invert)
 
         form.addRow("Baseline", baseline_main_widget)
         form.addRow(self.btn_toggle_advanced)
@@ -1289,6 +1388,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
 
         self.cb_artifact.stateChanged.connect(self._update_artifact_enabled)
         self.cb_filtering.stateChanged.connect(self._update_filtering_enabled)
+        self.cb_invert.stateChanged.connect(emit_noargs)
 
     def _toggle_advanced_baseline(self) -> None:
         """Toggle visibility of baseline advanced parameters."""
@@ -1381,6 +1481,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
             output_mode=self.combo_output.currentText(),
             reference_fit=self.combo_ref_fit.currentText(),
             lasso_alpha=float(self.spin_lasso.value()),
+            invert_polarity=self.cb_invert.isChecked(),
         )
 
     def set_params(self, params: ProcessingParams) -> None:
@@ -1394,6 +1495,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_lowpass.setValue(float(params.lowpass_hz))
         self.spin_filt_order.setValue(int(params.filter_order))
         self.spin_target_fs.setValue(float(params.target_fs_hz))
+        self.cb_invert.setChecked(bool(getattr(params, "invert_polarity", False)))
 
         self.combo_baseline.setCurrentText(str(params.baseline_method))
         lam = float(params.baseline_lambda)

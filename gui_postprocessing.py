@@ -890,7 +890,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 else:
                     continue
                 self._behavior_sources[stem] = info
-            except Exception:
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Behavior load failed",
+                    f"Could not load {os.path.basename(p)}:\n{exc}",
+                )
                 continue
         self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded")
 
@@ -1585,7 +1590,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         baseline = (b0, b1)
 
         try:
+            group_mode = self.tab_sources.currentIndex() == 1
             mats: List[np.ndarray] = []
+            animal_rows: List[np.ndarray] = []
             all_dur = []
             total_events = 0
             tvec = None
@@ -1600,6 +1607,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     continue
                 mats.append(mat)
                 total_events += mat.shape[0]
+                if group_mode:
+                    row = np.nanmean(mat, axis=0)
+                    if np.any(np.isfinite(row)):
+                        animal_rows.append(row)
                 if dur is not None and len(dur):
                     all_dur.append(np.asarray(dur, float))
 
@@ -1609,17 +1620,28 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self.lbl_log.setText("No events found for the current alignment.")
                 return
 
-            mat_all = np.vstack(mats)
-            self._render_heatmap(mat_all, tvec)
-            self._render_avg(mat_all, tvec)
+            mat_events = np.vstack(mats)
+            if group_mode:
+                if not animal_rows:
+                    self.lbl_log.setText("No events found for the current alignment.")
+                    return
+                mat_display = np.vstack(animal_rows)
+            else:
+                mat_display = mat_events
+
+            self._render_heatmap(mat_display, tvec)
+            self._render_avg(mat_display, tvec)
             dur_all = np.concatenate(all_dur) if all_dur else np.array([], float)
             self._render_duration_hist(dur_all)
-            self._render_metrics(mat_all, tvec)
-            self._last_mat = mat_all
+            self._render_metrics(mat_display, tvec)
+            self._last_mat = mat_display
             self._last_tvec = tvec
             self._last_events = None
             self._last_durations = dur_all
-            self.lbl_log.setText(f"Computed PSTH for {total_events} event(s).")
+            if group_mode:
+                self.lbl_log.setText(f"Computed PSTH for {total_events} event(s) across {mat_display.shape[0]} animal(s).")
+            else:
+                self.lbl_log.setText(f"Computed PSTH for {total_events} event(s).")
             self._update_metric_regions()
             self._save_settings()
         except Exception as e:

@@ -100,6 +100,11 @@ class ProcessingParams:
     output_mode: str = "dFF (motion corrected with fitted ref)"
 
     # -------------------------
+    # Signal polarity
+    # -------------------------
+    invert_polarity: bool = False
+
+    # -------------------------
     # Reference fit options (used by "fitted ref" output modes)
     # -------------------------
     reference_fit: str = "OLS (recommended)"  # OLS | Lasso | RLM (HuberT)
@@ -210,6 +215,7 @@ class ProcessedTrial:
     output_label: str = ""
 
     artifact_regions_sec: Optional[List[Tuple[float, float]]] = None
+    artifact_regions_auto_sec: Optional[List[Tuple[float, float]]] = None
 
     fs_actual: float = np.nan
     fs_target: float = np.nan
@@ -355,6 +361,16 @@ def apply_manual_regions(time: np.ndarray, mask: np.ndarray, regions: List[Tuple
     for (a, b) in (regions or []):
         t0, t1 = (min(a, b), max(a, b))
         m |= (t >= t0) & (t <= t1)
+    return m
+
+
+def remove_manual_regions(time: np.ndarray, mask: np.ndarray, regions: List[Tuple[float, float]]) -> np.ndarray:
+    """Remove (unmask) user-provided regions (sec) from the artifact mask."""
+    t = np.asarray(time, float)
+    m = np.asarray(mask, bool).copy()
+    for (a, b) in (regions or []):
+        t0, t1 = (min(a, b), max(a, b))
+        m &= ~((t >= t0) & (t <= t1))
     return m
 
 
@@ -698,6 +714,7 @@ class PreviewTask(QtCore.QRunnable):
         trial: LoadedTrial,
         params: ProcessingParams,
         manual_regions_sec: List[Tuple[float, float]],
+        manual_exclude_regions_sec: List[Tuple[float, float]],
         job_id: int,
     ):
         super().__init__()
@@ -706,13 +723,20 @@ class PreviewTask(QtCore.QRunnable):
         self.trial = trial
         self.params = params
         self.manual = manual_regions_sec
+        self.manual_exclude = manual_exclude_regions_sec
         self.job_id = job_id
         self.signals = _TaskSignals()
 
     def run(self) -> None:
         t0 = time.time()
         try:
-            proc = self.processor.process_trial(self.trial, self.params, self.manual, preview_mode=True)
+            proc = self.processor.process_trial(
+                self.trial,
+                self.params,
+                manual_regions_sec=self.manual,
+                manual_exclude_regions_sec=self.manual_exclude,
+                preview_mode=True,
+            )
             self.signals.finished.emit(proc, self.job_id, time.time() - t0)
         except Exception as e:
             self.signals.failed.emit(str(e), self.job_id)
@@ -794,9 +818,10 @@ class PhotometryProcessor:
         trial: LoadedTrial,
         params: ProcessingParams,
         manual_regions_sec: List[Tuple[float, float]],
+        manual_exclude_regions_sec: List[Tuple[float, float]],
         job_id: int,
     ) -> PreviewTask:
-        return PreviewTask(self, trial, params, manual_regions_sec, job_id)
+        return PreviewTask(self, trial, params, manual_regions_sec, manual_exclude_regions_sec, job_id)
 
     def _baseline(self, t: np.ndarray, x: np.ndarray, params: ProcessingParams) -> np.ndarray:
         """
@@ -833,6 +858,7 @@ class PhotometryProcessor:
         trial: LoadedTrial,
         params: ProcessingParams,
         manual_regions_sec: Optional[List[Tuple[float, float]]] = None,
+        manual_exclude_regions_sec: Optional[List[Tuple[float, float]]] = None,
         preview_mode: bool = False,
     ) -> ProcessedTrial:
         # ---------------------------------------------------------------------
@@ -841,6 +867,10 @@ class PhotometryProcessor:
         t = np.asarray(trial.time, float)
         sig = np.asarray(trial.signal_465, float)
         ref = np.asarray(trial.reference_405, float)
+
+        if bool(getattr(params, "invert_polarity", False)):
+            sig = -sig
+            ref = -ref
 
         fs = float(trial.sampling_rate) if np.isfinite(trial.sampling_rate) else (
             1.0 / float(np.nanmedian(np.diff(t))) if t.size > 2 else np.nan
@@ -872,6 +902,9 @@ class PhotometryProcessor:
         else:
             mask = np.zeros_like(t, dtype=bool)
 
+        auto_regions = regions_from_mask(t, mask)
+        if manual_exclude_regions_sec:
+            mask = remove_manual_regions(t, mask, manual_exclude_regions_sec or [])
         mask = apply_manual_regions(t, mask, manual_regions_sec or [])
 
         # ---------------------------------------------------------------------
@@ -997,6 +1030,7 @@ class PhotometryProcessor:
             output=out,
             output_label=mode,
             artifact_regions_sec=regions_from_mask(t, mask),
+            artifact_regions_auto_sec=auto_regions,
             fs_actual=float(fs),
             fs_target=float(target_fs),
             fs_used=float(fs_used),

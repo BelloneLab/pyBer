@@ -203,6 +203,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_trigger: Optional[str] = None
 
         self._manual_regions_by_key: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
+        self._manual_exclude_by_key: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
+        self._auto_regions_by_key: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
         self._metadata_by_key: Dict[Tuple[str, str], Dict[str, str]] = {}
         self._cutout_regions_by_key: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
         self._sections_by_key: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
@@ -210,6 +212,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_processed: Dict[Tuple[str, str], ProcessedTrial] = {}
         self._advanced_dialog: Optional[AdvancedOptionsDialog] = None
         self._box_select_callback: Optional[Callable[[float, float], None]] = None
+        self._last_artifact_params: Optional[Tuple[object, ...]] = None
 
         # Worker infra (stable)
         self._pool = QtCore.QThreadPool.globalInstance()
@@ -303,7 +306,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_panel.batchQcRequested.connect(self._run_batch_qc)
 
         # Parameters -> debounce preview
-        self.param_panel.paramsChanged.connect(self._trigger_preview)
+        self.param_panel.paramsChanged.connect(self._on_params_changed)
 
         # Plot sync
         self.plots.xRangeChanged.connect(self.plots.set_xrange_all)
@@ -336,6 +339,12 @@ class MainWindow(QtWidgets.QMainWindow):
             raw = self.settings.value("params_json", "", type=str)
             if raw:
                 d = json.loads(raw)
+                # One-time migration: ensure invert polarity defaults to off
+                migrated = self.settings.value("invert_polarity_migrated", False, type=bool)
+                if not migrated:
+                    d["invert_polarity"] = False
+                    self.settings.setValue("invert_polarity_migrated", True)
+                    self.settings.setValue("params_json", json.dumps(d))
                 p = ProcessingParams.from_dict(d)
                 self.param_panel.set_params(p)
         except Exception:
@@ -483,6 +492,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_time_window_changed(self) -> None:
         self._last_processed.clear()
+        key = self._current_key()
+        if key:
+            start_s, end_s = self._time_window_bounds()
+            manual_win = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
+            ignore_win = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
+            auto_win = self._clip_regions_to_window(self._auto_regions_by_key.get(key, []), start_s, end_s)
+            checked_auto = [r for r in auto_win if not any(self._regions_match(r, ig) for ig in ignore_win)]
+            self.artifact_panel.set_auto_regions(auto_win, checked_regions=checked_auto)
+            self.artifact_panel.set_regions(manual_win)
         self._update_raw_plot()
         self._trigger_preview()
 
@@ -801,13 +819,21 @@ class MainWindow(QtWidgets.QMainWindow):
         key = (self._current_path, self._current_channel)
         cutouts = self._cutout_regions_by_key.get(key, [])
         trial = self._apply_cutouts(trial, cutouts)
-        manual = self._manual_regions_by_key.get(key, [])
+        start_s, end_s = self._time_window_bounds()
+        manual = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
+        params = self.param_panel.get_params()
+
+        raw465 = trial.signal_465
+        raw405 = trial.reference_405
+        if bool(getattr(params, "invert_polarity", False)):
+            raw465 = -np.asarray(raw465, float)
+            raw405 = -np.asarray(raw405, float)
 
         self.plots.set_title(os.path.basename(self._current_path))
         self.plots.show_raw(
             time=trial.time,
-            raw465=trial.signal_465,
-            raw405=trial.reference_405,
+            raw465=raw465,
+            raw405=raw405,
             trig_time=trial.trigger_time,
             trig=trial.trigger,
             trig_label=self._current_trigger or "",
@@ -815,6 +841,40 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     # ---------------- Preview processing (worker) ----------------
+
+    def _artifact_param_signature(self, params: ProcessingParams) -> Tuple[object, ...]:
+        return (
+            bool(getattr(params, "artifact_detection_enabled", True)),
+            str(params.artifact_mode),
+            float(params.mad_k),
+            float(params.adaptive_window_s),
+            float(params.artifact_pad_s),
+        )
+
+    def _on_params_changed(self) -> None:
+        try:
+            params = self.param_panel.get_params()
+        except Exception:
+            self._trigger_preview()
+            return
+        sig = self._artifact_param_signature(params)
+        if self._last_artifact_params is None:
+            self._last_artifact_params = sig
+        elif sig != self._last_artifact_params:
+            self._last_artifact_params = sig
+            # Reset auto artifact selections when detection params change
+            self._manual_exclude_by_key.clear()
+            key = self._current_key()
+            if key:
+                auto = self._auto_regions_by_key.get(key, [])
+                if auto:
+                    self.artifact_panel.set_auto_regions(auto, checked_regions=auto)
+        # Update raw display for toggles like polarity inversion
+        try:
+            self._update_raw_plot()
+        except Exception:
+            pass
+        self._trigger_preview()
 
     def _trigger_preview(self) -> None:
         # persist params quickly
@@ -835,7 +895,9 @@ class MainWindow(QtWidgets.QMainWindow):
         cutouts = self._cutout_regions_by_key.get(key, [])
         trial = self._apply_cutouts(trial, cutouts)
 
-        manual = self._manual_regions_by_key.get(key, [])
+        start_s, end_s = self._time_window_bounds()
+        manual = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
+        manual_exclude = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
         self._job_counter += 1
         job_id = self._job_counter
         self._latest_job_id = job_id
@@ -849,6 +911,7 @@ class MainWindow(QtWidgets.QMainWindow):
             trial=trial,
             params=params,
             manual_regions_sec=manual,
+            manual_exclude_regions_sec=manual_exclude,
             job_id=job_id,
         )
         task.signals.finished.connect(self._on_preview_finished)
@@ -866,8 +929,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_processed[key] = processed
 
         # Update artifact panel regions list
-        regs = processed.artifact_regions_sec or []
-        self.artifact_panel.set_regions(regs)
+        start_s, end_s = self._time_window_bounds()
+        auto_regs = processed.artifact_regions_auto_sec or []
+        auto_regs = self._clip_regions_to_window(auto_regs, start_s, end_s)
+        self._auto_regions_by_key[key] = auto_regs
+        ignore = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
+        # build checked list by excluding ignored
+        checked_auto = [r for r in auto_regs if not any(self._regions_match(r, ig) for ig in ignore)]
+        self.artifact_panel.set_auto_regions(auto_regs, checked_regions=checked_auto)
+        manual_regs = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
+        self.artifact_panel.set_regions(manual_regs)
 
         # Preserve current x/y ranges before updating plots
         current_xrange = None
@@ -906,6 +977,55 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------- Manual artifacts ----------------
 
+    def _regions_match(self, a: Tuple[float, float], b: Tuple[float, float], tol: float = 1e-3) -> bool:
+        return (abs(a[0] - b[0]) <= tol) and (abs(a[1] - b[1]) <= tol)
+
+    def _time_window_bounds(self) -> Tuple[Optional[float], Optional[float]]:
+        start_s, end_s = self.file_panel.time_window()
+        if start_s is not None and end_s is not None and end_s <= start_s:
+            return None, None
+        return start_s, end_s
+
+    def _clip_regions_to_window(
+        self,
+        regions: List[Tuple[float, float]],
+        start_s: Optional[float],
+        end_s: Optional[float],
+    ) -> List[Tuple[float, float]]:
+        if start_s is None and end_s is None:
+            return list(regions)
+        lo = -np.inf if start_s is None else float(start_s)
+        hi = np.inf if end_s is None else float(end_s)
+        out: List[Tuple[float, float]] = []
+        for a, b in regions or []:
+            t0, t1 = (min(a, b), max(a, b))
+            if t1 < lo or t0 > hi:
+                continue
+            out.append((max(t0, lo), min(t1, hi)))
+        return out
+
+    def _merge_regions_with_window(
+        self,
+        original: List[Tuple[float, float]],
+        windowed: List[Tuple[float, float]],
+        start_s: Optional[float],
+        end_s: Optional[float],
+    ) -> List[Tuple[float, float]]:
+        if start_s is None and end_s is None:
+            out = list(windowed)
+            out.sort(key=lambda x: x[0])
+            return out
+        lo = -np.inf if start_s is None else float(start_s)
+        hi = np.inf if end_s is None else float(end_s)
+        kept: List[Tuple[float, float]] = []
+        for a, b in original or []:
+            t0, t1 = (min(a, b), max(a, b))
+            if t1 < lo or t0 > hi:
+                kept.append((t0, t1))
+        out = kept + list(windowed)
+        out.sort(key=lambda x: x[0])
+        return out
+
     def _add_manual_region_from_selector(self) -> None:
         key = self._current_key()
         if not key:
@@ -914,7 +1034,8 @@ class MainWindow(QtWidgets.QMainWindow):
         regs = self._manual_regions_by_key.get(key, [])
         regs.append((min(t0, t1), max(t0, t1)))
         self._manual_regions_by_key[key] = regs
-        self.artifact_panel.set_regions(regs)
+        start_s, end_s = self._time_window_bounds()
+        self.artifact_panel.set_regions(self._clip_regions_to_window(regs, start_s, end_s))
         self._trigger_preview()
 
     def _add_manual_region_from_drag(self, t0: float, t1: float) -> None:
@@ -932,7 +1053,8 @@ class MainWindow(QtWidgets.QMainWindow):
         regs = self._manual_regions_by_key.get(key, [])
         regs.append((min(t0, t1), max(t0, t1)))
         self._manual_regions_by_key[key] = regs
-        self.artifact_panel.set_regions(regs)
+        start_s, end_s = self._time_window_bounds()
+        self.artifact_panel.set_regions(self._clip_regions_to_window(regs, start_s, end_s))
         self._trigger_preview()
 
     def _clear_manual_regions_current(self) -> None:
@@ -940,6 +1062,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not key:
             return
         self._manual_regions_by_key[key] = []
+        self._manual_exclude_by_key[key] = []
         self.artifact_panel.set_regions([])
         self._trigger_preview()
 
@@ -958,7 +1081,19 @@ class MainWindow(QtWidgets.QMainWindow):
         key = self._current_key()
         if not key:
             return
-        self._manual_regions_by_key[key] = regions
+        start_s, end_s = self._time_window_bounds()
+        auto = self._clip_regions_to_window(self._auto_regions_by_key.get(key, []), start_s, end_s)
+
+        def _contains(target: Tuple[float, float], arr: List[Tuple[float, float]]) -> bool:
+            return any(self._regions_match(target, other) for other in arr)
+
+        manual_add = [r for r in regions if not _contains(r, auto)]
+        manual_ignore = [r for r in auto if not _contains(r, regions)]
+
+        prev_manual = self._manual_regions_by_key.get(key, [])
+        prev_ignore = self._manual_exclude_by_key.get(key, [])
+        self._manual_regions_by_key[key] = self._merge_regions_with_window(prev_manual, manual_add, start_s, end_s)
+        self._manual_exclude_by_key[key] = self._merge_regions_with_window(prev_ignore, manual_ignore, start_s, end_s)
         self._trigger_preview()
 
     def _toggle_artifacts_panel(self) -> None:
@@ -1032,7 +1167,9 @@ class MainWindow(QtWidgets.QMainWindow):
             trial = self._apply_time_window(trial)
             cutouts = self._cutout_regions_by_key.get(key, [])
             trial = self._apply_cutouts(trial, cutouts)
-            manual = self._manual_regions_by_key.get(key, [])
+            start_s, end_s = self._time_window_bounds()
+            manual = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
+            manual_exclude = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
             meta = self._metadata_by_key.get(key, {})
             sections = self._sections_by_key.get(key, [])
 
@@ -1061,6 +1198,7 @@ class MainWindow(QtWidgets.QMainWindow):
                             trial=sec_trial,
                             params=sec_params,
                             manual_regions_sec=manual,
+                            manual_exclude_regions_sec=manual_exclude,
                             preview_mode=False,
                         )
                         _export_one(processed, suffix=f"sec{i}_{s0:.2f}_{s1:.2f}")
@@ -1069,6 +1207,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         trial=trial,
                         params=params,
                         manual_regions_sec=manual,
+                        manual_exclude_regions_sec=manual_exclude,
                         preview_mode=False,
                     )
                     _export_one(processed)
@@ -1107,8 +1246,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     params = self.param_panel.get_params()
                     trial = doric.make_trial(ch, trigger_name=self._current_trigger)
                     trial = self._apply_time_window(trial)
-                    manual = self._manual_regions_by_key.get(key, [])
-                    proc = self.processor.process_trial(trial, params, manual_regions_sec=manual, preview_mode=False)
+                    start_s, end_s = self._time_window_bounds()
+                    manual = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
+                    manual_exclude = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
+                    proc = self.processor.process_trial(
+                        trial,
+                        params,
+                        manual_regions_sec=manual,
+                        manual_exclude_regions_sec=manual_exclude,
+                        preview_mode=False,
+                    )
                     cutouts = self._cutout_regions_by_key.get(key, [])
                     proc = self._apply_cutouts_to_processed(proc, cutouts)
                     self._last_processed[key] = proc
