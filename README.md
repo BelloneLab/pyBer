@@ -1,5 +1,8 @@
 # Fiber Photometry Processing GUI
 
+<img width="500" height="500" alt="pyBer_logo_big" src="https://github.com/user-attachments/assets/e5acb000-17cd-451d-9f49-4218b41519aa" />
+
+
 A desktop GUI for visualizing photometry recordings, cleaning artifacts, filtering/resampling, baseline estimation, motion-correction, and exporting processed traces for downstream analysis.
 
 This project is designed for efficient exploratory QC (preview in the GUI) while keeping processing logic deterministic and scriptable (core functions live in `analysis_core.py`).
@@ -204,5 +207,6 @@ PowerShell helper:
 ```
 
 This will create a `pyBer.exe` in the `dist/` folder.
+
 
 
