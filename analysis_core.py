@@ -242,6 +242,16 @@ def safe_stem_from_metadata(path: str, channel: str, meta: Dict[str, str]) -> st
     return f"{clean(base)}_{clean(channel)}"
 
 
+def output_label_type(label: str) -> str:
+    """Return a short output label type for export column/dataset names."""
+    lab = (label or "").strip().lower()
+    if "zscore" in lab or "z-score" in lab or "z score" in lab:
+        return "z-score"
+    if "dff" in lab:
+        return "dFF"
+    return "output"
+
+
 def export_processed_csv(
     path: str,
     processed: ProcessedTrial,
@@ -250,14 +260,19 @@ def export_processed_csv(
     import csv
 
     t = np.asarray(processed.time, float)
-    out = np.asarray(
-        processed.output if processed.output is not None else np.full_like(t, np.nan),
-        float,
-    )
+    out = np.asarray(processed.output if processed.output is not None else np.full_like(t, np.nan), float)
+    raw = np.asarray(processed.raw_signal if processed.raw_signal is not None else np.full_like(t, np.nan), float)
+    iso = np.asarray(processed.raw_reference if processed.raw_reference is not None else np.full_like(t, np.nan), float)
+    if raw.size != t.size:
+        raw = np.full_like(t, np.nan)
+    if iso.size != t.size:
+        iso = np.full_like(t, np.nan)
 
     dio = None
     if processed.dio is not None and processed.dio.size == t.size:
         dio = np.asarray(processed.dio, float)
+
+    out_col = output_label_type(processed.output_label)
 
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
@@ -265,14 +280,21 @@ def export_processed_csv(
             for k, v in metadata.items():
                 w.writerow([f"# {k}: {v}"])
         if dio is None:
-            w.writerow(["time", "output"])
-            for i in range(t.size):
-                w.writerow([float(t[i]), float(out[i]) if np.isfinite(out[i]) else np.nan])
-        else:
-            w.writerow(["time", "output", "dio"])
+            w.writerow(["time", "raw", "isobestic", out_col])
             for i in range(t.size):
                 w.writerow([
                     float(t[i]),
+                    float(raw[i]) if np.isfinite(raw[i]) else np.nan,
+                    float(iso[i]) if np.isfinite(iso[i]) else np.nan,
+                    float(out[i]) if np.isfinite(out[i]) else np.nan,
+                ])
+        else:
+            w.writerow(["time", "raw", "isobestic", out_col, "dio"])
+            for i in range(t.size):
+                w.writerow([
+                    float(t[i]),
+                    float(raw[i]) if np.isfinite(raw[i]) else np.nan,
+                    float(iso[i]) if np.isfinite(iso[i]) else np.nan,
                     float(out[i]) if np.isfinite(out[i]) else np.nan,
                     float(dio[i]) if np.isfinite(dio[i]) else np.nan,
                 ])
@@ -283,13 +305,26 @@ def export_processed_h5(path: str, processed: ProcessedTrial, metadata: Optional
         g = f.create_group("data")
         g.create_dataset("time", data=np.asarray(processed.time, float), compression="gzip")
         g.create_dataset("output", data=np.asarray(processed.output, float), compression="gzip")
+        out_type = output_label_type(processed.output_label)
         g.attrs["output_label"] = str(processed.output_label)
+        g.attrs["output_type"] = str(out_type)
         g.attrs["fs_actual"] = float(processed.fs_actual)
         g.attrs["fs_used"] = float(processed.fs_used)
         g.attrs["fs_target"] = float(processed.fs_target)
 
-        g.create_dataset("raw_465", data=np.asarray(processed.raw_signal, float), compression="gzip")
-        g.create_dataset("raw_405", data=np.asarray(processed.raw_reference, float), compression="gzip")
+        raw_sig = np.asarray(processed.raw_signal if processed.raw_signal is not None else np.full_like(processed.time, np.nan), float)
+        raw_ref = np.asarray(processed.raw_reference if processed.raw_reference is not None else np.full_like(processed.time, np.nan), float)
+        g.create_dataset("raw_465", data=raw_sig, compression="gzip")
+        g.create_dataset("raw_405", data=raw_ref, compression="gzip")
+        try:
+            if "raw" not in g:
+                g["raw"] = g["raw_465"]
+            if "isobestic" not in g:
+                g["isobestic"] = g["raw_405"]
+            if out_type and out_type != "output" and out_type not in g:
+                g[out_type] = g["output"]
+        except Exception:
+            pass
 
         if processed.dio is not None:
             g.create_dataset("dio", data=np.asarray(processed.dio, float), compression="gzip")

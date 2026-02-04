@@ -280,6 +280,7 @@ class MetadataDialog(QtWidgets.QDialog):
 
 class ArtifactPanel(QtWidgets.QDialog):
     regionsChanged = QtCore.Signal(list)
+    selectionChanged = QtCore.Signal(list)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -355,9 +356,11 @@ class ArtifactPanel(QtWidgets.QDialog):
         self.btn_update.clicked.connect(self._on_update_selected)
         self.btn_del.clicked.connect(self._on_delete_selected)
         self.btn_clear.clicked.connect(self._on_clear)
-        self.btn_close.clicked.connect(self.close)
+        self.btn_close.clicked.connect(self._on_close)
 
         self.table.itemSelectionChanged.connect(self._sync_edits_from_selected)
+        self.table.itemSelectionChanged.connect(self._emit_selection)
+        self.table_auto.itemSelectionChanged.connect(self._emit_selection)
         self.table_auto.itemChanged.connect(self._on_auto_item_changed)
 
     def set_regions(self, regions: List[Tuple[float, float]]) -> None:
@@ -410,6 +413,7 @@ class ArtifactPanel(QtWidgets.QDialog):
             self.table.setItem(r, 0, id_item)
             self.table.setItem(r, 1, QtWidgets.QTableWidgetItem(f"{a:.3f}"))
             self.table.setItem(r, 2, QtWidgets.QTableWidgetItem(f"{b:.3f}"))
+        self._emit_selection()
 
     def _rebuild_auto_table(self) -> None:
         self._auto_updating = True
@@ -438,9 +442,24 @@ class ArtifactPanel(QtWidgets.QDialog):
                 self.table_auto.setItem(r, 3, end_item)
         finally:
             self._auto_updating = False
+        self._emit_selection()
 
     def _emit(self) -> None:
         self.regionsChanged.emit(self._combined_regions())
+
+    def _emit_selection(self) -> None:
+        selected: List[Tuple[float, float]] = []
+        rows = self.table.selectionModel().selectedRows()
+        for r in rows:
+            idx = r.row()
+            if 0 <= idx < len(self._regions):
+                selected.append(self._regions[idx])
+        rows_auto = self.table_auto.selectionModel().selectedRows()
+        for r in rows_auto:
+            idx = r.row()
+            if 0 <= idx < len(self._auto_regions):
+                selected.append(self._auto_regions[idx])
+        self.selectionChanged.emit(selected)
 
     def _sync_edits_from_selected(self) -> None:
         rows = self.table.selectionModel().selectedRows()
@@ -505,6 +524,21 @@ class ArtifactPanel(QtWidgets.QDialog):
         self._regions = []
         self._rebuild_table()
         self._emit()
+
+    def _on_close(self) -> None:
+        parent = self.parentWidget()
+        if isinstance(parent, QtWidgets.QDockWidget):
+            parent.setVisible(False)
+        else:
+            self.hide()
+
+    def closeEvent(self, event) -> None:
+        parent = self.parentWidget()
+        if isinstance(parent, QtWidgets.QDockWidget):
+            event.ignore()
+            parent.setVisible(False)
+            return
+        super().closeEvent(event)
 
 
 # ----------------------------- File queue panel -----------------------------
@@ -1593,7 +1627,12 @@ class PlotDashboard(QtWidgets.QWidget):
         super().__init__(parent)
         self._sync_guard = False
         self._artifact_regions: List[pg.LinearRegionItem] = []
+        self._artifact_region_bounds: List[Tuple[float, float]] = []
         self._artifact_labels: List[pg.TextItem] = []
+        self._artifact_pen_default = pg.mkPen((240, 130, 90), width=1.0)
+        self._artifact_brush_default = pg.mkBrush(240, 130, 90, 40)
+        self._artifact_pen_selected = pg.mkPen((255, 220, 120), width=2.0)
+        self._artifact_brush_selected = pg.mkBrush(255, 220, 120, 90)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1788,6 +1827,7 @@ class PlotDashboard(QtWidgets.QWidget):
         for item in self._artifact_labels:
             self.plot_raw.removeItem(item)
         self._artifact_regions = []
+        self._artifact_region_bounds = []
         self._artifact_labels = []
 
     def _update_artifact_overlays(
@@ -1802,12 +1842,16 @@ class PlotDashboard(QtWidgets.QWidget):
         tt = np.asarray(t, float)
         yy = np.asarray(raw_sig, float)
         for idx, (a, b) in enumerate(regions, start=1):
-            region = pg.LinearRegionItem(values=(float(a), float(b)), movable=False,
-                                         brush=pg.mkBrush(240, 130, 90, 40),
-                                         pen=pg.mkPen((240, 130, 90), width=1.0))
+            region = pg.LinearRegionItem(
+                values=(float(a), float(b)),
+                movable=False,
+                brush=self._artifact_brush_default,
+                pen=self._artifact_pen_default,
+            )
             region.setZValue(8)
             self.plot_raw.addItem(region)
             self._artifact_regions.append(region)
+            self._artifact_region_bounds.append((float(a), float(b)))
 
             mask = (tt >= float(a)) & (tt <= float(b))
             if np.any(mask) and np.any(np.isfinite(yy[mask])):
@@ -1821,6 +1865,23 @@ class PlotDashboard(QtWidgets.QWidget):
             label.setZValue(9)
             self.plot_raw.addItem(label)
             self._artifact_labels.append(label)
+
+    def highlight_artifact_regions(self, regions: List[Tuple[float, float]]) -> None:
+        if not self._artifact_regions or not self._artifact_region_bounds:
+            return
+        selected = [(min(a, b), max(a, b)) for a, b in (regions or [])]
+
+        def _overlaps(a: Tuple[float, float], b: Tuple[float, float], tol: float = 1e-3) -> bool:
+            return (a[0] <= b[1] + tol) and (b[0] <= a[1] + tol)
+
+        for item, bounds in zip(self._artifact_regions, self._artifact_region_bounds):
+            is_sel = any(_overlaps(bounds, s) for s in selected)
+            if is_sel:
+                item.setBrush(self._artifact_brush_selected)
+                item.setPen(self._artifact_pen_selected)
+            else:
+                item.setBrush(self._artifact_brush_default)
+                item.setPen(self._artifact_pen_default)
 
     def _set_dio(self, t: np.ndarray, dio: Optional[np.ndarray], name: str = "") -> None:
         if dio is None or np.asarray(dio).size == 0:

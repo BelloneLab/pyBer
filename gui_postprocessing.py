@@ -1083,44 +1083,90 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not rows:
             return None
 
-        header = [h.strip().lower() for h in rows[0]]
-        has_header = "time" in header and "output" in header
-        data_rows = rows[1:] if has_header else rows
+        # Drop empty rows and metadata/comment rows (e.g., "# key: value")
+        rows = [r for r in rows if r and any(cell.strip() for cell in r)]
+        data_rows = [r for r in rows if not (r and r[0].lstrip().startswith("#"))]
+        if not data_rows:
+            return None
+
+        header = [h.strip().lower() for h in data_rows[0]]
+
+        def _find_col(names: List[str]) -> Optional[int]:
+            for name in names:
+                if name in header:
+                    return header.index(name)
+            return None
+
+        time_idx = header.index("time") if "time" in header else None
+        output_idx = _find_col(["dff", "z-score", "zscore", "z score", "output"])
+        has_header = time_idx is not None and output_idx is not None
+
+        raw_idx = _find_col(["raw", "raw_465", "signal", "signal_465"]) if has_header else None
+        iso_idx = _find_col(["isobestic", "isosbestic", "raw_405", "reference", "reference_405", "ref"]) if has_header else None
+        dio_idx = _find_col(["dio"]) if has_header else None
+
+        data_rows = data_rows[1:] if has_header else data_rows
+
         time = []
         output = []
-        dio = []
-        has_dio = has_header and "dio" in header
+        raw_vals = []
+        iso_vals = []
+        dio_vals = []
 
         for r in data_rows:
-            if len(r) < 2:
+            if time_idx is None or output_idx is None:
+                continue
+            if len(r) <= max(time_idx, output_idx):
                 continue
             try:
-                tval = float(r[0])
-                oval = float(r[1])
+                tval = float(r[time_idx])
+                oval = float(r[output_idx])
             except Exception:
                 continue
             time.append(tval)
             output.append(oval)
-            if has_dio and len(r) > 2:
+
+            if raw_idx is not None:
                 try:
-                    dio.append(float(r[2]))
+                    raw_vals.append(float(r[raw_idx]) if len(r) > raw_idx else np.nan)
                 except Exception:
-                    dio.append(np.nan)
+                    raw_vals.append(np.nan)
+            if iso_idx is not None:
+                try:
+                    iso_vals.append(float(r[iso_idx]) if len(r) > iso_idx else np.nan)
+                except Exception:
+                    iso_vals.append(np.nan)
+            if dio_idx is not None:
+                try:
+                    dio_vals.append(float(r[dio_idx]) if len(r) > dio_idx else np.nan)
+                except Exception:
+                    dio_vals.append(np.nan)
 
         if not time:
             return None
 
         t = np.asarray(time, float)
         out = np.asarray(output, float)
-        raw = np.full_like(t, np.nan, dtype=float)
-        dio_arr = np.asarray(dio, float) if has_dio and len(dio) == len(time) else None
+        raw = np.asarray(raw_vals, float) if raw_idx is not None and len(raw_vals) == len(time) else np.full_like(t, np.nan)
+        iso = np.asarray(iso_vals, float) if iso_idx is not None and len(iso_vals) == len(time) else np.full_like(t, np.nan)
+        dio_arr = np.asarray(dio_vals, float) if dio_idx is not None and len(dio_vals) == len(time) else None
+
+        output_label = "Imported CSV"
+        if has_header and output_idx is not None:
+            col = header[output_idx]
+            if col and col != "output":
+                if col == "zscore":
+                    col = "z-score"
+                elif col == "dff":
+                    col = "dFF"
+                output_label = f"Imported CSV ({col})"
 
         return ProcessedTrial(
             path=path,
             channel_id="import",
             time=t,
             raw_signal=raw,
-            raw_reference=raw.copy(),
+            raw_reference=iso,
             dio=dio_arr,
             dio_name="",
             sig_f=None,
@@ -1128,7 +1174,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             baseline_sig=None,
             baseline_ref=None,
             output=out,
-            output_label="Imported CSV",
+            output_label=output_label,
             artifact_regions_sec=None,
             fs_actual=np.nan,
             fs_target=np.nan,
@@ -1141,12 +1187,25 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if "data" not in f:
                     return None
                 g = f["data"]
-                if "time" not in g or "output" not in g:
+                if "time" not in g:
                     return None
                 t = np.asarray(g["time"][()], float)
-                out = np.asarray(g["output"][()], float)
-                raw_sig = np.asarray(g["raw_465"][()], float) if "raw_465" in g else np.full_like(t, np.nan)
-                raw_ref = np.asarray(g["raw_405"][()], float) if "raw_405" in g else np.full_like(t, np.nan)
+                if "output" in g:
+                    out = np.asarray(g["output"][()], float)
+                elif "dFF" in g:
+                    out = np.asarray(g["dFF"][()], float)
+                elif "z-score" in g:
+                    out = np.asarray(g["z-score"][()], float)
+                elif "zscore" in g:
+                    out = np.asarray(g["zscore"][()], float)
+                else:
+                    return None
+                raw_sig = np.asarray(g["raw_465"][()], float) if "raw_465" in g else (
+                    np.asarray(g["raw"][()], float) if "raw" in g else np.full_like(t, np.nan)
+                )
+                raw_ref = np.asarray(g["raw_405"][()], float) if "raw_405" in g else (
+                    np.asarray(g["isobestic"][()], float) if "isobestic" in g else np.full_like(t, np.nan)
+                )
                 dio = np.asarray(g["dio"][()], float) if "dio" in g else None
                 dio_name = str(g.attrs.get("dio_name", "")) if hasattr(g, "attrs") else ""
                 output_label = str(g.attrs.get("output_label", "Imported H5")) if hasattr(g, "attrs") else "Imported H5"
@@ -2079,6 +2138,42 @@ class PostProcessingPanel(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _export_origin_dir(self) -> str:
+        if self._processed:
+            p = self._processed[0].path
+            if p:
+                d = os.path.dirname(p)
+                if d and os.path.isdir(d):
+                    return d
+        return ""
+
+    def _export_start_dir(self) -> str:
+        origin_dir = self._export_origin_dir()
+        last_dir = self._settings.value("postprocess_last_dir", "", type=str)
+        override = self._settings.value("postprocess_last_dir_override", False, type=bool)
+
+        def _valid(p: str) -> bool:
+            return bool(p) and os.path.isdir(p)
+
+        if override and _valid(last_dir):
+            return last_dir
+        if _valid(origin_dir):
+            return origin_dir
+        if _valid(last_dir):
+            return last_dir
+        return os.getcwd()
+
+    def _remember_export_dir(self, out_dir: str) -> None:
+        origin_dir = self._export_origin_dir()
+        try:
+            self._settings.setValue("postprocess_last_dir", out_dir)
+            out_norm = os.path.normcase(os.path.abspath(out_dir)) if out_dir else ""
+            origin_norm = os.path.normcase(os.path.abspath(origin_dir)) if origin_dir else ""
+            override = bool(out_norm) and (not origin_norm or out_norm != origin_norm)
+            self._settings.setValue("postprocess_last_dir_override", override)
+        except Exception:
+            pass
+
     def _export_results(self) -> None:
         if self._last_mat is None or self._last_tvec is None:
             return
@@ -2086,14 +2181,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         choices = dlg.choices()
-        start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
+        start_dir = self._export_start_dir()
         out_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Select export folder", start_dir)
         if not out_dir:
             return
-        try:
-            self._settings.setValue("postprocess_last_dir", out_dir)
-        except Exception:
-            pass
+        self._remember_export_dir(out_dir)
         prefix = "postprocess"
         if self._processed:
             prefix = os.path.splitext(os.path.basename(self._processed[0].path))[0]
@@ -2151,14 +2243,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return cleaned
 
     def _export_images(self) -> None:
-        start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
+        start_dir = self._export_start_dir()
         out_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Select export folder", start_dir)
         if not out_dir:
             return
-        try:
-            self._settings.setValue("postprocess_last_dir", out_dir)
-        except Exception:
-            pass
+        self._remember_export_dir(out_dir)
         prefix = "postprocess"
         if self._processed:
             prefix = os.path.splitext(os.path.basename(self._processed[0].path))[0]
