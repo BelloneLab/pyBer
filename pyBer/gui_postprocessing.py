@@ -1083,6 +1083,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not rows:
             return None
 
+        output_context = ""
+        for r in rows:
+            if not r:
+                continue
+            cell0 = str(r[0]).strip()
+            if cell0.lower().startswith("# output_context:"):
+                output_context = cell0.split(":", 1)[1].strip()
+                break
+
         # Drop empty rows and metadata/comment rows (e.g., "# key: value")
         rows = [r for r in rows if r and any(cell.strip() for cell in r)]
         data_rows = [r for r in rows if not (r and r[0].lstrip().startswith("#"))]
@@ -1175,6 +1184,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             baseline_ref=None,
             output=out,
             output_label=output_label,
+            output_context=output_context,
             artifact_regions_sec=None,
             fs_actual=np.nan,
             fs_target=np.nan,
@@ -1209,6 +1219,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 dio = np.asarray(g["dio"][()], float) if "dio" in g else None
                 dio_name = str(g.attrs.get("dio_name", "")) if hasattr(g, "attrs") else ""
                 output_label = str(g.attrs.get("output_label", "Imported H5")) if hasattr(g, "attrs") else "Imported H5"
+                output_context = str(g.attrs.get("output_context", "")) if hasattr(g, "attrs") else ""
                 fs_actual = float(g.attrs.get("fs_actual", np.nan)) if hasattr(g, "attrs") else np.nan
                 fs_target = float(g.attrs.get("fs_target", np.nan)) if hasattr(g, "attrs") else np.nan
                 fs_used = float(g.attrs.get("fs_used", np.nan)) if hasattr(g, "attrs") else np.nan
@@ -1229,6 +1240,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             baseline_ref=None,
             output=out,
             output_label=output_label,
+            output_context=output_context,
             artifact_regions_sec=None,
             fs_actual=fs_actual,
             fs_target=fs_target,

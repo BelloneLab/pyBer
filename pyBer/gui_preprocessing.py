@@ -9,7 +9,13 @@ import numpy as np
 from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
-from analysis_core import ProcessingParams, ProcessedTrial, OUTPUT_MODES, BASELINE_METHODS
+from analysis_core import (
+    ProcessingParams,
+    ProcessedTrial,
+    OUTPUT_MODES,
+    BASELINE_METHODS,
+    REFERENCE_FIT_METHODS,
+)
 
 
 def _optimize_plot(w: pg.PlotWidget) -> None:
@@ -48,6 +54,48 @@ def _compact_combo(combo: QtWidgets.QComboBox, min_chars: int = 6) -> None:
     combo.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
 
 
+_FITTED_REF_MODES = {
+    "dFF (motion corrected with fitted ref)",
+    "zscore (motion corrected with fitted ref)",
+}
+
+_OUTPUT_DEFINITIONS: Dict[str, str] = {
+    "dFF (non motion corrected)": "dFF = (sig_f - b_sig) / b_sig",
+    "zscore (non motion corrected)": "z = zscore(dFF)",
+    "dFF (motion corrected via subtraction)": "dFF = dFF_sig - dFF_ref",
+    "zscore (motion corrected via subtraction)": "z = zscore(dFF_sig - dFF_ref)",
+    "zscore (subtractions)": "z = zscore(dFF_sig) - zscore(dFF_ref)",
+    "dFF (motion corrected with fitted ref)": "dFF = (sig_f - fitted_ref) / fitted_ref",
+    "zscore (motion corrected with fitted ref)": "z = zscore((sig_f - fitted_ref) / fitted_ref)",
+}
+
+
+def _system_locale() -> QtCore.QLocale:
+    return QtCore.QLocale.system()
+
+
+def _parse_float_text(text: str) -> Optional[float]:
+    s = (text or "").strip()
+    if not s:
+        return None
+
+    loc = _system_locale()
+    val, ok = loc.toDouble(s)
+    if ok:
+        return float(val)
+
+    # Accept both decimal dot and decimal comma regardless of current locale.
+    for cand in (s.replace(",", "."), s.replace(".", ",")):
+        val, ok = loc.toDouble(cand)
+        if ok:
+            return float(val)
+        try:
+            return float(cand)
+        except Exception:
+            pass
+    return None
+
+
 # ----------------------------- Metadata dialog -----------------------------
 
 class MetadataForm(QtWidgets.QWidget):
@@ -59,6 +107,9 @@ class MetadataForm(QtWidgets.QWidget):
         form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
         self.ed_animal_1 = QtWidgets.QLineEdit()
+        self.ed_session = QtWidgets.QLineEdit()
+        self.ed_trial = QtWidgets.QLineEdit()
+        self.ed_treatment = QtWidgets.QLineEdit()
         self.ed_sex = QtWidgets.QLineEdit()
         self.ed_age = QtWidgets.QLineEdit()
         self.ed_site = QtWidgets.QLineEdit()
@@ -66,6 +117,9 @@ class MetadataForm(QtWidgets.QWidget):
         self.ed_experiment = QtWidgets.QLineEdit()
 
         self.ed_animal_1.setPlaceholderText("Animal ID")
+        self.ed_session.setPlaceholderText("Session")
+        self.ed_trial.setPlaceholderText("Trial")
+        self.ed_treatment.setPlaceholderText("Treatment")
         self.ed_sex.setPlaceholderText("Sex")
         self.ed_age.setPlaceholderText("Age")
         self.ed_site.setPlaceholderText("Recording site")
@@ -73,6 +127,9 @@ class MetadataForm(QtWidgets.QWidget):
         self.ed_experiment.setPlaceholderText("Experiment")
 
         form.addRow("Animal ID", self.ed_animal_1)
+        form.addRow("Session", self.ed_session)
+        form.addRow("Trial", self.ed_trial)
+        form.addRow("Treatment", self.ed_treatment)
         form.addRow("Sex", self.ed_sex)
         form.addRow("Age", self.ed_age)
         form.addRow("Recording site", self.ed_site)
@@ -118,13 +175,27 @@ class MetadataForm(QtWidgets.QWidget):
 
     def from_dict(self, d: Dict[str, str]) -> None:
         self.ed_animal_1.setText(str(d.get("animal_id_1", d.get("animal_id", ""))))
+        self.ed_session.setText(str(d.get("session", "")))
+        self.ed_trial.setText(str(d.get("trial", "")))
+        self.ed_treatment.setText(str(d.get("treatment", "")))
         self.ed_sex.setText(str(d.get("sex", "")))
         self.ed_age.setText(str(d.get("age", "")))
         self.ed_site.setText(str(d.get("recording_site", "")))
         self.ed_sensor.setText(str(d.get("sensor", "")))
         self.ed_experiment.setText(str(d.get("experiment", "")))
 
-        reserved = {"animal_id", "animal_id_1", "sex", "age", "recording_site", "sensor", "experiment"}
+        reserved = {
+            "animal_id",
+            "animal_id_1",
+            "session",
+            "trial",
+            "treatment",
+            "sex",
+            "age",
+            "recording_site",
+            "sensor",
+            "experiment",
+        }
         self.table.setRowCount(0)
         for k, v in (d or {}).items():
             if k in reserved:
@@ -137,11 +208,20 @@ class MetadataForm(QtWidgets.QWidget):
         if animal_1:
             out["animal_id_1"] = animal_1
             out["animal_id"] = animal_1
+        session = self.ed_session.text().strip()
+        trial = self.ed_trial.text().strip()
+        treatment = self.ed_treatment.text().strip()
         sex = self.ed_sex.text().strip()
         age = self.ed_age.text().strip()
         site = self.ed_site.text().strip()
         sensor = self.ed_sensor.text().strip()
         experiment = self.ed_experiment.text().strip()
+        if session:
+            out["session"] = session
+        if trial:
+            out["trial"] = trial
+        if treatment:
+            out["treatment"] = treatment
         if sex:
             out["sex"] = sex
         if age:
@@ -615,7 +695,9 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         for ed in (self.edit_time_start, self.edit_time_end):
             ed.setPlaceholderText("Start (s)" if ed is self.edit_time_start else "End (s)")
             ed.setMinimumWidth(70)
-            ed.setValidator(QtGui.QDoubleValidator(0.0, 1e9, 3, ed))
+            val = QtGui.QDoubleValidator(0.0, 1e9, 3, ed)
+            val.setLocale(_system_locale())
+            ed.setValidator(val)
             ed.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Fixed)
 
         time_row = QtWidgets.QGridLayout()
@@ -641,7 +723,7 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         btncol = QtWidgets.QVBoxLayout()
         btncol.setSpacing(6)
 
-        self.btn_metadata = QtWidgets.QPushButton("Metadata?")
+        self.btn_metadata = QtWidgets.QPushButton("Metadata")
         self.btn_update = QtWidgets.QPushButton("Update")
         self.btn_artifacts = QtWidgets.QPushButton("Artifacts?")
         self.btn_export = QtWidgets.QPushButton("Export CSV/H5?")
@@ -715,6 +797,11 @@ class FileQueuePanel(QtWidgets.QGroupBox):
 
     def add_file(self, path: str) -> None:
         self.list_files.addItem(path)
+        if self.list_files.count() == 1:
+            self.list_files.setCurrentRow(0)
+            item0 = self.list_files.item(0)
+            if item0 is not None:
+                item0.setSelected(True)
         try:
             d = os.path.dirname(path)
             if d and os.path.isdir(d):
@@ -761,13 +848,7 @@ class FileQueuePanel(QtWidgets.QGroupBox):
 
     def time_window(self) -> Tuple[Optional[float], Optional[float]]:
         def _parse(text: str) -> Optional[float]:
-            t = text.strip()
-            if not t:
-                return None
-            try:
-                return float(t)
-            except Exception:
-                return None
+            return _parse_float_text(text)
 
         return _parse(self.edit_time_start.text()), _parse(self.edit_time_end.text())
 
@@ -1046,10 +1127,8 @@ class AdvancedOptionsDialog(QtWidgets.QDialog):
     def _read_float(item: Optional[QtWidgets.QTableWidgetItem]) -> float:
         if item is None:
             return 0.0
-        try:
-            return float(item.text().strip())
-        except Exception:
-            return 0.0
+        val = _parse_float_text(item.text())
+        return float(val) if val is not None else 0.0
 
     def get_cutouts(self) -> List[Tuple[float, float]]:
         out: List[Tuple[float, float]] = []
@@ -1143,22 +1222,34 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 "Smaller p keeps baseline below peaks more aggressively."
             ),
             "output_mode": (
-                "Output mode selects dFF/z-score and motion correction strategy.\n"
-                "Options include non-corrected, subtraction-based, and fitted-reference modes."
+                "Defines the exported trace. See formula below."
             ),
             "invert_polarity": (
-                "Invert the polarity of both 465 and 405 signals.\n"
-                "Useful if your acquisition wiring produced inverted traces."
+                "Flips the sign of both raw channels (465 and 405) before any processing.\n"
+                "Use this only if your acquisition polarity is inverted."
             ),
             "reference_fit": (
-                "Reference fit method for fitted-reference outputs:\n"
+                "Used only for fitted-reference motion correction modes:\n"
                 "- OLS: standard linear fit (recommended).\n"
                 "- Lasso: sparse linear fit (uses alpha).\n"
+                "- RLM (HuberT): robust fit with Huber weighting.\n"
                 "Affects how the 405 reference is fit to the 465 signal."
             ),
             "lasso_alpha": (
                 "Lasso alpha controls regularization strength (only for Lasso).\n"
-                "Higher alpha = stronger shrinkage; lower alpha = closer to OLS."
+                "Higher alpha = stronger shrinkage; lower alpha = closer to OLS.\n"
+                "If scikit-learn is unavailable, Lasso falls back to OLS."
+            ),
+            "rlm_huber_t": (
+                "HuberT threshold (t) for robust regression.\n"
+                "Lower t is more outlier-resistant; higher t is closer to OLS."
+            ),
+            "rlm_max_iter": (
+                "Maximum iterations for robust regression reweighting."
+            ),
+            "rlm_tol": (
+                "Convergence tolerance for robust regression.\n"
+                "Smaller values are stricter but may take more iterations."
             ),
         }
 
@@ -1193,6 +1284,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
             s.setMinimumWidth(minw)
             s.setDecimals(decimals)
             s.setKeyboardTracking(False)
+            s.setLocale(_system_locale())
+            s.setGroupSeparatorShown(False)
             return s
 
         def mk_spin(minw=60) -> QtWidgets.QSpinBox:
@@ -1245,8 +1338,11 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_target_fs.setRange(1.0, 1000.0)
         self.spin_target_fs.setValue(100.0)
 
-        self.cb_invert = QtWidgets.QCheckBox("Invert polarity (sign flip)")
+        self.cb_invert = QtWidgets.QCheckBox("Invert signal polarity (465/405)")
         self.cb_invert.setChecked(False)
+        self.cb_invert.setToolTip(
+            "Flips both raw channels before artifact detection, filtering, baseline, and output computation."
+        )
 
         # Baseline method and lambda (main parameters)
         baseline_main_row = QtWidgets.QHBoxLayout()
@@ -1321,17 +1417,88 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.btn_toggle_advanced.setProperty("class", "compactSmall")
         self.btn_toggle_advanced.clicked.connect(self._toggle_advanced_baseline)
 
+        self.output_group = QtWidgets.QGroupBox("Output")
+        out_v = QtWidgets.QVBoxLayout(self.output_group)
+        out_v.setContentsMargins(6, 6, 6, 6)
+        out_v.setSpacing(6)
+
+        out_form = QtWidgets.QFormLayout()
+        out_form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        out_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        out_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
         self.combo_output = QtWidgets.QComboBox()
         self.combo_output.addItems(OUTPUT_MODES)
         _compact_combo(self.combo_output, min_chars=8)
+        self.combo_output.setToolTip("Defines the exported trace. See formula below.")
+        for i in range(self.combo_output.count()):
+            mode = self.combo_output.itemText(i)
+            tip = "Defines the exported trace. See formula below."
+            if mode == "zscore (subtractions)":
+                tip = "Difference of z-scored channels; not the same as zscore of the difference."
+            self.combo_output.setItemData(i, tip, QtCore.Qt.ItemDataRole.ToolTipRole)
+
+        self.ed_output_definition = QtWidgets.QLineEdit()
+        self.ed_output_definition.setReadOnly(True)
+        self.ed_output_definition.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.ed_output_definition.setPlaceholderText("Definition updates with output mode")
 
         self.combo_ref_fit = QtWidgets.QComboBox()
-        self.combo_ref_fit.addItems(["OLS (recommended)", "Lasso"])
+        self.combo_ref_fit.addItems(REFERENCE_FIT_METHODS)
         _compact_combo(self.combo_ref_fit, min_chars=6)
+        self.combo_ref_fit.setToolTip("Used only for fitted-reference motion correction modes.")
 
         self.spin_lasso = mk_dspin(decimals=6)
         self.spin_lasso.setRange(1e-6, 1.0)
         self.spin_lasso.setValue(1e-3)
+        self.spin_lasso.setToolTip(
+            "Higher alpha means stronger shrinkage; if sklearn is missing, Lasso falls back to OLS."
+        )
+
+        self.spin_rlm_huber_t = mk_dspin(decimals=3)
+        self.spin_rlm_huber_t.setRange(0.1, 10.0)
+        self.spin_rlm_huber_t.setValue(1.345)
+
+        self.spin_rlm_max_iter = mk_spin()
+        self.spin_rlm_max_iter.setRange(1, 500)
+        self.spin_rlm_max_iter.setValue(50)
+
+        self.spin_rlm_tol = mk_dspin(decimals=8)
+        self.spin_rlm_tol.setRange(1e-12, 1e-2)
+        self.spin_rlm_tol.setValue(1e-6)
+
+        self.output_params_stack = QtWidgets.QStackedWidget()
+        self.output_params_stack.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+
+        page_none = QtWidgets.QWidget()
+        self.output_params_stack.addWidget(page_none)
+
+        page_lasso = QtWidgets.QWidget()
+        page_lasso_form = QtWidgets.QFormLayout(page_lasso)
+        page_lasso_form.setContentsMargins(0, 0, 0, 0)
+        page_lasso_form.addRow(self._label_with_help("Lasso alpha", "lasso_alpha"), self.spin_lasso)
+        self.output_params_stack.addWidget(page_lasso)
+
+        page_rlm = QtWidgets.QWidget()
+        page_rlm_layout = QtWidgets.QVBoxLayout(page_rlm)
+        page_rlm_layout.setContentsMargins(0, 0, 0, 0)
+        robust_group = QtWidgets.QGroupBox("Robust fit")
+        robust_form = QtWidgets.QFormLayout(robust_group)
+        robust_form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        robust_form.addRow(self._label_with_help("HuberT (t)", "rlm_huber_t"), self.spin_rlm_huber_t)
+        robust_form.addRow(self._label_with_help("Max iter", "rlm_max_iter"), self.spin_rlm_max_iter)
+        robust_form.addRow(self._label_with_help("Tol", "rlm_tol"), self.spin_rlm_tol)
+        page_rlm_layout.addWidget(robust_group)
+        self.output_params_stack.addWidget(page_rlm)
+
+        out_form.addRow(self._label_with_help("Output mode", "output_mode"), self.combo_output)
+        out_form.addRow("Definition", self.ed_output_definition)
+        out_form.addRow(self._label_with_help("Reference fit method", "reference_fit"), self.combo_ref_fit)
+        out_v.addLayout(out_form)
+        out_v.addWidget(self.output_params_stack)
 
         # Config buttons
         config_row = QtWidgets.QHBoxLayout()
@@ -1356,19 +1523,19 @@ class ParameterPanel(QtWidgets.QGroupBox):
         form.addRow(self._label_with_help("Low-pass cutoff (Hz)", "lowpass_hz"), self.spin_lowpass)
         form.addRow(self._label_with_help("Filter order", "filter_order"), self.spin_filt_order)
         form.addRow(self._label_with_help("Target FS (Hz)", "target_fs_hz"), self.spin_target_fs)
-        form.addRow(self._label_with_help("Invert polarity", "invert_polarity"), self.cb_invert)
+        form.addRow(self._label_with_help("Invert signal polarity", "invert_polarity"), self.cb_invert)
 
         form.addRow("Baseline", baseline_main_widget)
         form.addRow(self.btn_toggle_advanced)
         form.addRow(self.baseline_advanced_group)
 
-        form.addRow(self._label_with_help("Output mode", "output_mode"), self.combo_output)
-        form.addRow(self._label_with_help("Ref fit (z-reg only)", "reference_fit"), self.combo_ref_fit)
-        form.addRow(self._label_with_help("Lasso I?", "lasso_alpha"), self.spin_lasso)
+        form.addRow(self.output_group)
         form.addRow("Configuration", config_row)
         form.addRow("", self.lbl_fs)
 
         self._update_lambda_preview()
+        self._update_output_definition()
+        self._update_output_controls()
 
     def _update_artifact_enabled(self) -> None:
         enabled = self.cb_artifact.isChecked()
@@ -1387,6 +1554,36 @@ class ParameterPanel(QtWidgets.QGroupBox):
     def _update_lambda_preview(self) -> None:
         lam = self._lambda_value()
         self.lbl_lam_preview.setText(f"= {lam:.2e}")
+
+    def _is_fitted_output_mode(self) -> bool:
+        return self.combo_output.currentText().strip() in _FITTED_REF_MODES
+
+    def _update_output_definition(self) -> None:
+        mode = self.combo_output.currentText().strip()
+        self.ed_output_definition.setText(_OUTPUT_DEFINITIONS.get(mode, ""))
+        tip = self.combo_output.currentData(QtCore.Qt.ItemDataRole.ToolTipRole)
+        if tip:
+            self.combo_output.setToolTip(str(tip))
+
+    def _update_output_controls(self) -> None:
+        fitted_mode = self._is_fitted_output_mode()
+        self.combo_ref_fit.setEnabled(fitted_mode)
+
+        if not fitted_mode:
+            self.output_params_stack.setCurrentIndex(0)
+            self.output_params_stack.setVisible(False)
+            return
+
+        method = self.combo_ref_fit.currentText()
+        if method.startswith("Lasso"):
+            idx = 1
+        elif method.startswith("RLM"):
+            idx = 2
+        else:
+            idx = 0
+
+        self.output_params_stack.setCurrentIndex(idx)
+        self.output_params_stack.setVisible(idx != 0)
 
     def _wire(self) -> None:
         def emit_noargs(*_args) -> None:
@@ -1410,6 +1607,9 @@ class ParameterPanel(QtWidgets.QGroupBox):
             self.combo_output,
             self.combo_ref_fit,
             self.spin_lasso,
+            self.spin_rlm_huber_t,
+            self.spin_rlm_max_iter,
+            self.spin_rlm_tol,
         )
         for w in widgets:
             if isinstance(w, QtWidgets.QComboBox):
@@ -1419,6 +1619,9 @@ class ParameterPanel(QtWidgets.QGroupBox):
 
         self.spin_lam_x.valueChanged.connect(lambda *_: self._update_lambda_preview())
         self.spin_lam_y.valueChanged.connect(lambda *_: self._update_lambda_preview())
+        self.combo_output.currentIndexChanged.connect(lambda *_: self._update_output_definition())
+        self.combo_output.currentIndexChanged.connect(lambda *_: self._update_output_controls())
+        self.combo_ref_fit.currentIndexChanged.connect(lambda *_: self._update_output_controls())
 
         self.cb_artifact.stateChanged.connect(self._update_artifact_enabled)
         self.cb_filtering.stateChanged.connect(self._update_filtering_enabled)
@@ -1515,6 +1718,9 @@ class ParameterPanel(QtWidgets.QGroupBox):
             output_mode=self.combo_output.currentText(),
             reference_fit=self.combo_ref_fit.currentText(),
             lasso_alpha=float(self.spin_lasso.value()),
+            rlm_huber_t=float(self.spin_rlm_huber_t.value()),
+            rlm_max_iter=int(self.spin_rlm_max_iter.value()),
+            rlm_tol=float(self.spin_rlm_tol.value()),
             invert_polarity=self.cb_invert.isChecked(),
         )
 
@@ -1547,8 +1753,13 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.combo_output.setCurrentText(str(params.output_mode))
         self.combo_ref_fit.setCurrentText(str(params.reference_fit))
         self.spin_lasso.setValue(float(params.lasso_alpha))
+        self.spin_rlm_huber_t.setValue(float(getattr(params, "rlm_huber_t", 1.345)))
+        self.spin_rlm_max_iter.setValue(int(getattr(params, "rlm_max_iter", 50)))
+        self.spin_rlm_tol.setValue(float(getattr(params, "rlm_tol", 1e-6)))
 
         self._update_lambda_preview()
+        self._update_output_definition()
+        self._update_output_controls()
 
     def set_fs_info(self, fs_actual: float, fs_target: float, fs_used: float) -> None:
         self.lbl_fs.setText(f"FS: actual={fs_actual:.2f} Hz → used={fs_used:.2f} Hz (target={fs_target:.2f})")
@@ -2071,7 +2282,9 @@ class PlotDashboard(QtWidgets.QWidget):
         self.set_full_xrange(t)
 
         label = _first_not_none(kwargs, "label", "output_label", default="Output")
-        self.plot_out.setTitle(f"Output: {label}")
+        context = _first_not_none(kwargs, "output_context", "label_context", default="")
+        title = f"Output: {label}" if not context else f"Output: {label} | {context}"
+        self.plot_out.setTitle(title)
 
         dio = _first_not_none(kwargs, "dio", "digital", "dio_y")
         dio_name = _first_not_none(kwargs, "dio_name", "digital_name", "trigger_name", default="") or ""
@@ -2095,6 +2308,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.show_output(
             t, processed.output,
             label=processed.output_label,
+            output_context=getattr(processed, "output_context", ""),
             dio=processed.dio, dio_name=processed.dio_name
         )
         self._update_artifact_overlays(t, processed.raw_signal, processed.artifact_regions_sec)

@@ -213,6 +213,7 @@ class ProcessedTrial:
     # Final selected output
     output: Optional[np.ndarray] = None
     output_label: str = ""
+    output_context: str = ""
 
     artifact_regions_sec: Optional[List[Tuple[float, float]]] = None
     artifact_regions_auto_sec: Optional[List[Tuple[float, float]]] = None
@@ -237,8 +238,14 @@ def safe_stem_from_metadata(path: str, channel: str, meta: Dict[str, str]) -> st
         x = re.sub(r"[^A-Za-z0-9_\-\.]", "", x)
         return x
 
-    if a and s and t:
-        return f"{clean(a)}_{clean(s)}_{clean(t)}_{clean(channel)}"
+    if a:
+        parts = [clean(a)]
+        if s:
+            parts.append(clean(s))
+        if t:
+            parts.append(clean(t))
+        parts.append(clean(channel))
+        return "_".join(parts)
     return f"{clean(base)}_{clean(channel)}"
 
 
@@ -276,6 +283,8 @@ def export_processed_csv(
 
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
+        if processed.output_context:
+            w.writerow([f"# output_context: {processed.output_context}"])
         if metadata:
             for k, v in metadata.items():
                 w.writerow([f"# {k}: {v}"])
@@ -307,6 +316,7 @@ def export_processed_h5(path: str, processed: ProcessedTrial, metadata: Optional
         g.create_dataset("output", data=np.asarray(processed.output, float), compression="gzip")
         out_type = output_label_type(processed.output_label)
         g.attrs["output_label"] = str(processed.output_label)
+        g.attrs["output_context"] = str(processed.output_context)
         g.attrs["output_type"] = str(out_type)
         g.attrs["fs_actual"] = float(processed.fs_actual)
         g.attrs["fs_used"] = float(processed.fs_used)
@@ -998,6 +1008,7 @@ class PhotometryProcessor:
         # dFF_ref = (ref_filtered - baseline_ref) / baseline_ref
         dff_sig = safe_divide(sig2 - b_sig, b_sig)
         dff_ref = safe_divide(ref2 - b_ref, b_ref)
+        dff_sub = dff_sig - dff_ref
 
         if mode == "dFF (non motion corrected)":
             # (1) dFF (non motion corrected)
@@ -1012,12 +1023,12 @@ class PhotometryProcessor:
         elif mode == "dFF (motion corrected via subtraction)":
             # (3) dFF (motion corrected via subtraction)
             # dFF_mc = dFF_sig - dFF_ref
-            out = dff_sig - dff_ref
+            out = dff_sub
 
         elif mode == "zscore (motion corrected via subtraction)":
             # (4) zscore (motion corrected via subtraction)
             # zscore(dFF_sig - dFF_ref)
-            out = zscore_median_std(dff_sig - dff_ref)
+            out = zscore_median_std(dff_sub)
 
         elif mode == "zscore (subtractions)":
             # (5) zscore (subtractions)
@@ -1045,6 +1056,16 @@ class PhotometryProcessor:
             # Safety fallback (should not happen if OUTPUT_MODES is authoritative)
             out = dff_sig
 
+        baseline_desc = f"Baseline: {params.baseline_method} (lambda={float(params.baseline_lambda):.2e})"
+        context_parts = []
+        if mode in (
+            "dFF (motion corrected with fitted ref)",
+            "zscore (motion corrected with fitted ref)",
+        ):
+            context_parts.append(f"Fit: {params.reference_fit}")
+        context_parts.append(baseline_desc)
+        output_context = " | ".join(context_parts)
+
         # ---------------------------------------------------------------------
         # 10) Package outputs
         # ---------------------------------------------------------------------
@@ -1064,6 +1085,7 @@ class PhotometryProcessor:
             baseline_ref=b_ref,
             output=out,
             output_label=mode,
+            output_context=output_context,
             artifact_regions_sec=regions_from_mask(t, mask),
             artifact_regions_auto_sec=auto_regions,
             fs_actual=float(fs),
