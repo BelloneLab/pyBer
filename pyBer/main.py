@@ -2050,11 +2050,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         right = QtCore.Qt.DockWidgetArea.RightDockWidgetArea
+        bottom = QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
         self._suspend_panel_layout_persistence = True
         try:
             self._enforce_postprocessing_popups_hidden()
-            # Default dock layout: Artifacts on top, tabbed Filtering/Baseline/Output,
-            # QC below, Export at bottom. Config remains hidden.
+            # Default preprocessing layout:
+            # - top tab group: Artifacts list / Artifacts / Filtering / Baseline / Output
+            # - middle: QC
+            # - bottom: Export
+            # - bottom strip: Configuration
             artifacts = self._section_docks.get("artifacts")
             filtering = self._section_docks.get("filtering")
             baseline = self._section_docks.get("baseline")
@@ -2063,42 +2067,37 @@ class MainWindow(QtWidgets.QMainWindow):
             export = self._section_docks.get("export")
             config = self._section_docks.get("config")
 
-            for dock in (artifacts, filtering, baseline, output, qc, export, config):
+            for dock in (self.art_dock, artifacts, filtering, baseline, output, qc, export, config):
                 if dock is None:
                     continue
                 dock.setFloating(False)
                 dock.show()
 
-            if artifacts is not None:
-                self.addDockWidget(right, artifacts)
-            if filtering is not None:
-                self.addDockWidget(right, filtering)
-                if artifacts is not None:
-                    self.splitDockWidget(artifacts, filtering, QtCore.Qt.Orientation.Vertical)
-
-            if baseline is not None and filtering is not None:
-                self.addDockWidget(right, baseline)
-                self.tabifyDockWidget(filtering, baseline)
-            if output is not None and filtering is not None:
-                self.addDockWidget(right, output)
-                self.tabifyDockWidget(filtering, output)
-                filtering.raise_()
+            self.addDockWidget(right, self.art_dock)
+            for dock in (artifacts, filtering, baseline, output, qc, export):
+                if dock is not None:
+                    self.addDockWidget(right, dock)
 
             if qc is not None:
-                self.addDockWidget(right, qc)
-                if filtering is not None:
-                    self.splitDockWidget(filtering, qc, QtCore.Qt.Orientation.Vertical)
-                elif artifacts is not None:
-                    self.splitDockWidget(artifacts, qc, QtCore.Qt.Orientation.Vertical)
+                self.splitDockWidget(self.art_dock, qc, QtCore.Qt.Orientation.Vertical)
             if export is not None:
-                self.addDockWidget(right, export)
                 if qc is not None:
                     self.splitDockWidget(qc, export, QtCore.Qt.Orientation.Vertical)
-                elif filtering is not None:
-                    self.splitDockWidget(filtering, export, QtCore.Qt.Orientation.Vertical)
+                else:
+                    self.splitDockWidget(self.art_dock, export, QtCore.Qt.Orientation.Vertical)
 
             if config is not None:
-                config.hide()
+                self.addDockWidget(bottom, config)
+                config.raise_()
+
+            for dock in (artifacts, filtering, baseline, output):
+                if dock is not None:
+                    self.tabifyDockWidget(self.art_dock, dock)
+            self.art_dock.raise_()
+            if qc is not None:
+                qc.raise_()
+            if export is not None:
+                export.raise_()
 
             self._sync_section_button_states_from_docks()
         finally:
@@ -2110,8 +2109,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_pre_fixed_layout(self) -> None:
         """
         Force a deterministic preprocessing dock layout matching the project default:
-        - Right column top: Artifacts list tab group (Artifacts list / Filtering / Artifacts)
-        - Right column middle: Baseline tab group (Baseline / Output / QC)
+        - Right column top: Artifacts list tab group
+          (Artifacts list / Artifacts / Filtering / Baseline / Output)
+        - Right column middle: QC
         - Right column bottom: Export
         - Bottom strip: Configuration
         """
@@ -2159,34 +2159,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 finally:
                     config.blockSignals(False)
 
-            # Vertical stack in right area: artifacts list (top) -> baseline group (middle) -> export (bottom).
-            if baseline is not None:
-                host.splitDockWidget(self.art_dock, baseline, QtCore.Qt.Orientation.Vertical)
+            # Vertical stack in right area: top tab group -> QC -> Export.
+            if qc is not None:
+                host.splitDockWidget(self.art_dock, qc, QtCore.Qt.Orientation.Vertical)
             if export is not None:
-                if baseline is not None:
-                    host.splitDockWidget(baseline, export, QtCore.Qt.Orientation.Vertical)
+                if qc is not None:
+                    host.splitDockWidget(qc, export, QtCore.Qt.Orientation.Vertical)
                 else:
                     host.splitDockWidget(self.art_dock, export, QtCore.Qt.Orientation.Vertical)
 
-            # Top tab group: Artifacts list + Filtering + Artifacts.
+            # Top tab group: Artifacts list + Artifacts + Filtering + Baseline + Output.
             if artifacts is not None:
                 host.tabifyDockWidget(self.art_dock, artifacts)
             if filtering is not None:
                 host.tabifyDockWidget(self.art_dock, filtering)
-
-            # Middle tab group: Baseline + Output + QC.
-            if baseline is not None and output is not None:
-                host.tabifyDockWidget(baseline, output)
-            if baseline is not None and qc is not None:
-                host.tabifyDockWidget(baseline, qc)
+            if baseline is not None:
+                host.tabifyDockWidget(self.art_dock, baseline)
+            if output is not None:
+                host.tabifyDockWidget(self.art_dock, output)
 
             # Keep active tabs consistent with the default arrangement.
             try:
                 self.art_dock.raise_()
             except Exception:
                 pass
-            if baseline is not None:
-                baseline.raise_()
+            if qc is not None:
+                qc.raise_()
             if export is not None:
                 export.raise_()
             if config is not None:
@@ -2198,10 +2196,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 sizes: List[int] = []
                 if isinstance(self.art_dock, QtWidgets.QDockWidget):
                     vdocks.append(self.art_dock)
-                    sizes.append(520)
-                if baseline is not None:
-                    vdocks.append(baseline)
-                    sizes.append(260)
+                    sizes.append(560)
+                if qc is not None:
+                    vdocks.append(qc)
+                    sizes.append(220)
                 if export is not None:
                     vdocks.append(export)
                     sizes.append(120)

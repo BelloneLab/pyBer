@@ -10,7 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import h5py
 
-from scipy.signal import butter, sosfiltfilt, resample_poly
+from scipy.signal import butter, sosfiltfilt, resample_poly, savgol_filter
+from scipy.ndimage import uniform_filter1d, median_filter
 from PySide6 import QtCore  # for QRunnable signals
 
 # Optional: Lasso (requires scikit-learn). If unavailable, we fall back to OLS.
@@ -40,6 +41,12 @@ REFERENCE_FIT_METHODS = [
     "OLS (recommended)",
     "Lasso",
     "RLM (HuberT)",
+]
+
+SMOOTHING_METHODS = [
+    "Savitzky-Golay",
+    "Moving average",
+    "Moving median",
 ]
 
 # Output modes
@@ -79,6 +86,10 @@ class ProcessingParams:
     # -------------------------
     lowpass_hz: float = 12.0
     filter_order: int = 3
+    smoothing_enabled: bool = False
+    smoothing_method: str = "Savitzky-Golay"
+    smoothing_window_s: float = 0.200
+    smoothing_polyorder: int = 2
 
     # -------------------------
     # Decimation / resampling
@@ -451,6 +462,81 @@ def _lowpass_sos(x: np.ndarray, fs: float, cutoff: float, order: int) -> np.ndar
     wn = min(0.999, max(1e-6, cutoff / nyq))
     sos = butter(order, wn, btype="low", output="sos")
     return np.asarray(sosfiltfilt(sos, y), float)
+
+
+def _window_samples_from_seconds(
+    fs: float,
+    window_s: float,
+    *,
+    minimum: int = 1,
+    require_odd: bool = False,
+) -> int:
+    if not np.isfinite(fs) or fs <= 0:
+        return int(max(1, minimum))
+    n = int(round(float(window_s) * float(fs)))
+    n = max(int(minimum), n)
+    if require_odd and (n % 2 == 0):
+        n += 1
+    return int(n)
+
+
+def _apply_optional_smoothing(x: np.ndarray, fs: float, params: ProcessingParams) -> np.ndarray:
+    """
+    Optional smoothing stage applied on the processed timebase.
+    Supported methods:
+    - Savitzky-Golay
+    - Moving average
+    - Moving median
+    """
+    y = np.asarray(x, float)
+    if y.size < 3:
+        return y
+    if not bool(getattr(params, "smoothing_enabled", False)):
+        return y
+
+    method = str(getattr(params, "smoothing_method", "Savitzky-Golay") or "Savitzky-Golay").strip()
+    window_s = float(getattr(params, "smoothing_window_s", 0.0))
+    if not np.isfinite(window_s) or window_s <= 0:
+        return y
+
+    if np.any(~np.isfinite(y)):
+        y = interpolate_nans(y)
+
+    if method.startswith("Savitzky"):
+        polyorder = int(max(1, getattr(params, "smoothing_polyorder", 2)))
+        win = _window_samples_from_seconds(fs, window_s, minimum=polyorder + 2, require_odd=True)
+        if win > y.size:
+            win = y.size if (y.size % 2 == 1) else max(1, y.size - 1)
+        if win <= polyorder:
+            polyorder = max(1, min(polyorder, win - 1))
+        if win < 3 or win <= polyorder:
+            return y
+        try:
+            return np.asarray(savgol_filter(y, window_length=int(win), polyorder=int(polyorder), mode="interp"), float)
+        except Exception:
+            return y
+
+    if method.startswith("Moving average"):
+        win = _window_samples_from_seconds(fs, window_s, minimum=1, require_odd=False)
+        if win <= 1:
+            return y
+        try:
+            return np.asarray(uniform_filter1d(y, size=int(win), mode="nearest"), float)
+        except Exception:
+            return y
+
+    if method.startswith("Moving median"):
+        win = _window_samples_from_seconds(fs, window_s, minimum=3, require_odd=True)
+        if win > y.size:
+            win = y.size if (y.size % 2 == 1) else max(1, y.size - 1)
+        if win <= 1:
+            return y
+        try:
+            return np.asarray(median_filter(y, size=int(win), mode="nearest"), float)
+        except Exception:
+            return y
+
+    return y
 
 
 def _compute_resample_ratio(fs: float, target_fs: float) -> Tuple[int, int, float]:
@@ -1013,6 +1099,8 @@ class PhotometryProcessor:
         # 6) Resample signals together to target fs (only if true decimation)
         # ---------------------------------------------------------------------
         t2, sig2, ref2, fs_used = _resample_pair_to_target_fs(t, sig_f, ref_f, fs, target_fs)
+        sig2 = _apply_optional_smoothing(sig2, fs_used, params)
+        ref2 = _apply_optional_smoothing(ref2, fs_used, params)
 
         # Resample the envelope for display (same timebase as processed)
         _, hi2, lo2, _ = _resample_pair_to_target_fs(t, hi_raw, lo_raw, fs, target_fs)
@@ -1108,6 +1196,14 @@ class PhotometryProcessor:
             ):
                 context_parts.append(f"Fit: {params.reference_fit}")
             context_parts.append(baseline_desc)
+        if bool(getattr(params, "smoothing_enabled", False)):
+            sm_method = str(getattr(params, "smoothing_method", "Savitzky-Golay") or "Savitzky-Golay")
+            sm_win = float(getattr(params, "smoothing_window_s", 0.0))
+            sm_desc = f"Smoothing: {sm_method} (window={sm_win:.3g}s"
+            if sm_method.startswith("Savitzky"):
+                sm_desc += f", poly={int(getattr(params, 'smoothing_polyorder', 2))}"
+            sm_desc += ")"
+            context_parts.append(sm_desc)
         output_context = " | ".join(context_parts)
 
         # ---------------------------------------------------------------------

@@ -15,6 +15,7 @@ from analysis_core import (
     OUTPUT_MODES,
     BASELINE_METHODS,
     REFERENCE_FIT_METHODS,
+    SMOOTHING_METHODS,
 )
 
 
@@ -1308,6 +1309,24 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 "Target sampling rate (Hz) for decimation.\n"
                 "Lower values speed processing and plotting but reduce time resolution."
             ),
+            "smoothing_enabled": (
+                "Optional post-filter smoothing stage on the processed timebase.\n"
+                "Use it to reduce residual high-frequency noise after low-pass/resampling."
+            ),
+            "smoothing_method": (
+                "Smoothing algorithm:\n"
+                "- Savitzky-Golay: polynomial local fit, preserves peak shapes.\n"
+                "- Moving average: uniform sliding mean.\n"
+                "- Moving median: robust to spikes and impulsive noise."
+            ),
+            "smoothing_window_s": (
+                "Smoothing window in seconds.\n"
+                "Larger windows produce stronger smoothing but can attenuate fast transients."
+            ),
+            "smoothing_polyorder": (
+                "Polynomial order for Savitzky-Golay smoothing.\n"
+                "Lower order is smoother; higher order follows curvature more closely."
+            ),
             "baseline_method": (
                 "Baseline method (pybaselines):\n"
                 "- asls: asymmetric least squares; uses p to favor baseline below peaks.\n"
@@ -1450,6 +1469,17 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_target_fs = mk_dspin(decimals=1)
         self.spin_target_fs.setRange(1.0, 1000.0)
         self.spin_target_fs.setValue(100.0)
+        self.cb_smoothing = QtWidgets.QCheckBox("Enable smoothing")
+        self.cb_smoothing.setChecked(False)
+        self.combo_smoothing = QtWidgets.QComboBox()
+        self.combo_smoothing.addItems(SMOOTHING_METHODS)
+        _compact_combo(self.combo_smoothing, min_chars=8)
+        self.spin_smoothing_window = mk_dspin(decimals=3)
+        self.spin_smoothing_window.setRange(0.001, 60.0)
+        self.spin_smoothing_window.setValue(0.200)
+        self.spin_smoothing_poly = mk_spin()
+        self.spin_smoothing_poly.setRange(1, 7)
+        self.spin_smoothing_poly.setValue(2)
         self.cb_invert = QtWidgets.QCheckBox("Invert signal polarity (465/405)")
         self.cb_invert.setChecked(False)
         self.cb_invert.setToolTip(
@@ -1463,6 +1493,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
         filt_form.addRow(self._label_with_help("Low-pass cutoff (Hz)", "lowpass_hz"), self.spin_lowpass)
         filt_form.addRow(self._label_with_help("Filter order", "filter_order"), self.spin_filt_order)
         filt_form.addRow(self._label_with_help("Target FS (Hz)", "target_fs_hz"), self.spin_target_fs)
+        filt_form.addRow(self._label_with_help("Enable smoothing", "smoothing_enabled"), self.cb_smoothing)
+        filt_form.addRow(self._label_with_help("Smoothing method", "smoothing_method"), self.combo_smoothing)
+        filt_form.addRow(self._label_with_help("Smoothing window (s)", "smoothing_window_s"), self.spin_smoothing_window)
+        filt_form.addRow(self._label_with_help("Savitzky polyorder", "smoothing_polyorder"), self.spin_smoothing_poly)
         filt_form.addRow(self._label_with_help("Invert signal polarity", "invert_polarity"), self.cb_invert)
 
         # Baseline controls
@@ -1663,6 +1697,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._update_lambda_preview()
         self._update_output_definition()
         self._update_output_controls()
+        self._update_smoothing_controls(emit_signal=False)
         self._update_section_summaries()
 
     def _update_artifact_enabled(self) -> None:
@@ -1680,10 +1715,24 @@ class ParameterPanel(QtWidgets.QGroupBox):
         enabled = self.cb_filtering.isChecked()
         self.spin_lowpass.setEnabled(enabled)
         self.spin_filt_order.setEnabled(enabled)
+        self.spin_target_fs.setEnabled(enabled)
+        self.cb_invert.setEnabled(enabled)
+        self.cb_smoothing.setEnabled(enabled)
+        self._update_smoothing_controls(emit_signal=False)
         if not enabled and self.card_filtering.is_expanded():
             self.card_filtering.set_expanded(False)
         self._update_section_summaries()
         self.paramsChanged.emit()
+
+    def _update_smoothing_controls(self, emit_signal: bool = True) -> None:
+        enabled = self.cb_filtering.isChecked() and self.cb_smoothing.isChecked()
+        self.combo_smoothing.setEnabled(enabled)
+        self.spin_smoothing_window.setEnabled(enabled)
+        is_savgol = str(self.combo_smoothing.currentText()).startswith("Savitzky")
+        self.spin_smoothing_poly.setEnabled(enabled and is_savgol)
+        self._update_section_summaries()
+        if emit_signal:
+            self.paramsChanged.emit()
 
     def _update_lambda_preview(self) -> None:
         lam = self._lambda_value()
@@ -1753,6 +1802,18 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 f"order {int(self.spin_filt_order.value())}, "
                 f"target {self._fmt_num(self.spin_target_fs.value(), 2)} Hz"
             )
+            if self.cb_smoothing.isChecked():
+                method = self.combo_smoothing.currentText()
+                if method.startswith("Savitzky"):
+                    smooth_desc = (
+                        f"SG win={self._fmt_num(self.spin_smoothing_window.value(), 3)}s, "
+                        f"poly={int(self.spin_smoothing_poly.value())}"
+                    )
+                elif method.startswith("Moving average"):
+                    smooth_desc = f"Mean win={self._fmt_num(self.spin_smoothing_window.value(), 3)}s"
+                else:
+                    smooth_desc = f"Median win={self._fmt_num(self.spin_smoothing_window.value(), 3)}s"
+                summary = f"{summary} | {smooth_desc}"
         else:
             summary = "Off"
         self.card_filtering.set_summary(summary)
@@ -1773,6 +1834,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
             self.spin_lowpass,
             self.spin_filt_order,
             self.spin_target_fs,
+            self.spin_smoothing_window,
+            self.spin_smoothing_poly,
             self.combo_baseline,
             self.spin_lam_x,
             self.spin_lam_y,
@@ -1808,6 +1871,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
 
         self.cb_artifact.stateChanged.connect(self._update_artifact_enabled)
         self.cb_filtering.stateChanged.connect(self._update_filtering_enabled)
+        self.cb_smoothing.stateChanged.connect(self._update_smoothing_controls)
+        self.combo_smoothing.currentIndexChanged.connect(lambda *_: self._update_smoothing_controls())
         self.cb_invert.stateChanged.connect(emit_noargs)
         self.cb_show_artifact_overlay.toggled.connect(lambda v: self.artifactOverlayToggled.emit(bool(v)))
 
@@ -1918,6 +1983,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
             lowpass_hz=float(self.spin_lowpass.value()),
             filter_order=int(self.spin_filt_order.value()),
             target_fs_hz=float(self.spin_target_fs.value()),
+            smoothing_enabled=self.cb_filtering.isChecked() and self.cb_smoothing.isChecked(),
+            smoothing_method=self.combo_smoothing.currentText(),
+            smoothing_window_s=float(self.spin_smoothing_window.value()),
+            smoothing_polyorder=int(self.spin_smoothing_poly.value()),
             baseline_method=self.combo_baseline.currentText(),
             baseline_lambda=float(self._lambda_value()),
             baseline_diff_order=int(self.spin_diff.value()),
@@ -1944,6 +2013,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_lowpass.setValue(float(params.lowpass_hz))
         self.spin_filt_order.setValue(int(params.filter_order))
         self.spin_target_fs.setValue(float(params.target_fs_hz))
+        self.cb_smoothing.setChecked(bool(getattr(params, "smoothing_enabled", False)))
+        self.combo_smoothing.setCurrentText(str(getattr(params, "smoothing_method", "Savitzky-Golay")))
+        self.spin_smoothing_window.setValue(float(getattr(params, "smoothing_window_s", 0.200)))
+        self.spin_smoothing_poly.setValue(int(getattr(params, "smoothing_polyorder", 2)))
         self.cb_invert.setChecked(bool(getattr(params, "invert_polarity", False)))
 
         self.combo_baseline.setCurrentText(str(params.baseline_method))
@@ -1969,6 +2042,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._update_lambda_preview()
         self._update_output_definition()
         self._update_output_controls()
+        self._update_smoothing_controls(emit_signal=False)
         self._update_section_summaries()
 
     def set_fs_info(self, fs_actual: float, fs_target: float, fs_used: float) -> None:
