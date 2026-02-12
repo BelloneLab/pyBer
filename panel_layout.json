@@ -1,0 +1,114 @@
+{
+  "version": 3,
+  "pre": {
+    "pre_data_panel_visible": false,
+    "pre_splitter_sizes": [
+      317,
+      317
+    ],
+    "pre_main_dock_state": "",
+    "tab_groups": [
+      {
+        "members": [
+          "pre.artifact.dock",
+          "pre.artifacts.dock",
+          "pre.filtering.dock"
+        ],
+        "active": "pre.artifact.dock"
+      },
+      {
+        "members": [
+          "pre.baseline.dock",
+          "pre.output.dock",
+          "pre.qc.dock"
+        ],
+        "active": "pre.baseline.dock"
+      }
+    ],
+    "sections": {
+      "artifacts": {
+        "visible": true,
+        "floating": false,
+        "area": 2,
+        "geometry": "AdnQywADAAD///wt///8Sv///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///8Sv///gv///4L"
+      },
+      "filtering": {
+        "visible": true,
+        "floating": false,
+        "area": 2,
+        "geometry": "AdnQywADAAD///wt///7UP///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///7UP///gv///4L"
+      },
+      "baseline": {
+        "visible": true,
+        "floating": false,
+        "area": 2,
+        "geometry": "AdnQywADAAAAAARTAAADgAAABjEAAAUdAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAARTAAADgAAABjEAAAUd"
+      },
+      "output": {
+        "visible": true,
+        "floating": false,
+        "area": 2,
+        "geometry": "AdnQywADAAD///wt///8nf///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///8nf///gv///4L"
+      },
+      "qc": {
+        "visible": true,
+        "floating": false,
+        "area": 2,
+        "geometry": "AdnQywADAAD///wt///8nf///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///8nf///gv///4L"
+      },
+      "export": {
+        "visible": true,
+        "floating": false,
+        "area": 2,
+        "geometry": "AdnQywADAAAAAARTAAAFQgAABjEAAAYPAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAARTAAAFQgAABjEAAAYP"
+      },
+      "config": {
+        "visible": true,
+        "floating": false,
+        "area": 8,
+        "geometry": "AdnQywADAAAAAAAAAAAGEgAABjEAAAZWAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAAAAAAGEgAABjEAAAZW"
+      }
+    },
+    "artifact": {
+      "visible": true,
+      "floating": false,
+      "area": 2,
+      "geometry": "AdnQywADAAAAAARTAAAAAAAABjEAAANbAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAARTAAAAAAAABjEAAANb"
+    }
+  },
+  "post": {
+    "post_main_dock_state": "",
+    "sections": {
+      "setup": {
+        "visible": true,
+        "floating": false,
+        "area": 2,
+        "geometry": "AdnQywADAAAAAARTAAAAAAAABjEAAAXQAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAARTAAAAAAAABjEAAAXQ"
+      },
+      "psth": {
+        "visible": true,
+        "floating": false,
+        "area": 2,
+        "geometry": "AdnQywADAAD///wt///61////gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///61////gv///4L"
+      },
+      "signal": {
+        "visible": true,
+        "floating": false,
+        "area": 2,
+        "geometry": "AdnQywADAAD///wt///61////gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///61////gv///4L"
+      },
+      "behavior": {
+        "visible": true,
+        "floating": false,
+        "area": 2,
+        "geometry": "AdnQywADAAD///wt///61////gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///61////gv///4L"
+      },
+      "export": {
+        "visible": true,
+        "floating": false,
+        "area": 8,
+        "geometry": "AdnQywADAAAAAAAAAAAF9QAABjEAAAZWAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAAAAAAF9QAABjEAAAZW"
+      }
+    }
+  }
+}

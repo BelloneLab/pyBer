@@ -1,0 +1,28 @@
+{
+  "artifact_detection_enabled": true,
+  "artifact_overlay_visible": true,
+  "filtering_enabled": true,
+  "parameters": {
+    "artifact_detection_enabled": true,
+    "artifact_mode": "Adaptive MAD (windowed)",
+    "mad_k": 25.0,
+    "adaptive_window_s": 1.0,
+    "artifact_pad_s": 0.5,
+    "lowpass_hz": 2.1,
+    "filter_order": 1,
+    "target_fs_hz": 120.0,
+    "baseline_method": "arpls",
+    "baseline_lambda": 100000000000.0,
+    "baseline_diff_order": 2,
+    "baseline_max_iter": 50,
+    "baseline_tol": 0.001,
+    "asls_p": 0.01,
+    "output_mode": "zscore (motion corrected with fitted ref)",
+    "invert_polarity": false,
+    "reference_fit": "OLS (recommended)",
+    "lasso_alpha": 0.001,
+    "rlm_huber_t": 1.345,
+    "rlm_max_iter": 50,
+    "rlm_tol": 1e-06
+  }
+}
