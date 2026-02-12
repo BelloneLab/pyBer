@@ -513,7 +513,7 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         self.btn_artifacts = QtWidgets.QPushButton("Artifacts…")
 
         form.addRow("Channel (preview)", self.combo_channel)
-        form.addRow("Digital trigger (overlay)", self.combo_trigger)
+        form.addRow("Analog/Digital channel (overlay)", self.combo_trigger)
         form.addRow(self.chk_split)
         form.addRow(self.btn_metadata)
         form.addRow(self.btn_update)

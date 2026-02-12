@@ -42,7 +42,7 @@ REFERENCE_FIT_METHODS = [
     "RLM (HuberT)",
 ]
 
-# Output modes (user requested: 7 clear options)
+# Output modes
 OUTPUT_MODES = [
     # 1) dFF (non motion corrected)
     "dFF (non motion corrected)",
@@ -58,6 +58,8 @@ OUTPUT_MODES = [
     "dFF (motion corrected with fitted ref)",
     # 7) zscore of that fitted-ref dFF
     "zscore (motion corrected with fitted ref)",
+    # 8) raw signal (processed 465 trace after artifact handling/filtering/resampling)
+    "Raw signal (465)",
 ]
 
 
@@ -151,6 +153,8 @@ class LoadedDoricFile:
     reference_by_channel: Dict[str, np.ndarray]
     digital_time: Optional[np.ndarray]
     digital_by_name: Dict[str, np.ndarray]
+    trigger_time_by_name: Dict[str, np.ndarray]
+    trigger_by_name: Dict[str, np.ndarray]
 
     def make_trial(self, channel: str, trigger_name: Optional[str] = None) -> LoadedTrial:
         t = self.time_by_channel[channel]
@@ -162,15 +166,30 @@ class LoadedDoricFile:
         trig_name = trigger_name or ""
 
         if trigger_name:
-            if self.digital_time is not None and trigger_name in self.digital_by_name:
-                trig_t = self.digital_time
-                trig = self.digital_by_name[trigger_name]
+            if trigger_name in self.trigger_by_name:
+                trig = np.asarray(self.trigger_by_name[trigger_name], float)
+                trig_t = self.trigger_time_by_name.get(trigger_name, None)
+                if trig_t is not None:
+                    trig_t = np.asarray(trig_t, float)
+                elif self.digital_time is not None and trigger_name in self.digital_by_name:
+                    trig_t = np.asarray(self.digital_time, float)
+                elif trig.size == t.size:
+                    trig_t = np.asarray(t, float)
 
-                # Align analog signals to DIO time base (so DIO overlays correctly).
+                if trig_t is not None and trig_t.size and trig.size:
+                    n = min(trig_t.size, trig.size)
+                    trig_t = trig_t[:n]
+                    trig = trig[:n]
+
+                # Align analog signals to selected trigger time base for overlays/event alignment.
                 if trig_t is not None and trig_t.size and t.size and trig_t.size != t.size:
                     sig = np.interp(trig_t, t, sig)
                     ref = np.interp(trig_t, t, ref)
                     t = trig_t
+            elif self.digital_time is not None and trigger_name in self.digital_by_name:
+                # Backward compatibility for sessions loaded before trigger map support.
+                trig_t = self.digital_time
+                trig = self.digital_by_name[trigger_name]
 
         fs = 1.0 / float(np.nanmedian(np.diff(t))) if t.size > 2 else np.nan
 
@@ -200,7 +219,7 @@ class ProcessedTrial:
     raw_thr_hi: Optional[np.ndarray] = None
     raw_thr_lo: Optional[np.ndarray] = None
 
-    # Optional DIO aligned to processed time
+    # Optional analog/digital trigger channel aligned to processed time
     dio: Optional[np.ndarray] = None
     dio_name: str = ""
 
@@ -256,6 +275,8 @@ def output_label_type(label: str) -> str:
         return "z-score"
     if "dff" in lab:
         return "dFF"
+    if "raw signal" in lab or lab.startswith("raw"):
+        return "raw_signal"
     return "output"
 
 
@@ -283,8 +304,6 @@ def export_processed_csv(
 
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        if processed.output_context:
-            w.writerow([f"# output_context: {processed.output_context}"])
         if metadata:
             for k, v in metadata.items():
                 w.writerow([f"# {k}: {v}"])
@@ -848,6 +867,21 @@ class PhotometryProcessor:
                     if k.startswith("DIO"):
                         digital_by[k] = np.asarray(dio[k][()], float)
 
+            trigger_by: Dict[str, np.ndarray] = dict(digital_by)
+            trigger_time_by: Dict[str, np.ndarray] = {}
+            if digital_time is not None:
+                for name in digital_by.keys():
+                    trigger_time_by[name] = np.asarray(digital_time, float)
+
+            if "AnalogOut" in base:
+                aout = base["AnalogOut"]
+                aout_time = np.asarray(aout["Time"][()], float) if "Time" in aout else None
+                for k in aout.keys():
+                    if k.startswith("AOUT"):
+                        trigger_by[k] = np.asarray(aout[k][()], float)
+                        if aout_time is not None:
+                            trigger_time_by[k] = np.asarray(aout_time, float)
+
             return LoadedDoricFile(
                 path=path,
                 channels=chans,
@@ -856,6 +890,8 @@ class PhotometryProcessor:
                 reference_by_channel=ref_by,
                 digital_time=digital_time,
                 digital_by_name=digital_by,
+                trigger_time_by_name=trigger_time_by,
+                trigger_by_name=trigger_by,
             )
 
     def make_preview_task(
@@ -982,7 +1018,7 @@ class PhotometryProcessor:
         _, hi2, lo2, _ = _resample_pair_to_target_fs(t, hi_raw, lo_raw, fs, target_fs)
 
         # ---------------------------------------------------------------------
-        # 7) DIO overlay (if present): interpolate and binarize
+        # 7) A/D overlay (if present): interpolate and binarize
         # ---------------------------------------------------------------------
         dio2 = None
         dio_name = ""
@@ -998,7 +1034,7 @@ class PhotometryProcessor:
         b_ref = self._baseline(t2, ref2, params)
 
         # ---------------------------------------------------------------------
-        # 9) Compute requested output mode (7 user-defined options)
+        # 9) Compute requested output mode
         # ---------------------------------------------------------------------
         mode = params.output_mode if params.output_mode in OUTPUT_MODES else OUTPUT_MODES[0]
         out: Optional[np.ndarray] = None
@@ -1052,18 +1088,26 @@ class PhotometryProcessor:
             dff_fit = safe_divide(sig2 - fitted_ref, fitted_ref)
             out = zscore_median_std(dff_fit)
 
+        elif mode == "Raw signal (465)":
+            # (8) raw signal (processed 465 trace)
+            # Directly expose the filtered/resampled 465 channel.
+            out = np.asarray(sig2, float)
+
         else:
             # Safety fallback (should not happen if OUTPUT_MODES is authoritative)
             out = dff_sig
 
-        baseline_desc = f"Baseline: {params.baseline_method} (lambda={float(params.baseline_lambda):.2e})"
         context_parts = []
-        if mode in (
-            "dFF (motion corrected with fitted ref)",
-            "zscore (motion corrected with fitted ref)",
-        ):
-            context_parts.append(f"Fit: {params.reference_fit}")
-        context_parts.append(baseline_desc)
+        if mode == "Raw signal (465)":
+            context_parts.append("Raw 465 after artifact interpolation, filtering, and resampling")
+        else:
+            baseline_desc = f"Baseline: {params.baseline_method} (lambda={float(params.baseline_lambda):.2e})"
+            if mode in (
+                "dFF (motion corrected with fitted ref)",
+                "zscore (motion corrected with fitted ref)",
+            ):
+                context_parts.append(f"Fit: {params.reference_fit}")
+            context_parts.append(baseline_desc)
         output_context = " | ".join(context_parts)
 
         # ---------------------------------------------------------------------
