@@ -110,6 +110,11 @@ _FORCE_FIXED_DOCK_LAYOUTS = True
 _LOG = logging.getLogger(__name__)
 
 
+def _pyber_icon_path() -> str:
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_dir, "assets", "pyBer_logo_big.png")
+
+
 def _rolling_corr(x: np.ndarray, y: np.ndarray, win: int) -> Tuple[np.ndarray, np.ndarray]:
     x = np.asarray(x, float)
     y = np.asarray(y, float)
@@ -262,6 +267,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Pyber - Fiber Photometry")
+        try:
+            icon_path = _pyber_icon_path()
+            if os.path.isfile(icon_path):
+                icon = QtGui.QIcon(icon_path)
+                if not icon.isNull():
+                    self.setWindowIcon(icon)
+        except Exception:
+            pass
         self.resize(1500, 900)
         self.setDockOptions(
             QtWidgets.QMainWindow.DockOption.AllowNestedDocks
@@ -3660,8 +3673,28 @@ class MainWindow(QtWidgets.QMainWindow):
 def main() -> None:
     pg.setConfigOptions(antialias=True)
     app = QtWidgets.QApplication([])
+    icon_path = _pyber_icon_path()
+    try:
+        if os.path.isfile(icon_path):
+            app_icon = QtGui.QIcon(icon_path)
+            if not app_icon.isNull():
+                app.setWindowIcon(app_icon)
+    except Exception:
+        pass
+    splash = None
+    try:
+        if os.path.isfile(icon_path):
+            pix = QtGui.QPixmap(icon_path)
+            if not pix.isNull():
+                splash = QtWidgets.QSplashScreen(pix, QtCore.Qt.WindowType.WindowStaysOnTopHint)
+                splash.show()
+                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+    except Exception:
+        splash = None
     w = MainWindow()
     w.show()
+    if splash is not None:
+        splash.finish(w)
     app.exec()
 
 
