@@ -89,7 +89,7 @@ The GUI exposes seven explicit output definitions:
 
 1. Create the environment:
    ```bash
-   conda env create -f requirements.yml
+   conda env create -f environment.yml
 ## Run
   python main.py
 
@@ -207,6 +207,7 @@ PowerShell helper:
 ```
 
 This will create a `pyBer.exe` in the `dist/` folder.
+
 
 
 
