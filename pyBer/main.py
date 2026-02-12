@@ -2307,10 +2307,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self._enforce_postprocessing_popups_hidden()
         self._save_panel_layout_state()
 
+    def _restore_window_state_after_tab_switch(self, was_fullscreen: bool, was_maximized: bool) -> None:
+        """
+        Keep the top-level window mode stable across heavy dock add/remove/tabify
+        operations triggered by main-tab switches.
+        """
+        if was_fullscreen:
+            if self.isFullScreen():
+                return
+
+            def _ensure_fullscreen() -> None:
+                if not self.isFullScreen():
+                    self.showFullScreen()
+
+            try:
+                _ensure_fullscreen()
+                QtCore.QTimer.singleShot(0, _ensure_fullscreen)
+                QtCore.QTimer.singleShot(120, _ensure_fullscreen)
+            except Exception:
+                pass
+            return
+
+        if was_maximized and not self.isMaximized() and not self.isFullScreen():
+            try:
+                self.showMaximized()
+            except Exception:
+                pass
+
     def _on_main_tab_changed(self, index: int) -> None:
         if self._handling_main_tab_change:
             return
         self._handling_main_tab_change = True
+        was_fullscreen = bool(self.isFullScreen())
+        was_maximized = bool(self.isMaximized())
         try:
             current = self.tabs.widget(index)
             if self._force_fixed_dock_layouts:
@@ -2382,6 +2411,7 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 _LOG.exception("Failed to handle main tab switch")
         finally:
+            self._restore_window_state_after_tab_switch(was_fullscreen, was_maximized)
             self._handling_main_tab_change = False
 
     def _on_artifact_overlay_toggled(self, visible: bool) -> None:
