@@ -2319,8 +2319,6 @@ class MainWindow(QtWidgets.QMainWindow):
                             self.post_tab.ensure_section_popups_initialized()
                             if hasattr(self.post_tab, "apply_fixed_default_layout"):
                                 self.post_tab.apply_fixed_default_layout()
-                                # Re-apply after queued dock events from tab switch.
-                                QtCore.QTimer.singleShot(0, self.post_tab.apply_fixed_default_layout)
                         except Exception:
                             _LOG.exception("Failed to apply fixed post layout on tab switch")
                         self._enforce_only_tab_docks_visible("post")

@@ -1351,6 +1351,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             dock.hide()
             self._section_popups[key] = dock
 
+        self._apply_fixed_dock_features()
+
         # If popups become available after delayed host attachment, restore once here.
         if self._panel_layout_persistence_ready and not self._dock_layout_restored:
             self._restore_panel_layout_state()
@@ -1371,6 +1373,28 @@ class PostProcessingPanel(QtWidgets.QWidget):
         btn.blockSignals(True)
         btn.setChecked(bool(checked))
         btn.blockSignals(False)
+
+    def _apply_fixed_dock_features(self) -> None:
+        if not self._section_popups:
+            return
+        for dock in self._section_popups.values():
+            if dock is None:
+                continue
+            if self._force_fixed_default_layout:
+                features = (
+                    QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
+                    | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+                )
+            else:
+                features = (
+                    QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
+                    | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+                    | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
+                )
+            try:
+                dock.setFeatures(features)
+            except Exception:
+                pass
 
     def _toggle_section_popup(self, key: str, checked: bool) -> None:
         if not self._section_popups:
@@ -4260,9 +4284,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             # Defer until the widget is fully attached to a main-window host.
             QtCore.QTimer.singleShot(0, self._setup_section_popups)
         if self._force_fixed_default_layout and self._section_popups:
-            # Always enforce fixed docking on show to override any late floating restores.
-            self.apply_fixed_default_layout()
-            self._dock_layout_restored = True
+            if not self._dock_layout_restored:
+                self.apply_fixed_default_layout()
+                self._dock_layout_restored = True
         elif not self._dock_layout_restored and self._section_popups:
             self._restore_panel_layout_state()
             self._dock_layout_restored = True
@@ -4378,6 +4402,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def set_force_fixed_default_layout(self, enabled: bool) -> None:
         self._force_fixed_default_layout = bool(enabled)
+        self._apply_fixed_dock_features()
 
     def apply_fixed_default_layout(self) -> None:
         """
@@ -4396,6 +4421,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         self._suspend_panel_layout_persistence = True
         try:
+            self._apply_fixed_dock_features()
             # Reset previous split/tab topology before rebuilding the fixed stack.
             for key in ("setup", "psth", "signal", "behavior", "export"):
                 dock = self._section_popups.get(key)
@@ -4412,8 +4438,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     continue
                 dock.blockSignals(True)
                 try:
-                    dock.setFloating(False)
                     host.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+                    dock.setFloating(False)
                     dock.show()
                 finally:
                     dock.blockSignals(False)
@@ -4421,8 +4447,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if export is not None:
                 export.blockSignals(True)
                 try:
-                    export.setFloating(False)
                     host.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, export)
+                    export.setFloating(False)
                     export.show()
                 finally:
                     export.blockSignals(False)
@@ -4444,6 +4470,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._last_opened_section = "setup"
             if export is not None:
                 export.raise_()
+
+            # Final hard enforcement: all post docks must be docked (non-floating).
+            for key in ("setup", "psth", "signal", "behavior", "export"):
+                dock = self._section_popups.get(key)
+                if dock is None:
+                    continue
+                try:
+                    if dock.isFloating():
+                        dock.setFloating(False)
+                except Exception:
+                    pass
 
             self._sync_section_button_states_from_docks()
             self._post_docks_hidden_for_tab_switch = False
