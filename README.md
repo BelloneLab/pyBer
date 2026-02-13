@@ -13,7 +13,7 @@ This project is designed for efficient exploratory QC (preview in the GUI) while
 
 ### Data IO
 - Supports raw data in .doric, .h5 or .csv.
-- Multi-channel support (e.g., AIN01, AIN02, DIO channels …).
+- Multi-channel support (e.g., analogue, DIO channels …).
 - Optional alignment of analog traces to the DigitalIO timebase when a DIO is selected.
 
 ### Artifact Handling
@@ -25,13 +25,13 @@ This project is designed for efficient exploratory QC (preview in the GUI) while
 - Masked samples are replaced via **linear interpolation** to preserve time alignment.
 
 ### Signal Conditioning
-- Zero-phase low-pass filtering (Butterworth SOS via `sosfiltfilt`).
-- Joint decimation/resampling of 465 and 405 to a **target sampling rate** using `resample_poly`.
+- Low-pass filtering.
+- Decimation/resampling.
 
 ### Baseline Estimation
 Baseline is computed after filtering and resampling using **pybaselines**:
 - `asls`, `arpls`, `airpls`
-- tunable smoothing parameters (lambda, diff order, iterations, tolerance)
+- tunable parameters (lambda, diff order, iterations, tolerance)
 
 ### Output Modes (7)
 The GUI exposes seven explicit output definitions:
@@ -207,6 +207,7 @@ PowerShell helper:
 ```
 
 This will create a `pyBer.exe` in the `dist/` folder.
+
 
 
 
