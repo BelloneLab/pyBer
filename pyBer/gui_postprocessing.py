@@ -221,23 +221,40 @@ def _extract_onsets_offsets(
         fi += 1
     return np.asarray(on, float), np.asarray(off, float), np.asarray(dur, float)
 
-def _binary_columns_from_df(df) -> Tuple[str, Dict[str, np.ndarray]]:
-    cols = [c.strip() for c in df.columns]
-    time_col = None
+def _detect_time_column(df, fallback_to_first: bool = False) -> Optional[str]:
     for c in df.columns:
         if str(c).strip().lower() in {"time", "trial time", "recording time"}:
-            time_col = c
-            break
-    if time_col is None and cols:
-        time_col = df.columns[0]
+            return str(c)
+    if fallback_to_first and len(df.columns):
+        return str(df.columns[0])
+    return None
 
-    t = np.asarray(df[time_col], float)
-    behaviors: Dict[str, np.ndarray] = {}
 
+def _numeric_column_array(df, col_name: str) -> np.ndarray:
+    import pandas as pd
+
+    col_key = None
     for c in df.columns:
-        if c == time_col:
+        if str(c) == str(col_name):
+            col_key = c
+            break
+    if col_key is None:
+        return np.array([], float)
+    vals = pd.to_numeric(df[col_key], errors="coerce")
+    return np.asarray(vals, float)
+
+
+def _binary_columns_from_df(df) -> Tuple[str, Dict[str, np.ndarray]]:
+    time_col = _detect_time_column(df, fallback_to_first=True)
+    if not time_col:
+        return "", {}
+
+    behaviors: Dict[str, np.ndarray] = {}
+    for c in df.columns:
+        name = str(c)
+        if name == time_col:
             continue
-        arr = np.asarray(df[c], float)
+        arr = _numeric_column_array(df, name)
         if arr.size == 0:
             continue
         finite = arr[np.isfinite(arr)]
@@ -245,9 +262,30 @@ def _binary_columns_from_df(df) -> Tuple[str, Dict[str, np.ndarray]]:
             continue
         uniq = np.unique(finite)
         if np.all(np.isin(uniq, [0.0, 1.0])):
-            behaviors[str(c)] = arr.astype(float)
-
+            behaviors[name] = arr.astype(float)
     return time_col, behaviors
+
+
+def _trajectory_columns_from_df(df, time_col: Optional[str]) -> Dict[str, np.ndarray]:
+    trajectory: Dict[str, np.ndarray] = {}
+    for c in df.columns:
+        name = str(c).strip()
+        if not name:
+            continue
+        if time_col and name == time_col:
+            continue
+        arr = _numeric_column_array(df, name)
+        if arr.size == 0:
+            continue
+        finite = arr[np.isfinite(arr)]
+        if finite.size < 8:
+            continue
+        uniq = np.unique(finite)
+        # Skip classic binary behavior columns from trajectory candidates.
+        if uniq.size <= 2 and np.all(np.isin(uniq, [0.0, 1.0])):
+            continue
+        trajectory[name] = arr
+    return trajectory
 
 
 def _timestamp_columns_from_df(df) -> Dict[str, np.ndarray]:
@@ -271,11 +309,30 @@ def _timestamp_columns_from_df(df) -> Dict[str, np.ndarray]:
 
 def _load_behavior_csv(path: str, parse_mode: str = _BEHAVIOR_PARSE_BINARY) -> Dict[str, Any]:
     import pandas as pd
+
     df = pd.read_csv(path)
+    time_col = _detect_time_column(df)
+    trajectory = _trajectory_columns_from_df(df, time_col=time_col)
+    trajectory_time = _numeric_column_array(df, time_col) if time_col else np.array([], float)
     if str(parse_mode) == _BEHAVIOR_PARSE_TIMESTAMPS:
-        return {"kind": _BEHAVIOR_PARSE_TIMESTAMPS, "time": np.array([], float), "behaviors": _timestamp_columns_from_df(df)}
+        return {
+            "kind": _BEHAVIOR_PARSE_TIMESTAMPS,
+            "time": np.array([], float),
+            "behaviors": _timestamp_columns_from_df(df),
+            "trajectory": trajectory,
+            "trajectory_time": trajectory_time,
+            "trajectory_time_col": time_col or "",
+        }
     time_col, behaviors = _binary_columns_from_df(df)
-    return {"kind": _BEHAVIOR_PARSE_BINARY, "time": np.asarray(df[time_col], float), "behaviors": behaviors}
+    time = _numeric_column_array(df, time_col) if time_col else np.array([], float)
+    return {
+        "kind": _BEHAVIOR_PARSE_BINARY,
+        "time": time,
+        "behaviors": behaviors,
+        "trajectory": trajectory,
+        "trajectory_time": trajectory_time if trajectory_time.size else time,
+        "trajectory_time_col": time_col or "",
+    }
 
 
 def _load_behavior_ethovision(
@@ -289,18 +346,38 @@ def _load_behavior_ethovision(
         xls = pd.ExcelFile(path, engine="openpyxl")
         sheet_name = xls.sheet_names[0] if xls.sheet_names else None
     if not sheet_name:
-        return {"kind": _BEHAVIOR_PARSE_BINARY, "time": np.array([], float), "behaviors": {}}
+        return {
+            "kind": _BEHAVIOR_PARSE_BINARY,
+            "time": np.array([], float),
+            "behaviors": {},
+            "trajectory": {},
+            "trajectory_time": np.array([], float),
+            "trajectory_time_col": "",
+        }
     if str(parse_mode) == _BEHAVIOR_PARSE_TIMESTAMPS:
         df = pd.read_excel(path, sheet_name=sheet_name, engine="openpyxl")
+        time_col = _detect_time_column(df)
         return {
             "kind": _BEHAVIOR_PARSE_TIMESTAMPS,
             "time": np.array([], float),
             "behaviors": _timestamp_columns_from_df(df),
+            "trajectory": _trajectory_columns_from_df(df, time_col=time_col),
+            "trajectory_time": _numeric_column_array(df, time_col) if time_col else np.array([], float),
+            "trajectory_time_col": time_col or "",
             "sheet": sheet_name,
         }
     df = clean_sheet(Path(path), sheet_name, interpolate=True)
     time_col, behaviors = _binary_columns_from_df(df)
-    return {"kind": _BEHAVIOR_PARSE_BINARY, "time": np.asarray(df[time_col], float), "behaviors": behaviors, "sheet": sheet_name}
+    time = _numeric_column_array(df, time_col) if time_col else np.array([], float)
+    return {
+        "kind": _BEHAVIOR_PARSE_BINARY,
+        "time": time,
+        "behaviors": behaviors,
+        "trajectory": _trajectory_columns_from_df(df, time_col=time_col),
+        "trajectory_time": _numeric_column_array(df, time_col) if time_col else np.array([], float),
+        "trajectory_time_col": time_col or "",
+        "sheet": sheet_name,
+    }
 
 
 def _compute_psth_matrix(
@@ -376,6 +453,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._last_durations: Optional[np.ndarray] = None
         self._last_metrics: Optional[Dict[str, float]] = None
         self._last_global_metrics: Optional[Dict[str, float]] = None
+        self._last_spatial_occupancy_map: Optional[np.ndarray] = None
+        self._last_spatial_activity_map: Optional[np.ndarray] = None
+        self._last_spatial_velocity_map: Optional[np.ndarray] = None
+        self._last_spatial_extent: Optional[Tuple[float, float, float, float]] = None
         self._last_event_rows: List[Dict[str, object]] = []
         self.last_signal_events: Optional[Dict[str, object]] = None
         self.last_behavior_analysis: Optional[Dict[str, object]] = None
@@ -924,6 +1005,135 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_behavior_summary = QtWidgets.QLabel("Group metrics: -")
         self.lbl_behavior_summary.setProperty("class", "hint")
 
+        grp_spatial = QtWidgets.QGroupBox("Spatial Heatmap")
+        f_spatial = QtWidgets.QFormLayout(grp_spatial)
+        f_spatial.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.DontWrapRows)
+        f_spatial.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+
+        self.combo_spatial_x = QtWidgets.QComboBox()
+        self.combo_spatial_y = QtWidgets.QComboBox()
+        _compact_combo(self.combo_spatial_x, min_chars=10)
+        _compact_combo(self.combo_spatial_y, min_chars=10)
+        self.spin_spatial_bins_x = QtWidgets.QSpinBox()
+        self.spin_spatial_bins_x.setRange(8, 512)
+        self.spin_spatial_bins_x.setValue(64)
+        self.spin_spatial_bins_y = QtWidgets.QSpinBox()
+        self.spin_spatial_bins_y.setRange(8, 512)
+        self.spin_spatial_bins_y.setValue(64)
+        self.combo_spatial_weight = QtWidgets.QComboBox()
+        self.combo_spatial_weight.addItems(
+            [
+                "Occupancy (samples)",
+                "Occupancy time (s)",
+                "Probability (% of time)",
+            ]
+        )
+        _compact_combo(self.combo_spatial_weight, min_chars=10)
+        self.cb_spatial_clip = QtWidgets.QCheckBox("Enabled")
+        self.cb_spatial_clip.setChecked(True)
+        self.spin_spatial_clip_low = QtWidgets.QDoubleSpinBox()
+        self.spin_spatial_clip_low.setRange(0.0, 49.0)
+        self.spin_spatial_clip_low.setValue(1.0)
+        self.spin_spatial_clip_low.setDecimals(2)
+        self.spin_spatial_clip_high = QtWidgets.QDoubleSpinBox()
+        self.spin_spatial_clip_high.setRange(51.0, 100.0)
+        self.spin_spatial_clip_high.setValue(99.0)
+        self.spin_spatial_clip_high.setDecimals(2)
+        self.spin_spatial_smooth = QtWidgets.QDoubleSpinBox()
+        self.spin_spatial_smooth.setRange(0.0, 20.0)
+        self.spin_spatial_smooth.setValue(0.0)
+        self.spin_spatial_smooth.setDecimals(2)
+        self.cb_spatial_log = QtWidgets.QCheckBox("Log scale (log1p)")
+        self.cb_spatial_log.setChecked(False)
+        self.cb_spatial_invert_y = QtWidgets.QCheckBox("Invert Y axis")
+        self.cb_spatial_invert_y.setChecked(False)
+        self.combo_spatial_activity_mode = QtWidgets.QComboBox()
+        self.combo_spatial_activity_mode.addItems(
+            [
+                "Mean z-score/bin (occupancy normalized)",
+                "Velocity-normalized z-score/bin",
+                "Sum z-score/bin",
+            ]
+        )
+        _compact_combo(self.combo_spatial_activity_mode, min_chars=12)
+        self.cb_spatial_time_filter = QtWidgets.QCheckBox("Enabled")
+        self.cb_spatial_time_filter.setChecked(False)
+        self.spin_spatial_time_min = QtWidgets.QDoubleSpinBox()
+        self.spin_spatial_time_min.setRange(-1e9, 1e9)
+        self.spin_spatial_time_min.setDecimals(3)
+        self.spin_spatial_time_min.setValue(0.0)
+        self.spin_spatial_time_max = QtWidgets.QDoubleSpinBox()
+        self.spin_spatial_time_max.setRange(-1e9, 1e9)
+        self.spin_spatial_time_max.setDecimals(3)
+        self.spin_spatial_time_max.setValue(0.0)
+        self.btn_spatial_help = QtWidgets.QToolButton()
+        self.btn_spatial_help.setText("?")
+        self.btn_spatial_help.setToolTip(
+            "Spatial heatmap help:\n"
+            "- Top plot: occupancy map.\n"
+            "- Middle plot: activity map (mode selected below).\n"
+            "- Bottom plot: velocity map (mean speed/bin).\n"
+            "- Enable Time filter to restrict trajectory/activity samples to [min,max] seconds.\n"
+            "- Use right-side color cursors on each plot to set min/max display range."
+        )
+        self.btn_compute_spatial = QtWidgets.QPushButton("Compute spatial heatmap")
+        self.btn_compute_spatial.setProperty("class", "compactPrimarySmall")
+        self.lbl_spatial_msg = QtWidgets.QLabel("")
+        self.lbl_spatial_msg.setProperty("class", "hint")
+
+        bins_row = QtWidgets.QGridLayout()
+        bins_row.setHorizontalSpacing(6)
+        bins_row.setContentsMargins(0, 0, 0, 0)
+        bins_row.addWidget(QtWidgets.QLabel("X"), 0, 0)
+        bins_row.addWidget(self.spin_spatial_bins_x, 0, 1)
+        bins_row.addWidget(QtWidgets.QLabel("Y"), 0, 2)
+        bins_row.addWidget(self.spin_spatial_bins_y, 0, 3)
+        bins_widget = QtWidgets.QWidget()
+        bins_widget.setLayout(bins_row)
+
+        clip_row = QtWidgets.QGridLayout()
+        clip_row.setHorizontalSpacing(6)
+        clip_row.setContentsMargins(0, 0, 0, 0)
+        clip_row.addWidget(QtWidgets.QLabel("Low"), 0, 0)
+        clip_row.addWidget(self.spin_spatial_clip_low, 0, 1)
+        clip_row.addWidget(QtWidgets.QLabel("High"), 0, 2)
+        clip_row.addWidget(self.spin_spatial_clip_high, 0, 3)
+        clip_widget = QtWidgets.QWidget()
+        clip_widget.setLayout(clip_row)
+
+        time_row = QtWidgets.QGridLayout()
+        time_row.setHorizontalSpacing(6)
+        time_row.setContentsMargins(0, 0, 0, 0)
+        time_row.addWidget(QtWidgets.QLabel("Start"), 0, 0)
+        time_row.addWidget(self.spin_spatial_time_min, 0, 1)
+        time_row.addWidget(QtWidgets.QLabel("End"), 0, 2)
+        time_row.addWidget(self.spin_spatial_time_max, 0, 3)
+        time_widget = QtWidgets.QWidget()
+        time_widget.setLayout(time_row)
+
+        help_row = QtWidgets.QHBoxLayout()
+        help_row.setContentsMargins(0, 0, 0, 0)
+        help_row.addStretch(1)
+        help_row.addWidget(self.btn_spatial_help)
+        help_widget = QtWidgets.QWidget()
+        help_widget.setLayout(help_row)
+
+        f_spatial.addRow("X trajectory column", self.combo_spatial_x)
+        f_spatial.addRow("Y trajectory column", self.combo_spatial_y)
+        f_spatial.addRow("Help", help_widget)
+        f_spatial.addRow("Bins (X/Y)", bins_widget)
+        f_spatial.addRow("Occupancy map value", self.combo_spatial_weight)
+        f_spatial.addRow("Clip ranges", self.cb_spatial_clip)
+        f_spatial.addRow("Percentiles", clip_widget)
+        f_spatial.addRow("Time filter", self.cb_spatial_time_filter)
+        f_spatial.addRow("Time range (s)", time_widget)
+        f_spatial.addRow("Spatial smooth (bins)", self.spin_spatial_smooth)
+        f_spatial.addRow("Activity map mode", self.combo_spatial_activity_mode)
+        f_spatial.addRow("Log scale", self.cb_spatial_log)
+        f_spatial.addRow("Invert Y axis", self.cb_spatial_invert_y)
+        f_spatial.addRow("", self.btn_compute_spatial)
+        f_spatial.addRow("", self.lbl_spatial_msg)
+
         self.section_setup = QtWidgets.QWidget()
         setup_layout = QtWidgets.QVBoxLayout(self.section_setup)
         setup_layout.setContentsMargins(6, 6, 6, 6)
@@ -974,6 +1184,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         behavior_layout.addWidget(self.lbl_behavior_summary)
         behavior_layout.addStretch(1)
 
+        self.section_spatial = QtWidgets.QWidget()
+        spatial_layout = QtWidgets.QVBoxLayout(self.section_spatial)
+        spatial_layout.setContentsMargins(6, 6, 6, 6)
+        spatial_layout.setSpacing(8)
+        spatial_layout.addWidget(grp_spatial)
+        spatial_layout.addStretch(1)
+
         self.section_export = QtWidgets.QWidget()
         export_layout = QtWidgets.QVBoxLayout(self.section_export)
         export_layout.setContentsMargins(6, 6, 6, 6)
@@ -1011,12 +1228,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_panel_psth = QtWidgets.QPushButton("PSTH")
         self.btn_panel_signal = QtWidgets.QPushButton("Signal")
         self.btn_panel_behavior = QtWidgets.QPushButton("Behavior")
+        self.btn_panel_spatial = QtWidgets.QPushButton("Spatial")
         self.btn_panel_export = QtWidgets.QPushButton("Export")
         self._section_buttons = {
             "setup": self.btn_panel_setup,
             "psth": self.btn_panel_psth,
             "signal": self.btn_panel_signal,
             "behavior": self.btn_panel_behavior,
+            "spatial": self.btn_panel_spatial,
             "export": self.btn_panel_export,
         }
         for b in self._section_buttons.values():
@@ -1033,6 +1252,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         action_row.addWidget(self.btn_panel_psth)
         action_row.addWidget(self.btn_panel_signal)
         action_row.addWidget(self.btn_panel_behavior)
+        action_row.addWidget(self.btn_panel_spatial)
         action_row.addWidget(self.btn_panel_export)
         action_row.addStretch(1)
         root.addLayout(action_row)
@@ -1078,6 +1298,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_behavior_rate = pg.PlotWidget(title="Behavior frequency over time")
         self.plot_behavior_duration = pg.PlotWidget(title="Behavior duration distribution")
         self.plot_behavior_starts = pg.PlotWidget(title="Behavior start times")
+        self.plot_spatial_occupancy = pg.PlotWidget(title="Spatial occupancy")
+        self.plot_spatial_activity = pg.PlotWidget(title="Spatial activity (mean z-score)")
+        self.plot_spatial_velocity = pg.PlotWidget(title="Spatial velocity (mean speed)")
 
         for w in (
             self.plot_trace,
@@ -1093,6 +1316,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_behavior_rate,
             self.plot_behavior_duration,
             self.plot_behavior_starts,
+            self.plot_spatial_occupancy,
+            self.plot_spatial_activity,
+            self.plot_spatial_velocity,
         ):
             _opt_plot(w)
 
@@ -1127,6 +1353,30 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_behavior_duration.setLabel("left", "Count")
         self.plot_behavior_starts.setLabel("bottom", "Start time (s)")
         self.plot_behavior_starts.setLabel("left", "Count")
+        self.plot_spatial_occupancy.setLabel("bottom", "X")
+        self.plot_spatial_occupancy.setLabel("left", "Y")
+        self.plot_spatial_activity.setLabel("bottom", "X")
+        self.plot_spatial_activity.setLabel("left", "Y")
+        self.plot_spatial_velocity.setLabel("bottom", "X")
+        self.plot_spatial_velocity.setLabel("left", "Y")
+        self.img_spatial_occupancy = pg.ImageItem()
+        self.img_spatial_activity = pg.ImageItem()
+        self.img_spatial_velocity = pg.ImageItem()
+        self.plot_spatial_occupancy.addItem(self.img_spatial_occupancy)
+        self.plot_spatial_activity.addItem(self.img_spatial_activity)
+        self.plot_spatial_velocity.addItem(self.img_spatial_velocity)
+        self.spatial_lut_occupancy = pg.HistogramLUTWidget()
+        self.spatial_lut_activity = pg.HistogramLUTWidget()
+        self.spatial_lut_velocity = pg.HistogramLUTWidget()
+        self.spatial_lut_occupancy.setMinimumWidth(110)
+        self.spatial_lut_occupancy.setMaximumWidth(150)
+        self.spatial_lut_activity.setMinimumWidth(110)
+        self.spatial_lut_activity.setMaximumWidth(150)
+        self.spatial_lut_velocity.setMinimumWidth(110)
+        self.spatial_lut_velocity.setMaximumWidth(150)
+        self.spatial_lut_occupancy.setImageItem(self.img_spatial_occupancy)
+        self.spatial_lut_activity.setImageItem(self.img_spatial_activity)
+        self.spatial_lut_velocity.setImageItem(self.img_spatial_velocity)
 
         self.curve_avg = self.plot_avg.plot(pen=pg.mkPen(self._style["avg"], width=1.3))
         self.curve_sem_hi = self.plot_avg.plot(pen=pg.mkPen((220, 220, 220), width=1.0))
@@ -1182,6 +1432,36 @@ class PostProcessingPanel(QtWidgets.QWidget):
         behavior_grid.setColumnStretch(1, 1)
         behavior_grid.setColumnStretch(2, 1)
 
+        self.spatial_plot_dialog = QtWidgets.QDialog(self)
+        self.spatial_plot_dialog.setWindowTitle("Spatial Heatmap")
+        self.spatial_plot_dialog.setModal(False)
+        self.spatial_plot_dialog.resize(980, 920)
+        spatial_dialog_layout = QtWidgets.QVBoxLayout(self.spatial_plot_dialog)
+        spatial_dialog_layout.setContentsMargins(8, 8, 8, 8)
+        spatial_dialog_layout.setSpacing(8)
+        spatial_top_row = QtWidgets.QHBoxLayout()
+        spatial_top_row.setContentsMargins(0, 0, 0, 0)
+        spatial_top_row.setSpacing(8)
+        spatial_top_row.addWidget(self.plot_spatial_occupancy, stretch=1)
+        spatial_top_row.addWidget(self.spatial_lut_occupancy, stretch=0)
+        spatial_bottom_row = QtWidgets.QHBoxLayout()
+        spatial_bottom_row.setContentsMargins(0, 0, 0, 0)
+        spatial_bottom_row.setSpacing(8)
+        spatial_bottom_row.addWidget(self.plot_spatial_activity, stretch=1)
+        spatial_bottom_row.addWidget(self.spatial_lut_activity, stretch=0)
+        spatial_velocity_row = QtWidgets.QHBoxLayout()
+        spatial_velocity_row.setContentsMargins(0, 0, 0, 0)
+        spatial_velocity_row.setSpacing(8)
+        spatial_velocity_row.addWidget(self.plot_spatial_velocity, stretch=1)
+        spatial_velocity_row.addWidget(self.spatial_lut_velocity, stretch=0)
+        spatial_dialog_layout.addLayout(spatial_top_row, stretch=1)
+        spatial_dialog_layout.addLayout(spatial_bottom_row, stretch=1)
+        spatial_dialog_layout.addLayout(spatial_velocity_row, stretch=1)
+        self.lbl_spatial_cursor_hint = QtWidgets.QLabel("Use the right-side color cursors to set min/max display range for each map.")
+        self.lbl_spatial_cursor_hint.setProperty("class", "hint")
+        spatial_dialog_layout.addWidget(self.lbl_spatial_cursor_hint)
+        self.spatial_plot_dialog.hide()
+
         # Keep a visible minimum plot footprint even with aggressive docking/resizing.
         self.plot_trace.setMinimumHeight(140)
         self.row_heat.setMinimumHeight(180)
@@ -1218,8 +1498,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_load_processed_single.clicked.connect(self._load_processed_files_single)
         self.list_preprocessed.filesDropped.connect(self._on_preprocessed_files_dropped)
         self.list_preprocessed.orderChanged.connect(self._sync_processed_order_from_list)
+        self.list_preprocessed.itemSelectionChanged.connect(self._compute_spatial_heatmap)
         self.list_behaviors.filesDropped.connect(self._on_behavior_files_dropped)
         self.list_behaviors.orderChanged.connect(self._sync_behavior_order_from_list)
+        self.list_behaviors.itemSelectionChanged.connect(self._compute_spatial_heatmap)
         self.btn_compute.clicked.connect(self._compute_psth)
         self.btn_update.clicked.connect(self._compute_psth)
         self.btn_detect_peaks.clicked.connect(self._detect_signal_events)
@@ -1227,6 +1509,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_compute_behavior.clicked.connect(self._compute_behavior_analysis)
         self.btn_export_behavior_metrics.clicked.connect(self._export_behavior_metrics_csv)
         self.btn_export_behavior_events.clicked.connect(self._export_behavior_events_csv)
+        self.btn_compute_spatial.clicked.connect(self._on_compute_spatial_clicked)
         self.btn_export.clicked.connect(self._export_results)
         self.btn_export_img.clicked.connect(self._export_images)
         self.btn_style.clicked.connect(self._open_style_dialog)
@@ -1279,6 +1562,26 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_global_freq.stateChanged.connect(self._compute_psth)
         for w in (self.spin_metric_pre0, self.spin_metric_pre1, self.spin_metric_post0, self.spin_metric_post1):
             w.valueChanged.connect(self._update_metric_regions)
+        for w in (self.combo_spatial_x, self.combo_spatial_y, self.combo_spatial_weight):
+            w.currentIndexChanged.connect(self._compute_spatial_heatmap)
+        for w in (
+            self.spin_spatial_bins_x,
+            self.spin_spatial_bins_y,
+            self.spin_spatial_clip_low,
+            self.spin_spatial_clip_high,
+            self.spin_spatial_time_min,
+            self.spin_spatial_time_max,
+            self.spin_spatial_smooth,
+        ):
+            w.valueChanged.connect(self._compute_spatial_heatmap)
+        self.cb_spatial_clip.toggled.connect(self._compute_spatial_heatmap)
+        self.cb_spatial_clip.toggled.connect(self._update_spatial_clip_enabled)
+        self.cb_spatial_time_filter.toggled.connect(self._compute_spatial_heatmap)
+        self.cb_spatial_time_filter.toggled.connect(self._update_spatial_time_filter_enabled)
+        self.cb_spatial_log.toggled.connect(self._compute_spatial_heatmap)
+        self.cb_spatial_invert_y.toggled.connect(self._compute_spatial_heatmap)
+        self.combo_spatial_activity_mode.currentIndexChanged.connect(self._compute_spatial_heatmap)
+        self.btn_spatial_help.clicked.connect(self._show_spatial_help)
 
         self._update_align_ui()
         self._update_event_filter_enabled()
@@ -1289,6 +1592,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._apply_view_layout()
         self._refresh_signal_file_combo()
         self._update_data_availability()
+        self._update_spatial_clip_enabled()
+        self._update_spatial_time_filter_enabled()
+        self._refresh_spatial_columns()
+        self._compute_spatial_heatmap()
         self._update_status_strip()
 
         QtGui.QShortcut(QtGui.QKeySequence("Ctrl+S"), self, activated=self._export_results)
@@ -1312,6 +1619,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "psth": ("PSTH", self.section_psth),
             "signal": ("Signal Event Analyzer", self.section_signal),
             "behavior": ("Behavior Analysis", self.section_behavior),
+            "spatial": ("Spatial Heatmap", self.section_spatial),
             "export": ("Export", self.section_export),
         }
         for key, (title, widget) in section_map.items():
@@ -1320,6 +1628,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
             scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            scroll.setStyleSheet("QScrollArea { background: #242a34; border: none; }")
             # Keep viewport painted with dock background to avoid dark paint gaps
             # when section rows are dynamically shown/hidden.
             scroll.viewport().setAutoFillBackground(True)
@@ -1437,6 +1746,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "psth": (420, 640),
             "signal": (420, 640),
             "behavior": (500, 620),
+            "spatial": (420, 520),
             "export": (340, 300),
         }
         return size_map.get(key, (420, 620))
@@ -1533,7 +1843,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         try:
             if self._settings.contains(_POST_DOCK_STATE_KEY):
                 return True
-            keys = list(self._section_popups.keys()) or ["setup", "psth", "signal", "behavior", "export"]
+            keys = list(self._section_popups.keys()) or ["setup", "psth", "signal", "behavior", "spatial", "export"]
             for key in keys:
                 if self._settings.contains(f"post_section_docks/{key}/visible"):
                     return True
@@ -1723,6 +2033,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._refresh_behavior_list()
         self._set_resample_from_processed()
         self._update_trace_preview()
+        self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
 
@@ -1733,6 +2044,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._refresh_behavior_list()
         self._set_resample_from_processed()
         self._update_trace_preview()
+        self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
 
@@ -1777,11 +2089,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     info = _load_behavior_ethovision(p, sheet_name=sheet, parse_mode=parse_mode)
                 else:
                     continue
-                if not (info.get("behaviors") or {}):
+                has_behaviors = bool(info.get("behaviors") or {})
+                has_trajectory = bool(info.get("trajectory") or {})
+                if not has_behaviors and not has_trajectory:
                     QtWidgets.QMessageBox.warning(
                         self,
                         "Behavior load warning",
-                        f"No behavior columns detected in {os.path.basename(p)} for the selected file type.",
+                        f"No behavior or trajectory numeric columns detected in {os.path.basename(p)} for the selected file type.",
                     )
                 self._behavior_sources[stem] = info
             except Exception as exc:
@@ -1818,6 +2132,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_file_lists()
         self._set_resample_from_processed()
         self._compute_psth()
+        self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
 
@@ -1941,6 +2256,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _update_data_availability(self) -> None:
         has_processed = bool(self._processed)
         has_behavior = bool(self._behavior_sources)
+        spatial_ready = has_processed and has_behavior
         for w in (
             self.btn_compute,
             self.btn_update,
@@ -1975,6 +2291,28 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.cb_behavior_aligned,
         ):
             w.setEnabled(has_behavior)
+        for w in (
+            self.combo_spatial_x,
+            self.combo_spatial_y,
+            self.spin_spatial_bins_x,
+            self.spin_spatial_bins_y,
+            self.combo_spatial_weight,
+            self.cb_spatial_clip,
+            self.spin_spatial_clip_low,
+            self.spin_spatial_clip_high,
+            self.cb_spatial_time_filter,
+            self.spin_spatial_time_min,
+            self.spin_spatial_time_max,
+            self.spin_spatial_smooth,
+            self.combo_spatial_activity_mode,
+            self.cb_spatial_log,
+            self.cb_spatial_invert_y,
+            self.btn_compute_spatial,
+        ):
+            w.setEnabled(spatial_ready)
+        self.btn_spatial_help.setEnabled(True)
+        self._update_spatial_clip_enabled()
+        self._update_spatial_time_filter_enabled()
         self._refresh_signal_file_combo()
 
     def _update_status_strip(self) -> None:
@@ -2318,6 +2656,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if hasattr(self, "combo_behavior_analysis"):
             self.combo_behavior_analysis.clear()
         if not self._behavior_sources:
+            self._refresh_spatial_columns()
+            self._compute_spatial_heatmap()
             self._update_data_availability()
             return
         behavior_names: set[str] = set()
@@ -2337,8 +2677,620 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         # Update the lists with numbered items
         self._update_file_lists()
+        self._refresh_spatial_columns()
+        self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
+
+    def _guess_spatial_column(self, columns: List[str], axis: str) -> Optional[str]:
+        if not columns:
+            return None
+        axis_l = axis.lower()
+        patterns = {
+            "x": ["x", "center x", "centrex", "nose x", "body x", "position x", "x center"],
+            "y": ["y", "center y", "centrey", "nose y", "body y", "position y", "y center"],
+        }.get(axis_l, [])
+        for col in columns:
+            name = str(col).strip().lower()
+            for pat in patterns:
+                if pat == name or pat in name:
+                    return col
+        return columns[0]
+
+    def _refresh_spatial_columns(self) -> None:
+        if not hasattr(self, "combo_spatial_x") or not hasattr(self, "combo_spatial_y"):
+            return
+
+        prev_x = self.combo_spatial_x.currentText().strip()
+        prev_y = self.combo_spatial_y.currentText().strip()
+        cols: set[str] = set()
+        for info in self._behavior_sources.values():
+            trajectory = info.get("trajectory") or {}
+            cols.update(str(k) for k in trajectory.keys())
+        ordered = sorted(cols)
+
+        for combo in (self.combo_spatial_x, self.combo_spatial_y):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(ordered)
+            combo.blockSignals(False)
+
+        if not ordered:
+            return
+
+        if prev_x:
+            ix = self.combo_spatial_x.findText(prev_x)
+            if ix >= 0:
+                self.combo_spatial_x.setCurrentIndex(ix)
+        if prev_y:
+            iy = self.combo_spatial_y.findText(prev_y)
+            if iy >= 0:
+                self.combo_spatial_y.setCurrentIndex(iy)
+
+        if not self.combo_spatial_x.currentText().strip():
+            gx = self._guess_spatial_column(ordered, "x")
+            if gx:
+                self.combo_spatial_x.setCurrentText(gx)
+        if not self.combo_spatial_y.currentText().strip():
+            gy = self._guess_spatial_column(ordered, "y")
+            if gy:
+                self.combo_spatial_y.setCurrentText(gy)
+
+        if self.combo_spatial_x.currentText().strip() == self.combo_spatial_y.currentText().strip() and len(ordered) > 1:
+            for col in ordered:
+                if col != self.combo_spatial_x.currentText().strip():
+                    self.combo_spatial_y.setCurrentText(col)
+                    break
+
+    def _update_spatial_clip_enabled(self) -> None:
+        enabled = bool(self.cb_spatial_clip.isChecked() and self.cb_spatial_clip.isEnabled())
+        self.spin_spatial_clip_low.setEnabled(enabled)
+        self.spin_spatial_clip_high.setEnabled(enabled)
+
+    def _update_spatial_time_filter_enabled(self) -> None:
+        enabled = bool(self.cb_spatial_time_filter.isChecked() and self.cb_spatial_time_filter.isEnabled())
+        self.spin_spatial_time_min.setEnabled(enabled)
+        self.spin_spatial_time_max.setEnabled(enabled)
+
+    def _show_spatial_help(self) -> None:
+        QtWidgets.QMessageBox.information(
+            self,
+            "Spatial Heatmap Help",
+            "Top plot: occupancy heatmap.\n"
+            "Middle plot: activity heatmap (mean, sum, or velocity-normalized z-score per bin).\n"
+            "Bottom plot: velocity heatmap (mean speed per bin).\n"
+            "Enable time filter to include only samples within [start, end] seconds.\n"
+            "Use the right-side color cursors on each plot to set min/max display range interactively.",
+        )
+
+    def _selected_processed_for_spatial(self) -> List[ProcessedTrial]:
+        if not self._processed:
+            return []
+        selected = self.list_preprocessed.selectedItems() if hasattr(self, "list_preprocessed") else []
+        if not selected:
+            return list(self._processed)
+        id_map = {id(proc): proc for proc in self._processed}
+        picked: List[ProcessedTrial] = []
+        for item in selected:
+            proc_id = item.data(QtCore.Qt.ItemDataRole.UserRole) if item else None
+            proc = id_map.get(proc_id)
+            if proc is not None:
+                picked.append(proc)
+        return picked or list(self._processed)
+
+    def _spatial_weight_values(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        t: np.ndarray,
+        mode: str,
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+        xx = np.asarray(x, float)
+        yy = np.asarray(y, float)
+        n = min(xx.size, yy.size)
+        if n <= 0:
+            return np.array([], float), np.array([], float), None
+        xx = xx[:n]
+        yy = yy[:n]
+        weights: Optional[np.ndarray] = None
+        if "time" in mode.lower() or "probability" in mode.lower():
+            tt = np.asarray(t, float) if t is not None else np.array([], float)
+            if tt.size >= n:
+                tt = tt[:n]
+            else:
+                tt = np.array([], float)
+            if tt.size == n:
+                dt = np.diff(tt)
+                dt = dt[np.isfinite(dt) & (dt > 0)]
+                default_dt = float(np.nanmedian(dt)) if dt.size else 1.0
+                w = np.full(n, default_dt, dtype=float)
+                if n > 1:
+                    step = np.diff(tt, prepend=tt[0])
+                    step[~np.isfinite(step)] = default_dt
+                    step[step <= 0] = default_dt
+                    w = step
+                weights = w
+            else:
+                weights = np.ones(n, dtype=float)
+        return xx, yy, weights
+
+    def _spatial_velocity_values(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        t: np.ndarray,
+    ) -> np.ndarray:
+        xx = np.asarray(x, float)
+        yy = np.asarray(y, float)
+        n = min(xx.size, yy.size)
+        if n <= 1:
+            return np.array([], float)
+        xx = xx[:n]
+        yy = yy[:n]
+        tt = np.asarray(t, float) if t is not None else np.array([], float)
+        if tt.size >= n:
+            tt = tt[:n]
+            dt = np.diff(tt)
+            use_time = True
+        else:
+            dt = np.ones(n - 1, dtype=float)
+            use_time = False
+        dx = np.diff(xx)
+        dy = np.diff(yy)
+        speed_steps = np.full(n - 1, np.nan, dtype=float)
+        valid = np.isfinite(dx) & np.isfinite(dy) & np.isfinite(dt) & (dt > 0)
+        if np.any(valid):
+            dist = np.sqrt(dx[valid] * dx[valid] + dy[valid] * dy[valid])
+            speed_steps[valid] = dist / dt[valid] if use_time else dist
+        speed = np.full(n, np.nan, dtype=float)
+        speed[1:] = speed_steps
+        if np.isfinite(speed_steps).any():
+            speed[0] = float(speed_steps[np.where(np.isfinite(speed_steps))[0][0]])
+        return speed
+
+    def _render_spatial_map(
+        self,
+        plot_widget: pg.PlotWidget,
+        image_item: pg.ImageItem,
+        heat: Optional[np.ndarray],
+        extent: Optional[Tuple[float, float, float, float]],
+        x_label: str,
+        y_label: str,
+        title: str,
+    ) -> None:
+        plot_widget.setTitle(title)
+        plot_widget.setLabel("bottom", x_label or "X")
+        plot_widget.setLabel("left", y_label or "Y")
+        invert_y = bool(self.cb_spatial_invert_y.isChecked()) if hasattr(self, "cb_spatial_invert_y") else False
+        vb = plot_widget.getViewBox()
+        if vb is not None:
+            vb.invertY(invert_y)
+
+        if heat is None or heat.size == 0 or extent is None:
+            image_item.setImage(np.zeros((1, 1)), autoLevels=True)
+            image_item.setRect(QtCore.QRectF(0.0, 0.0, 1.0, 1.0))
+            plot_widget.setXRange(0.0, 1.0, padding=0.0)
+            plot_widget.setYRange(0.0, 1.0, padding=0.0)
+            return
+
+        cmap_name = str(self._style.get("heatmap_cmap", "viridis"))
+        try:
+            cmap = pg.colormap.get(cmap_name)
+            image_item.setLookupTable(cmap.getLookupTable())
+            if image_item is getattr(self, "img_spatial_occupancy", None):
+                self.spatial_lut_occupancy.item.gradient.setColorMap(cmap)
+            elif image_item is getattr(self, "img_spatial_activity", None):
+                self.spatial_lut_activity.item.gradient.setColorMap(cmap)
+            elif image_item is getattr(self, "img_spatial_velocity", None):
+                self.spatial_lut_velocity.item.gradient.setColorMap(cmap)
+        except Exception:
+            pass
+
+        arr = np.asarray(heat, float)
+        image_item.setImage(arr, autoLevels=True)
+        hmin = self._style.get("heatmap_min", None)
+        hmax = self._style.get("heatmap_max", None)
+        if hmin is not None and hmax is not None:
+            image_item.setLevels([float(hmin), float(hmax)])
+        xmin, xmax, ymin, ymax = extent
+        dx = max(1e-9, float(xmax - xmin))
+        dy = max(1e-9, float(ymax - ymin))
+        image_item.setRect(QtCore.QRectF(float(xmin), float(ymin), dx, dy))
+        plot_widget.setXRange(float(xmin), float(xmax), padding=0.0)
+        plot_widget.setYRange(float(ymin), float(ymax), padding=0.0)
+
+    def _render_spatial_heatmap(
+        self,
+        occupancy_heat: Optional[np.ndarray],
+        activity_heat: Optional[np.ndarray],
+        velocity_heat: Optional[np.ndarray],
+        extent: Optional[Tuple[float, float, float, float]],
+        x_label: str,
+        y_label: str,
+        occupancy_title: str,
+        activity_title: str,
+        velocity_title: str,
+    ) -> None:
+        self._render_spatial_map(
+            self.plot_spatial_occupancy,
+            self.img_spatial_occupancy,
+            occupancy_heat,
+            extent,
+            x_label,
+            y_label,
+            occupancy_title,
+        )
+        self._render_spatial_map(
+            self.plot_spatial_activity,
+            self.img_spatial_activity,
+            activity_heat,
+            extent,
+            x_label,
+            y_label,
+            activity_title,
+        )
+        self._render_spatial_map(
+            self.plot_spatial_velocity,
+            self.img_spatial_velocity,
+            velocity_heat,
+            extent,
+            x_label,
+            y_label,
+            velocity_title,
+        )
+
+    def _show_spatial_heatmap_panel(self) -> None:
+        if not hasattr(self, "spatial_plot_dialog"):
+            return
+        try:
+            self.spatial_plot_dialog.show()
+            self.spatial_plot_dialog.raise_()
+            self.spatial_plot_dialog.activateWindow()
+        except Exception:
+            pass
+
+    def _on_compute_spatial_clicked(self) -> None:
+        self._compute_spatial_heatmap(show_panel=True)
+
+    def _compute_spatial_heatmap(self, show_panel: bool = False) -> None:
+        if not hasattr(self, "plot_spatial_occupancy"):
+            return
+        if show_panel:
+            self._show_spatial_heatmap_panel()
+        activity_mode_text = self.combo_spatial_activity_mode.currentText().strip().lower()
+        activity_mode = "mean"
+        if "velocity" in activity_mode_text:
+            activity_mode = "velocity"
+        elif "sum" in activity_mode_text:
+            activity_mode = "sum"
+
+        def _activity_title_default() -> str:
+            if activity_mode == "velocity":
+                return "Spatial activity (velocity-normalized z-score/bin)"
+            if activity_mode == "sum":
+                return "Spatial activity (sum z-score/bin)"
+            return "Spatial activity (mean z-score/bin)"
+
+        def _clear_spatial(msg: str, x_label: str = "", y_label: str = "") -> None:
+            self._last_spatial_occupancy_map = None
+            self._last_spatial_activity_map = None
+            self._last_spatial_velocity_map = None
+            self._last_spatial_extent = None
+            self.lbl_spatial_msg.setText(msg)
+            self._render_spatial_heatmap(
+                None,
+                None,
+                None,
+                None,
+                x_label,
+                y_label,
+                "Spatial occupancy",
+                _activity_title_default(),
+                "Spatial velocity (mean speed/bin)",
+            )
+
+        if not self._processed:
+            _clear_spatial("Load processed files to compute spatial heatmap.")
+            return
+        if not self._behavior_sources:
+            _clear_spatial("Load behavior file(s) with trajectory columns.")
+            return
+
+        x_col = self.combo_spatial_x.currentText().strip()
+        y_col = self.combo_spatial_y.currentText().strip()
+        if not x_col or not y_col:
+            _clear_spatial("Select X and Y trajectory columns.", x_col, y_col)
+            return
+
+        selected = self._selected_processed_for_spatial()
+        mode = self.combo_spatial_weight.currentText().strip()
+        use_time_filter = bool(self.cb_spatial_time_filter.isChecked())
+        time_min = float(self.spin_spatial_time_min.value())
+        time_max = float(self.spin_spatial_time_max.value())
+        if use_time_filter and time_max <= time_min:
+            _clear_spatial("Invalid time range: end must be greater than start.", x_col, y_col)
+            return
+        bins_x = int(self.spin_spatial_bins_x.value())
+        bins_y = int(self.spin_spatial_bins_y.value())
+
+        rows: List[Dict[str, np.ndarray]] = []
+        all_x: List[np.ndarray] = []
+        all_y: List[np.ndarray] = []
+        skipped_missing_time = 0
+        for proc in selected:
+            info = self._match_behavior_source(proc)
+            if not info:
+                continue
+            traj = info.get("trajectory") or {}
+            if x_col not in traj or y_col not in traj:
+                continue
+            x = np.asarray(traj.get(x_col, np.array([], float)), float)
+            y = np.asarray(traj.get(y_col, np.array([], float)), float)
+            t = np.asarray(info.get("trajectory_time", np.array([], float)), float)
+            if t.size == 0:
+                t = np.asarray(info.get("time", np.array([], float)), float)
+            n = min(x.size, y.size)
+            if n <= 2:
+                continue
+            xx = x[:n]
+            yy = y[:n]
+            tt_full = t[:n] if t.size >= n else np.array([], float)
+            finite = np.isfinite(xx) & np.isfinite(yy)
+            if use_time_filter:
+                if tt_full.size != n:
+                    skipped_missing_time += 1
+                    continue
+                finite = finite & np.isfinite(tt_full) & (tt_full >= time_min) & (tt_full <= time_max)
+            if not np.any(finite):
+                continue
+
+            xx_occ = xx[finite]
+            yy_occ = yy[finite]
+            tt_occ = tt_full[finite] if tt_full.size == n else np.array([], float)
+            vel_occ = self._spatial_velocity_values(xx_occ, yy_occ, tt_occ)
+            if vel_occ.size != xx_occ.size:
+                vel_occ = np.full(xx_occ.shape, np.nan, dtype=float)
+
+            act_vals = np.array([], float)
+            if proc.output is not None:
+                yy_out = np.asarray(proc.output, float)
+                is_zscore_output = "zscore" in (proc.output_label or "").lower() or "z-score" in (proc.output_label or "").lower()
+                if is_zscore_output:
+                    yy_z = yy_out
+                else:
+                    yy_z = np.asarray(yy_out, float).copy()
+                    m_out = np.isfinite(yy_z)
+                    if np.any(m_out):
+                        mu = float(np.nanmean(yy_z[m_out]))
+                        sd = float(np.nanstd(yy_z[m_out]))
+                        if not np.isfinite(sd) or sd <= 1e-12:
+                            sd = 1.0
+                        yy_z = (yy_z - mu) / sd
+                if proc.time is not None and np.asarray(proc.time, float).size == yy_out.size and t.size >= n:
+                    tt_proc = np.asarray(proc.time, float)
+                    act_full = np.interp(t[:n], tt_proc, yy_z, left=np.nan, right=np.nan)
+                    act_vals = np.asarray(act_full[finite], float)
+                elif yy_z.size >= n:
+                    act_vals = np.asarray(yy_z[:n][finite], float)
+
+            rows.append(
+                {
+                    "x_occ": xx_occ,
+                    "y_occ": yy_occ,
+                    "t_occ": tt_occ,
+                    "vel_occ": vel_occ,
+                    "x_act": xx_occ.copy(),
+                    "y_act": yy_occ.copy(),
+                    "t_act": tt_occ.copy(),
+                    "vel_act": vel_occ.copy(),
+                    "act": act_vals,
+                }
+            )
+            all_x.append(xx_occ)
+            all_y.append(yy_occ)
+
+        if not rows or not all_x or not all_y:
+            if use_time_filter:
+                _clear_spatial("No trajectory samples in the selected time range.", x_col, y_col)
+            else:
+                _clear_spatial("No matching trajectory data found for selected files.", x_col, y_col)
+            return
+
+        x_all = np.concatenate(all_x)
+        y_all = np.concatenate(all_y)
+        if self.cb_spatial_clip.isChecked():
+            lo = float(self.spin_spatial_clip_low.value())
+            hi = float(self.spin_spatial_clip_high.value())
+            if hi <= lo:
+                hi = min(100.0, lo + 1.0)
+            xmin, xmax = np.nanpercentile(x_all, [lo, hi])
+            ymin, ymax = np.nanpercentile(y_all, [lo, hi])
+        else:
+            xmin, xmax = float(np.nanmin(x_all)), float(np.nanmax(x_all))
+            ymin, ymax = float(np.nanmin(y_all)), float(np.nanmax(y_all))
+        if not np.isfinite(xmin) or not np.isfinite(xmax) or xmin == xmax:
+            xmin, xmax = 0.0, 1.0
+        if not np.isfinite(ymin) or not np.isfinite(ymax) or ymin == ymax:
+            ymin, ymax = 0.0, 1.0
+
+        occ_maps: List[np.ndarray] = []
+        act_maps: List[np.ndarray] = []
+        vel_maps: List[np.ndarray] = []
+        for row in rows:
+            xx, yy, weights = self._spatial_weight_values(row["x_occ"], row["y_occ"], row["t_occ"], mode)
+            if xx.size == 0 or yy.size == 0:
+                continue
+            occ_hist, _, _ = np.histogram2d(
+                xx,
+                yy,
+                bins=[bins_x, bins_y],
+                range=[[xmin, xmax], [ymin, ymax]],
+                weights=weights,
+            )
+            occ_hist = np.asarray(occ_hist, float)
+            if "probability" in mode.lower():
+                denom = float(np.nansum(occ_hist))
+                if denom > 0:
+                    occ_hist = (occ_hist / denom) * 100.0
+            occ_maps.append(occ_hist)
+
+            vel = np.asarray(row.get("vel_occ", np.array([], float)), float)
+            if vel.size > 0:
+                xv = np.asarray(row["x_occ"], float)
+                yv = np.asarray(row["y_occ"], float)
+                tv = np.asarray(row["t_occ"], float)
+                m_vel = np.isfinite(vel) & np.isfinite(xv) & np.isfinite(yv)
+                if np.any(m_vel):
+                    xv = xv[m_vel]
+                    yv = yv[m_vel]
+                    vel = np.clip(vel[m_vel], a_min=0.0, a_max=None)
+                    tv = tv[m_vel] if tv.size == m_vel.size else np.array([], float)
+                    xx_v, yy_v, w_v = self._spatial_weight_values(xv, yv, tv, mode)
+                    n_v = min(xx_v.size, yy_v.size, vel.size)
+                    if n_v > 0:
+                        xx_v = xx_v[:n_v]
+                        yy_v = yy_v[:n_v]
+                        vel = vel[:n_v]
+                        vel_w = w_v[:n_v] if w_v is not None and w_v.size >= n_v else np.ones(n_v, dtype=float)
+                        vel_num, _, _ = np.histogram2d(
+                            xx_v,
+                            yy_v,
+                            bins=[bins_x, bins_y],
+                            range=[[xmin, xmax], [ymin, ymax]],
+                            weights=vel * vel_w,
+                        )
+                        vel_den, _, _ = np.histogram2d(
+                            xx_v,
+                            yy_v,
+                            bins=[bins_x, bins_y],
+                            range=[[xmin, xmax], [ymin, ymax]],
+                            weights=vel_w,
+                        )
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            vel_hist = np.divide(vel_num, vel_den, out=np.full_like(vel_num, np.nan), where=vel_den > 0)
+                        vel_maps.append(np.asarray(vel_hist, float))
+
+            act = np.asarray(row.get("act", np.array([], float)), float)
+            if act.size == 0:
+                continue
+            xa = np.asarray(row["x_act"], float)
+            ya = np.asarray(row["y_act"], float)
+            ta = np.asarray(row["t_act"], float)
+            va = np.asarray(row.get("vel_act", np.array([], float)), float)
+            m_act = np.isfinite(act) & np.isfinite(xa) & np.isfinite(ya)
+            if not np.any(m_act):
+                continue
+            xa = xa[m_act]
+            ya = ya[m_act]
+            act = act[m_act]
+            ta = ta[m_act] if ta.size == m_act.size else np.array([], float)
+            if va.size == m_act.size:
+                va = va[m_act]
+            else:
+                va = np.full(act.shape, np.nan, dtype=float)
+            xx_a, yy_a, w_a = self._spatial_weight_values(xa, ya, ta, mode)
+            if xx_a.size == 0 or yy_a.size == 0 or act.size == 0:
+                continue
+            n_a = min(xx_a.size, yy_a.size, act.size)
+            xx_a = xx_a[:n_a]
+            yy_a = yy_a[:n_a]
+            act = act[:n_a]
+            va = va[:n_a] if va.size >= n_a else np.full(n_a, np.nan, dtype=float)
+            den_w = w_a[:n_a] if w_a is not None and w_a.size >= n_a else np.ones(n_a, dtype=float)
+            num_hist, _, _ = np.histogram2d(
+                xx_a,
+                yy_a,
+                bins=[bins_x, bins_y],
+                range=[[xmin, xmax], [ymin, ymax]],
+                weights=act * den_w,
+            )
+
+            if activity_mode == "sum":
+                act_hist = np.asarray(num_hist, float)
+            elif activity_mode == "velocity":
+                vel_weights = np.nan_to_num(np.clip(va, a_min=0.0, a_max=None), nan=0.0, posinf=0.0, neginf=0.0) * den_w
+                vel_den, _, _ = np.histogram2d(
+                    xx_a,
+                    yy_a,
+                    bins=[bins_x, bins_y],
+                    range=[[xmin, xmax], [ymin, ymax]],
+                    weights=vel_weights,
+                )
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    act_hist = np.divide(num_hist, vel_den, out=np.full_like(num_hist, np.nan), where=vel_den > 1e-12)
+            else:
+                den_hist, _, _ = np.histogram2d(
+                    xx_a,
+                    yy_a,
+                    bins=[bins_x, bins_y],
+                    range=[[xmin, xmax], [ymin, ymax]],
+                    weights=den_w,
+                )
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    act_hist = np.divide(num_hist, den_hist, out=np.full_like(num_hist, np.nan), where=den_hist > 0)
+            act_maps.append(np.asarray(act_hist, float))
+
+        if not occ_maps:
+            _clear_spatial("Could not compute heatmap for selected trajectories.", x_col, y_col)
+            return
+
+        occupancy_map = np.nanmean(np.stack(occ_maps, axis=0), axis=0)
+        activity_map = np.nanmean(np.stack(act_maps, axis=0), axis=0) if act_maps else None
+        velocity_map = np.nanmean(np.stack(vel_maps, axis=0), axis=0) if vel_maps else None
+        sigma = float(self.spin_spatial_smooth.value())
+        if sigma > 0:
+            from scipy.ndimage import gaussian_filter
+
+            def _smooth_map(arr: np.ndarray) -> np.ndarray:
+                a = np.asarray(arr, float)
+                if not np.any(~np.isfinite(a)):
+                    return gaussian_filter(a, sigma=max(0.0, sigma), mode="nearest")
+                valid = np.isfinite(a).astype(float)
+                num = gaussian_filter(np.nan_to_num(a, nan=0.0), sigma=max(0.0, sigma), mode="nearest")
+                den = gaussian_filter(valid, sigma=max(0.0, sigma), mode="nearest")
+                return np.divide(num, den, out=np.full_like(num, np.nan), where=den > 1e-9)
+
+            occupancy_map = _smooth_map(occupancy_map)
+            if activity_map is not None:
+                activity_map = _smooth_map(activity_map)
+            if velocity_map is not None:
+                velocity_map = _smooth_map(velocity_map)
+        if self.cb_spatial_log.isChecked():
+            occupancy_map = np.log1p(np.clip(occupancy_map, a_min=0.0, a_max=None))
+            if activity_map is not None:
+                activity_map = np.sign(activity_map) * np.log1p(np.abs(activity_map))
+            if velocity_map is not None:
+                velocity_map = np.log1p(np.clip(velocity_map, a_min=0.0, a_max=None))
+
+        self._last_spatial_occupancy_map = occupancy_map
+        self._last_spatial_activity_map = activity_map
+        self._last_spatial_velocity_map = velocity_map
+        self._last_spatial_extent = (float(xmin), float(xmax), float(ymin), float(ymax))
+        occ_title = f"Spatial occupancy ({mode.lower()})"
+        if len(occ_maps) > 1:
+            occ_title += f" - avg {len(occ_maps)} files"
+        act_title = _activity_title_default()
+        if len(act_maps) > 1:
+            act_title += f" - avg {len(act_maps)} files"
+        vel_title = "Spatial velocity (mean speed/bin)"
+        if len(vel_maps) > 1:
+            vel_title += f" - avg {len(vel_maps)} files"
+        self._render_spatial_heatmap(
+            occupancy_map,
+            activity_map,
+            velocity_map,
+            self._last_spatial_extent,
+            x_col,
+            y_col,
+            occ_title,
+            act_title,
+            vel_title,
+        )
+        time_txt = f", time={time_min:g}-{time_max:g}s" if use_time_filter else ""
+        skip_txt = f", skipped {skipped_missing_time} file(s) without valid time" if skipped_missing_time > 0 else ""
+        self.lbl_spatial_msg.setText(
+            f"Rendered occupancy {len(occ_maps)} map(s), activity {len(act_maps)} map(s), velocity {len(vel_maps)} map(s), bins={bins_x}x{bins_y}{time_txt}{skip_txt}."
+        )
 
     def _update_file_lists(self) -> None:
         """Update the preprocessed files and behaviors lists with numbered entries."""
@@ -2370,6 +3322,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if new_order and len(new_order) == len(self._processed):
             self._processed = new_order
             self._update_file_lists()
+            self._compute_spatial_heatmap()
             self._update_status_strip()
 
     def _sync_behavior_order_from_list(self) -> None:
@@ -2382,6 +3335,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if keys and len(keys) == len(self._behavior_sources):
             self._behavior_sources = {k: self._behavior_sources[k] for k in keys}
             self._update_file_lists()
+            self._compute_spatial_heatmap()
             self._update_status_strip()
 
     def _move_selected_up(self) -> None:
@@ -2484,6 +3438,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         self._behavior_sources = dict(new_behavior_order)
         self._update_file_lists()
+        self._compute_spatial_heatmap()
         self._update_status_strip()
 
     def _remove_selected_preprocessed(self) -> None:
@@ -2495,6 +3450,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if 0 <= row < len(self._processed):
                 del self._processed[row]
         self._update_file_lists()
+        self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
 
@@ -3848,6 +4804,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.curve_behavior.setPen(pg.mkPen(self._style["behavior"], width=1.0))
         self.curve_avg.setPen(pg.mkPen(self._style["avg"], width=1.3))
         self._render_heatmap(self._last_mat if self._last_mat is not None else np.zeros((1, 1)), self._last_tvec if self._last_tvec is not None else np.array([0.0, 1.0]))
+        self._render_spatial_heatmap(
+            self._last_spatial_occupancy_map,
+            self._last_spatial_activity_map,
+            self._last_spatial_velocity_map,
+            self._last_spatial_extent,
+            self.combo_spatial_x.currentText().strip(),
+            self.combo_spatial_y.currentText().strip(),
+            "Spatial occupancy",
+            "Spatial activity",
+            "Spatial velocity",
+        )
         self._save_settings()
 
     def _save_config_file(self) -> None:
@@ -3875,6 +4842,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 data = json.load(f)
             self._apply_settings(data)
             self._compute_psth()
+            self._compute_spatial_heatmap()
             self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
         except Exception:
             pass
@@ -3931,6 +4899,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "behavior_analysis_name": self.combo_behavior_analysis.currentText(),
             "behavior_analysis_bin": float(self.spin_behavior_bin.value()),
             "behavior_analysis_aligned": self.cb_behavior_aligned.isChecked(),
+            "spatial_x": self.combo_spatial_x.currentText(),
+            "spatial_y": self.combo_spatial_y.currentText(),
+            "spatial_bins_x": int(self.spin_spatial_bins_x.value()),
+            "spatial_bins_y": int(self.spin_spatial_bins_y.value()),
+            "spatial_weight": self.combo_spatial_weight.currentText(),
+            "spatial_clip": self.cb_spatial_clip.isChecked(),
+            "spatial_clip_low": float(self.spin_spatial_clip_low.value()),
+            "spatial_clip_high": float(self.spin_spatial_clip_high.value()),
+            "spatial_time_filter": self.cb_spatial_time_filter.isChecked(),
+            "spatial_time_min": float(self.spin_spatial_time_min.value()),
+            "spatial_time_max": float(self.spin_spatial_time_max.value()),
+            "spatial_smooth": float(self.spin_spatial_smooth.value()),
+            "spatial_activity_mode": self.combo_spatial_activity_mode.currentText(),
+            "spatial_activity_norm": self.combo_spatial_activity_mode.currentText().strip().lower().startswith("mean"),
+            "spatial_log": self.cb_spatial_log.isChecked(),
+            "spatial_invert_y": self.cb_spatial_invert_y.isChecked(),
             "style": dict(self._style),
         }
 
@@ -4025,6 +5009,38 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_behavior_bin.setValue(float(data["behavior_analysis_bin"]))
         if "behavior_analysis_aligned" in data:
             self.cb_behavior_aligned.setChecked(bool(data["behavior_analysis_aligned"]))
+        _set_combo(self.combo_spatial_x, data.get("spatial_x"))
+        _set_combo(self.combo_spatial_y, data.get("spatial_y"))
+        if "spatial_bins_x" in data:
+            self.spin_spatial_bins_x.setValue(int(data["spatial_bins_x"]))
+        if "spatial_bins_y" in data:
+            self.spin_spatial_bins_y.setValue(int(data["spatial_bins_y"]))
+        _set_combo(self.combo_spatial_weight, data.get("spatial_weight"))
+        if "spatial_clip" in data:
+            self.cb_spatial_clip.setChecked(bool(data["spatial_clip"]))
+        if "spatial_clip_low" in data:
+            self.spin_spatial_clip_low.setValue(float(data["spatial_clip_low"]))
+        if "spatial_clip_high" in data:
+            self.spin_spatial_clip_high.setValue(float(data["spatial_clip_high"]))
+        if "spatial_time_filter" in data:
+            self.cb_spatial_time_filter.setChecked(bool(data["spatial_time_filter"]))
+        if "spatial_time_min" in data:
+            self.spin_spatial_time_min.setValue(float(data["spatial_time_min"]))
+        if "spatial_time_max" in data:
+            self.spin_spatial_time_max.setValue(float(data["spatial_time_max"]))
+        if "spatial_smooth" in data:
+            self.spin_spatial_smooth.setValue(float(data["spatial_smooth"]))
+        if "spatial_activity_mode" in data:
+            _set_combo(self.combo_spatial_activity_mode, data.get("spatial_activity_mode"))
+        elif "spatial_activity_norm" in data:
+            if bool(data["spatial_activity_norm"]):
+                _set_combo(self.combo_spatial_activity_mode, "Mean z-score/bin (occupancy normalized)")
+            else:
+                _set_combo(self.combo_spatial_activity_mode, "Sum z-score/bin")
+        if "spatial_log" in data:
+            self.cb_spatial_log.setChecked(bool(data["spatial_log"]))
+        if "spatial_invert_y" in data:
+            self.cb_spatial_invert_y.setChecked(bool(data["spatial_invert_y"]))
         style = data.get("style")
         if isinstance(style, dict):
             self._style.update(style)
@@ -4034,9 +5050,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_event_filter_enabled()
         self._update_metrics_enabled()
         self._update_global_metrics_enabled()
+        self._update_spatial_clip_enabled()
+        self._update_spatial_time_filter_enabled()
         self._update_metric_regions()
         self._apply_view_layout()
         self._refresh_signal_file_combo()
+        self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
 
@@ -4199,6 +5218,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "behavior_rate": self.plot_behavior_rate,
             "behavior_duration": self.plot_behavior_duration,
             "behavior_starts": self.plot_behavior_starts,
+            "spatial_occupancy": self.plot_spatial_occupancy,
+            "spatial_activity": self.plot_spatial_activity,
+            "spatial_velocity": self.plot_spatial_velocity,
         }
         for name, widget in targets.items():
             try:
@@ -4211,6 +5233,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         super().hideEvent(event)
         if self._app_closing:
             return
+        try:
+            if hasattr(self, "spatial_plot_dialog"):
+                self.spatial_plot_dialog.hide()
+        except Exception:
+            pass
         self.hide_section_popups_for_tab_switch()
 
     def hide_section_popups_for_tab_switch(self) -> None:
@@ -4271,7 +5298,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         """Guarantee the plot area remains visible after tab switches and dock operations."""
         if hasattr(self, "_right_panel"):
             self._right_panel.setVisible(True)
-        if not (self.plot_trace.isVisible() or self.row_heat.isVisible() or self.row_avg.isVisible()):
+        if not (
+            self.plot_trace.isVisible()
+            or self.row_heat.isVisible()
+            or self.row_avg.isVisible()
+        ):
             self.combo_view_layout.blockSignals(True)
             self.combo_view_layout.setCurrentText("Standard")
             self.combo_view_layout.blockSignals(False)
@@ -4377,6 +5408,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _on_about_to_quit(self) -> None:
         self._app_closing = True
+        try:
+            if hasattr(self, "spatial_plot_dialog"):
+                self.spatial_plot_dialog.hide()
+        except Exception:
+            pass
         self.persist_layout_state_snapshot()
         self._save_settings()
 
@@ -4416,14 +5452,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._dock_host = host
 
         setup = self._section_popups.get("setup")
-        ordered_right_keys = ["setup", "psth", "signal", "behavior"]
+        ordered_right_keys = ["setup", "psth", "signal", "behavior", "spatial"]
         export = self._section_popups.get("export")
 
         self._suspend_panel_layout_persistence = True
         try:
             self._apply_fixed_dock_features()
             # Reset previous split/tab topology before rebuilding the fixed stack.
-            for key in ("setup", "psth", "signal", "behavior", "export"):
+            for key in ("setup", "psth", "signal", "behavior", "spatial", "export"):
                 dock = self._section_popups.get(key)
                 if dock is None:
                     continue
@@ -4454,7 +5490,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     export.blockSignals(False)
 
             if setup is not None:
-                for key in ("psth", "signal", "behavior"):
+                for key in ("psth", "signal", "behavior", "spatial"):
                     dock = self._section_popups.get(key)
                     if dock is None:
                         continue
@@ -4472,7 +5508,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 export.raise_()
 
             # Final hard enforcement: all post docks must be docked (non-floating).
-            for key in ("setup", "psth", "signal", "behavior", "export"):
+            for key in ("setup", "psth", "signal", "behavior", "spatial", "export"):
                 dock = self._section_popups.get(key)
                 if dock is None:
                     continue

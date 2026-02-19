@@ -1,79 +1,62 @@
 {
   "version": 3,
   "pre": {
-    "pre_data_panel_visible": true,
+    "pre_data_panel_visible": false,
     "pre_splitter_sizes": [
-      0,
-      1413
+      317,
+      317
     ],
     "pre_main_dock_state": "",
-    "tab_groups": [
-      {
-        "members": [
-          "pre.artifact.dock",
-          "pre.artifacts.dock",
-          "pre.filtering.dock"
-        ],
-        "active": "pre.artifact.dock"
-      },
-      {
-        "members": [
-          "pre.baseline.dock",
-          "pre.output.dock",
-          "pre.qc.dock"
-        ],
-        "active": "pre.baseline.dock"
-      }
-    ],
+    "tab_groups": [],
     "sections": {
       "artifacts": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///8Sv///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///8Sv///gv///4L"
+        "geometry": "AdnQywADAAD///wt///8hP///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///8hP///gv///4L"
       },
       "filtering": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///7UP///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///7UP///gv///4L"
+        "geometry": "AdnQywADAAD///wt///8fv///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///8fv///gv///4L"
       },
       "baseline": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAAAAAWhAAADgAAAB38AAAUdAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAWhAAADgAAAB38AAAUd"
+        "geometry": "AdnQywADAAD///wt///8hP///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///8hP///gv///4L"
       },
       "output": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///8nf///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///8nf///gv///4L"
+        "geometry": "AdnQywADAAD///wt///8hP///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///8hP///gv///4L"
       },
       "qc": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///8nf///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///8nf///gv///4L"
+        "geometry": "AdnQywADAAAAAARTAAAC8gAABjEAAAP4AAAAAAAAAAD//////////wAAAAAAAAAAB4AAAARTAAAC8gAABjEAAAP4"
       },
       "export": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAAAAAWhAAAFQgAAB38AAAYPAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAWhAAAFQgAAB38AAAYP"
+        "geometry": "AdnQywADAAAAAARTAAAD+wAABjEAAARyAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAARTAAAD+wAABjEAAARy"
       },
       "config": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 8,
-        "geometry": "AdnQywADAAAAAAAAAAAGEgAAB38AAAZWAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAAAAAAGEgAAB38AAAZW"
+        "geometry": "AdnQywADAAAAAAAAAAAEdQAABjEAAATWAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAAAAAAAEdQAABjEAAATW"
       }
     },
     "artifact": {
-      "visible": true,
+      "visible": false,
       "floating": false,
       "area": 2,
-      "geometry": "AdnQywADAAAAAAWhAAAAAAAAB38AAANbAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAWhAAAAAAAAB38AAANb"
+      "geometry": "AdnQywADAAAAAARTAAAAAAAABjEAAALNAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAARTAAAAAAAABjEAAALN"
     }
   },
   "post": {
@@ -83,31 +66,37 @@
         "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAAAAAWhAAAAAAAAB38AAANUAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAWhAAAAAAAAB38AAANU"
+        "geometry": "AdnQywADAAD///wt///6t////gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///6t////gv///4L"
       },
       "psth": {
         "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///81v///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///81v///gv///4L"
+        "geometry": "AdnQywADAAD///wt///8tf///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///8tf///gv///4L"
       },
       "signal": {
         "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///81v///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///81v///gv///4L"
+        "geometry": "AdnQywADAAD///wt///8tf///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///8tf///gv///4L"
       },
       "behavior": {
         "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///81v///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///81v///gv///4L"
+        "geometry": "AdnQywADAAD///wt///8tf///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///8tf///gv///4L"
+      },
+      "spatial": {
+        "visible": true,
+        "floating": false,
+        "area": 2,
+        "geometry": "AdnQywADAAAAAAUTAAAAAAAAB38AAANUAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAAUTAAAAAAAAB38AAANU"
       },
       "export": {
         "visible": true,
         "floating": false,
         "area": 8,
-        "geometry": "AdnQywADAAAAAAAAAAADeQAAB38AAAPaAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAAAAAADeQAAB38AAAPa"
+        "geometry": "AdnQywADAAAAAAAAAAADeQAAB38AAAPaAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAAAAAAADeQAAB38AAAPa"
       }
     }
   }
