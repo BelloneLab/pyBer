@@ -91,6 +91,7 @@ The GUI exposes seven explicit output definitions:
    ```bash
    conda env create -f environment.yml
 ## Run
+  cd .\pyBer\
   python main.py
 
 ## Usage workflow
@@ -207,6 +208,7 @@ PowerShell helper:
 ```
 
 This will create a `pyBer.exe` in the `dist/` folder.
+
 
 
 
