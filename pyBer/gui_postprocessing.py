@@ -772,6 +772,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fopt.addRow("Baseline (s)", base_widget)
         fopt.addRow("Resample (Hz)", self.spin_resample)
         filt_row = QtWidgets.QHBoxLayout()
+        filt_row.setContentsMargins(0, 0, 0, 0)
+        filt_row.setSpacing(6)
         filt_row.addWidget(self.cb_filter_events)
         filt_row.addStretch(1)
         filt_row.addWidget(self.btn_hide_filters)
@@ -789,6 +791,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fopt.addRow(self.lbl_dur_max, self.spin_dur_max)
         fopt.addRow("Gaussian smooth sigma (s)", self.spin_smooth)
         met_row = QtWidgets.QHBoxLayout()
+        met_row.setContentsMargins(0, 0, 0, 0)
+        met_row.setSpacing(6)
         met_row.addWidget(self.cb_metrics)
         met_row.addStretch(1)
         met_row.addWidget(self.btn_hide_metrics)
@@ -836,6 +840,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_global_freq = QtWidgets.QCheckBox("Transient frequency")
         self.cb_global_freq.setChecked(True)
         global_opts = QtWidgets.QHBoxLayout()
+        global_opts.setContentsMargins(0, 0, 0, 0)
+        global_opts.setSpacing(6)
         global_opts.addWidget(self.cb_global_amp)
         global_opts.addWidget(self.cb_global_freq)
         global_opts.addStretch(1)
@@ -1051,10 +1057,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_spatial_activity_mode.addItems(
             [
                 "Mean z-score/bin (occupancy normalized)",
-                "Velocity-normalized z-score/bin",
-                "Sum z-score/bin",
+                "Mean z-score/bin (velocity normalized)",
+                "Sum z-score/bin (no normalization)",
             ]
         )
+        self.combo_spatial_activity_mode.setCurrentIndex(0)
         _compact_combo(self.combo_spatial_activity_mode, min_chars=12)
         self.cb_spatial_time_filter = QtWidgets.QCheckBox("Enabled")
         self.cb_spatial_time_filter.setChecked(False)
@@ -1073,6 +1080,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "- Top plot: occupancy map.\n"
             "- Middle plot: activity map (mode selected below).\n"
             "- Bottom plot: velocity map (mean speed/bin).\n"
+            "- Mean z-score/bin (occupancy normalized) = sum(z*weight) / sum(weight).\n"
+            "- Mean z-score/bin (velocity normalized) = sum(z*weight) / sum(speed*weight).\n"
             "- Enable Time filter to restrict trajectory/activity samples to [min,max] seconds.\n"
             "- Use right-side color cursors on each plot to set min/max display range."
         )
@@ -1386,6 +1395,26 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.metrics_bar_post = pg.BarGraphItem(x=[1], height=[0], width=0.6, brush=(214, 122, 90))
         self.plot_metrics.addItem(self.metrics_bar_pre)
         self.plot_metrics.addItem(self.metrics_bar_post)
+        # Overlay paired trial/event points (pre vs post) and links.
+        self.metrics_pairs_curve = self.plot_metrics.plot(
+            pen=pg.mkPen((210, 215, 225, 130), width=1.0),
+            connect="finite",
+            skipFiniteCheck=True,
+        )
+        self.metrics_scatter_pre = self.plot_metrics.plot(
+            pen=None,
+            symbol="o",
+            symbolSize=5,
+            symbolBrush=pg.mkBrush(90, 143, 214, 220),
+            symbolPen=pg.mkPen((90, 143, 214), width=0.8),
+        )
+        self.metrics_scatter_post = self.plot_metrics.plot(
+            pen=None,
+            symbol="o",
+            symbolSize=5,
+            symbolBrush=pg.mkBrush(214, 122, 90, 220),
+            symbolPen=pg.mkPen((214, 122, 90), width=0.8),
+        )
         self.plot_metrics.setXRange(-0.5, 1.5, padding=0)
         self.plot_metrics.getAxis("bottom").setTicks([[(0, "pre"), (1, "post")]])
 
@@ -2686,14 +2715,41 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not columns:
             return None
         axis_l = axis.lower()
+        # First choice: exact column labels "X" / "Y" (case-insensitive).
+        for col in columns:
+            name = str(col).strip().lower()
+            if name == axis_l:
+                return col
+        # Second choice: explicit EthoVision center labels.
+        preferred_center = {
+            "x": ["x center", "x_center", "x-center", "center x", "center_x", "center-x"],
+            "y": ["y center", "y_center", "y-center", "center y", "center_y", "center-y"],
+        }.get(axis_l, [])
+        for col in columns:
+            name = str(col).strip().lower()
+            if name in preferred_center:
+                return col
+        # Third choice: labels starting with X/Y token (e.g. "X nose", "Y_center").
+        token_re = re.compile(rf"^{re.escape(axis_l)}(?:$|[\s_\-:/\(\[])")
+        for col in columns:
+            name = str(col).strip().lower()
+            if token_re.match(name):
+                return col
         patterns = {
             "x": ["x", "center x", "centrex", "nose x", "body x", "position x", "x center"],
             "y": ["y", "center y", "centrey", "nose y", "body y", "position y", "y center"],
         }.get(axis_l, [])
+        # Third choice: known exact labels.
         for col in columns:
             name = str(col).strip().lower()
             for pat in patterns:
-                if pat == name or pat in name:
+                if pat == name:
+                    return col
+        # Last choice: known partial labels.
+        for col in columns:
+            name = str(col).strip().lower()
+            for pat in patterns:
+                if pat in name:
                     return col
         return columns[0]
 
@@ -2757,8 +2813,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self,
             "Spatial Heatmap Help",
             "Top plot: occupancy heatmap.\n"
-            "Middle plot: activity heatmap (mean, sum, or velocity-normalized z-score per bin).\n"
+            "Middle plot: activity heatmap (mean occupancy-normalized, mean velocity-normalized, or sum z-score/bin).\n"
             "Bottom plot: velocity heatmap (mean speed per bin).\n"
+            "Mean z-score/bin (occupancy normalized) = sum(z*weight) / sum(weight).\n"
+            "Mean z-score/bin (velocity normalized) = sum(z*weight) / sum(speed*weight).\n"
             "Enable time filter to include only samples within [start, end] seconds.\n"
             "Use the right-side color cursors on each plot to set min/max display range interactively.",
         )
@@ -2966,10 +3024,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         def _activity_title_default() -> str:
             if activity_mode == "velocity":
-                return "Spatial activity (velocity-normalized z-score/bin)"
+                return "Spatial activity (mean z-score/bin, velocity normalized)"
             if activity_mode == "sum":
                 return "Spatial activity (sum z-score/bin)"
-            return "Spatial activity (mean z-score/bin)"
+            return "Spatial activity (mean z-score/bin, occupancy normalized)"
 
         def _clear_spatial(msg: str, x_label: str = "", y_label: str = "") -> None:
             self._last_spatial_occupancy_map = None
@@ -4600,6 +4658,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if mat.size == 0 or not self.cb_metrics.isChecked():
             self.metrics_bar_pre.setOpts(height=[0])
             self.metrics_bar_post.setOpts(height=[0])
+            self.metrics_pairs_curve.setData([], [])
+            self.metrics_scatter_pre.setData([], [])
+            self.metrics_scatter_post.setData([], [])
             self._last_metrics = None
             return
         metric = self.combo_metric.currentText()
@@ -4619,6 +4680,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if pre.size == 0 or post.size == 0:
             self.metrics_bar_pre.setOpts(height=[0])
             self.metrics_bar_post.setOpts(height=[0])
+            self.metrics_pairs_curve.setData([], [])
+            self.metrics_scatter_pre.setData([], [])
+            self.metrics_scatter_post.setData([], [])
             self._last_metrics = None
             return
 
@@ -4631,18 +4695,54 @@ class PostProcessingPanel(QtWidgets.QWidget):
             else:
                 with np.errstate(all="ignore"):
                     vals = np.nanmean(win, axis=1)
-            vals = np.asarray(vals, float)
-            vals = vals[np.isfinite(vals)]
-            return vals
+            return np.asarray(vals, float)
 
-        pre_vals = _metric_vals(pre, pre1 - pre0)
-        post_vals = _metric_vals(post, post1 - post0)
-        pre_mean = float(np.nanmean(pre_vals)) if pre_vals.size else 0.0
-        post_mean = float(np.nanmean(post_vals)) if post_vals.size else 0.0
+        pre_vals_all = _metric_vals(pre, pre1 - pre0)
+        post_vals_all = _metric_vals(post, post1 - post0)
+        pre_vals_finite = pre_vals_all[np.isfinite(pre_vals_all)]
+        post_vals_finite = post_vals_all[np.isfinite(post_vals_all)]
+        pre_mean = float(np.nanmean(pre_vals_finite)) if pre_vals_finite.size else 0.0
+        post_mean = float(np.nanmean(post_vals_finite)) if post_vals_finite.size else 0.0
         self.metrics_bar_pre.setOpts(height=[pre_mean])
         self.metrics_bar_post.setOpts(height=[post_mean])
-        ymin = min(pre_mean, post_mean, 0.0)
-        ymax = max(pre_mean, post_mean, 0.0)
+
+        pair_mask = np.isfinite(pre_vals_all) & np.isfinite(post_vals_all)
+        pre_pair = pre_vals_all[pair_mask]
+        post_pair = post_vals_all[pair_mask]
+        if pre_pair.size and post_pair.size:
+            n_pair = int(min(pre_pair.size, post_pair.size))
+            pre_pair = pre_pair[:n_pair]
+            post_pair = post_pair[:n_pair]
+            # Build segmented polyline: (0, pre_i) -> (1, post_i), NaN separator.
+            x_line = np.empty(n_pair * 3, dtype=float)
+            y_line = np.empty(n_pair * 3, dtype=float)
+            x_line[0::3] = 0.0
+            x_line[1::3] = 1.0
+            x_line[2::3] = np.nan
+            y_line[0::3] = pre_pair
+            y_line[1::3] = post_pair
+            y_line[2::3] = np.nan
+            self.metrics_pairs_curve.setData(x_line, y_line, connect="finite", skipFiniteCheck=True)
+            self.metrics_scatter_pre.setData(np.zeros(n_pair, dtype=float), pre_pair)
+            self.metrics_scatter_post.setData(np.ones(n_pair, dtype=float), post_pair)
+        else:
+            self.metrics_pairs_curve.setData([], [])
+            self.metrics_scatter_pre.setData([], [])
+            self.metrics_scatter_post.setData([], [])
+
+        finite_all = np.concatenate(
+            [
+                pre_vals_finite if pre_vals_finite.size else np.array([], float),
+                post_vals_finite if post_vals_finite.size else np.array([], float),
+                np.array([pre_mean, post_mean, 0.0], float),
+            ]
+        )
+        finite_all = finite_all[np.isfinite(finite_all)]
+        if finite_all.size:
+            ymin = float(np.nanmin(finite_all))
+            ymax = float(np.nanmax(finite_all))
+        else:
+            ymin, ymax = 0.0, 1.0
         if ymin == ymax:
             ymax = ymin + 1.0
         self.plot_metrics.setYRange(ymin, ymax, padding=0.2)

@@ -27,6 +27,12 @@ QGroupBox {
     background: #262b35;
 }
 
+/* Keep helper row-container widgets inside group boxes transparent, so
+   row-spanning form rows do not appear as dark horizontal bands. */
+QGroupBox > QWidget {
+    background: transparent;
+}
+
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
@@ -310,7 +316,7 @@ QDockWidget::title {
     font-weight: 700;
 }
 
-QDockWidget QWidget {
+QDockWidget > QWidget {
     background: #242a34;
 }
 
