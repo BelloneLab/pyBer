@@ -7,7 +7,7 @@ import json
 import logging
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from PySide6 import QtCore, QtWidgets, QtGui
@@ -857,7 +857,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             w.setMinimumWidth(60)
             w.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
-        self.btn_compute = QtWidgets.QPushButton("Post-process (compute PSTH)")
+        self.btn_compute = QtWidgets.QPushButton("Postprocessing (compute PSTH)")
         self.btn_compute.setProperty("class", "compactPrimarySmall")
         self.btn_compute.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_update = QtWidgets.QPushButton("Update Preview")
@@ -1223,6 +1223,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.act_load_group = self.menu_action_load.addAction("Load processed files (group)")
         self.menu_action_load.addSeparator()
         self.act_load_behavior = self.menu_action_load.addAction("Load behavior CSV/XLSX")
+        self.menu_action_recent = self.menu_action_load.addMenu("Load recent")
+        self.menu_recent_processed = self.menu_action_recent.addMenu("Processed files")
+        self.menu_recent_behavior = self.menu_action_recent.addMenu("Behavior files")
+        self.menu_action_recent.aboutToShow.connect(self._refresh_recent_postprocessing_menus)
         self.act_refresh_dio = self.menu_action_load.addAction("Refresh A/D channel list")
         self.btn_action_load.setMenu(self.menu_action_load)
 
@@ -1468,6 +1472,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         spatial_dialog_layout = QtWidgets.QVBoxLayout(self.spatial_plot_dialog)
         spatial_dialog_layout.setContentsMargins(8, 8, 8, 8)
         spatial_dialog_layout.setSpacing(8)
+        self.spatial_plot_content = QtWidgets.QWidget(self.spatial_plot_dialog)
+        spatial_content_layout = QtWidgets.QVBoxLayout(self.spatial_plot_content)
+        spatial_content_layout.setContentsMargins(0, 0, 0, 0)
+        spatial_content_layout.setSpacing(8)
         spatial_top_row = QtWidgets.QHBoxLayout()
         spatial_top_row.setContentsMargins(0, 0, 0, 0)
         spatial_top_row.setSpacing(8)
@@ -1483,12 +1491,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
         spatial_velocity_row.setSpacing(8)
         spatial_velocity_row.addWidget(self.plot_spatial_velocity, stretch=1)
         spatial_velocity_row.addWidget(self.spatial_lut_velocity, stretch=0)
-        spatial_dialog_layout.addLayout(spatial_top_row, stretch=1)
-        spatial_dialog_layout.addLayout(spatial_bottom_row, stretch=1)
-        spatial_dialog_layout.addLayout(spatial_velocity_row, stretch=1)
+        spatial_content_layout.addLayout(spatial_top_row, stretch=1)
+        spatial_content_layout.addLayout(spatial_bottom_row, stretch=1)
+        spatial_content_layout.addLayout(spatial_velocity_row, stretch=1)
         self.lbl_spatial_cursor_hint = QtWidgets.QLabel("Use the right-side color cursors to set min/max display range for each map.")
         self.lbl_spatial_cursor_hint.setProperty("class", "hint")
-        spatial_dialog_layout.addWidget(self.lbl_spatial_cursor_hint)
+        spatial_content_layout.addWidget(self.lbl_spatial_cursor_hint)
+        spatial_dialog_layout.addWidget(self.spatial_plot_content, stretch=1)
+        self.btn_export_spatial_img = QtWidgets.QPushButton("Export image")
+        self.btn_export_spatial_img.setProperty("class", "compactSmall")
+        spatial_export_row = QtWidgets.QHBoxLayout()
+        spatial_export_row.setContentsMargins(0, 0, 0, 0)
+        spatial_export_row.addStretch(1)
+        spatial_export_row.addWidget(self.btn_export_spatial_img)
+        spatial_dialog_layout.addLayout(spatial_export_row)
         self.spatial_plot_dialog.hide()
 
         # Keep a visible minimum plot footprint even with aggressive docking/resizing.
@@ -1539,6 +1555,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_export_behavior_metrics.clicked.connect(self._export_behavior_metrics_csv)
         self.btn_export_behavior_events.clicked.connect(self._export_behavior_events_csv)
         self.btn_compute_spatial.clicked.connect(self._on_compute_spatial_clicked)
+        self.btn_export_spatial_img.clicked.connect(self._export_spatial_figure)
         self.btn_export.clicked.connect(self._export_results)
         self.btn_export_img.clicked.connect(self._export_images)
         self.btn_style.clicked.connect(self._open_style_dialog)
@@ -2090,6 +2107,115 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         self._dio_cache[(path, dio_name)] = (np.asarray(t, float), np.asarray(x, float))
 
+    def _load_recent_paths(self, key: str) -> List[str]:
+        raw = self._settings.value(key, "[]", type=str)
+        try:
+            data = json.loads(raw) if raw else []
+        except Exception:
+            data = []
+        out: List[str] = []
+        if isinstance(data, list):
+            for item in data:
+                p = str(item or "").strip()
+                if p:
+                    out.append(p)
+        return out
+
+    def _save_recent_paths(self, key: str, paths: List[str]) -> None:
+        try:
+            self._settings.setValue(key, json.dumps(paths))
+        except Exception:
+            pass
+
+    def _push_recent_paths(self, key: str, paths: List[str], max_items: int = 15) -> None:
+        if not paths:
+            return
+        existing = self._load_recent_paths(key)
+        merged: List[str] = []
+        for p in paths:
+            sp = str(p or "").strip()
+            if not sp:
+                continue
+            if sp in merged:
+                continue
+            merged.append(sp)
+        for p in existing:
+            if p not in merged:
+                merged.append(p)
+        self._save_recent_paths(key, merged[:max_items])
+
+    def _prune_recent_paths(self, key: str) -> None:
+        recent = self._load_recent_paths(key)
+        kept = [p for p in recent if os.path.isfile(p)]
+        self._save_recent_paths(key, kept)
+
+    def _refresh_recent_postprocessing_menus(self) -> None:
+        self._refresh_recent_menu(
+            self.menu_recent_processed,
+            key="postprocess_recent_processed_paths",
+            loader=self._load_recent_processed_path,
+        )
+        self._refresh_recent_menu(
+            self.menu_recent_behavior,
+            key="postprocess_recent_behavior_paths",
+            loader=self._load_recent_behavior_path,
+        )
+
+    def _refresh_recent_menu(
+        self,
+        menu: QtWidgets.QMenu,
+        key: str,
+        loader: Callable[[str], None],
+    ) -> None:
+        if menu is None:
+            return
+        menu.clear()
+        recent = self._load_recent_paths(key)
+        if not recent:
+            act_empty = menu.addAction("(No recent files)")
+            act_empty.setEnabled(False)
+            return
+
+        missing: List[str] = []
+        for path in recent:
+            label = os.path.basename(path) or path
+            if not os.path.isfile(path):
+                label = f"{label} (missing)"
+            act = menu.addAction(label)
+            act.setToolTip(path)
+            act.setEnabled(os.path.isfile(path))
+            if os.path.isfile(path):
+                act.triggered.connect(lambda _checked=False, p=path: loader(p))
+            else:
+                missing.append(path)
+        menu.addSeparator()
+        act_clear = menu.addAction("Clear recent")
+        act_clear.triggered.connect(lambda: self._save_recent_paths(key, []))
+        if missing:
+            act_prune = menu.addAction("Remove missing")
+            act_prune.triggered.connect(lambda: self._prune_recent_paths(key))
+
+    def _load_recent_processed_path(self, path: str) -> None:
+        if not path or not os.path.isfile(path):
+            QtWidgets.QMessageBox.warning(self, "Load recent", "Selected recent processed file is missing.")
+            return
+        self._load_processed_paths([path], replace=True)
+        try:
+            self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
+        except Exception:
+            pass
+
+    def _load_recent_behavior_path(self, path: str) -> None:
+        if not path or not os.path.isfile(path):
+            QtWidgets.QMessageBox.warning(self, "Load recent", "Selected recent behavior file is missing.")
+            return
+        self._load_behavior_paths([path], replace=True)
+        self._refresh_behavior_list()
+        try:
+            self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
+        except Exception:
+            pass
+
     def _load_behavior_paths(self, paths: List[str], replace: bool) -> None:
         if replace:
             self._behavior_sources.clear()
@@ -2136,6 +2262,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 continue
         mode_label = "timestamps" if parse_mode == _BEHAVIOR_PARSE_TIMESTAMPS else "binary"
         self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded [{mode_label}]")
+        self._push_recent_paths("postprocess_recent_behavior_paths", paths)
         self._update_data_availability()
         self._update_status_strip()
 
@@ -2158,6 +2285,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         else:
             self._processed.extend(loaded)
         self.lbl_group.setText(f"{len(self._processed)} file(s) loaded")
+        self._push_recent_paths("postprocess_recent_processed_paths", paths)
         self._update_file_lists()
         self._set_resample_from_processed()
         self._compute_psth()
@@ -2337,6 +2465,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.cb_spatial_log,
             self.cb_spatial_invert_y,
             self.btn_compute_spatial,
+            self.btn_export_spatial_img,
         ):
             w.setEnabled(spatial_ready)
         self.btn_spatial_help.setEnabled(True)
@@ -2715,19 +2844,29 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not columns:
             return None
         axis_l = axis.lower()
-        # First choice: exact column labels "X" / "Y" (case-insensitive).
-        for col in columns:
-            name = str(col).strip().lower()
-            if name == axis_l:
-                return col
-        # Second choice: explicit EthoVision center labels.
+        def _norm(value: str) -> str:
+            s = str(value).strip().lower()
+            s = re.sub(r"[\s_\-:/\(\)\[\]]+", " ", s)
+            return re.sub(r"\s+", " ", s).strip()
+
+        # First choice: explicit EthoVision center labels (set as default).
         preferred_center = {
             "x": ["x center", "x_center", "x-center", "center x", "center_x", "center-x"],
             "y": ["y center", "y_center", "y-center", "center y", "center_y", "center-y"],
         }.get(axis_l, [])
+        preferred_center_norm = {_norm(v) for v in preferred_center}
         for col in columns:
-            name = str(col).strip().lower()
-            if name in preferred_center:
+            name_norm = _norm(str(col))
+            if name_norm in preferred_center_norm:
+                return col
+        # Fallback center match for labels like "Center X (cm)" / "X center px".
+        for col in columns:
+            name_norm = _norm(str(col))
+            if "center" in name_norm and axis_l in name_norm:
+                return col
+        # Second choice: exact column labels "X" / "Y" (case-insensitive).
+        for col in columns:
+            if _norm(str(col)) == axis_l:
                 return col
         # Third choice: labels starting with X/Y token (e.g. "X nose", "Y_center").
         token_re = re.compile(rf"^{re.escape(axis_l)}(?:$|[\s_\-:/\(\[])")
@@ -3010,7 +3149,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _on_compute_spatial_clicked(self) -> None:
         self._compute_spatial_heatmap(show_panel=True)
 
-    def _compute_spatial_heatmap(self, show_panel: bool = False) -> None:
+    def _compute_spatial_heatmap(self, *_args: object, show_panel: bool = False) -> None:
         if not hasattr(self, "plot_spatial_occupancy"):
             return
         if show_panel:
@@ -4579,7 +4718,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._update_status_strip()
             self._save_settings()
         except Exception as e:
-            self.statusUpdate.emit(f"Post-processing error: {e}", 5000)
+            self.statusUpdate.emit(f"Postprocessing error: {e}", 5000)
             self._update_status_strip()
 
     def _render_heatmap(self, mat: np.ndarray, tvec: np.ndarray) -> None:
@@ -5216,6 +5355,97 @@ class PostProcessingPanel(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _default_export_prefix(self) -> str:
+        prefix = "postprocess"
+        if self._processed:
+            prefix = os.path.splitext(os.path.basename(self._processed[0].path))[0]
+        beh_suffix = self._behavior_suffix()
+        if beh_suffix:
+            prefix = f"{prefix}_{beh_suffix}"
+        return prefix
+
+    def _render_widget_image(
+        self,
+        widget: QtWidgets.QWidget,
+        transparent: bool = True,
+    ) -> Optional[QtGui.QImage]:
+        if widget is None:
+            return None
+        size = widget.size()
+        if not size.isValid() or size.width() <= 0 or size.height() <= 0:
+            size = widget.sizeHint()
+        if not size.isValid() or size.width() <= 0 or size.height() <= 0:
+            size = QtCore.QSize(1280, 720)
+        dpr = 1.0
+        try:
+            dpr = max(1.0, float(widget.devicePixelRatioF()))
+        except Exception:
+            dpr = 1.0
+        image = QtGui.QImage(
+            max(1, int(round(size.width() * dpr))),
+            max(1, int(round(size.height() * dpr))),
+            QtGui.QImage.Format.Format_ARGB32,
+        )
+        image.setDevicePixelRatio(dpr)
+        if transparent:
+            image.fill(QtCore.Qt.GlobalColor.transparent)
+        else:
+            image.fill(QtGui.QColor(255, 255, 255))
+        painter = QtGui.QPainter(image)
+        try:
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
+            # Keep alpha background while rendering children.
+            widget.render(
+                painter,
+                QtCore.QPoint(),
+                QtGui.QRegion(),
+                QtWidgets.QWidget.RenderFlag.DrawChildren,
+            )
+        finally:
+            painter.end()
+        return image
+
+    def _write_widget_pdf(self, widget: QtWidgets.QWidget, path: str) -> bool:
+        if widget is None:
+            return False
+        size = widget.size()
+        if not size.isValid() or size.width() <= 0 or size.height() <= 0:
+            size = widget.sizeHint()
+        if not size.isValid() or size.width() <= 0 or size.height() <= 0:
+            size = QtCore.QSize(1280, 720)
+        writer = QtGui.QPdfWriter(path)
+        writer.setResolution(300)
+        width_px = float(size.width())
+        height_px = float(size.height())
+        width_pt = max(1.0, width_px * 72.0 / 96.0)
+        height_pt = max(1.0, height_px * 72.0 / 96.0)
+        writer.setPageSize(QtGui.QPageSize(QtCore.QSizeF(width_pt, height_pt), QtGui.QPageSize.Unit.Point))
+        writer.setPageMargins(QtCore.QMarginsF(0.0, 0.0, 0.0, 0.0))
+        painter = QtGui.QPainter(writer)
+        try:
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
+            widget.render(
+                painter,
+                QtCore.QPoint(),
+                QtGui.QRegion(),
+                QtWidgets.QWidget.RenderFlag.DrawChildren,
+            )
+        finally:
+            painter.end()
+        return True
+
+    def _export_widget_png_pdf(self, widget: QtWidgets.QWidget, base_path: str, transparent: bool = True) -> Tuple[bool, Optional[str], Optional[str]]:
+        image = self._render_widget_image(widget, transparent=transparent)
+        if image is None or image.isNull():
+            return False, None, None
+        png_path = f"{base_path}.png"
+        pdf_path = f"{base_path}.pdf"
+        ok_png = bool(image.save(png_path, "PNG"))
+        ok_pdf = self._write_widget_pdf(widget, pdf_path)
+        return (ok_png and ok_pdf), (png_path if ok_png else None), (pdf_path if ok_pdf else None)
+
     def _export_results(self) -> None:
         if self._last_mat is None or self._last_tvec is None:
             return
@@ -5228,21 +5458,36 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not out_dir:
             return
         self._remember_export_dir(out_dir)
-        prefix = "postprocess"
-        if self._processed:
-            prefix = os.path.splitext(os.path.basename(self._processed[0].path))[0]
-        beh_suffix = self._behavior_suffix()
-        if beh_suffix:
-            prefix = f"{prefix}_{beh_suffix}"
+        prefix = self._default_export_prefix()
 
         if choices.get("heatmap"):
-            np.savetxt(os.path.join(out_dir, f"{prefix}_heatmap.csv"), self._last_mat, delimiter=",")
-            np.savetxt(os.path.join(out_dir, f"{prefix}_heatmap_tvec.csv"), self._last_tvec, delimiter=",")
+            mat = np.asarray(self._last_mat, float)
+            if mat.ndim == 1:
+                mat = mat[np.newaxis, :]
+            time = np.asarray(self._last_tvec, float)
+            n_time = min(time.size, mat.shape[1])
+            time = time[:n_time]
+            mat = mat[:, :n_time]
+            arr = np.column_stack([time, mat.T])
+            header_cols = ["time"] + [f"trial_{i + 1}" for i in range(mat.shape[0])]
+            np.savetxt(
+                os.path.join(out_dir, f"{prefix}_heatmap.csv"),
+                arr,
+                delimiter=",",
+                header=",".join(header_cols),
+                comments="",
+            )
         if choices.get("avg"):
             avg = np.nanmean(self._last_mat, axis=0)
             sem = np.nanstd(self._last_mat, axis=0) / np.sqrt(max(1, np.sum(np.any(np.isfinite(self._last_mat), axis=1))))
             arr = np.vstack([self._last_tvec, avg, sem]).T
-            np.savetxt(os.path.join(out_dir, f"{prefix}_avg_psth.csv"), arr, delimiter=",", header="time,avg,sem", comments="")
+            np.savetxt(
+                os.path.join(out_dir, f"{prefix}_avg_psth.csv"),
+                arr,
+                delimiter=",",
+                header="time,average_psth,sem",
+                comments="",
+            )
         if choices.get("events"):
             event_path = os.path.join(out_dir, f"{prefix}_events.csv")
             if self._last_event_rows:
@@ -5294,40 +5539,60 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return cleaned
 
     def _export_images(self) -> None:
-        start_dir = self._export_start_dir()
-        out_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Select export folder", start_dir)
-        if not out_dir:
+        if not hasattr(self, "_right_panel"):
             return
-        self._remember_export_dir(out_dir)
-        prefix = "postprocess"
-        if self._processed:
-            prefix = os.path.splitext(os.path.basename(self._processed[0].path))[0]
+        start_dir = self._export_start_dir()
+        prefix = self._default_export_prefix()
+        default_path = os.path.join(start_dir, f"{prefix}_psth_figure.png")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export PSTH figure (PNG + PDF)",
+            default_path,
+            "PNG image (*.png);;All files (*.*)",
+        )
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path = f"{path}.png"
+        base_path, _ = os.path.splitext(path)
+        out_dir = os.path.dirname(base_path)
+        if out_dir:
+            self._remember_export_dir(out_dir)
+        ok, png_path, pdf_path = self._export_widget_png_pdf(self._right_panel, base_path, transparent=True)
+        if ok:
+            self.statusUpdate.emit(f"Exported PSTH figure: {os.path.basename(png_path or '')}, {os.path.basename(pdf_path or '')}", 5000)
+        else:
+            QtWidgets.QMessageBox.warning(self, "Export failed", "Could not export PSTH figure as PNG/PDF.")
 
-        targets = {
-            "overview": self._right_panel,
-            "trace": self.plot_trace,
-            "heatmap": self.plot_heat,
-            "duration": self.plot_dur,
-            "avg": self.plot_avg,
-            "metrics": self.plot_metrics,
-            "global": self.plot_global,
-            "peaks_amp": self.plot_peak_amp,
-            "peaks_ibi": self.plot_peak_ibi,
-            "peaks_rate": self.plot_peak_rate,
-            "behavior_raster": self.plot_behavior_raster,
-            "behavior_rate": self.plot_behavior_rate,
-            "behavior_duration": self.plot_behavior_duration,
-            "behavior_starts": self.plot_behavior_starts,
-            "spatial_occupancy": self.plot_spatial_occupancy,
-            "spatial_activity": self.plot_spatial_activity,
-            "spatial_velocity": self.plot_spatial_velocity,
-        }
-        for name, widget in targets.items():
-            try:
-                pix = widget.grab()
-                pix.save(os.path.join(out_dir, f"{prefix}_{name}.png"))
-            except Exception:
-                pass
+    def _export_spatial_figure(self) -> None:
+        if self._last_spatial_occupancy_map is None or self._last_spatial_extent is None:
+            QtWidgets.QMessageBox.information(self, "Spatial heatmap", "Compute spatial heatmap first.")
+            return
+        target = getattr(self, "spatial_plot_content", None) or getattr(self, "spatial_plot_dialog", None)
+        if target is None:
+            return
+        start_dir = self._export_start_dir()
+        prefix = self._default_export_prefix()
+        default_path = os.path.join(start_dir, f"{prefix}_spatial_figure.png")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export spatial figure (PNG + PDF)",
+            default_path,
+            "PNG image (*.png);;All files (*.*)",
+        )
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path = f"{path}.png"
+        base_path, _ = os.path.splitext(path)
+        out_dir = os.path.dirname(base_path)
+        if out_dir:
+            self._remember_export_dir(out_dir)
+        ok, png_path, pdf_path = self._export_widget_png_pdf(target, base_path, transparent=True)
+        if ok:
+            self.statusUpdate.emit(f"Exported spatial figure: {os.path.basename(png_path or '')}, {os.path.basename(pdf_path or '')}", 5000)
+        else:
+            QtWidgets.QMessageBox.warning(self, "Export failed", "Could not export spatial figure as PNG/PDF.")
 
     def hideEvent(self, event: QtGui.QHideEvent) -> None:
         super().hideEvent(event)

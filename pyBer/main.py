@@ -394,6 +394,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.menu_workflow_load = QtWidgets.QMenu(self.btn_workflow_load)
         self.act_open_file = self.menu_workflow_load.addAction("Open File...")
         self.act_add_folder = self.menu_workflow_load.addAction("Add Folder...")
+        self.menu_workflow_load_recent = self.menu_workflow_load.addMenu("Load Recent")
+        self.menu_workflow_load_recent.aboutToShow.connect(self._refresh_recent_preprocessing_menu)
         self.menu_workflow_load.addSeparator()
         self.act_focus_data = self.menu_workflow_load.addAction("Focus Data Browser")
         self.btn_workflow_load.setMenu(self.menu_workflow_load)
@@ -474,7 +476,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.post_tab.set_force_fixed_default_layout(self._force_fixed_dock_layouts)
             except Exception:
                 pass
-        self.tabs.addTab(self.post_tab, "Post Processing")
+        self.tabs.addTab(self.post_tab, "Postprocessing")
         self.post_tab.statusUpdate.connect(self._show_status_message)
 
         # Wiring - file panel
@@ -1795,6 +1797,78 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------- File loading ----------------
 
+    def _load_recent_preprocessing_files(self) -> List[str]:
+        raw = self.settings.value("recent_pre_files", "[]", type=str)
+        try:
+            data = json.loads(raw) if raw else []
+        except Exception:
+            data = []
+        out: List[str] = []
+        if isinstance(data, list):
+            for item in data:
+                p = str(item or "").strip()
+                if p:
+                    out.append(p)
+        return out
+
+    def _save_recent_preprocessing_files(self, paths: List[str]) -> None:
+        try:
+            self.settings.setValue("recent_pre_files", json.dumps(paths))
+        except Exception:
+            pass
+
+    def _push_recent_preprocessing_files(self, paths: List[str], max_items: int = 15) -> None:
+        if not paths:
+            return
+        existing = self._load_recent_preprocessing_files()
+        merged: List[str] = []
+        for p in paths:
+            sp = str(p or "").strip()
+            if not sp:
+                continue
+            if sp in merged:
+                continue
+            merged.append(sp)
+        for p in existing:
+            if p not in merged:
+                merged.append(p)
+        self._save_recent_preprocessing_files(merged[:max_items])
+
+    def _refresh_recent_preprocessing_menu(self) -> None:
+        if not hasattr(self, "menu_workflow_load_recent"):
+            return
+        menu = self.menu_workflow_load_recent
+        menu.clear()
+        recent = self._load_recent_preprocessing_files()
+        if not recent:
+            act_empty = menu.addAction("(No recent files)")
+            act_empty.setEnabled(False)
+            return
+
+        missing: List[str] = []
+        for path in recent:
+            label = os.path.basename(path) or path
+            if not os.path.isfile(path):
+                label = f"{label} (missing)"
+            act = menu.addAction(label)
+            act.setToolTip(path)
+            act.setEnabled(os.path.isfile(path))
+            if os.path.isfile(path):
+                act.triggered.connect(lambda _checked=False, p=path: self._add_files([p]))
+            else:
+                missing.append(path)
+        menu.addSeparator()
+        act_clear = menu.addAction("Clear recent")
+        act_clear.triggered.connect(lambda: self._save_recent_preprocessing_files([]))
+        if missing:
+            act_prune = menu.addAction("Remove missing")
+            act_prune.triggered.connect(self._prune_recent_preprocessing_files)
+
+    def _prune_recent_preprocessing_files(self) -> None:
+        recent = self._load_recent_preprocessing_files()
+        kept = [p for p in recent if os.path.isfile(p)]
+        self._save_recent_preprocessing_files(kept)
+
     def _open_files_dialog(self) -> None:
         start_dir = self.file_panel.current_dir_hint() or self.settings.value("last_open_dir", "", type=str) or os.getcwd()
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -1807,6 +1881,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.settings.setValue("last_open_dir", os.path.dirname(paths[0]))
+        self._push_recent_preprocessing_files(paths)
         self._add_files(paths)
 
     def _open_folder_dialog(self) -> None:
@@ -1821,6 +1896,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if fn.lower().endswith((".doric", ".h5", ".hdf5")):
                 paths.append(os.path.join(folder, fn))
         paths.sort()
+        self._push_recent_preprocessing_files(paths)
         self._add_files(paths)
 
     def _add_files(self, paths: List[str]) -> None:
@@ -1834,6 +1910,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._show_status_message(f"Loaded: {os.path.basename(p)}", 5000)
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Load error", f"Failed to load:\n{p}\n\n{e}")
+
+        self._push_recent_preprocessing_files(paths)
 
         # set current selection -> triggers preview
         self._on_file_selection_changed()
