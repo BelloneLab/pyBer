@@ -193,21 +193,6 @@ Use the **Group** tab in Post-Processing to load multiple processed files (CSV/H
 
 ---
 
-## Build (PyInstaller)
-
-Example command (run from repo root):
-
-```bash
-python -m PyInstaller --noconfirm --clean pyBer.spec
-```
-
-PowerShell helper:
-
-```powershell
-.\build_pyinstaller.ps1
-```
-
-This will create a `pyBer.exe` in the `dist/` folder.
 
 
 
