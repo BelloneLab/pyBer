@@ -7,56 +7,67 @@
       375
     ],
     "pre_main_dock_state": "",
-    "tab_groups": [],
+    "tab_groups": [
+      {
+        "members": [
+          "pre.artifact.dock",
+          "pre.artifacts.dock",
+          "pre.baseline.dock",
+          "pre.filtering.dock",
+          "pre.output.dock"
+        ],
+        "active": "pre.artifact.dock"
+      }
+    ],
     "sections": {
       "artifacts": {
-        "visible": false,
+        "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///86////gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///86////gv///4L"
+        "geometry": "AdnQywADAAD///wt///86////gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///86////gv///4L"
       },
       "filtering": {
-        "visible": false,
+        "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///8fv///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///8fv///gv///4L"
+        "geometry": "AdnQywADAAD///wt///8fv///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///8fv///gv///4L"
       },
       "baseline": {
-        "visible": false,
+        "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///9Nf///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///9Nf///gv///4L"
+        "geometry": "AdnQywADAAD///wt///9Nf///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///9Nf///gv///4L"
       },
       "output": {
-        "visible": false,
+        "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///9P////gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///9P////gv///4L"
+        "geometry": "AdnQywADAAD///wt///9P////gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///9P////gv///4L"
       },
       "qc": {
-        "visible": false,
+        "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAAAAAWhAAACOQAAB38AAAMXAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAWhAAACOQAAB38AAAMX"
+        "geometry": "AdnQywADAAAAAAP9AAAB4AAABdsAAAKbAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAAP9AAAB4AAABdsAAAKb"
       },
       "export": {
-        "visible": false,
+        "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAAAAAWhAAADGgAAB38AAAOTAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAWhAAADGgAAB38AAAOT"
+        "geometry": "AdnQywADAAAAAAP9AAACngAABdsAAAMEAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAAP9AAACngAABdsAAAME"
       },
       "config": {
-        "visible": false,
+        "visible": true,
         "floating": false,
         "area": 8,
-        "geometry": "AdnQywADAAAAAAAAAAADlgAAB38AAAPaAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAAAAAADlgAAB38AAAPa"
+        "geometry": "AdnQywADAAAAAAAAAAADBwAABdsAAANLAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAAAAAAADBwAABdsAAANL"
       }
     },
     "artifact": {
-      "visible": false,
+      "visible": true,
       "floating": false,
       "area": 2,
-      "geometry": "AdnQywADAAAAAAWhAAAAAAAAB38AAAIUAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAWhAAAAAAAAB38AAAIU"
+      "geometry": "AdnQywADAAAAAAP9AAAAAAAABdsAAAG7AAAAAAAAAAD//////////wAAAAAAAAAAB4AAAAP9AAAAAAAABdsAAAG7"
     }
   },
   "post": {
@@ -66,37 +77,37 @@
         "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAAAAAP9AAAAAAAABdsAAALFAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAP9AAAAAAAABdsAAALF"
+        "geometry": "AdnQywADAAAAAAP9AAAAAAAABdsAAALFAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAAP9AAAAAAAABdsAAALF"
       },
       "psth": {
         "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///9TP///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///9TP///gv///4L"
+        "geometry": "AdnQywADAAD///wt///9lP///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///9lP///gv///4L"
       },
       "signal": {
         "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///9TP///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///9TP///gv///4L"
+        "geometry": "AdnQywADAAD///wt///9lP///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///9lP///gv///4L"
       },
       "behavior": {
         "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///9TP///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///9TP///gv///4L"
+        "geometry": "AdnQywADAAD///wt///9lP///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///9lP///gv///4L"
       },
       "spatial": {
         "visible": true,
         "floating": false,
         "area": 2,
-        "geometry": "AdnQywADAAD///wt///9TP///gv///4LAAAAAAAAAAD//////////wAAAAIAAAAAB4D///wt///9TP///gv///4L"
+        "geometry": "AdnQywADAAD///wt///9lP///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///9lP///gv///4L"
       },
       "export": {
         "visible": true,
         "floating": false,
         "area": 8,
-        "geometry": "AdnQywADAAAAAAAAAAAC6gAABdsAAANLAAAAAAAAAAD//////////wAAAAIAAAAAB4AAAAAAAAAC6gAABdsAAANL"
+        "geometry": "AdnQywADAAAAAAAAAAAC6gAABdsAAANLAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAAAAAAAC6gAABdsAAANL"
       }
     }
   }

@@ -497,6 +497,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._post_snapshot_applied: bool = False
         self._force_fixed_default_layout: bool = False
         self._pending_project_recompute_from_current: bool = False
+        self._project_dirty: bool = False
+        self._autosave_restoring: bool = False
+        self._project_recovered_from_autosave: bool = False
         try:
             self._build_ui()
             self._restore_settings()
@@ -506,6 +509,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         app = QtWidgets.QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._on_about_to_quit)
+        QtCore.QTimer.singleShot(0, self._restore_project_autosave_if_needed)
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
@@ -2100,6 +2104,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
     @QtCore.Slot(list)
     def receive_current_processed(self, processed_list: List[ProcessedTrial]) -> None:
         self._processed = processed_list or []
+        if not self._autosave_restoring:
+            self._project_dirty = True
         # update trace preview with first entry
         self._refresh_behavior_list()
         self._set_resample_from_processed()
@@ -2116,6 +2122,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not processed_list:
             return
         self._processed.extend(processed_list)
+        if not self._autosave_restoring:
+            self._project_dirty = True
         self._refresh_behavior_list()
         self._set_resample_from_processed()
         self._update_trace_preview()
@@ -2260,6 +2268,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if replace:
             self._behavior_sources.clear()
         parse_mode = self._current_behavior_parse_mode()
+        loaded_any = False
         for p in paths:
             stem = os.path.splitext(os.path.basename(p))[0]
             ext = os.path.splitext(p)[1].lower()
@@ -2294,6 +2303,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     )
                 info["source_path"] = str(p)
                 self._behavior_sources[stem] = info
+                loaded_any = True
             except Exception as exc:
                 QtWidgets.QMessageBox.warning(
                     self,
@@ -2304,6 +2314,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         mode_label = "timestamps" if parse_mode == _BEHAVIOR_PARSE_TIMESTAMPS else "binary"
         self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded [{mode_label}]")
         self._push_recent_paths("postprocess_recent_behavior_paths", paths)
+        if loaded_any and not self._autosave_restoring:
+            self._project_dirty = True
         self._update_data_availability()
         self._update_status_strip()
 
@@ -2325,6 +2337,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._processed = loaded
         else:
             self._processed.extend(loaded)
+        if not self._autosave_restoring:
+            self._project_dirty = True
         self.lbl_group.setText(f"{len(self._processed)} file(s) loaded")
         self._push_recent_paths("postprocess_recent_processed_paths", paths)
         self._update_file_lists()
@@ -2582,6 +2596,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _queue_settings_save(self, *_args: object) -> None:
         if self._is_restoring_settings:
             return
+        if not self._autosave_restoring:
+            self._project_dirty = True
         timer = getattr(self, "_settings_save_timer", None)
         if timer is None:
             self._save_settings()
@@ -3774,6 +3790,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for row in rows:
             if 0 <= row < len(self._processed):
                 del self._processed[row]
+        if not self._autosave_restoring:
+            self._project_dirty = True
         self._update_file_lists()
         self._compute_spatial_heatmap()
         self._update_data_availability()
@@ -3790,6 +3808,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 key = keys[row]
                 if key in self._behavior_sources:
                     del self._behavior_sources[key]
+        if not self._autosave_restoring:
+            self._project_dirty = True
         self._refresh_behavior_list()
         self._update_data_availability()
         self._update_status_strip()
@@ -4366,6 +4386,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._refresh_signal_overlay()
         self._render_signal_event_plots()
         self._update_signal_metrics_table()
+        if not self._autosave_restoring:
+            self._project_dirty = True
         self._save_settings()
         self._update_status_strip()
 
@@ -4591,6 +4613,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         }
         self.statusUpdate.emit(f"Analyzed {len(per_file_metrics)} file(s).", 5000)
         self._render_behavior_analysis_outputs()
+        if not self._autosave_restoring:
+            self._project_dirty = True
         self._save_settings()
 
     def _render_behavior_analysis_outputs(self) -> None:
@@ -5725,6 +5749,77 @@ class PostProcessingPanel(QtWidgets.QWidget):
             payload["behavior_sources"] = loaded_behavior
         return payload
 
+    def _autosave_project_cache_path(self) -> str:
+        cache_root = QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.StandardLocation.CacheLocation)
+        if not cache_root:
+            cache_root = QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.StandardLocation.AppDataLocation)
+        if not cache_root:
+            cache_root = os.path.join(os.getcwd(), "cache")
+        cache_dir = os.path.join(cache_root, "pyber_postprocessing")
+        os.makedirs(cache_dir, exist_ok=True)
+        return os.path.join(cache_dir, "autosave_project.h5")
+
+    def _has_project_state_for_autosave(self) -> bool:
+        if self._processed or self._behavior_sources:
+            return True
+        if isinstance(self.last_signal_events, dict) and bool(self.last_signal_events):
+            return True
+        if isinstance(self.last_behavior_analysis, dict) and bool(self.last_behavior_analysis):
+            return True
+        return False
+
+    def _clear_project_autosave_cache(self, delete_file: bool = True) -> None:
+        path = self._settings.value("postprocess_autosave_project_path", "", type=str).strip()
+        if not path:
+            path = self._autosave_project_cache_path()
+        if delete_file and path and os.path.isfile(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+        self._settings.setValue("postprocess_autosave_project_available", False)
+        self._settings.setValue("postprocess_autosave_project_path", "")
+        self._settings.setValue("postprocess_autosave_project_utc", "")
+        self._project_recovered_from_autosave = False
+
+    def _autosave_project_to_cache(self) -> None:
+        if self._autosave_restoring:
+            return
+        if not self._has_project_state_for_autosave():
+            self._clear_project_autosave_cache(delete_file=True)
+            return
+        should_write = bool(self._project_dirty or self._project_recovered_from_autosave)
+        if not should_write:
+            self._clear_project_autosave_cache(delete_file=True)
+            return
+        path = self._autosave_project_cache_path()
+        try:
+            self._save_project_h5(path)
+            self._settings.setValue("postprocess_autosave_project_available", True)
+            self._settings.setValue("postprocess_autosave_project_path", path)
+            self._settings.setValue("postprocess_autosave_project_utc", datetime.now(timezone.utc).isoformat())
+        except Exception:
+            _LOG.exception("Failed to autosave postprocessing project to cache")
+
+    def _restore_project_autosave_if_needed(self) -> None:
+        available = bool(self._settings.value("postprocess_autosave_project_available", False, type=bool))
+        path = self._settings.value("postprocess_autosave_project_path", "", type=str).strip()
+        if not path:
+            path = self._autosave_project_cache_path()
+        if not available:
+            return
+        if not path or not os.path.isfile(path):
+            self._clear_project_autosave_cache(delete_file=False)
+            return
+
+        try:
+            self._autosave_restoring = True
+            ok = self._load_project_from_path(path, from_autosave=True)
+        finally:
+            self._autosave_restoring = False
+        if not ok:
+            self._clear_project_autosave_cache(delete_file=False)
+
     def _save_project_file(self) -> None:
         start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
         default_name = f"{self._default_export_prefix()}_project.h5"
@@ -5742,6 +5837,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._save_project_h5(path)
             self._push_recent_paths("postprocess_recent_project_paths", [path])
             self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
+            self._project_dirty = False
+            self._project_recovered_from_autosave = False
+            self._clear_project_autosave_cache(delete_file=True)
             self.statusUpdate.emit(f"Project saved: {os.path.basename(path)}", 5000)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Save project", f"Could not save project:\n{exc}")
@@ -5775,12 +5873,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._refresh_behavior_list()
         return bool(proc_existing or beh_existing)
 
-    def _load_project_from_path(self, path: str) -> None:
+    def _load_project_from_path(self, path: str, from_autosave: bool = False) -> bool:
         try:
             payload = self._load_project_h5(path)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Load project", f"Could not load project:\n{exc}")
-            return
+            return False
 
         settings_data = payload.get("settings", {})
         processed = payload.get("processed", [])
@@ -5830,11 +5928,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if isinstance(beh_paths, list) and beh_paths:
             self._push_recent_paths("postprocess_recent_behavior_paths", [str(p) for p in beh_paths if str(p).strip()])
 
-        self._push_recent_paths("postprocess_recent_project_paths", [path])
-        try:
-            self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
-        except Exception:
-            pass
+        if not from_autosave:
+            self._push_recent_paths("postprocess_recent_project_paths", [path])
+            try:
+                self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
+            except Exception:
+                pass
 
         proc_raw = recent_paths.get("processed_paths", []) if isinstance(recent_paths, dict) else []
         beh_raw = recent_paths.get("behavior_paths", []) if isinstance(recent_paths, dict) else []
@@ -5843,7 +5942,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         has_referenced_sources = bool(proc_existing or beh_existing)
 
         imported_sources = False
-        if has_referenced_sources:
+        if has_referenced_sources and not from_autosave:
             ask_sources = QtWidgets.QMessageBox.question(
                 self,
                 "Load project",
@@ -5857,7 +5956,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if self._processed:
             self._compute_psth()
             self._compute_spatial_heatmap()
-        elif not imported_sources:
+        elif not imported_sources and not from_autosave:
             ask = QtWidgets.QMessageBox.question(
                 self,
                 "Load project",
@@ -5872,7 +5971,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._restore_cached_analysis_outputs(payload)
         self._save_settings()
         self._update_status_strip()
-        self.statusUpdate.emit(f"Project loaded: {os.path.basename(path)}", 5000)
+        self._project_dirty = False
+        self._project_recovered_from_autosave = bool(from_autosave)
+        if from_autosave:
+            self.statusUpdate.emit("Recovered autosaved postprocessing project.", 5000)
+        else:
+            self.statusUpdate.emit(f"Project loaded: {os.path.basename(path)}", 5000)
+        return True
 
     def _save_config_file(self) -> None:
         start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
@@ -6600,6 +6705,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self.spatial_plot_dialog.hide()
         except Exception:
             pass
+        self._autosave_project_to_cache()
         self.persist_layout_state_snapshot()
         self._save_settings()
 
