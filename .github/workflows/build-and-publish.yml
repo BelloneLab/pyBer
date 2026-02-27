@@ -58,32 +58,64 @@ jobs:
 
       - name: Build with PyInstaller (last known good method)
         run: |
-          DLLS=(
-            "hdf5.dll"
-            "hdf5_hl.dll"
-            "zlib.dll"
-            "blosc.dll"
-            "libblosc2.dll"
-            "libmmd.dll"
-            "libifcoremd.dll"
-            "libifportmd.dll"
-            "libiomp5md.dll"
-            "libimalloc.dll"
-            "svml_dispmd.dll"
-            "libpng16.dll"
-            "freetype.dll"
+          BIN_DIR="$CONDA_PREFIX/Library/bin"
+          DLL_PATTERNS=(
+            "hdf5*.dll"
+            "zlib*.dll"
+            "blosc*.dll"
+            "libblosc2*.dll"
+            "libpng16*.dll"
+            "freetype*.dll"
+            "liblapack*.dll"
+            "libblas*.dll"
+            "libcblas*.dll"
+            "mkl_rt*.dll"
+            "mkl_core*.dll"
+            "mkl_intel_thread*.dll"
+            "mkl_intel_lp64*.dll"
+            "mkl_sequential*.dll"
+            "libmmd*.dll"
+            "libifcoremd*.dll"
+            "libifportmd*.dll"
+            "libiomp5md*.dll"
+            "libimalloc*.dll"
+            "svml_dispmd*.dll"
           )
 
           ADD_ARGS=()
-          for dll in "${DLLS[@]}"; do
-            dll_path="$CONDA_PREFIX/Library/bin/$dll"
-            if [[ -f "$dll_path" ]]; then
-              echo "Bundling $dll"
-              ADD_ARGS+=(--add-binary "$dll_path;.")
-            else
-              echo "Skipping missing $dll"
+          declare -A SEEN_DLLS
+          shopt -s nullglob
+          for pattern in "${DLL_PATTERNS[@]}"; do
+            matches=("$BIN_DIR"/$pattern)
+            if [[ ${#matches[@]} -eq 0 ]]; then
+              echo "No matches for pattern: $pattern"
+              continue
             fi
+            for dll_path in "${matches[@]}"; do
+              dll_name="$(basename "$dll_path")"
+              # Optional cluster/MPI BLACS DLLs are not required for local scipy use.
+              if [[ "$dll_name" =~ ^mkl_blacs_.*(intelmpi|msmpi).*\.dll$ ]]; then
+                echo "Skipping optional BLACS runtime: $dll_name"
+                continue
+              fi
+              if [[ -n "${SEEN_DLLS[$dll_name]:-}" ]]; then
+                continue
+              fi
+              echo "Bundling $dll_name"
+              ADD_ARGS+=(--add-binary "$dll_path;.")
+              SEEN_DLLS["$dll_name"]=1
+            done
           done
+          shopt -u nullglob
+
+          python - <<'PY'
+          import numpy, scipy, h5py, sklearn
+          print("Import smoke test OK")
+          print("numpy:", numpy.__version__)
+          print("scipy:", scipy.__version__)
+          print("h5py:", h5py.__version__)
+          print("sklearn:", sklearn.__version__)
+          PY
 
           python -m PyInstaller \
             --noconfirm \
@@ -92,6 +124,12 @@ jobs:
             --windowed \
             --icon build/pyBer_logo_big.ico \
             --add-data "assets;assets" \
+            --collect-binaries numpy \
+            --collect-binaries scipy \
+            --collect-binaries h5py \
+            --collect-binaries sklearn \
+            --exclude-module pyqtgraph.opengl \
+            --exclude-module OpenGL \
             --name pyBer \
             "${ADD_ARGS[@]}" \
             pyBer/main.py
