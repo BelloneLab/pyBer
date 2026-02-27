@@ -3949,6 +3949,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main() -> None:
     pg.setConfigOptions(antialias=True)
+    smoke_test = str(os.environ.get("PYBER_SMOKE_TEST", "")).strip().lower() in {"1", "true", "yes", "on"}
     app = QtWidgets.QApplication([])
     icon_path = _pyber_icon_path()
     try:
@@ -3959,16 +3960,43 @@ def main() -> None:
     except Exception:
         pass
     splash = None
-    try:
-        if os.path.isfile(icon_path):
-            pix = QtGui.QPixmap(icon_path)
-            if not pix.isNull():
-                splash = QtWidgets.QSplashScreen(pix, QtCore.Qt.WindowType.WindowStaysOnTopHint)
-                splash.show()
-                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
-    except Exception:
-        splash = None
+    if not smoke_test:
+        try:
+            if os.path.isfile(icon_path):
+                pix = QtGui.QPixmap(icon_path)
+                if not pix.isNull():
+                    splash = QtWidgets.QSplashScreen(pix, QtCore.Qt.WindowType.WindowStaysOnTopHint)
+                    splash.show()
+                    app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        except Exception:
+            splash = None
     w = MainWindow()
+
+    if smoke_test:
+        try:
+            w.show()
+            app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+            if hasattr(w, "tabs") and hasattr(w, "post_tab"):
+                idx = w.tabs.indexOf(w.post_tab)
+                if idx >= 0:
+                    w.tabs.setCurrentIndex(idx)
+                for _ in range(8):
+                    app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+            try:
+                if hasattr(w, "post_tab") and hasattr(w.post_tab, "ensure_section_popups_initialized"):
+                    w.post_tab.ensure_section_popups_initialized()
+            except Exception:
+                pass
+            for _ in range(8):
+                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        finally:
+            try:
+                w.close()
+            except Exception:
+                pass
+            app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        return
+
     w.show()
     if splash is not None:
         splash.finish(w)

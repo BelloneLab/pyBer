@@ -471,6 +471,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "trace": (90, 190, 255),
             "behavior": (220, 180, 80),
             "avg": (90, 190, 255),
+            "sem_edge": (152, 201, 143),
+            "sem_fill": (188, 230, 178, 96),
+            "plot_bg": (36, 42, 52),
+            "grid_enabled": True,
+            "grid_alpha": 0.25,
             "heatmap_cmap": "viridis",
             "heatmap_min": None,
             "heatmap_max": None,
@@ -1226,7 +1231,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         export_layout.setSpacing(8)
         export_layout.addWidget(self.btn_export)
         export_layout.addWidget(self.btn_export_img)
-        export_layout.addWidget(self.btn_style)
         export_layout.addWidget(self.btn_save_cfg)
         export_layout.addWidget(self.btn_load_cfg)
         export_layout.addWidget(self.btn_save_project)
@@ -1292,6 +1296,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         action_row.addWidget(self.btn_panel_behavior)
         action_row.addWidget(self.btn_panel_spatial)
         action_row.addWidget(self.btn_panel_export)
+        action_row.addStretch(1)
+        action_row.addWidget(self.btn_style)
         action_row.addStretch(1)
         root.addLayout(action_row)
 
@@ -1373,6 +1379,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         self.img = pg.ImageItem()
         self.plot_heat.addItem(self.img)
+        self.heat_lut = pg.HistogramLUTWidget()
+        self.heat_lut.setMinimumWidth(110)
+        self.heat_lut.setMaximumWidth(150)
+        self.heat_lut.setImageItem(self.img)
         self.plot_heat.setLabel("bottom", "Time (s)")
         self.plot_heat.setLabel("left", "Trials / Recordings")
         self.plot_dur.setLabel("bottom", "Duration (s)")
@@ -1417,8 +1427,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spatial_lut_velocity.setImageItem(self.img_spatial_velocity)
 
         self.curve_avg = self.plot_avg.plot(pen=pg.mkPen(self._style["avg"], width=1.3))
-        self.curve_sem_hi = self.plot_avg.plot(pen=pg.mkPen((220, 220, 220), width=1.0))
-        self.curve_sem_lo = self.plot_avg.plot(pen=pg.mkPen((220, 220, 220), width=1.0))
+        self.curve_sem_hi = self.plot_avg.plot(pen=pg.mkPen((152, 201, 143), width=1.0))
+        self.curve_sem_lo = self.plot_avg.plot(pen=pg.mkPen((152, 201, 143), width=1.0))
+        self.sem_band = pg.FillBetweenItem(
+            self.curve_sem_hi,
+            self.curve_sem_lo,
+            brush=pg.mkBrush(188, 230, 178, 96),
+        )
+        self.plot_avg.addItem(self.sem_band)
         self.plot_avg.addLine(x=0, pen=pg.mkPen((200, 200, 200), style=QtCore.Qt.PenStyle.DashLine))
         self.metrics_bar_pre = pg.BarGraphItem(x=[0], height=[0], width=0.6, brush=(90, 143, 214))
         self.metrics_bar_post = pg.BarGraphItem(x=[1], height=[0], width=0.6, brush=(214, 122, 90))
@@ -1459,6 +1475,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         heat_row.setContentsMargins(0, 0, 0, 0)
         heat_row.setSpacing(8)
         heat_row.addWidget(self.plot_heat, stretch=4)
+        heat_row.addWidget(self.heat_lut, stretch=0)
         heat_row.addWidget(self.plot_dur, stretch=1)
 
         self.row_avg = QtWidgets.QWidget()
@@ -1656,8 +1673,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_spatial_invert_y.toggled.connect(self._compute_spatial_heatmap)
         self.combo_spatial_activity_mode.currentIndexChanged.connect(self._compute_spatial_heatmap)
         self.btn_spatial_help.clicked.connect(self._show_spatial_help)
+        if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
+            level_signal = getattr(self.heat_lut.item, "sigLevelChangeFinished", None)
+            if level_signal is None:
+                level_signal = getattr(self.heat_lut.item, "sigLevelsChangeFinished", None)
+            if level_signal is not None:
+                level_signal.connect(self._on_heatmap_levels_changed)
         self._wire_settings_autosave()
 
+        self._apply_plot_style()
         self._update_align_ui()
         self._update_event_filter_enabled()
         self._update_metrics_enabled()
@@ -4886,6 +4910,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             cmap = pg.colormap.get(cmap_name)
             lut = cmap.getLookupTable()
             self.img.setLookupTable(lut)
+            if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
+                self.heat_lut.item.gradient.setColorMap(cmap)
         except Exception:
             pass
         hmin = self._style.get("heatmap_min", None)
@@ -5187,14 +5213,98 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_avg.addItem(self._pre_region)
         self.plot_avg.addItem(self._post_region)
 
+    def _style_color_tuple(self, key: str, fallback: Tuple[int, ...]) -> Tuple[int, ...]:
+        raw = self._style.get(key, fallback)
+        if isinstance(raw, np.ndarray):
+            vals = raw.tolist()
+        elif isinstance(raw, (list, tuple)):
+            vals = list(raw)
+        else:
+            vals = list(fallback)
+        out: List[int] = []
+        for i, default in enumerate(list(fallback)):
+            try:
+                v = int(vals[i]) if i < len(vals) else int(default)
+            except Exception:
+                v = int(default)
+            out.append(max(0, min(255, v)))
+        return tuple(out)
+
+    def _apply_plot_style(self) -> None:
+        self.curve_trace.setPen(pg.mkPen(self._style_color_tuple("trace", (90, 190, 255)), width=1.1))
+        self.curve_behavior.setPen(pg.mkPen(self._style_color_tuple("behavior", (220, 180, 80)), width=1.0))
+        self.curve_avg.setPen(pg.mkPen(self._style_color_tuple("avg", (90, 190, 255)), width=1.3))
+        sem_edge = self._style_color_tuple("sem_edge", (152, 201, 143))
+        sem_fill = self._style_color_tuple("sem_fill", (188, 230, 178, 96))
+        self.curve_sem_hi.setPen(pg.mkPen(sem_edge, width=1.0))
+        self.curve_sem_lo.setPen(pg.mkPen(sem_edge, width=1.0))
+        if hasattr(self, "sem_band"):
+            self.sem_band.setBrush(pg.mkBrush(*sem_fill))
+        bg = self._style_color_tuple("plot_bg", (36, 42, 52))
+        grid_enabled = bool(self._style.get("grid_enabled", True))
+        try:
+            grid_alpha = float(self._style.get("grid_alpha", 0.25))
+        except Exception:
+            grid_alpha = 0.25
+        grid_alpha = max(0.0, min(1.0, grid_alpha))
+        for pw in (
+            self.plot_trace,
+            self.plot_heat,
+            self.plot_dur,
+            self.plot_avg,
+            self.plot_metrics,
+            self.plot_global,
+            self.plot_peak_amp,
+            self.plot_peak_ibi,
+            self.plot_peak_rate,
+            self.plot_behavior_raster,
+            self.plot_behavior_rate,
+            self.plot_behavior_duration,
+            self.plot_behavior_starts,
+            self.plot_spatial_occupancy,
+            self.plot_spatial_activity,
+            self.plot_spatial_velocity,
+        ):
+            try:
+                pw.setBackground(QtGui.QColor(*bg[:3]))
+            except Exception:
+                pass
+            try:
+                pw.showGrid(x=grid_enabled, y=grid_enabled, alpha=grid_alpha)
+            except Exception:
+                pass
+        cmap_name = str(self._style.get("heatmap_cmap", "viridis"))
+        try:
+            cmap = pg.colormap.get(cmap_name)
+            if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
+                self.heat_lut.item.gradient.setColorMap(cmap)
+        except Exception:
+            pass
+
+    def _on_heatmap_levels_changed(self) -> None:
+        if self._is_restoring_settings:
+            return
+        if not hasattr(self, "heat_lut") or getattr(self.heat_lut, "item", None) is None:
+            return
+        try:
+            levels = self.heat_lut.item.getLevels()
+        except Exception:
+            return
+        if not isinstance(levels, (list, tuple)) or len(levels) < 2:
+            return
+        lo = float(levels[0])
+        hi = float(levels[1])
+        if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+            self._style["heatmap_min"] = lo
+            self._style["heatmap_max"] = hi
+            self._queue_settings_save()
+
     def _open_style_dialog(self) -> None:
         dlg = StyleDialog(self._style, self)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         self._style = dlg.get_style()
-        self.curve_trace.setPen(pg.mkPen(self._style["trace"], width=1.1))
-        self.curve_behavior.setPen(pg.mkPen(self._style["behavior"], width=1.0))
-        self.curve_avg.setPen(pg.mkPen(self._style["avg"], width=1.3))
+        self._apply_plot_style()
         self._render_heatmap(self._last_mat if self._last_mat is not None else np.zeros((1, 1)), self._last_tvec if self._last_tvec is not None else np.array([0.0, 1.0]))
         self._render_spatial_heatmap(
             self._last_spatial_occupancy_map,
@@ -6206,9 +6316,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         style = data.get("style")
         if isinstance(style, dict):
             self._style.update(style)
-            self.curve_trace.setPen(pg.mkPen(self._style["trace"], width=1.1))
-            self.curve_behavior.setPen(pg.mkPen(self._style["behavior"], width=1.0))
-            self.curve_avg.setPen(pg.mkPen(self._style["avg"], width=1.3))
+            self._apply_plot_style()
         self._update_event_filter_enabled()
         self._update_metrics_enabled()
         self._update_global_metrics_enabled()
@@ -6468,28 +6576,84 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _export_images(self) -> None:
         if not hasattr(self, "_right_panel"):
             return
+        dlg = ExportImageDialog(self)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        choices = dlg.choices()
+
+        export_targets: List[Tuple[str, QtWidgets.QWidget]] = []
+        if choices.get("all", False):
+            export_targets.append(("psth_figure", self._right_panel))
+        else:
+            if choices.get("trace"):
+                export_targets.append(("trace", self.plot_trace))
+            if choices.get("heat"):
+                export_targets.append(("heatmap", self.row_heat))
+            if choices.get("avg"):
+                export_targets.append(("avg_metrics", self.row_avg))
+            if choices.get("signal"):
+                export_targets.append(("signal", self.row_signal))
+            if choices.get("behavior"):
+                export_targets.append(("behavior", self.row_behavior))
+            if choices.get("spatial"):
+                target_spatial = getattr(self, "spatial_plot_content", None) or getattr(self, "spatial_plot_dialog", None)
+                if target_spatial is not None:
+                    export_targets.append(("spatial", target_spatial))
+
+        if not export_targets:
+            QtWidgets.QMessageBox.information(self, "Export images", "Select at least one panel to export.")
+            return
+
         start_dir = self._export_start_dir()
         prefix = self._default_export_prefix()
-        default_path = os.path.join(start_dir, f"{prefix}_psth_figure.png")
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Export PSTH figure (PNG + PDF)",
-            default_path,
-            "PNG image (*.png);;All files (*.*)",
-        )
-        if not path:
+        if len(export_targets) == 1:
+            suffix, widget = export_targets[0]
+            default_path = os.path.join(start_dir, f"{prefix}_{suffix}.png")
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Export image (PNG + PDF)",
+                default_path,
+                "PNG image (*.png);;All files (*.*)",
+            )
+            if not path:
+                return
+            if not os.path.splitext(path)[1]:
+                path = f"{path}.png"
+            base_path, _ = os.path.splitext(path)
+            out_dir = os.path.dirname(base_path)
+            if out_dir:
+                self._remember_export_dir(out_dir)
+            ok, png_path, pdf_path = self._export_widget_png_pdf(widget, base_path, transparent=True)
+            if ok:
+                self.statusUpdate.emit(
+                    f"Exported image: {os.path.basename(png_path or '')}, {os.path.basename(pdf_path or '')}",
+                    5000,
+                )
+            else:
+                QtWidgets.QMessageBox.warning(self, "Export failed", "Could not export selected panel as PNG/PDF.")
             return
-        if not os.path.splitext(path)[1]:
-            path = f"{path}.png"
-        base_path, _ = os.path.splitext(path)
-        out_dir = os.path.dirname(base_path)
-        if out_dir:
-            self._remember_export_dir(out_dir)
-        ok, png_path, pdf_path = self._export_widget_png_pdf(self._right_panel, base_path, transparent=True)
-        if ok:
-            self.statusUpdate.emit(f"Exported PSTH figure: {os.path.basename(png_path or '')}, {os.path.basename(pdf_path or '')}", 5000)
+
+        out_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Select export folder", start_dir)
+        if not out_dir:
+            return
+        self._remember_export_dir(out_dir)
+        ok_count = 0
+        failed: List[str] = []
+        for suffix, widget in export_targets:
+            base_path = os.path.join(out_dir, f"{prefix}_{suffix}")
+            ok, _png_path, _pdf_path = self._export_widget_png_pdf(widget, base_path, transparent=True)
+            if ok:
+                ok_count += 1
+            else:
+                failed.append(suffix)
+        if failed:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Export images",
+                f"Exported {ok_count}/{len(export_targets)} panel(s).\nFailed: {', '.join(failed)}",
+            )
         else:
-            QtWidgets.QMessageBox.warning(self, "Export failed", "Could not export PSTH figure as PNG/PDF.")
+            self.statusUpdate.emit(f"Exported {ok_count} panel image set(s) (PNG + PDF).", 5000)
 
     def _export_spatial_figure(self) -> None:
         if self._last_spatial_occupancy_map is None or self._last_spatial_extent is None:
@@ -6873,6 +7037,56 @@ class ExportDialog(QtWidgets.QDialog):
         }
 
 
+class ExportImageDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Export Images")
+        self.setModal(True)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        self.cb_all = QtWidgets.QCheckBox("All panels")
+        self.cb_trace = QtWidgets.QCheckBox("Trace preview")
+        self.cb_heat = QtWidgets.QCheckBox("Heatmap + durations")
+        self.cb_avg = QtWidgets.QCheckBox("Average + metrics")
+        self.cb_signal = QtWidgets.QCheckBox("Signal analyzer")
+        self.cb_behavior = QtWidgets.QCheckBox("Behavior analysis")
+        self.cb_spatial = QtWidgets.QCheckBox("Spatial window")
+
+        self.cb_all.setChecked(True)
+        for cb in (self.cb_all, self.cb_trace, self.cb_heat, self.cb_avg, self.cb_signal, self.cb_behavior, self.cb_spatial):
+            layout.addWidget(cb)
+        self._set_individual_enabled(self.cb_all.isChecked())
+
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch(1)
+        btn_ok = QtWidgets.QPushButton("OK")
+        btn_cancel = QtWidgets.QPushButton("Cancel")
+        btn_ok.setDefault(True)
+        row.addWidget(btn_ok)
+        row.addWidget(btn_cancel)
+        layout.addLayout(row)
+
+        self.cb_all.toggled.connect(self._set_individual_enabled)
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel.clicked.connect(self.reject)
+
+    def _set_individual_enabled(self, all_checked: bool) -> None:
+        enabled = not bool(all_checked)
+        for cb in (self.cb_trace, self.cb_heat, self.cb_avg, self.cb_signal, self.cb_behavior, self.cb_spatial):
+            cb.setEnabled(enabled)
+
+    def choices(self) -> Dict[str, bool]:
+        return {
+            "all": self.cb_all.isChecked(),
+            "trace": self.cb_trace.isChecked(),
+            "heat": self.cb_heat.isChecked(),
+            "avg": self.cb_avg.isChecked(),
+            "signal": self.cb_signal.isChecked(),
+            "behavior": self.cb_behavior.isChecked(),
+            "spatial": self.cb_spatial.isChecked(),
+        }
+
+
 class StyleDialog(QtWidgets.QDialog):
     def __init__(self, style: Dict[str, object], parent=None) -> None:
         super().__init__(parent)
@@ -6885,6 +7099,19 @@ class StyleDialog(QtWidgets.QDialog):
         self.btn_trace = QtWidgets.QPushButton("Pick")
         self.btn_behavior = QtWidgets.QPushButton("Pick")
         self.btn_avg = QtWidgets.QPushButton("Pick")
+        self.btn_sem_edge = QtWidgets.QPushButton("Pick")
+        self.btn_sem_fill = QtWidgets.QPushButton("Pick")
+        self.btn_plot_bg = QtWidgets.QPushButton("Pick")
+        self.cb_grid = QtWidgets.QCheckBox("Show grid on plots")
+        self.cb_grid.setChecked(bool(self._style.get("grid_enabled", True)))
+        self.spin_grid_alpha = QtWidgets.QDoubleSpinBox()
+        self.spin_grid_alpha.setRange(0.0, 1.0)
+        self.spin_grid_alpha.setSingleStep(0.05)
+        self.spin_grid_alpha.setDecimals(2)
+        try:
+            self.spin_grid_alpha.setValue(float(self._style.get("grid_alpha", 0.25)))
+        except Exception:
+            self.spin_grid_alpha.setValue(0.25)
         self.combo_cmap = QtWidgets.QComboBox()
         self.combo_cmap.addItems(["viridis", "plasma", "inferno", "magma", "cividis", "turbo", "gray"])
         if self._style.get("heatmap_cmap"):
@@ -6900,6 +7127,11 @@ class StyleDialog(QtWidgets.QDialog):
         layout.addRow("Trace color", self.btn_trace)
         layout.addRow("Behavior color", self.btn_behavior)
         layout.addRow("Avg color", self.btn_avg)
+        layout.addRow("SEM edge color", self.btn_sem_edge)
+        layout.addRow("SEM fill color", self.btn_sem_fill)
+        layout.addRow("Plot background", self.btn_plot_bg)
+        layout.addRow("Grid", self.cb_grid)
+        layout.addRow("Grid alpha", self.spin_grid_alpha)
         layout.addRow("Heatmap colormap", self.combo_cmap)
         layout.addRow("Heatmap min", self.spin_hmin)
         layout.addRow("Heatmap max", self.spin_hmax)
@@ -6916,17 +7148,51 @@ class StyleDialog(QtWidgets.QDialog):
         self.btn_trace.clicked.connect(lambda *_: self._pick_color("trace"))
         self.btn_behavior.clicked.connect(lambda *_: self._pick_color("behavior"))
         self.btn_avg.clicked.connect(lambda *_: self._pick_color("avg"))
+        self.btn_sem_edge.clicked.connect(lambda *_: self._pick_color("sem_edge"))
+        self.btn_sem_fill.clicked.connect(lambda *_: self._pick_color("sem_fill", with_alpha=True))
+        self.btn_plot_bg.clicked.connect(lambda *_: self._pick_color("plot_bg"))
         btn_ok.clicked.connect(self.accept)
         btn_cancel.clicked.connect(self.reject)
 
-    def _pick_color(self, key: str) -> None:
-        col = QtWidgets.QColorDialog.getColor(parent=self)
+    def _pick_color(self, key: str, with_alpha: bool = False) -> None:
+        current = self._style.get(key, (255, 255, 255, 255) if with_alpha else (255, 255, 255))
+        if isinstance(current, np.ndarray):
+            current_vals = current.tolist()
+        elif isinstance(current, (list, tuple)):
+            current_vals = list(current)
+        else:
+            current_vals = [255, 255, 255, 255] if with_alpha else [255, 255, 255]
+        if with_alpha:
+            while len(current_vals) < 4:
+                current_vals.append(255)
+            qcol = QtGui.QColor(
+                int(current_vals[0]),
+                int(current_vals[1]),
+                int(current_vals[2]),
+                int(current_vals[3]),
+            )
+        else:
+            qcol = QtGui.QColor(
+                int(current_vals[0]) if len(current_vals) > 0 else 255,
+                int(current_vals[1]) if len(current_vals) > 1 else 255,
+                int(current_vals[2]) if len(current_vals) > 2 else 255,
+            )
+        options = QtWidgets.QColorDialog.ColorDialogOption.ShowAlphaChannel if with_alpha else QtWidgets.QColorDialog.ColorDialogOption(0)
+        col = QtWidgets.QColorDialog.getColor(qcol, self, "Select color", options)
         if not col.isValid():
             return
-        self._style[key] = (col.red(), col.green(), col.blue())
+        if with_alpha:
+            self._style[key] = (col.red(), col.green(), col.blue(), col.alpha())
+        else:
+            self._style[key] = (col.red(), col.green(), col.blue())
 
     def get_style(self) -> Dict[str, object]:
         self._style["heatmap_cmap"] = self.combo_cmap.currentText()
         self._style["heatmap_min"] = float(self.spin_hmin.value()) if self.spin_hmin.value() != 0.0 else None
         self._style["heatmap_max"] = float(self.spin_hmax.value()) if self.spin_hmax.value() != 0.0 else None
+        self._style["grid_enabled"] = bool(self.cb_grid.isChecked())
+        self._style["grid_alpha"] = float(self.spin_grid_alpha.value())
+        self._style.setdefault("plot_bg", (36, 42, 52))
+        self._style.setdefault("sem_edge", (152, 201, 143))
+        self._style.setdefault("sem_fill", (188, 230, 178, 96))
         return dict(self._style)

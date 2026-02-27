@@ -134,10 +134,15 @@ jobs:
             "${ADD_ARGS[@]}" \
             pyBer/main.py
 
+      - name: Smoke test built EXE (switch to Postprocessing tab)
+        run: |
+          export PYBER_SMOKE_TEST=1
+          ./dist/pyBer.exe
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-exe
+          name: pyber-windows-exe
           path: dist/pyBer.exe
           if-no-files-found: error
 
@@ -156,13 +161,24 @@ jobs:
       - name: Download Windows Artifact
         uses: actions/download-artifact@v4
         with:
-          name: windows-exe
+          name: pyber-windows-exe
           path: ./publish
+
+      - name: Normalize Release Asset Name
+        run: |
+          set -euo pipefail
+          exe_path="$(find ./publish -type f -name '*.exe' | head -n 1 || true)"
+          if [[ -z "$exe_path" ]]; then
+            echo "No EXE found in downloaded artifact"
+            find ./publish -maxdepth 4 -type f -print || true
+            exit 1
+          fi
+          cp "$exe_path" ./publish/pyBer-windows.exe
 
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "./publish/*"
+          artifacts: "./publish/pyBer-windows.exe"
           token: ${{ secrets.GITHUB_TOKEN }}
           generateReleaseNotes: true
           allowUpdates: true
