@@ -7,6 +7,7 @@ import json
 import logging
 from pathlib import Path
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -495,6 +496,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._app_closing: bool = False
         self._post_snapshot_applied: bool = False
         self._force_fixed_default_layout: bool = False
+        self._pending_project_recompute_from_current: bool = False
         try:
             self._build_ui()
             self._restore_settings()
@@ -886,6 +888,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_load_cfg = QtWidgets.QPushButton("Load config")
         self.btn_load_cfg.setProperty("class", "compactSmall")
         self.btn_load_cfg.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_save_project = QtWidgets.QPushButton("Save project (.h5)")
+        self.btn_save_project.setProperty("class", "compactSmall")
+        self.btn_save_project.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_load_project = QtWidgets.QPushButton("Load project (.h5)")
+        self.btn_load_project.setProperty("class", "compactSmall")
+        self.btn_load_project.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
         grp_signal = QtWidgets.QGroupBox("Signal Event Analyzer")
         f_signal = QtWidgets.QFormLayout(grp_signal)
@@ -1217,6 +1225,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         export_layout.addWidget(self.btn_style)
         export_layout.addWidget(self.btn_save_cfg)
         export_layout.addWidget(self.btn_load_cfg)
+        export_layout.addWidget(self.btn_save_project)
+        export_layout.addWidget(self.btn_load_project)
         export_layout.addStretch(1)
 
         action_row = QtWidgets.QHBoxLayout()
@@ -1230,10 +1240,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.act_load_single = self.menu_action_load.addAction("Load processed file (single)")
         self.act_load_group = self.menu_action_load.addAction("Load processed files (group)")
         self.menu_action_load.addSeparator()
+        self.act_load_project = self.menu_action_load.addAction("Load project (.h5)")
+        self.menu_action_load.addSeparator()
         self.act_load_behavior = self.menu_action_load.addAction("Load behavior CSV/XLSX")
         self.menu_action_recent = self.menu_action_load.addMenu("Load recent")
         self.menu_recent_processed = self.menu_action_recent.addMenu("Processed files")
         self.menu_recent_behavior = self.menu_action_recent.addMenu("Behavior files")
+        self.menu_recent_projects = self.menu_action_recent.addMenu("Projects")
         self.menu_action_recent.aboutToShow.connect(self._refresh_recent_postprocessing_menus)
         self.act_refresh_dio = self.menu_action_load.addAction("Refresh A/D channel list")
         self.btn_action_load.setMenu(self.menu_action_load)
@@ -1534,6 +1547,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.act_load_current.triggered.connect(self.requestCurrentProcessed.emit)
         self.act_load_single.triggered.connect(self._load_processed_files_single)
         self.act_load_group.triggered.connect(self._load_processed_files)
+        self.act_load_project.triggered.connect(self._load_project_file)
         self.act_load_behavior.triggered.connect(self._load_behavior_files)
         self.act_refresh_dio.triggered.connect(self.requestDioList.emit)
         self.btn_action_compute.clicked.connect(self._compute_psth)
@@ -1569,6 +1583,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_style.clicked.connect(self._open_style_dialog)
         self.btn_save_cfg.clicked.connect(self._save_config_file)
         self.btn_load_cfg.clicked.connect(self._load_config_file)
+        self.btn_save_project.clicked.connect(self._save_project_file)
+        self.btn_load_project.clicked.connect(self._load_project_file)
         self.cb_filter_events.stateChanged.connect(self._update_event_filter_enabled)
         self.cb_metrics.stateChanged.connect(self._update_metrics_enabled)
         self.cb_global_metrics.stateChanged.connect(self._update_global_metrics_enabled)
@@ -2091,6 +2107,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
+        if self._pending_project_recompute_from_current:
+            self._pending_project_recompute_from_current = False
+            self._compute_psth()
+            self._compute_spatial_heatmap()
 
     def append_processed(self, processed_list: List[ProcessedTrial]) -> None:
         if not processed_list:
@@ -2169,6 +2189,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             key="postprocess_recent_behavior_paths",
             loader=self._load_recent_behavior_path,
         )
+        self._refresh_recent_menu(
+            self.menu_recent_projects,
+            key="postprocess_recent_project_paths",
+            loader=self._load_recent_project_path,
+        )
 
     def _refresh_recent_menu(
         self,
@@ -2225,6 +2250,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _load_recent_project_path(self, path: str) -> None:
+        if not path or not os.path.isfile(path):
+            QtWidgets.QMessageBox.warning(self, "Load recent", "Selected recent project file is missing.")
+            return
+        self._load_project_from_path(path)
+
     def _load_behavior_paths(self, paths: List[str], replace: bool) -> None:
         if replace:
             self._behavior_sources.clear()
@@ -2261,6 +2292,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         "Behavior load warning",
                         f"No behavior or trajectory numeric columns detected in {os.path.basename(p)} for the selected file type.",
                     )
+                info["source_path"] = str(p)
                 self._behavior_sources[stem] = info
             except Exception as exc:
                 QtWidgets.QMessageBox.warning(
@@ -5152,6 +5184,695 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "Spatial velocity",
         )
         self._save_settings()
+
+    def _h5_text(self, value: object, default: str = "") -> str:
+        if value is None:
+            return default
+        if isinstance(value, bytes):
+            try:
+                return value.decode("utf-8", errors="ignore")
+            except Exception:
+                return default
+        return str(value)
+
+    def _write_h5_json(self, group: h5py.Group, name: str, payload: Dict[str, object]) -> None:
+        text = json.dumps(payload or {})
+        dtype = h5py.string_dtype(encoding="utf-8")
+        if name in group:
+            del group[name]
+        group.create_dataset(name, data=text, dtype=dtype)
+
+    def _write_h5_json_any(self, group: h5py.Group, name: str, payload: object) -> None:
+        text = json.dumps(payload)
+        dtype = h5py.string_dtype(encoding="utf-8")
+        if name in group:
+            del group[name]
+        group.create_dataset(name, data=text, dtype=dtype)
+
+    def _read_h5_json(self, group: Optional[h5py.Group], name: str) -> Dict[str, object]:
+        if group is None or name not in group:
+            return {}
+        try:
+            raw = group[name][()]
+        except Exception:
+            return {}
+        if isinstance(raw, np.ndarray):
+            try:
+                raw = raw.item()
+            except Exception:
+                raw = raw.tolist()
+        if isinstance(raw, bytes):
+            try:
+                raw = raw.decode("utf-8", errors="ignore")
+            except Exception:
+                raw = ""
+        text = str(raw or "")
+        if not text:
+            return {}
+        try:
+            data = json.loads(text)
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _read_h5_json_any(self, group: Optional[h5py.Group], name: str, default: object) -> object:
+        if group is None or name not in group:
+            return default
+        try:
+            raw = group[name][()]
+        except Exception:
+            return default
+        if isinstance(raw, np.ndarray):
+            try:
+                raw = raw.item()
+            except Exception:
+                raw = raw.tolist()
+        if isinstance(raw, bytes):
+            try:
+                raw = raw.decode("utf-8", errors="ignore")
+            except Exception:
+                raw = ""
+        text = str(raw or "")
+        if not text:
+            return default
+        try:
+            return json.loads(text)
+        except Exception:
+            return default
+
+    def _write_h5_str_list(self, group: h5py.Group, name: str, values: List[str]) -> None:
+        dtype = h5py.string_dtype(encoding="utf-8")
+        arr = np.asarray([str(v) for v in (values or [])], dtype=dtype)
+        if name in group:
+            del group[name]
+        group.create_dataset(name, data=arr, dtype=dtype)
+
+    def _read_h5_str_list(self, group: Optional[h5py.Group], name: str) -> List[str]:
+        if group is None or name not in group:
+            return []
+        try:
+            raw = group[name][()]
+        except Exception:
+            return []
+        if isinstance(raw, bytes):
+            return [raw.decode("utf-8", errors="ignore")]
+        if isinstance(raw, str):
+            return [raw]
+        if isinstance(raw, np.ndarray):
+            out: List[str] = []
+            for item in raw.tolist():
+                if isinstance(item, bytes):
+                    out.append(item.decode("utf-8", errors="ignore"))
+                else:
+                    out.append(str(item))
+            return out
+        return []
+
+    def _write_h5_numeric(self, group: h5py.Group, name: str, values: np.ndarray) -> None:
+        arr = np.asarray(values, float)
+        if name in group:
+            del group[name]
+        kwargs: Dict[str, object] = {}
+        if arr.size > 0:
+            kwargs["compression"] = "gzip"
+        group.create_dataset(name, data=arr, **kwargs)
+
+    def _read_h5_numeric(self, group: h5py.Group, name: str) -> Optional[np.ndarray]:
+        if name not in group:
+            return None
+        try:
+            return np.asarray(group[name][()], float)
+        except Exception:
+            return None
+
+    def _save_signal_events_h5(self, parent: h5py.Group) -> None:
+        if not isinstance(self.last_signal_events, dict) or not self.last_signal_events:
+            return
+        group = parent.create_group("signal_events")
+        for key in (
+            "peak_times_sec",
+            "peak_indices",
+            "peak_heights",
+            "peak_prominences",
+            "peak_widths_sec",
+            "peak_auc",
+        ):
+            self._write_h5_numeric(group, key, np.asarray(self.last_signal_events.get(key, np.array([], float)), float))
+        self._write_h5_str_list(group, "file_ids", [str(v) for v in self.last_signal_events.get("file_ids", []) or []])
+        self._write_h5_json(group, "derived_metrics_json", dict(self.last_signal_events.get("derived_metrics", {}) or {}))
+        self._write_h5_json(group, "params_json", dict(self.last_signal_events.get("params", {}) or {}))
+
+    def _load_signal_events_h5(self, parent: Optional[h5py.Group]) -> Optional[Dict[str, object]]:
+        if parent is None:
+            return None
+        group = parent.get("signal_events")
+        if not isinstance(group, h5py.Group):
+            return None
+
+        def _num(name: str) -> np.ndarray:
+            arr = self._read_h5_numeric(group, name)
+            if arr is None:
+                return np.array([], float)
+            return np.asarray(arr, float)
+
+        out: Dict[str, object] = {
+            "peak_times_sec": _num("peak_times_sec"),
+            "peak_indices": _num("peak_indices"),
+            "peak_heights": _num("peak_heights"),
+            "peak_prominences": _num("peak_prominences"),
+            "peak_widths_sec": _num("peak_widths_sec"),
+            "peak_auc": _num("peak_auc"),
+            "file_ids": self._read_h5_str_list(group, "file_ids"),
+            "derived_metrics": self._read_h5_json(group, "derived_metrics_json"),
+            "params": self._read_h5_json(group, "params_json"),
+        }
+        return out
+
+    def _save_behavior_analysis_h5(self, parent: h5py.Group) -> None:
+        if not isinstance(self.last_behavior_analysis, dict) or not self.last_behavior_analysis:
+            return
+        group = parent.create_group("behavior_analysis")
+        group.attrs["behavior_name"] = str(self.last_behavior_analysis.get("behavior_name", "") or "")
+        self._write_h5_json_any(group, "per_file_metrics_json", self.last_behavior_analysis.get("per_file_metrics", []) or [])
+        self._write_h5_json(group, "group_metrics_json", dict(self.last_behavior_analysis.get("group_metrics", {}) or {}))
+        self._write_h5_json(group, "params_json", dict(self.last_behavior_analysis.get("params", {}) or {}))
+
+        events_group = group.create_group("per_file_events")
+        for idx, row in enumerate(self.last_behavior_analysis.get("per_file_events", []) or []):
+            if not isinstance(row, dict):
+                continue
+            entry = events_group.create_group(f"item_{idx:04d}")
+            entry.attrs["file_id"] = str(row.get("file_id", "") or "")
+            try:
+                entry.attrs["row_index"] = int(row.get("row_index", idx + 1))
+            except Exception:
+                entry.attrs["row_index"] = int(idx + 1)
+            self._write_h5_numeric(entry, "start_sec", np.asarray(row.get("start_sec", np.array([], float)), float))
+            self._write_h5_numeric(entry, "end_sec", np.asarray(row.get("end_sec", np.array([], float)), float))
+            self._write_h5_numeric(entry, "duration_sec", np.asarray(row.get("duration_sec", np.array([], float)), float))
+
+    def _load_behavior_analysis_h5(self, parent: Optional[h5py.Group]) -> Optional[Dict[str, object]]:
+        if parent is None:
+            return None
+        group = parent.get("behavior_analysis")
+        if not isinstance(group, h5py.Group):
+            return None
+
+        per_file_metrics_raw = self._read_h5_json_any(group, "per_file_metrics_json", [])
+        per_file_metrics = per_file_metrics_raw if isinstance(per_file_metrics_raw, list) else []
+
+        per_file_events: List[Dict[str, object]] = []
+        events_group = group.get("per_file_events")
+        if isinstance(events_group, h5py.Group):
+            for key in sorted(events_group.keys()):
+                entry = events_group.get(key)
+                if not isinstance(entry, h5py.Group):
+                    continue
+                try:
+                    row_index = int(entry.attrs.get("row_index", 0))
+                except Exception:
+                    row_index = 0
+                per_file_events.append(
+                    {
+                        "file_id": self._h5_text(entry.attrs.get("file_id", ""), ""),
+                        "row_index": row_index,
+                        "start_sec": np.asarray(
+                            self._read_h5_numeric(entry, "start_sec") if "start_sec" in entry else np.array([], float),
+                            float,
+                        ),
+                        "end_sec": np.asarray(
+                            self._read_h5_numeric(entry, "end_sec") if "end_sec" in entry else np.array([], float),
+                            float,
+                        ),
+                        "duration_sec": np.asarray(
+                            self._read_h5_numeric(entry, "duration_sec") if "duration_sec" in entry else np.array([], float),
+                            float,
+                        ),
+                    }
+                )
+
+        return {
+            "behavior_name": self._h5_text(group.attrs.get("behavior_name", ""), ""),
+            "per_file_metrics": per_file_metrics,
+            "per_file_events": per_file_events,
+            "group_metrics": self._read_h5_json(group, "group_metrics_json"),
+            "params": self._read_h5_json(group, "params_json"),
+        }
+
+    def _clear_cached_analysis_outputs(self) -> None:
+        self.last_signal_events = None
+        self.last_behavior_analysis = None
+        self.tbl_signal_metrics.setRowCount(0)
+        self.tbl_behavior_metrics.setRowCount(0)
+        self.lbl_behavior_summary.setText("Group metrics: -")
+        for pw in (self.plot_peak_amp, self.plot_peak_ibi, self.plot_peak_rate):
+            pw.clear()
+        for pw in (
+            self.plot_behavior_raster,
+            self.plot_behavior_rate,
+            self.plot_behavior_duration,
+            self.plot_behavior_starts,
+        ):
+            pw.clear()
+        self._refresh_signal_overlay()
+
+    def _restore_cached_analysis_outputs(self, payload: Dict[str, object]) -> None:
+        self._clear_cached_analysis_outputs()
+
+        signal_events = payload.get("signal_events")
+        if isinstance(signal_events, dict) and signal_events:
+            self.last_signal_events = signal_events
+            self._refresh_signal_overlay()
+            self._render_signal_event_plots()
+            self._update_signal_metrics_table()
+
+        behavior_analysis = payload.get("behavior_analysis")
+        if isinstance(behavior_analysis, dict) and behavior_analysis:
+            self.last_behavior_analysis = behavior_analysis
+            self._render_behavior_analysis_outputs()
+
+    def _save_project_h5(self, path: str) -> None:
+        with h5py.File(path, "w") as f:
+            f.attrs["project_type"] = "pyber_postprocessing_project"
+            f.attrs["project_version"] = 1
+            f.attrs["created_utc"] = datetime.now(timezone.utc).isoformat()
+
+            ui_group = f.create_group("ui")
+            self._write_h5_json(ui_group, "settings_json", self._collect_settings())
+            ui_group.attrs["tab_sources_index"] = int(self.tab_sources.currentIndex())
+
+            meta_group = f.create_group("meta")
+            processed_paths = [str(getattr(proc, "path", "") or "").strip() for proc in self._processed]
+            processed_paths = [p for p in processed_paths if p]
+            behavior_paths: List[str] = []
+            for info in self._behavior_sources.values():
+                src = str((info or {}).get("source_path", "") or "").strip()
+                if src:
+                    behavior_paths.append(src)
+            self._write_h5_json(
+                meta_group,
+                "recent_paths_json",
+                {
+                    "processed_paths": processed_paths,
+                    "behavior_paths": behavior_paths,
+                },
+            )
+
+            processed_group = f.create_group("processed")
+            processed_group.attrs["count"] = int(len(self._processed))
+            for idx, proc in enumerate(self._processed):
+                entry = processed_group.create_group(f"item_{idx:04d}")
+                entry.attrs["path"] = str(getattr(proc, "path", "") or "")
+                entry.attrs["channel_id"] = str(getattr(proc, "channel_id", "") or "")
+                entry.attrs["dio_name"] = str(getattr(proc, "dio_name", "") or "")
+                entry.attrs["output_label"] = str(getattr(proc, "output_label", "") or "")
+                entry.attrs["output_context"] = str(getattr(proc, "output_context", "") or "")
+                entry.attrs["fs_actual"] = float(getattr(proc, "fs_actual", np.nan))
+                entry.attrs["fs_target"] = float(getattr(proc, "fs_target", np.nan))
+                entry.attrs["fs_used"] = float(getattr(proc, "fs_used", np.nan))
+
+                self._write_h5_numeric(entry, "time", np.asarray(getattr(proc, "time", np.array([], float)), float))
+                self._write_h5_numeric(entry, "raw_signal", np.asarray(getattr(proc, "raw_signal", np.array([], float)), float))
+                self._write_h5_numeric(entry, "raw_reference", np.asarray(getattr(proc, "raw_reference", np.array([], float)), float))
+
+                for field in (
+                    "raw_thr_hi",
+                    "raw_thr_lo",
+                    "dio",
+                    "sig_f",
+                    "ref_f",
+                    "baseline_sig",
+                    "baseline_ref",
+                    "output",
+                ):
+                    value = getattr(proc, field, None)
+                    if value is None:
+                        continue
+                    self._write_h5_numeric(entry, field, np.asarray(value, float))
+
+                artifact_regions = getattr(proc, "artifact_regions_sec", None)
+                if artifact_regions:
+                    arr = np.asarray(artifact_regions, float).reshape(-1, 2)
+                    self._write_h5_numeric(entry, "artifact_regions_sec", arr)
+                artifact_regions_auto = getattr(proc, "artifact_regions_auto_sec", None)
+                if artifact_regions_auto:
+                    arr_auto = np.asarray(artifact_regions_auto, float).reshape(-1, 2)
+                    self._write_h5_numeric(entry, "artifact_regions_auto_sec", arr_auto)
+
+            behavior_group = f.create_group("behavior_sources")
+            behavior_group.attrs["count"] = int(len(self._behavior_sources))
+            for idx, (stem, info) in enumerate(self._behavior_sources.items()):
+                source = info or {}
+                entry = behavior_group.create_group(f"item_{idx:04d}")
+                entry.attrs["stem"] = str(stem)
+                entry.attrs["kind"] = str(source.get("kind", _BEHAVIOR_PARSE_BINARY))
+                entry.attrs["trajectory_time_col"] = str(source.get("trajectory_time_col", "") or "")
+                if source.get("sheet") is not None:
+                    entry.attrs["sheet"] = str(source.get("sheet"))
+                if source.get("source_path") is not None:
+                    entry.attrs["source_path"] = str(source.get("source_path"))
+
+                self._write_h5_numeric(entry, "time", np.asarray(source.get("time", np.array([], float)), float))
+                self._write_h5_numeric(
+                    entry,
+                    "trajectory_time",
+                    np.asarray(source.get("trajectory_time", np.array([], float)), float),
+                )
+
+                behaviors_group = entry.create_group("behaviors")
+                behaviors = source.get("behaviors") or {}
+                for b_idx, (name, values) in enumerate(behaviors.items()):
+                    data = np.asarray(values, float)
+                    kwargs: Dict[str, object] = {}
+                    if data.size > 0:
+                        kwargs["compression"] = "gzip"
+                    ds = behaviors_group.create_dataset(f"item_{b_idx:04d}", data=data, **kwargs)
+                    ds.attrs["name"] = str(name)
+
+                trajectory_group = entry.create_group("trajectory")
+                trajectory = source.get("trajectory") or {}
+                for t_idx, (name, values) in enumerate(trajectory.items()):
+                    data = np.asarray(values, float)
+                    kwargs: Dict[str, object] = {}
+                    if data.size > 0:
+                        kwargs["compression"] = "gzip"
+                    ds = trajectory_group.create_dataset(f"item_{t_idx:04d}", data=data, **kwargs)
+                    ds.attrs["name"] = str(name)
+
+            analysis_group = f.create_group("analysis")
+            self._save_signal_events_h5(analysis_group)
+            self._save_behavior_analysis_h5(analysis_group)
+
+    def _load_project_h5(self, path: str) -> Dict[str, object]:
+        payload: Dict[str, object] = {
+            "settings": {},
+            "tab_sources_index": 0,
+            "processed": [],
+            "behavior_sources": {},
+            "recent_paths": {},
+            "signal_events": None,
+            "behavior_analysis": None,
+        }
+        with h5py.File(path, "r") as f:
+            project_type = self._h5_text(f.attrs.get("project_type", ""), "")
+            if project_type and project_type != "pyber_postprocessing_project":
+                raise ValueError("This H5 file is not a pyBer postprocessing project.")
+            if not project_type and "processed" not in f and "ui" not in f:
+                raise ValueError("This H5 file does not contain a pyBer postprocessing project.")
+
+            ui_group = f.get("ui")
+            if isinstance(ui_group, h5py.Group):
+                payload["settings"] = self._read_h5_json(ui_group, "settings_json")
+                try:
+                    payload["tab_sources_index"] = int(ui_group.attrs.get("tab_sources_index", 0))
+                except Exception:
+                    payload["tab_sources_index"] = 0
+
+            meta_group = f.get("meta")
+            if isinstance(meta_group, h5py.Group):
+                payload["recent_paths"] = self._read_h5_json(meta_group, "recent_paths_json")
+
+            loaded_processed: List[ProcessedTrial] = []
+            processed_group = f.get("processed")
+            if isinstance(processed_group, h5py.Group):
+                for key in sorted(processed_group.keys()):
+                    entry = processed_group.get(key)
+                    if not isinstance(entry, h5py.Group):
+                        continue
+                    time = self._read_h5_numeric(entry, "time")
+                    if time is None or time.size == 0:
+                        continue
+                    t = np.asarray(time, float).reshape(-1)
+                    n = int(t.size)
+
+                    def _aligned(values: Optional[np.ndarray], fill_nan: bool = True) -> np.ndarray:
+                        if values is None:
+                            return np.full(n, np.nan, dtype=float) if fill_nan else np.array([], float)
+                        arr = np.asarray(values, float).reshape(-1)
+                        if arr.size == n:
+                            return arr
+                        if arr.size == 0:
+                            return np.full(n, np.nan, dtype=float) if fill_nan else np.array([], float)
+                        out = np.full(n, np.nan, dtype=float) if fill_nan else np.array([], float)
+                        if fill_nan:
+                            m = min(n, arr.size)
+                            out[:m] = arr[:m]
+                            return out
+                        return arr
+
+                    raw_signal = _aligned(self._read_h5_numeric(entry, "raw_signal"), fill_nan=True)
+                    raw_reference = _aligned(self._read_h5_numeric(entry, "raw_reference"), fill_nan=True)
+                    output_arr = _aligned(self._read_h5_numeric(entry, "output"), fill_nan=True)
+
+                    trial = ProcessedTrial(
+                        path=self._h5_text(entry.attrs.get("path", ""), ""),
+                        channel_id=self._h5_text(entry.attrs.get("channel_id", ""), "import"),
+                        time=t,
+                        raw_signal=raw_signal,
+                        raw_reference=raw_reference,
+                        raw_thr_hi=_aligned(self._read_h5_numeric(entry, "raw_thr_hi"), fill_nan=False)
+                        if "raw_thr_hi" in entry
+                        else None,
+                        raw_thr_lo=_aligned(self._read_h5_numeric(entry, "raw_thr_lo"), fill_nan=False)
+                        if "raw_thr_lo" in entry
+                        else None,
+                        dio=_aligned(self._read_h5_numeric(entry, "dio"), fill_nan=False) if "dio" in entry else None,
+                        dio_name=self._h5_text(entry.attrs.get("dio_name", ""), ""),
+                        sig_f=_aligned(self._read_h5_numeric(entry, "sig_f"), fill_nan=False) if "sig_f" in entry else None,
+                        ref_f=_aligned(self._read_h5_numeric(entry, "ref_f"), fill_nan=False) if "ref_f" in entry else None,
+                        baseline_sig=_aligned(self._read_h5_numeric(entry, "baseline_sig"), fill_nan=False)
+                        if "baseline_sig" in entry
+                        else None,
+                        baseline_ref=_aligned(self._read_h5_numeric(entry, "baseline_ref"), fill_nan=False)
+                        if "baseline_ref" in entry
+                        else None,
+                        output=output_arr,
+                        output_label=self._h5_text(entry.attrs.get("output_label", "output"), "output"),
+                        output_context=self._h5_text(entry.attrs.get("output_context", ""), ""),
+                        artifact_regions_sec=None,
+                        artifact_regions_auto_sec=None,
+                        fs_actual=float(entry.attrs.get("fs_actual", np.nan)),
+                        fs_target=float(entry.attrs.get("fs_target", np.nan)),
+                        fs_used=float(entry.attrs.get("fs_used", np.nan)),
+                    )
+
+                    regions = self._read_h5_numeric(entry, "artifact_regions_sec")
+                    if regions is not None and regions.size:
+                        rr = np.asarray(regions, float).reshape(-1, 2)
+                        trial.artifact_regions_sec = [(float(a), float(b)) for a, b in rr]
+                    regions_auto = self._read_h5_numeric(entry, "artifact_regions_auto_sec")
+                    if regions_auto is not None and regions_auto.size:
+                        ra = np.asarray(regions_auto, float).reshape(-1, 2)
+                        trial.artifact_regions_auto_sec = [(float(a), float(b)) for a, b in ra]
+
+                    loaded_processed.append(trial)
+
+            loaded_behavior: Dict[str, Dict[str, Any]] = {}
+            behavior_group = f.get("behavior_sources")
+            if isinstance(behavior_group, h5py.Group):
+                for key in sorted(behavior_group.keys()):
+                    entry = behavior_group.get(key)
+                    if not isinstance(entry, h5py.Group):
+                        continue
+                    stem = self._h5_text(entry.attrs.get("stem", key), key)
+                    info: Dict[str, Any] = {
+                        "kind": self._h5_text(entry.attrs.get("kind", _BEHAVIOR_PARSE_BINARY), _BEHAVIOR_PARSE_BINARY),
+                        "time": np.asarray(
+                            self._read_h5_numeric(entry, "time") if "time" in entry else np.array([], float),
+                            float,
+                        ),
+                        "behaviors": {},
+                        "trajectory": {},
+                        "trajectory_time": np.asarray(
+                            self._read_h5_numeric(entry, "trajectory_time")
+                            if "trajectory_time" in entry
+                            else np.array([], float),
+                            float,
+                        ),
+                        "trajectory_time_col": self._h5_text(entry.attrs.get("trajectory_time_col", ""), ""),
+                    }
+                    if "sheet" in entry.attrs:
+                        info["sheet"] = self._h5_text(entry.attrs.get("sheet", ""), "")
+                    if "source_path" in entry.attrs:
+                        info["source_path"] = self._h5_text(entry.attrs.get("source_path", ""), "")
+
+                    behaviors_group = entry.get("behaviors")
+                    if isinstance(behaviors_group, h5py.Group):
+                        for b_key in sorted(behaviors_group.keys()):
+                            ds = behaviors_group.get(b_key)
+                            if ds is None:
+                                continue
+                            name = self._h5_text(ds.attrs.get("name", b_key), b_key)
+                            info["behaviors"][name] = np.asarray(ds[()], float)
+
+                    trajectory_group = entry.get("trajectory")
+                    if isinstance(trajectory_group, h5py.Group):
+                        for t_key in sorted(trajectory_group.keys()):
+                            ds = trajectory_group.get(t_key)
+                            if ds is None:
+                                continue
+                            name = self._h5_text(ds.attrs.get("name", t_key), t_key)
+                            info["trajectory"][name] = np.asarray(ds[()], float)
+
+                    loaded_behavior[stem] = info
+
+            analysis_group = f.get("analysis")
+            if isinstance(analysis_group, h5py.Group):
+                payload["signal_events"] = self._load_signal_events_h5(analysis_group)
+                payload["behavior_analysis"] = self._load_behavior_analysis_h5(analysis_group)
+
+            payload["processed"] = loaded_processed
+            payload["behavior_sources"] = loaded_behavior
+        return payload
+
+    def _save_project_file(self) -> None:
+        start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
+        default_name = f"{self._default_export_prefix()}_project.h5"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save postprocessing project",
+            os.path.join(start_dir, default_name),
+            "HDF5 project (*.h5)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith((".h5", ".hdf5")):
+            path = f"{path}.h5"
+        try:
+            self._save_project_h5(path)
+            self._push_recent_paths("postprocess_recent_project_paths", [path])
+            self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
+            self.statusUpdate.emit(f"Project saved: {os.path.basename(path)}", 5000)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Save project", f"Could not save project:\n{exc}")
+
+    def _load_project_file(self) -> None:
+        start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load postprocessing project",
+            start_dir,
+            "HDF5 project (*.h5 *.hdf5)",
+        )
+        if not path:
+            return
+        self._load_project_from_path(path)
+
+    def _import_project_source_paths(self, recent_paths: Dict[str, object]) -> bool:
+        proc_raw = recent_paths.get("processed_paths", []) if isinstance(recent_paths, dict) else []
+        beh_raw = recent_paths.get("behavior_paths", []) if isinstance(recent_paths, dict) else []
+        proc_paths = [str(p).strip() for p in (proc_raw if isinstance(proc_raw, list) else []) if str(p).strip()]
+        beh_paths = [str(p).strip() for p in (beh_raw if isinstance(beh_raw, list) else []) if str(p).strip()]
+        proc_existing = [p for p in proc_paths if os.path.isfile(p)]
+        beh_existing = [p for p in beh_paths if os.path.isfile(p)]
+        if not proc_existing and not beh_existing:
+            return False
+
+        if proc_existing:
+            self._load_processed_paths(proc_existing, replace=True)
+        if beh_existing:
+            self._load_behavior_paths(beh_existing, replace=True)
+            self._refresh_behavior_list()
+        return bool(proc_existing or beh_existing)
+
+    def _load_project_from_path(self, path: str) -> None:
+        try:
+            payload = self._load_project_h5(path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Load project", f"Could not load project:\n{exc}")
+            return
+
+        settings_data = payload.get("settings", {})
+        processed = payload.get("processed", [])
+        behavior_sources = payload.get("behavior_sources", {})
+        tab_idx = payload.get("tab_sources_index", 0)
+        recent_paths = payload.get("recent_paths", {}) if isinstance(payload.get("recent_paths", {}), dict) else {}
+
+        was_restoring = self._is_restoring_settings
+        self._is_restoring_settings = True
+        try:
+            self._clear_cached_analysis_outputs()
+            self._processed = list(processed) if isinstance(processed, list) else []
+            self._behavior_sources = dict(behavior_sources) if isinstance(behavior_sources, dict) else {}
+
+            self.lbl_group.setText(f"{len(self._processed)} file(s) loaded")
+            kinds = {
+                str((info or {}).get("kind", "")).strip()
+                for info in self._behavior_sources.values()
+                if isinstance(info, dict)
+            }
+            if len(kinds) == 1 and _BEHAVIOR_PARSE_TIMESTAMPS in kinds:
+                mode_label = "timestamps"
+            elif len(kinds) == 1 and _BEHAVIOR_PARSE_BINARY in kinds:
+                mode_label = "binary"
+            elif len(kinds) > 1:
+                mode_label = "mixed"
+            else:
+                mode_label = "timestamps" if self._current_behavior_parse_mode() == _BEHAVIOR_PARSE_TIMESTAMPS else "binary"
+            self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded [{mode_label}]")
+
+            self._update_file_lists()
+            self._refresh_behavior_list()
+            self._set_resample_from_processed()
+            if isinstance(settings_data, dict) and settings_data:
+                self._apply_settings(settings_data)
+            if isinstance(tab_idx, int) and 0 <= tab_idx < self.tab_sources.count():
+                self.tab_sources.setCurrentIndex(tab_idx)
+            self._update_trace_preview()
+            self._update_data_availability()
+        finally:
+            self._is_restoring_settings = was_restoring
+
+        proc_paths = recent_paths.get("processed_paths", []) if isinstance(recent_paths, dict) else []
+        beh_paths = recent_paths.get("behavior_paths", []) if isinstance(recent_paths, dict) else []
+        if isinstance(proc_paths, list) and proc_paths:
+            self._push_recent_paths("postprocess_recent_processed_paths", [str(p) for p in proc_paths if str(p).strip()])
+        if isinstance(beh_paths, list) and beh_paths:
+            self._push_recent_paths("postprocess_recent_behavior_paths", [str(p) for p in beh_paths if str(p).strip()])
+
+        self._push_recent_paths("postprocess_recent_project_paths", [path])
+        try:
+            self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
+        except Exception:
+            pass
+
+        proc_raw = recent_paths.get("processed_paths", []) if isinstance(recent_paths, dict) else []
+        beh_raw = recent_paths.get("behavior_paths", []) if isinstance(recent_paths, dict) else []
+        proc_existing = [str(p).strip() for p in (proc_raw if isinstance(proc_raw, list) else []) if str(p).strip() and os.path.isfile(str(p).strip())]
+        beh_existing = [str(p).strip() for p in (beh_raw if isinstance(beh_raw, list) else []) if str(p).strip() and os.path.isfile(str(p).strip())]
+        has_referenced_sources = bool(proc_existing or beh_existing)
+
+        imported_sources = False
+        if has_referenced_sources:
+            ask_sources = QtWidgets.QMessageBox.question(
+                self,
+                "Load project",
+                "Import linked source files from this project (last opened data)?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if ask_sources == QtWidgets.QMessageBox.StandardButton.Yes:
+                imported_sources = self._import_project_source_paths(recent_paths)
+
+        if self._processed:
+            self._compute_psth()
+            self._compute_spatial_heatmap()
+        elif not imported_sources:
+            ask = QtWidgets.QMessageBox.question(
+                self,
+                "Load project",
+                "Project loaded without processed traces. Import current preprocessing selection now?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.Yes,
+            )
+            if ask == QtWidgets.QMessageBox.StandardButton.Yes:
+                self._pending_project_recompute_from_current = True
+                self.requestCurrentProcessed.emit()
+
+        self._restore_cached_analysis_outputs(payload)
+        self._save_settings()
+        self._update_status_strip()
+        self.statusUpdate.emit(f"Project loaded: {os.path.basename(path)}", 5000)
 
     def _save_config_file(self) -> None:
         start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)

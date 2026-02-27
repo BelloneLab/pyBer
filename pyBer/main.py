@@ -346,6 +346,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pool = QtCore.QThreadPool.globalInstance()
         self._job_counter = 0
         self._latest_job_id = 0
+        self._preview_preserve_view_pending: bool = False
+        self._preview_preserve_view_by_job: Dict[int, bool] = {}
 
         # Debounce
         self._preview_timer = QtCore.QTimer(self)
@@ -444,8 +446,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_workflow_export,
             self.btn_plot_style,
         ):
-            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-            b.setMinimumWidth(44)
+            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
+            b.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         for b in (self.btn_workflow_artifacts, self.btn_workflow_qc, self.btn_plot_style):
             b.setProperty("class", "blueSecondarySmall")
 
@@ -485,8 +487,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for btn in self._section_buttons.values():
             btn.setCheckable(True)
             btn.setProperty("class", "blueSecondarySmall")
-            btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-            btn.setMinimumWidth(56)
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
+            btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
 
         workflow_row = QtWidgets.QHBoxLayout()
         workflow_row.setContentsMargins(0, 0, 0, 0)
@@ -497,17 +499,22 @@ class MainWindow(QtWidgets.QMainWindow):
         workflow_row.addWidget(self.btn_workflow_qc)
         workflow_row.addWidget(self.btn_workflow_export)
         workflow_row.addWidget(self.btn_plot_style)
-        workflow_row.addSpacing(8)
-        workflow_row.addWidget(QtWidgets.QLabel("Parameters:"))
-        for btn in self._section_buttons.values():
-            workflow_row.addWidget(btn)
         workflow_row.addStretch(1)
+
+        section_row = QtWidgets.QHBoxLayout()
+        section_row.setContentsMargins(0, 0, 0, 0)
+        section_row.setSpacing(6)
+        section_row.addWidget(QtWidgets.QLabel("Parameters:"))
+        for btn in self._section_buttons.values():
+            section_row.addWidget(btn)
+        section_row.addStretch(1)
 
         center_widget = QtWidgets.QWidget()
         center_v = QtWidgets.QVBoxLayout(center_widget)
         center_v.setContentsMargins(0, 0, 0, 0)
         center_v.setSpacing(6)
         center_v.addLayout(workflow_row)
+        center_v.addLayout(section_row)
         center_v.addWidget(self.plots, stretch=1)
 
         # Main splitter: data panel + visuals. Parameter popups are floating by default.
@@ -709,6 +716,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
             btn.setMinimumWidth(90)
+            btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
             row.addWidget(btn)
         return panel
 
@@ -732,6 +740,7 @@ class MainWindow(QtWidgets.QMainWindow):
             dock.show()
             dock.raise_()
             dock.activateWindow()
+            self._focus_first_editable(dock.widget())
             self._last_opened_section = key
         else:
             dock.hide()
@@ -1101,13 +1110,53 @@ class MainWindow(QtWidgets.QMainWindow):
         fw = QtWidgets.QApplication.focusWidget()
         if fw is None:
             return False
+        if isinstance(fw, QtWidgets.QAbstractButton):
+            return False
         if isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QPlainTextEdit, QtWidgets.QTextEdit)):
             return True
         if isinstance(fw, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox, QtWidgets.QAbstractSpinBox)):
             return True
         if isinstance(fw, QtWidgets.QComboBox) and fw.isEditable():
             return True
+        parent = fw.parentWidget()
+        while parent is not None:
+            if isinstance(parent, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox, QtWidgets.QAbstractSpinBox)):
+                return True
+            if isinstance(parent, QtWidgets.QComboBox) and parent.isEditable():
+                return True
+            parent = parent.parentWidget()
         return False
+
+    def _focus_first_editable(self, root: Optional[QtWidgets.QWidget]) -> None:
+        if root is None:
+            return
+        editable_types = (
+            QtWidgets.QLineEdit,
+            QtWidgets.QPlainTextEdit,
+            QtWidgets.QTextEdit,
+            QtWidgets.QSpinBox,
+            QtWidgets.QDoubleSpinBox,
+            QtWidgets.QAbstractSpinBox,
+            QtWidgets.QComboBox,
+        )
+        for w in root.findChildren(QtWidgets.QWidget):
+            if not isinstance(w, editable_types):
+                continue
+            if not w.isVisible() or not w.isEnabled():
+                continue
+            if isinstance(w, QtWidgets.QComboBox) and not w.isEditable():
+                continue
+            try:
+                w.setFocus(QtCore.Qt.FocusReason.TabFocusReason)
+            except Exception:
+                continue
+            if isinstance(w, QtWidgets.QAbstractSpinBox):
+                le = w.lineEdit()
+                if le is not None:
+                    le.selectAll()
+            elif isinstance(w, QtWidgets.QLineEdit):
+                w.selectAll()
+            return
 
     def _bind_shortcut(
         self,
@@ -1122,7 +1171,7 @@ class MainWindow(QtWidgets.QMainWindow):
         def _on_activated() -> None:
             if self.tabs.currentWidget() is not self.pre_tab:
                 return
-            if require_non_text_focus and self._is_text_entry_focused():
+            if self._is_text_entry_focused():
                 return
             callback()
 
@@ -3070,7 +3119,7 @@ class MainWindow(QtWidgets.QMainWindow):
             trigger_name=trial.trigger_name,
         )
 
-    def _update_raw_plot(self) -> None:
+    def _update_raw_plot(self, preserve_view: bool = False) -> None:
         if not self._current_path or not self._current_channel:
             return
         doric = self._loaded_files.get(self._current_path)
@@ -3101,6 +3150,7 @@ class MainWindow(QtWidgets.QMainWindow):
             trig=trial.trigger,
             trig_label=self._current_trigger or "",
             manual_regions=manual,
+            preserve_view=preserve_view,
         )
         self._update_plot_status(fs_actual=float(trial.sampling_rate), fs_target=float(params.target_fs_hz))
 
@@ -3119,7 +3169,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             params = self.param_panel.get_params()
         except Exception:
-            self._trigger_preview()
+            self._trigger_preview(preserve_view=True)
             return
         self._update_plot_status(fs_target=float(params.target_fs_hz))
         sig = self._artifact_param_signature(params)
@@ -3136,14 +3186,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.artifact_panel.set_auto_regions(auto, checked_regions=auto)
         # Update raw display for toggles like polarity inversion
         try:
-            self._update_raw_plot()
+            self._update_raw_plot(preserve_view=True)
         except Exception:
             pass
-        self._trigger_preview()
+        self._trigger_preview(preserve_view=True)
 
-    def _trigger_preview(self) -> None:
+    def _trigger_preview(self, preserve_view: bool = False) -> None:
         # persist params quickly
         self._save_settings()
+        self._preview_preserve_view_pending = bool(preserve_view)
         self._preview_timer.start()
 
     def _start_preview_processing(self) -> None:
@@ -3166,6 +3217,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._job_counter += 1
         job_id = self._job_counter
         self._latest_job_id = job_id
+        preserve_view = bool(self._preview_preserve_view_pending)
+        self._preview_preserve_view_pending = False
+        self._preview_preserve_view_by_job[job_id] = preserve_view
 
         self._show_status_message(
             f"Processing preview... (fs={trial.sampling_rate:.2f} Hz -> target {params.target_fs_hz:.1f} Hz, "
@@ -3186,6 +3240,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(object, int, float)
     def _on_preview_finished(self, processed: ProcessedTrial, job_id: int, elapsed_s: float) -> None:
+        preserve_view = bool(self._preview_preserve_view_by_job.pop(job_id, False))
         if job_id != self._latest_job_id:
             return  # ignore stale jobs
 
@@ -3207,9 +3262,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.artifact_panel.set_regions(manual_regs)
 
         # Update plots (decimated signals)
-        self.plots.update_plots(processed)
-        # Auto-range on each update so file/time-window changes do not require manual reset.
-        self._auto_range_for_processed(processed)
+        self.plots.update_plots(processed, preserve_view=preserve_view)
+        if not preserve_view:
+            # Auto-range on each update so file/time-window changes do not require manual reset.
+            self._auto_range_for_processed(processed)
 
         log_msg = (
             f"Preview updated: {processed.output_label} | fs={processed.fs_actual:.2f}->{processed.fs_used:.2f} Hz "
@@ -3224,6 +3280,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(str, int)
     def _on_preview_failed(self, err: str, job_id: int) -> None:
+        self._preview_preserve_view_by_job.pop(job_id, None)
         if job_id != self._latest_job_id:
             return
         self._show_status_message(f"Preview error: {err}")

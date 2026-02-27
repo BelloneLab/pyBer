@@ -2593,6 +2593,14 @@ class PlotDashboard(QtWidgets.QWidget):
           - show_raw(time=..., signal_465=..., reference_405=...)
           - show_raw(time=..., raw_signal=..., raw_reference=...)
         """
+        preserve_view = False
+        for key in ("preserve_view", "preserve_xrange", "keep_view"):
+            if key in kwargs:
+                try:
+                    preserve_view = preserve_view or bool(kwargs.pop(key))
+                except Exception:
+                    kwargs.pop(key, None)
+
         # Positional support: (time, sig, ref)
         t = s = r = None
         if len(args) >= 3:
@@ -2622,7 +2630,8 @@ class PlotDashboard(QtWidgets.QWidget):
         self.curve_465.setData(t, s, connect="finite", skipFiniteCheck=True)
         r_scaled = self._scale_reference_to_signal(s, r)
         self.curve_405.setData(t, r_scaled, connect="finite", skipFiniteCheck=True)
-        self.set_full_xrange(t)
+        if not preserve_view:
+            self.set_full_xrange(t)
         self._clear_artifact_overlays()
 
         # Thresholds (either scalars or arrays): do not use "or" on arrays.
@@ -2679,6 +2688,14 @@ class PlotDashboard(QtWidgets.QWidget):
           - show_processing(time, sig_f=..., ref_f=..., baseline_sig=..., baseline_ref=...)
           - show_processing(time=..., sig_f=..., ref_f=..., b_sig=..., b_ref=...)
         """
+        preserve_view = False
+        for key in ("preserve_view", "preserve_xrange", "keep_view"):
+            if key in kwargs:
+                try:
+                    preserve_view = preserve_view or bool(kwargs.pop(key))
+                except Exception:
+                    kwargs.pop(key, None)
+
         if len(args) >= 1:
             t = args[0]
         else:
@@ -2716,7 +2733,8 @@ class PlotDashboard(QtWidgets.QWidget):
         dio = _first_not_none(kwargs, "dio", "digital", "dio_y")
         dio_name = _first_not_none(kwargs, "dio_name", "digital_name", "trigger_name", default="") or ""
         self._set_dio(t, dio, str(dio_name))
-        self.set_full_xrange(t)
+        if not preserve_view:
+            self.set_full_xrange(t)
 
     def show_output(self, *args, **kwargs) -> None:
         """
@@ -2726,6 +2744,14 @@ class PlotDashboard(QtWidgets.QWidget):
           - show_output(time, output, label="...", dio=..., dio_name=...)
           - show_output(time=..., y=..., label=...)
         """
+        preserve_view = False
+        for key in ("preserve_view", "preserve_xrange", "keep_view"):
+            if key in kwargs:
+                try:
+                    preserve_view = preserve_view or bool(kwargs.pop(key))
+                except Exception:
+                    kwargs.pop(key, None)
+
         if len(args) >= 2:
             t, y = args[0], args[1]
         else:
@@ -2743,7 +2769,8 @@ class PlotDashboard(QtWidgets.QWidget):
         t, y = t[:n], y[:n]
 
         self.curve_out.setData(t, y, connect="finite", skipFiniteCheck=True)
-        self.set_full_xrange(t)
+        if not preserve_view:
+            self.set_full_xrange(t)
 
         label = _first_not_none(kwargs, "label", "output_label", default="Output")
         context = _first_not_none(kwargs, "output_context", "label_context", default="")
@@ -2756,24 +2783,27 @@ class PlotDashboard(QtWidgets.QWidget):
 
     # -------------------- Modern API (kept) --------------------
 
-    def update_plots(self, processed: ProcessedTrial) -> None:
+    def update_plots(self, processed: ProcessedTrial, preserve_view: bool = False) -> None:
         t = np.asarray(processed.time, float)
         self.show_raw(
             t, processed.raw_signal, processed.raw_reference,
             dio=processed.dio, dio_name=processed.dio_name,
-            thr_hi=processed.raw_thr_hi, thr_lo=processed.raw_thr_lo
+            thr_hi=processed.raw_thr_hi, thr_lo=processed.raw_thr_lo,
+            preserve_view=preserve_view,
         )
         self.show_processing(
             t,
             sig_f=processed.sig_f, ref_f=processed.ref_f,
             baseline_sig=processed.baseline_sig, baseline_ref=processed.baseline_ref,
-            dio=processed.dio, dio_name=processed.dio_name
+            dio=processed.dio, dio_name=processed.dio_name,
+            preserve_view=preserve_view,
         )
         self.show_output(
             t, processed.output,
             label=processed.output_label,
             output_context=getattr(processed, "output_context", ""),
-            dio=processed.dio, dio_name=processed.dio_name
+            dio=processed.dio, dio_name=processed.dio_name,
+            preserve_view=preserve_view,
         )
         self._update_artifact_overlays(t, processed.raw_signal, processed.artifact_regions_sec)
 
