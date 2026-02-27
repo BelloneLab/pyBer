@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import json
 import logging
+import sys
 from typing import Callable, Dict, List, Optional, Tuple
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -111,8 +112,20 @@ _LOG = logging.getLogger(__name__)
 
 
 def _pyber_icon_path() -> str:
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_dir, "assets", "pyBer_logo_big.png")
+    if getattr(sys, "frozen", False):
+        base_dir = str(getattr(sys, "_MEIPASS", "")) or os.path.dirname(sys.executable)
+        candidates = [
+            os.path.join(base_dir, "assets", "pyBer_logo_big.png"),
+            os.path.join(os.path.dirname(sys.executable), "assets", "pyBer_logo_big.png"),
+        ]
+    else:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        candidates = [os.path.join(base_dir, "assets", "pyBer_logo_big.png")]
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return candidates[0]
 
 
 def _rolling_corr(x: np.ndarray, y: np.ndarray, win: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -275,7 +288,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.setWindowIcon(icon)
         except Exception:
             pass
-        self.resize(1500, 900)
+        self._set_initial_window_size()
         self.setDockOptions(
             QtWidgets.QMainWindow.DockOption.AllowNestedDocks
             | QtWidgets.QMainWindow.DockOption.AllowTabbedDocks
@@ -352,6 +365,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------- UI ----------------
 
+    def _set_initial_window_size(self) -> None:
+        """Choose a sensible non-fullscreen default size relative to the active screen."""
+        screen = QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(1280, 780)
+            return
+        rect = screen.availableGeometry()
+        width = max(1024, min(1500, int(rect.width() * 0.86)))
+        height = max(680, min(900, int(rect.height() * 0.84)))
+        min_w = max(860, min(980, int(rect.width() * 0.65)))
+        min_h = max(560, min(640, int(rect.height() * 0.60)))
+        self.setMinimumSize(min_w, min_h)
+        self.resize(width, height)
+
     def _build_ui(self) -> None:
         self.setStyleSheet(APP_QSS)
 
@@ -384,8 +411,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.art_dock)
 
         # Left pane: data browser
-        self.file_panel.setMinimumWidth(320)
-        self.file_panel.setMaximumWidth(380)
+        self.file_panel.setMinimumWidth(260)
+        self.file_panel.setMaximumWidth(340)
         self.file_panel.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
 
         # Center pane: workflow toolbar + plots
@@ -403,13 +430,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_workflow_artifacts = QtWidgets.QPushButton("Detected artifacts")
         self.btn_workflow_qc = QtWidgets.QPushButton("QC")
         self.btn_workflow_export = QtWidgets.QPushButton("Export")
+        self.btn_plot_style = QtWidgets.QPushButton("Plot style")
         self.btn_toggle_data = QtWidgets.QPushButton("Data")
         self.btn_toggle_data.setCheckable(True)
         self.btn_toggle_data.setChecked(True)
         self.btn_toggle_data.setProperty("class", "blueSecondarySmall")
         self.btn_workflow_export.setProperty("class", "bluePrimarySmall")
-        for b in (self.btn_workflow_artifacts, self.btn_workflow_qc):
+        for b in (
+            self.btn_toggle_data,
+            self.btn_workflow_load,
+            self.btn_workflow_artifacts,
+            self.btn_workflow_qc,
+            self.btn_workflow_export,
+            self.btn_plot_style,
+        ):
+            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+            b.setMinimumWidth(44)
+        for b in (self.btn_workflow_artifacts, self.btn_workflow_qc, self.btn_plot_style):
             b.setProperty("class", "blueSecondarySmall")
+
+        self.menu_plot_style = QtWidgets.QMenu(self.btn_plot_style)
+        self._plot_bg_group = QtGui.QActionGroup(self)
+        self._plot_bg_group.setExclusive(True)
+        self.act_plot_bg_dark = self.menu_plot_style.addAction("Dark background")
+        self.act_plot_bg_dark.setCheckable(True)
+        self.act_plot_bg_white = self.menu_plot_style.addAction("White background")
+        self.act_plot_bg_white.setCheckable(True)
+        self._plot_bg_group.addAction(self.act_plot_bg_dark)
+        self._plot_bg_group.addAction(self.act_plot_bg_white)
+        self.menu_plot_style.addSeparator()
+        self.act_plot_grid = self.menu_plot_style.addAction("Show grid")
+        self.act_plot_grid.setCheckable(True)
+        self.act_plot_bg_dark.setChecked(True)
+        self.act_plot_grid.setChecked(True)
+        self.btn_plot_style.setMenu(self.menu_plot_style)
 
         # Inline parameter section buttons (same row as workflow actions).
         self.btn_section_artifacts = QtWidgets.QPushButton("Artifacts")
@@ -431,7 +485,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for btn in self._section_buttons.values():
             btn.setCheckable(True)
             btn.setProperty("class", "blueSecondarySmall")
-            btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+            btn.setMinimumWidth(56)
 
         workflow_row = QtWidgets.QHBoxLayout()
         workflow_row.setContentsMargins(0, 0, 0, 0)
@@ -441,6 +496,7 @@ class MainWindow(QtWidgets.QMainWindow):
         workflow_row.addWidget(self.btn_workflow_artifacts)
         workflow_row.addWidget(self.btn_workflow_qc)
         workflow_row.addWidget(self.btn_workflow_export)
+        workflow_row.addWidget(self.btn_plot_style)
         workflow_row.addSpacing(8)
         workflow_row.addWidget(QtWidgets.QLabel("Parameters:"))
         for btn in self._section_buttons.values():
@@ -514,6 +570,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_open_file.triggered.connect(self._open_files_dialog)
         self.act_add_folder.triggered.connect(self._open_folder_dialog)
         self.act_focus_data.triggered.connect(self._focus_data_browser)
+        self.act_plot_bg_dark.triggered.connect(self._on_pre_plot_style_changed)
+        self.act_plot_bg_white.triggered.connect(self._on_pre_plot_style_changed)
+        self.act_plot_grid.toggled.connect(self._on_pre_plot_style_changed)
         self.btn_toggle_data.toggled.connect(self._set_data_panel_visible)
         self.btn_workflow_artifacts.clicked.connect(self._toggle_artifacts_panel)
         self.btn_workflow_qc.clicked.connect(self._run_qc_dialog)
@@ -648,7 +707,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.param_panel.btn_save_config,
             self.param_panel.btn_load_config,
         ):
-            btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+            btn.setMinimumWidth(90)
             row.addWidget(btn)
         return panel
 
@@ -1672,6 +1732,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plots.set_artifact_thresholds_visible(bool(show_thresholds))
         except Exception:
             pass
+        try:
+            plot_bg = self.settings.value("pre_plot_background", "dark", type=str)
+        except Exception:
+            plot_bg = "dark"
+        try:
+            plot_grid = _to_bool(self.settings.value("pre_plot_grid", True), True)
+        except Exception:
+            plot_grid = True
+        self._apply_pre_plot_style(plot_bg, plot_grid, persist=False)
 
         if self._force_fixed_dock_layouts:
             # Fixed mode: always enforce deterministic defaults.
@@ -1769,6 +1838,11 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         try:
             self.settings.setValue("artifact_thresholds_visible", bool(self.plots.artifact_thresholds_visible()))
+        except Exception:
+            pass
+        try:
+            self.settings.setValue("pre_plot_background", str(self.plots.plot_background_mode()))
+            self.settings.setValue("pre_plot_grid", bool(self.plots.plot_grid_visible()))
         except Exception:
             pass
 
@@ -2498,6 +2572,46 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plots.set_artifact_thresholds_visible(bool(visible))
         self._save_settings()
 
+    def _normalize_pre_plot_background(self, value: object) -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"white", "light", "w"}:
+            return "white"
+        return "dark"
+
+    def _selected_pre_plot_background(self) -> str:
+        if hasattr(self, "act_plot_bg_white") and self.act_plot_bg_white.isChecked():
+            return "white"
+        return "dark"
+
+    def _apply_pre_plot_style(self, background: object, show_grid: object, persist: bool = True) -> None:
+        mode = self._normalize_pre_plot_background(background)
+        grid = bool(show_grid)
+        if hasattr(self, "act_plot_bg_dark"):
+            self.act_plot_bg_dark.blockSignals(True)
+            self.act_plot_bg_dark.setChecked(mode == "dark")
+            self.act_plot_bg_dark.blockSignals(False)
+        if hasattr(self, "act_plot_bg_white"):
+            self.act_plot_bg_white.blockSignals(True)
+            self.act_plot_bg_white.setChecked(mode == "white")
+            self.act_plot_bg_white.blockSignals(False)
+        if hasattr(self, "act_plot_grid"):
+            self.act_plot_grid.blockSignals(True)
+            self.act_plot_grid.setChecked(grid)
+            self.act_plot_grid.blockSignals(False)
+        try:
+            self.plots.set_plot_appearance(mode, grid)
+        except Exception:
+            pass
+        if persist:
+            self._save_settings()
+
+    def _on_pre_plot_style_changed(self, *_args) -> None:
+        self._apply_pre_plot_style(
+            self._selected_pre_plot_background(),
+            self.act_plot_grid.isChecked() if hasattr(self, "act_plot_grid") else True,
+            persist=True,
+        )
+
     def _auto_range_for_processed(self, processed: ProcessedTrial) -> None:
         try:
             start_s, end_s = self._time_window_bounds()
@@ -2978,7 +3092,7 @@ class MainWindow(QtWidgets.QMainWindow):
             raw465 = -np.asarray(raw465, float)
             raw405 = -np.asarray(raw405, float)
 
-        self.plots.set_title(os.path.basename(self._current_path))
+        self.plots.set_title("raw signal")
         self.plots.show_raw(
             time=trial.time,
             raw465=raw465,

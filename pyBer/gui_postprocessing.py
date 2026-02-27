@@ -478,6 +478,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._section_scroll_hosts: Dict[str, QtWidgets.QScrollArea] = {}
         self._section_buttons: Dict[str, QtWidgets.QPushButton] = {}
         self._section_popup_initialized: set[str] = set()
+        self._is_restoring_settings: bool = True
+        self._settings_save_timer = QtCore.QTimer(self)
+        self._settings_save_timer.setSingleShot(True)
+        self._settings_save_timer.setInterval(250)
+        self._settings_save_timer.timeout.connect(self._save_settings)
         self._is_restoring_panel_layout: bool = False
         self._panel_layout_persistence_ready: bool = False
         self._last_opened_section: Optional[str] = None
@@ -490,8 +495,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._app_closing: bool = False
         self._post_snapshot_applied: bool = False
         self._force_fixed_default_layout: bool = False
-        self._build_ui()
-        self._restore_settings()
+        try:
+            self._build_ui()
+            self._restore_settings()
+        finally:
+            self._is_restoring_settings = False
         self._panel_layout_persistence_ready = True
         app = QtWidgets.QApplication.instance()
         if app is not None:
@@ -1567,7 +1575,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_hide_filters.toggled.connect(self._toggle_filter_panel)
         self.btn_hide_metrics.toggled.connect(self._toggle_metrics_panel)
         self.combo_view_layout.currentIndexChanged.connect(self._apply_view_layout)
-        self.combo_view_layout.currentIndexChanged.connect(lambda *_: self._save_settings())
+        self.combo_view_layout.currentIndexChanged.connect(self._queue_settings_save)
         self.cb_peak_overlay.toggled.connect(self._refresh_signal_overlay)
         self.combo_signal_source.currentIndexChanged.connect(self._refresh_signal_file_combo)
         self.combo_signal_scope.currentIndexChanged.connect(self._refresh_signal_file_combo)
@@ -1628,6 +1636,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_spatial_invert_y.toggled.connect(self._compute_spatial_heatmap)
         self.combo_spatial_activity_mode.currentIndexChanged.connect(self._compute_spatial_heatmap)
         self.btn_spatial_help.clicked.connect(self._show_spatial_help)
+        self._wire_settings_autosave()
 
         self._update_align_ui()
         self._update_event_filter_enabled()
@@ -2509,7 +2518,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         enabled = self.cb_filter_events.isChecked()
         for w in (self.spin_event_start, self.spin_event_end, self.spin_group_window, self.spin_dur_min, self.spin_dur_max):
             w.setEnabled(enabled)
-        self._save_settings()
+        self._queue_settings_save()
 
     def _update_metrics_enabled(self) -> None:
         enabled = self.cb_metrics.isChecked()
@@ -2522,7 +2531,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         ):
             w.setEnabled(enabled)
         self._update_metric_regions()
-        self._save_settings()
+        self._queue_settings_save()
 
     def _update_global_metrics_enabled(self) -> None:
         enabled = self.cb_global_metrics.isChecked()
@@ -2536,7 +2545,93 @@ class PostProcessingPanel(QtWidgets.QWidget):
             w.setEnabled(enabled)
         self._render_global_metrics()
         self._apply_view_layout()
-        self._save_settings()
+        self._queue_settings_save()
+
+    def _queue_settings_save(self, *_args: object) -> None:
+        if self._is_restoring_settings:
+            return
+        timer = getattr(self, "_settings_save_timer", None)
+        if timer is None:
+            self._save_settings()
+            return
+        timer.start()
+
+    def _wire_settings_autosave(self) -> None:
+        for combo in (
+            self.combo_align,
+            self.combo_dio,
+            self.combo_dio_polarity,
+            self.combo_dio_align,
+            self.combo_behavior_file_type,
+            self.combo_behavior_name,
+            self.combo_behavior_align,
+            self.combo_behavior_from,
+            self.combo_behavior_to,
+            self.combo_metric,
+            self.combo_signal_source,
+            self.combo_signal_scope,
+            self.combo_signal_file,
+            self.combo_signal_method,
+            self.combo_peak_baseline,
+            self.combo_behavior_analysis,
+            self.combo_spatial_x,
+            self.combo_spatial_y,
+            self.combo_spatial_weight,
+            self.combo_spatial_activity_mode,
+        ):
+            combo.currentIndexChanged.connect(self._queue_settings_save)
+
+        for spin in (
+            self.spin_transition_gap,
+            self.spin_pre,
+            self.spin_post,
+            self.spin_b0,
+            self.spin_b1,
+            self.spin_resample,
+            self.spin_smooth,
+            self.spin_event_start,
+            self.spin_event_end,
+            self.spin_group_window,
+            self.spin_dur_min,
+            self.spin_dur_max,
+            self.spin_metric_pre0,
+            self.spin_metric_pre1,
+            self.spin_metric_post0,
+            self.spin_metric_post1,
+            self.spin_global_start,
+            self.spin_global_end,
+            self.spin_peak_prominence,
+            self.spin_peak_height,
+            self.spin_peak_distance,
+            self.spin_peak_smooth,
+            self.spin_peak_baseline_window,
+            self.spin_peak_rate_bin,
+            self.spin_peak_auc_window,
+            self.spin_behavior_bin,
+            self.spin_spatial_bins_x,
+            self.spin_spatial_bins_y,
+            self.spin_spatial_clip_low,
+            self.spin_spatial_clip_high,
+            self.spin_spatial_time_min,
+            self.spin_spatial_time_max,
+            self.spin_spatial_smooth,
+        ):
+            spin.valueChanged.connect(self._queue_settings_save)
+
+        for chk in (
+            self.cb_filter_events,
+            self.cb_metrics,
+            self.cb_global_metrics,
+            self.cb_global_amp,
+            self.cb_global_freq,
+            self.cb_peak_overlay,
+            self.cb_behavior_aligned,
+            self.cb_spatial_clip,
+            self.cb_spatial_time_filter,
+            self.cb_spatial_log,
+            self.cb_spatial_invert_y,
+        ):
+            chk.toggled.connect(self._queue_settings_save)
 
     def _refresh_section_scroll(self, key: str) -> None:
         scroll = self._section_scroll_hosts.get(key)
@@ -3150,6 +3245,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._compute_spatial_heatmap(show_panel=True)
 
     def _compute_spatial_heatmap(self, *_args: object, show_panel: bool = False) -> None:
+        self._queue_settings_save()
         if not hasattr(self, "plot_spatial_occupancy"):
             return
         if show_panel:
@@ -4613,6 +4709,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     w.writerow([float(starts[i]), float(ends[i]), float(durs[i]), file_id, behavior_name])
 
     def _compute_psth(self) -> None:
+        self._queue_settings_save()
         if not self._processed:
             self.statusUpdate.emit("No processed data loaded.", 5000)
             self._last_global_metrics = None
@@ -5311,6 +5408,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             pass
 
     def _restore_settings(self) -> None:
+        was_restoring = self._is_restoring_settings
+        self._is_restoring_settings = True
         try:
             raw = self._settings.value("postprocess_json", "", type=str)
             if raw:
@@ -5318,6 +5417,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._apply_settings(data)
         except Exception:
             pass
+        finally:
+            self._is_restoring_settings = was_restoring
 
     def _export_origin_dir(self) -> str:
         if self._processed:

@@ -37,6 +37,25 @@ jobs:
           python -m pip --version
           python -c "import os, sys; print('CONDA_PREFIX=', os.environ.get('CONDA_PREFIX')); print('PYTHON=', sys.executable)"
 
+      - name: Build Windows icon from assets
+        run: |
+          python -m pip install --upgrade pillow
+          mkdir -p build
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+
+          src = Path("assets/pyBer_logo_big.png")
+          dst = Path("build/pyBer_logo_big.ico")
+          if not src.exists():
+              raise SystemExit(f"Missing icon source: {src}")
+
+          img = Image.open(src).convert("RGBA")
+          sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
+          img.save(dst, format="ICO", sizes=sizes)
+          print(f"Wrote {dst}")
+          PY
+
       - name: Build with PyInstaller (last known good method)
         run: |
           DLLS=(
@@ -71,6 +90,8 @@ jobs:
             --clean \
             --onefile \
             --windowed \
+            --icon build/pyBer_logo_big.ico \
+            --add-data "assets;assets" \
             --name pyBer \
             "${ADD_ARGS[@]}" \
             pyBer/main.py

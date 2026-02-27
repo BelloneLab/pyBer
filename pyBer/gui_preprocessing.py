@@ -2129,6 +2129,8 @@ class PlotDashboard(QtWidgets.QWidget):
         self._sync_guard = False
         self._artifact_overlay_visible = True
         self._artifact_thresholds_visible = True
+        self._plot_background_mode = "dark"
+        self._plot_grid_visible = True
         self._artifact_regions: List[pg.LinearRegionItem] = []
         self._artifact_region_bounds: List[Tuple[float, float]] = []
         self._artifact_labels: List[pg.TextItem] = []
@@ -2182,7 +2184,7 @@ class PlotDashboard(QtWidgets.QWidget):
         v.addLayout(tools)
 
         self._raw_vb = ArtifactSelectViewBox()
-        self.plot_raw = pg.PlotWidget(viewBox=self._raw_vb, title="Raw signals (465 /405)")
+        self.plot_raw = pg.PlotWidget(viewBox=self._raw_vb, title="raw signal")
         self.plot_proc = pg.PlotWidget(title="Filtered + baselines")
         self.plot_out = pg.PlotWidget(title="Output")
         for w in (self.plot_raw, self.plot_proc, self.plot_out):
@@ -2261,6 +2263,51 @@ class PlotDashboard(QtWidgets.QWidget):
 
         self._sync_artifact_threshold_curves_visibility()
         self._toggle_box_select(False)
+        self.set_plot_appearance(self._plot_background_mode, self._plot_grid_visible)
+
+    def _normalize_plot_background_mode(self, value: object) -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"white", "light", "w"}:
+            return "white"
+        return "dark"
+
+    def set_plot_appearance(self, background_mode: str, show_grid: bool) -> None:
+        self._plot_background_mode = self._normalize_plot_background_mode(background_mode)
+        self._plot_grid_visible = bool(show_grid)
+
+        if self._plot_background_mode == "white":
+            bg = pg.mkColor("w")
+            axis_pen = pg.mkPen((35, 35, 35), width=1.0)
+            text_pen = pg.mkPen((35, 35, 35), width=1.0)
+            grid_alpha = 0.20
+        else:
+            bg = pg.mkColor((18, 22, 30))
+            axis_pen = pg.mkPen((200, 205, 215), width=1.0)
+            text_pen = pg.mkPen((200, 205, 215), width=1.0)
+            grid_alpha = 0.25
+
+        for plot in (self.plot_raw, self.plot_proc, self.plot_out):
+            try:
+                plot.setBackground(bg)
+                plot.showGrid(
+                    x=self._plot_grid_visible,
+                    y=self._plot_grid_visible,
+                    alpha=grid_alpha if self._plot_grid_visible else 0.0,
+                )
+                pi = plot.getPlotItem()
+                for axis_name in ("left", "right", "bottom"):
+                    axis = pi.getAxis(axis_name)
+                    if axis is not None:
+                        axis.setPen(axis_pen)
+                        axis.setTextPen(text_pen)
+            except Exception:
+                pass
+
+    def plot_background_mode(self) -> str:
+        return str(self._plot_background_mode)
+
+    def plot_grid_visible(self) -> bool:
+        return bool(self._plot_grid_visible)
 
     def _add_dio_axis(self, plot: pg.PlotWidget, label: str):
         pi = plot.getPlotItem()
