@@ -31,6 +31,7 @@ _BEHAVIOR_PARSE_TIMESTAMPS = "timestamp_columns"
 _FIXED_POST_RIGHT_SECTIONS = frozenset({"setup", "spatial", "psth", "export"})
 _FIXED_POST_VISIBLE_SECTIONS = frozenset({"setup", "spatial", "psth", "export"})
 _FIXED_POST_RIGHT_TAB_ORDER = ("setup", "psth", "spatial", "export")
+_POST_RIGHT_PANEL_MIN_WIDTH = 420
 _FIXED_POST_RIGHT_TAB_TITLES: Dict[str, str] = {
     "setup": "Setup",
     "psth": "PSTH",
@@ -1411,6 +1412,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         self.img = pg.ImageItem()
         self.plot_heat.addItem(self.img)
+        self.heat_zero_line = pg.InfiniteLine(
+            pos=0.0,
+            angle=90,
+            movable=False,
+            pen=pg.mkPen((245, 245, 245), width=1.0, style=QtCore.Qt.PenStyle.DotLine),
+        )
+        self.heat_zero_line.setZValue(20)
+        self.plot_heat.addItem(self.heat_zero_line)
         self.heat_lut = pg.HistogramLUTWidget()
         self.heat_lut.setMinimumWidth(110)
         self.heat_lut.setMaximumWidth(150)
@@ -1646,9 +1655,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             workspace.setChildrenCollapsible(False)
             workspace.addWidget(right)
             self._dockarea = DockArea()
+            self._dockarea.setMinimumWidth(_POST_RIGHT_PANEL_MIN_WIDTH)
             workspace.addWidget(self._dockarea)
             workspace.setStretchFactor(0, 5)
-            workspace.setStretchFactor(1, 2)
+            workspace.setStretchFactor(1, 3)
+            workspace.setSizes([1280, _POST_RIGHT_PANEL_MIN_WIDTH + 40])
             self._dockarea_splitter = workspace
             root.addWidget(workspace, stretch=1)
         else:
@@ -1867,6 +1878,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self._apply_scroll_theme(scroll)
+            scroll.setMinimumWidth(_POST_RIGHT_PANEL_MIN_WIDTH)
             widget.setMinimumSize(0, 0)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
             scroll.setWidget(widget)
@@ -1912,7 +1924,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _lock_pg_dock_interactions(self, dock: Dock) -> None:
         label = getattr(dock, "label", None)
-        if label is None or bool(getattr(label, "_pyber_fixed_interaction_lock", False)):
+        if label is None:
+            return
+        if not self._force_fixed_default_layout:
+            self._style_pg_dock_label_buttons(label)
+            return
+        if bool(getattr(label, "_pyber_fixed_interaction_lock", False)):
             return
 
         def _ignore_drag(event: QtGui.QMouseEvent) -> None:
@@ -1928,9 +1945,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             label._pyber_fixed_interaction_lock = True
         except Exception:
             pass
-        self._style_pg_dock_label_buttons(label)
+        self._style_pg_dock_label_buttons(dock, label)
 
-    def _style_pg_dock_label_buttons(self, label: object) -> None:
+    def _style_pg_dock_label_buttons(self, dock: Dock, label: object) -> None:
         if label is None:
             return
         try:
@@ -1939,29 +1956,51 @@ class PostProcessingPanel(QtWidgets.QWidget):
             buttons = []
         for btn in buttons:
             try:
-                btn.setText("×")
+                btn.setText("x")
                 btn.setIcon(QtGui.QIcon())
-                btn.setAutoRaise(False)
+                btn.setAutoRaise(True)
                 btn.setFixedSize(13, 13)
                 btn.setToolTip("Close")
+                if not bool(btn.property("_pyber_hide_wired")):
+                    try:
+                        btn.clicked.disconnect()
+                    except Exception:
+                        pass
+                    btn.clicked.connect(lambda _checked=False, section_dock=dock: self._hide_dockarea_dock(section_dock))
+                    btn.setProperty("_pyber_hide_wired", True)
                 btn.setStyleSheet(
                     "QToolButton {"
-                    " background: #222733;"
-                    " color: #d7deea;"
-                    " border: 1px solid #5a6274;"
-                    " border-radius: 6px;"
+                    " background: transparent;"
+                    " color: #f3f5f8;"
+                    " border: none;"
                     " padding: 0px;"
-                    " font-size: 9pt;"
+                    " margin: 0px;"
+                    " font-size: 8pt;"
                     " font-weight: 700;"
                     " }"
                     "QToolButton:hover {"
-                    " background: #343a48;"
+                    " background: transparent;"
                     " color: #ffffff;"
-                    " border: 1px solid #7b8498;"
+                    " border: none;"
                     " }"
                 )
             except Exception:
                 continue
+
+    def _hide_dockarea_dock(self, dock: Dock) -> None:
+        if dock is None:
+            return
+        try:
+            dock.hide()
+        except Exception:
+            return
+        for key, candidate in self._dockarea_docks.items():
+            if candidate is dock:
+                self._set_section_button_checked(key, False)
+                if self._last_opened_section == key:
+                    self._last_opened_section = None
+                break
+        self._save_panel_layout_state()
 
     def _dockarea_active_key(self) -> Optional[str]:
         active = self._last_opened_section if self._last_opened_section in self._dockarea_docks else None
@@ -5508,6 +5547,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _render_heatmap(self, mat: np.ndarray, tvec: np.ndarray) -> None:
         if mat.size == 0:
             self.img.setImage(np.zeros((1, 1)))
+            self.heat_zero_line.setVisible(False)
             return
 
         # ImageItem maps axis-0 -> x and axis-1 -> y; transpose so time is x, trials are y.
@@ -5536,6 +5576,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.img.setRect(QtCore.QRectF(x0, 0, x1 - x0, img.shape[1]))
         self.plot_heat.setXRange(x0, x1, padding=0)
         self.plot_heat.setYRange(0, float(img.shape[1]), padding=0)
+        self.heat_zero_line.setPos(0.0)
+        self.heat_zero_line.setVisible(bool(x0 <= 0.0 <= x1))
 
     def _render_duration_hist(self, durations: np.ndarray) -> None:
         self.plot_dur.clear()

@@ -3,9 +3,9 @@
   "pre": {
     "pre_data_panel_visible": false,
     "pre_splitter_sizes": [
-      0,
-      1450,
-      439
+      210,
+      210,
+      210
     ],
     "pre_main_dock_state": "",
     "tab_groups": [],

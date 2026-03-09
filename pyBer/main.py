@@ -111,7 +111,7 @@ _PRE_DOCKAREA_VISIBLE_KEY = "pre_dockarea_visible_v1"
 _PRE_DOCKAREA_ACTIVE_KEY = "pre_dockarea_active_v1"
 _PRE_DOCK_PREFIX = "pre."
 _POST_DOCK_PREFIX = "post."
-_FORCE_FIXED_DOCK_LAYOUTS = True
+_FORCE_FIXED_DOCK_LAYOUTS = False
 _USE_PG_DOCKAREA_PRE_LAYOUT = True
 _PRE_DOCKAREA_PRIMARY_ORDER = ("artifacts_list", "artifacts", "filtering", "baseline", "output", "export")
 _PRE_DOCKAREA_OPTIONAL_ORDER = ("qc", "config")
@@ -774,7 +774,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _lock_pre_pg_dock_interactions(self, dock: Dock) -> None:
         label = getattr(dock, "label", None)
-        if label is None or bool(getattr(label, "_pyber_fixed_interaction_lock", False)):
+        if label is None:
+            return
+        if not self._force_fixed_dock_layouts:
+            self._style_pg_dock_label_buttons(label)
+            return
+        if bool(getattr(label, "_pyber_fixed_interaction_lock", False)):
             return
 
         def _ignore_drag(event: QtGui.QMouseEvent) -> None:
@@ -790,9 +795,9 @@ class MainWindow(QtWidgets.QMainWindow):
             label._pyber_fixed_interaction_lock = True
         except Exception:
             pass
-        self._style_pg_dock_label_buttons(label)
+        self._style_pg_dock_label_buttons(dock, label)
 
-    def _style_pg_dock_label_buttons(self, label: object) -> None:
+    def _style_pg_dock_label_buttons(self, dock: Dock, label: object) -> None:
         if label is None:
             return
         try:
@@ -801,29 +806,51 @@ class MainWindow(QtWidgets.QMainWindow):
             buttons = []
         for btn in buttons:
             try:
-                btn.setText("×")
+                btn.setText("x")
                 btn.setIcon(QtGui.QIcon())
-                btn.setAutoRaise(False)
+                btn.setAutoRaise(True)
                 btn.setFixedSize(13, 13)
                 btn.setToolTip("Close")
+                if not bool(btn.property("_pyber_hide_wired")):
+                    try:
+                        btn.clicked.disconnect()
+                    except Exception:
+                        pass
+                    btn.clicked.connect(lambda _checked=False, section_dock=dock: self._hide_pre_dockarea_dock(section_dock))
+                    btn.setProperty("_pyber_hide_wired", True)
                 btn.setStyleSheet(
                     "QToolButton {"
-                    " background: #222733;"
-                    " color: #d7deea;"
-                    " border: 1px solid #5a6274;"
-                    " border-radius: 6px;"
+                    " background: transparent;"
+                    " color: #f3f5f8;"
+                    " border: none;"
                     " padding: 0px;"
-                    " font-size: 9pt;"
+                    " margin: 0px;"
+                    " font-size: 8pt;"
                     " font-weight: 700;"
                     " }"
                     "QToolButton:hover {"
-                    " background: #343a48;"
+                    " background: transparent;"
                     " color: #ffffff;"
-                    " border: 1px solid #7b8498;"
+                    " border: none;"
                     " }"
                 )
             except Exception:
                 continue
+
+    def _hide_pre_dockarea_dock(self, dock: Dock) -> None:
+        if dock is None:
+            return
+        try:
+            dock.hide()
+        except Exception:
+            return
+        for key, candidate in self._pre_dockarea_docks.items():
+            if candidate is dock:
+                self._set_section_button_checked(key, False)
+                if self._last_opened_section == key:
+                    self._last_opened_section = None
+                break
+        self._save_panel_layout_state()
 
     def _arrange_pre_dockarea_default(self) -> None:
         if self._pre_dockarea is None:
@@ -1901,6 +1928,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "artifact_overlay_visible": bool(self.param_panel.artifact_overlay_visible()),
             "artifact_thresholds_visible": bool(self.plots.artifact_thresholds_visible()),
             "export_selection": self.param_panel.export_selection().to_dict(),
+            "export_trigger_name": self.param_panel.export_trigger_name(),
             "panel_layout": self._collect_panel_layout_payload(),
         }
 
@@ -1951,6 +1979,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plots.set_artifact_thresholds_visible(bool(ui_state.get("artifact_thresholds_visible")))
         if "export_selection" in ui_state:
             self.param_panel.set_export_selection(ExportSelection.from_dict(ui_state.get("export_selection")))
+        if "export_trigger_name" in ui_state:
+            self.param_panel.set_export_trigger_name(str(ui_state.get("export_trigger_name") or ""))
+        self._update_export_summary_label()
         panel_layout = ui_state.get("panel_layout")
         if isinstance(panel_layout, dict):
             self._load_panel_config_payload_into_settings(panel_layout)
@@ -3357,6 +3388,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.file_panel.set_available_channels(doric.channels)
         self.file_panel.set_available_triggers(sorted(doric.trigger_by_name.keys()))
+        self.param_panel.set_available_export_triggers(sorted(doric.trigger_by_name.keys()))
+        self._update_export_summary_label()
 
         # keep channel if still valid
         if self._current_channel in doric.channels:
@@ -3370,6 +3403,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._current_trigger and self._current_trigger not in doric.trigger_by_name:
             self._current_trigger = None
             self.file_panel.set_trigger("")
+        self._update_export_summary_label()
 
         self._update_raw_plot()
         self._trigger_preview()
@@ -3387,6 +3421,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_trigger_changed(self, trig: str) -> None:
         self._current_trigger = trig if trig else None
+        if self._current_path:
+            doric = self._loaded_files.get(self._current_path)
+            if doric is not None:
+                self.param_panel.set_available_export_triggers(
+                    sorted(doric.trigger_by_name.keys()),
+                    preferred=self.param_panel.export_trigger_name(),
+                )
+                self._update_export_summary_label()
         self._update_raw_plot()
         self._update_plot_status()
 
@@ -4119,6 +4161,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         params = self.param_panel.get_params()
         export_selection = self.param_panel.export_selection()
+        export_trigger_name = self.param_panel.export_trigger_name()
 
         # Process/export each selected file, for the currently selected channel.
         n_total = 0
@@ -4130,7 +4173,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if not ch:
                 continue
             key = (path, ch)
-            trial = doric.make_trial(ch, trigger_name=self._current_trigger)  # export uses current trigger selection
+            export_trigger = self._current_trigger
+            if export_trigger_name:
+                export_trigger = export_trigger_name if export_trigger_name in doric.trigger_by_name else None
+            trial = doric.make_trial(ch, trigger_name=export_trigger)
             trial = self._apply_time_window(trial)
             cutouts = self._cutout_regions_by_key.get(key, [])
             trial = self._apply_cutouts(trial, cutouts)

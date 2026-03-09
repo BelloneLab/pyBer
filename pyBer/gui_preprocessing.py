@@ -1277,6 +1277,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._help_texts = self._build_help_texts()
         self._config_state_exporter: Optional[Callable[[], Dict[str, object]]] = None
         self._config_state_importer: Optional[Callable[[Dict[str, object]], None]] = None
+        self._pending_export_trigger_name: str = ""
         self._build_ui()
         self._wire()
 
@@ -1388,6 +1389,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
             "export_selection": (
                 "Choose which processed signals are written during CSV/H5 export.\n"
                 "Time is always exported. These options are saved in the preprocessing configuration file."
+            ),
+            "export_dio_channel": (
+                "Choose which DIO / trigger channel to export.\n"
+                "If left on Current overlay, export uses the trigger currently selected in the file panel."
             ),
         }
 
@@ -1665,6 +1670,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.chk_export_baseline_sig.setChecked(True)
         self.chk_export_baseline_ref = QtWidgets.QCheckBox("Baseline 405")
         self.chk_export_baseline_ref.setChecked(True)
+        self.combo_export_dio = QtWidgets.QComboBox()
+        _compact_combo(self.combo_export_dio, min_chars=10)
+        self.combo_export_dio.addItem("Current overlay", "")
+        self.combo_export_dio.setEnabled(self.chk_export_dio.isChecked())
 
         self.export_options_group = QtWidgets.QGroupBox("Export fields")
         export_form = QtWidgets.QFormLayout(self.export_options_group)
@@ -1681,6 +1690,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         export_checks.addWidget(self.chk_export_baseline_sig, 2, 0)
         export_checks.addWidget(self.chk_export_baseline_ref, 2, 1)
         export_form.addRow(export_checks)
+        export_form.addRow(self._label_with_help("DIO channel", "export_dio_channel"), self.combo_export_dio)
 
         qc_content = QtWidgets.QWidget()
         qc_grid = QtWidgets.QGridLayout(qc_content)
@@ -1909,6 +1919,9 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.combo_smoothing.currentIndexChanged.connect(lambda *_: self._update_smoothing_controls())
         self.cb_invert.stateChanged.connect(emit_noargs)
         self.cb_show_artifact_overlay.toggled.connect(lambda v: self.artifactOverlayToggled.emit(bool(v)))
+        self.chk_export_dio.toggled.connect(self.combo_export_dio.setEnabled)
+        self.combo_export_dio.currentIndexChanged.connect(self._on_export_trigger_changed)
+        self.combo_export_dio.currentIndexChanged.connect(emit_noargs)
         for cb in (
             self.chk_export_raw,
             self.chk_export_iso,
@@ -1951,7 +1964,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         if selection.output:
             parts.append("output")
         if selection.dio:
-            parts.append("DIO")
+            dio_name = self.export_trigger_name()
+            parts.append(f"DIO({dio_name})" if dio_name else "DIO")
         if selection.raw:
             parts.append("raw")
         if selection.isobestic:
@@ -1975,6 +1989,37 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.chk_export_dio.setChecked(bool(selection.dio))
         self.chk_export_baseline_sig.setChecked(bool(selection.baseline_sig))
         self.chk_export_baseline_ref.setChecked(bool(selection.baseline_ref))
+
+    def export_trigger_name(self) -> str:
+        if self.combo_export_dio.count() > 0 and self.combo_export_dio.currentIndex() == 0:
+            return ""
+        current = str(self.combo_export_dio.currentData() or "").strip()
+        return current or self._pending_export_trigger_name
+
+    def _on_export_trigger_changed(self, *_args) -> None:
+        self._pending_export_trigger_name = str(self.combo_export_dio.currentData() or "").strip()
+
+    def set_available_export_triggers(self, triggers: List[str], preferred: str = "") -> None:
+        current = preferred.strip() or self.export_trigger_name()
+        self.combo_export_dio.blockSignals(True)
+        try:
+            self.combo_export_dio.clear()
+            self.combo_export_dio.addItem("Current overlay", "")
+            for trig in triggers or []:
+                name = str(trig or "").strip()
+                if name:
+                    self.combo_export_dio.addItem(name, name)
+            idx = self.combo_export_dio.findData(current)
+            self.combo_export_dio.setCurrentIndex(idx if idx >= 0 else 0)
+            self._pending_export_trigger_name = current if idx != 0 else ""
+        finally:
+            self.combo_export_dio.blockSignals(False)
+
+    def set_export_trigger_name(self, trigger_name: str) -> None:
+        name = str(trigger_name or "").strip()
+        self._pending_export_trigger_name = name
+        idx = self.combo_export_dio.findData(name)
+        self.combo_export_dio.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _save_config(self) -> None:
         """Save current preprocessing parameters to a JSON file."""
