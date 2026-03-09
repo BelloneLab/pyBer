@@ -2576,30 +2576,59 @@ class PlotDashboard(QtWidgets.QWidget):
             return
         tt = np.asarray(t, float)
         yy = np.asarray(raw_sig, float)
-        for idx, (a, b) in enumerate(regions, start=1):
-            region = pg.LinearRegionItem(
-                values=(float(a), float(b)),
-                movable=False,
-                brush=self._artifact_brush_default,
-                pen=self._artifact_pen_default,
-            )
-            region.setZValue(8)
-            self.plot_raw.addItem(region)
-            self._artifact_regions.append(region)
-            self._artifact_region_bounds.append((float(a), float(b)))
 
-            mask = (tt >= float(a)) & (tt <= float(b))
-            if np.any(mask) and np.any(np.isfinite(yy[mask])):
-                y_pos = float(np.nanmax(yy[mask]))
-            else:
-                (y0, y1) = self.plot_raw.getViewBox().viewRange()[1]
-                y_pos = float(y1 - 0.05 * (y1 - y0))
+        # Optimization: use a single PathItem for many regions to avoid scene graph bloat.
+        if len(regions) > 25:
+            y0, y1 = -1e12, 1e12  # Large range for vertical bars
+            path = QtGui.QPainterPath()
+            for a, b in regions:
+                path.addRect(QtCore.QRectF(float(a), y0, float(b - a), y1 - y0))
 
-            label = pg.TextItem(str(idx), color=(240, 240, 240), anchor=(0.5, 0.5))
-            label.setPos(float((a + b) * 0.5), y_pos)
-            label.setZValue(9)
-            self.plot_raw.addItem(label)
-            self._artifact_labels.append(label)
+            path_item = pg.PathItem(path, pen=self._artifact_pen_default, brush=self._artifact_brush_default)
+            path_item.setZValue(8)
+            self.plot_raw.addItem(path_item)
+            self._artifact_regions.append(path_item)
+            self._artifact_region_bounds.extend(regions)
+
+            # Limit labels to first 100 to avoid lag
+            for idx, (a, b) in enumerate(regions[:100], start=1):
+                mask = (tt >= float(a)) & (tt <= float(b))
+                if np.any(mask):
+                    y_pos = float(np.nanmax(yy[mask]))
+                else:
+                    (vy0, vy1) = self.plot_raw.getViewBox().viewRange()[1]
+                    y_pos = float(vy1 - 0.05 * (vy1 - vy0))
+
+                label = pg.TextItem(str(idx), color=(240, 240, 240), anchor=(0.5, 0.5))
+                label.setPos(float((a + b) * 0.5), y_pos)
+                label.setZValue(9)
+                self.plot_raw.addItem(label)
+                self._artifact_labels.append(label)
+        else:
+            for idx, (a, b) in enumerate(regions, start=1):
+                region = pg.LinearRegionItem(
+                    values=(float(a), float(b)),
+                    movable=False,
+                    brush=self._artifact_brush_default,
+                    pen=self._artifact_pen_default,
+                )
+                region.setZValue(8)
+                self.plot_raw.addItem(region)
+                self._artifact_regions.append(region)
+                self._artifact_region_bounds.append((float(a), float(b)))
+
+                mask = (tt >= float(a)) & (tt <= float(b))
+                if np.any(mask) and np.any(np.isfinite(yy[mask])):
+                    y_pos = float(np.nanmax(yy[mask]))
+                else:
+                    (y0, y1) = self.plot_raw.getViewBox().viewRange()[1]
+                    y_pos = float(y1 - 0.05 * (y1 - y0))
+
+                label = pg.TextItem(str(idx), color=(240, 240, 240), anchor=(0.5, 0.5))
+                label.setPos(float((a + b) * 0.5), y_pos)
+                label.setZValue(9)
+                self.plot_raw.addItem(label)
+                self._artifact_labels.append(label)
 
     def set_artifact_overlay_visible(self, visible: bool) -> None:
         self._artifact_overlay_visible = bool(visible)
@@ -2633,12 +2662,15 @@ class PlotDashboard(QtWidgets.QWidget):
 
         for item, bounds in zip(self._artifact_regions, self._artifact_region_bounds):
             is_sel = any(_overlaps(bounds, s) for s in selected)
-            if is_sel:
-                item.setBrush(self._artifact_brush_selected)
-                item.setPen(self._artifact_pen_selected)
-            else:
-                item.setBrush(self._artifact_brush_default)
-                item.setPen(self._artifact_pen_default)
+            brush = self._artifact_brush_selected if is_sel else self._artifact_brush_default
+            pen = self._artifact_pen_selected if is_sel else self._artifact_pen_default
+
+            item.setBrush(brush)
+            if hasattr(item, "setPen"):
+                item.setPen(pen)
+            elif hasattr(item, "lines"):
+                for line in item.lines:
+                    line.setPen(pen)
 
     def _set_dio(self, t: np.ndarray, dio: Optional[np.ndarray], name: str = "") -> None:
         if dio is None or np.asarray(dio).size == 0:
