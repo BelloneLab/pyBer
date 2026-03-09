@@ -419,6 +419,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._app_theme_group.addAction(self.act_app_theme_light)
         self.act_app_theme_dark.setChecked(True)
         self.btn_app_theme.setMenu(self.menu_app_theme)
+
         self._status_bar.addPermanentWidget(QtWidgets.QLabel("App theme"))
         self._status_bar.addPermanentWidget(self.btn_app_theme)
 
@@ -4700,7 +4701,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def main() -> None:
-    pg.setConfigOptions(antialias=True)
+    pg.setConfigOptions(antialias=False)
     smoke_test = str(os.environ.get("PYBER_SMOKE_TEST", "")).strip().lower() in {"1", "true", "yes", "on"}
     app = QtWidgets.QApplication([])
     icon_path = _pyber_icon_path()
