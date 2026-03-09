@@ -609,6 +609,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Parameters: changes and actions
         self.param_panel.paramsChanged.connect(self._on_params_changed)
+        self.param_panel.paramsChanged.connect(self._update_export_summary_label)
         self.param_panel.previewRequested.connect(self._trigger_preview)
         self.param_panel.metadataRequested.connect(self._edit_metadata_for_current)
         self.param_panel.exportRequested.connect(self._export_selected_or_all)
@@ -789,6 +790,40 @@ class MainWindow(QtWidgets.QMainWindow):
             label._pyber_fixed_interaction_lock = True
         except Exception:
             pass
+        self._style_pg_dock_label_buttons(label)
+
+    def _style_pg_dock_label_buttons(self, label: object) -> None:
+        if label is None:
+            return
+        try:
+            buttons = label.findChildren(QtWidgets.QToolButton)
+        except Exception:
+            buttons = []
+        for btn in buttons:
+            try:
+                btn.setText("×")
+                btn.setIcon(QtGui.QIcon())
+                btn.setAutoRaise(False)
+                btn.setFixedSize(13, 13)
+                btn.setToolTip("Close")
+                btn.setStyleSheet(
+                    "QToolButton {"
+                    " background: #222733;"
+                    " color: #d7deea;"
+                    " border: 1px solid #5a6274;"
+                    " border-radius: 6px;"
+                    " padding: 0px;"
+                    " font-size: 9pt;"
+                    " font-weight: 700;"
+                    " }"
+                    "QToolButton:hover {"
+                    " background: #343a48;"
+                    " color: #ffffff;"
+                    " border: 1px solid #7b8498;"
+                    " }"
+                )
+            except Exception:
+                continue
 
     def _arrange_pre_dockarea_default(self) -> None:
         if self._pre_dockarea is None:
@@ -980,15 +1015,23 @@ class MainWindow(QtWidgets.QMainWindow):
         v = QtWidgets.QVBoxLayout(panel)
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(6)
+        self.lbl_export_summary = QtWidgets.QLabel("")
+        self.lbl_export_summary.setWordWrap(True)
+        self.lbl_export_summary.setProperty("class", "hint")
+        v.addWidget(self.lbl_export_summary)
         self.param_panel.btn_export.setProperty("class", "bluePrimarySmall")
         v.addWidget(self.param_panel.btn_export)
         v.addStretch(1)
+        self._update_export_summary_label()
         return panel
 
     def _build_config_actions_widget(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(panel)
-        row.setContentsMargins(8, 8, 8, 8)
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
         self.param_panel.btn_metadata.setProperty("class", "blueSecondarySmall")
         self.param_panel.btn_advanced.setProperty("class", "blueSecondarySmall")
@@ -1004,7 +1047,19 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setMinimumWidth(90)
             btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
             row.addWidget(btn)
+        layout.addLayout(row)
+        if hasattr(self.param_panel, "export_options_group"):
+            self.param_panel.export_options_group.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            layout.addWidget(self.param_panel.export_options_group)
+        layout.addStretch(1)
         return panel
+
+    def _update_export_summary_label(self) -> None:
+        if hasattr(self, "lbl_export_summary") and self.lbl_export_summary is not None:
+            self.lbl_export_summary.setText(self.param_panel.export_selection_summary())
 
     def _set_section_button_checked(self, key: str, checked: bool) -> None:
         btn = self._section_buttons.get(key)
@@ -4063,6 +4118,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._remember_export_dir(out_dir, origin_dir)
 
         params = self.param_panel.get_params()
+        export_selection = self.param_panel.export_selection()
 
         # Process/export each selected file, for the currently selected channel.
         n_total = 0

@@ -1928,6 +1928,40 @@ class PostProcessingPanel(QtWidgets.QWidget):
             label._pyber_fixed_interaction_lock = True
         except Exception:
             pass
+        self._style_pg_dock_label_buttons(label)
+
+    def _style_pg_dock_label_buttons(self, label: object) -> None:
+        if label is None:
+            return
+        try:
+            buttons = label.findChildren(QtWidgets.QToolButton)
+        except Exception:
+            buttons = []
+        for btn in buttons:
+            try:
+                btn.setText("×")
+                btn.setIcon(QtGui.QIcon())
+                btn.setAutoRaise(False)
+                btn.setFixedSize(13, 13)
+                btn.setToolTip("Close")
+                btn.setStyleSheet(
+                    "QToolButton {"
+                    " background: #222733;"
+                    " color: #d7deea;"
+                    " border: 1px solid #5a6274;"
+                    " border-radius: 6px;"
+                    " padding: 0px;"
+                    " font-size: 9pt;"
+                    " font-weight: 700;"
+                    " }"
+                    "QToolButton:hover {"
+                    " background: #343a48;"
+                    " color: #ffffff;"
+                    " border: 1px solid #7b8498;"
+                    " }"
+                )
+            except Exception:
+                continue
 
     def _dockarea_active_key(self) -> Optional[str]:
         active = self._last_opened_section if self._last_opened_section in self._dockarea_docks else None
