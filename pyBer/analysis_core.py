@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -253,6 +254,39 @@ class ProcessedTrial:
     fs_used: float = np.nan
 
 
+@dataclass
+class ExportSelection:
+    raw: bool = True
+    isobestic: bool = True
+    output: bool = True
+    dio: bool = True
+    baseline_sig: bool = True
+    baseline_ref: bool = True
+
+    def to_dict(self) -> Dict[str, bool]:
+        return {
+            "raw": bool(self.raw),
+            "isobestic": bool(self.isobestic),
+            "output": bool(self.output),
+            "dio": bool(self.dio),
+            "baseline_sig": bool(self.baseline_sig),
+            "baseline_ref": bool(self.baseline_ref),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, object]]) -> "ExportSelection":
+        if not isinstance(data, dict):
+            return cls()
+        return cls(
+            raw=bool(data.get("raw", True)),
+            isobestic=bool(data.get("isobestic", True)),
+            output=bool(data.get("output", True)),
+            dio=bool(data.get("dio", True)),
+            baseline_sig=bool(data.get("baseline_sig", True)),
+            baseline_ref=bool(data.get("baseline_ref", True)),
+        )
+
+
 # =============================================================================
 # Export helpers
 # =============================================================================
@@ -295,9 +329,11 @@ def export_processed_csv(
     path: str,
     processed: ProcessedTrial,
     metadata: Optional[Dict[str, str]] = None,
+    selection: Optional[ExportSelection] = None,
 ) -> None:
     import csv
 
+    selection = selection if isinstance(selection, ExportSelection) else ExportSelection()
     t = np.asarray(processed.time, float)
     out = np.asarray(processed.output if processed.output is not None else np.full_like(t, np.nan), float)
     raw = np.asarray(processed.raw_signal if processed.raw_signal is not None else np.full_like(t, np.nan), float)
@@ -308,7 +344,7 @@ def export_processed_csv(
         iso = np.full_like(t, np.nan)
 
     dio = None
-    if processed.dio is not None and processed.dio.size == t.size:
+    if selection.dio and processed.dio is not None and processed.dio.size == t.size:
         dio = np.asarray(processed.dio, float)
 
     out_col = output_label_type(processed.output_label)
@@ -318,32 +354,34 @@ def export_processed_csv(
         if metadata:
             for k, v in metadata.items():
                 w.writerow([f"# {k}: {v}"])
-        if dio is None:
-            w.writerow(["time", "raw", "isobestic", out_col])
-            for i in range(t.size):
-                w.writerow([
-                    float(t[i]),
-                    float(raw[i]) if np.isfinite(raw[i]) else np.nan,
-                    float(iso[i]) if np.isfinite(iso[i]) else np.nan,
-                    float(out[i]) if np.isfinite(out[i]) else np.nan,
-                ])
-        else:
-            w.writerow(["time", "raw", "isobestic", out_col, "dio"])
-            for i in range(t.size):
-                w.writerow([
-                    float(t[i]),
-                    float(raw[i]) if np.isfinite(raw[i]) else np.nan,
-                    float(iso[i]) if np.isfinite(iso[i]) else np.nan,
-                    float(out[i]) if np.isfinite(out[i]) else np.nan,
-                    float(dio[i]) if np.isfinite(dio[i]) else np.nan,
-                ])
+        columns = [("time", t)]
+        if selection.raw:
+            columns.append(("raw", raw))
+        if selection.isobestic:
+            columns.append(("isobestic", iso))
+        if selection.output:
+            columns.append((out_col, out))
+        if dio is not None:
+            columns.append(("dio", dio))
+        w.writerow([name for name, _ in columns])
+        for i in range(t.size):
+            row = []
+            for _, values in columns:
+                v = float(values[i])
+                row.append(v if np.isfinite(v) else np.nan)
+            w.writerow(row)
 
 
-def export_processed_h5(path: str, processed: ProcessedTrial, metadata: Optional[Dict[str, str]] = None) -> None:
+def export_processed_h5(
+    path: str,
+    processed: ProcessedTrial,
+    metadata: Optional[Dict[str, str]] = None,
+    selection: Optional[ExportSelection] = None,
+) -> None:
+    selection = selection if isinstance(selection, ExportSelection) else ExportSelection()
     with h5py.File(path, "w") as f:
         g = f.create_group("data")
         g.create_dataset("time", data=np.asarray(processed.time, float), compression="gzip")
-        g.create_dataset("output", data=np.asarray(processed.output, float), compression="gzip")
         out_type = output_label_type(processed.output_label)
         g.attrs["output_label"] = str(processed.output_label)
         g.attrs["output_context"] = str(processed.output_context)
@@ -351,28 +389,34 @@ def export_processed_h5(path: str, processed: ProcessedTrial, metadata: Optional
         g.attrs["fs_actual"] = float(processed.fs_actual)
         g.attrs["fs_used"] = float(processed.fs_used)
         g.attrs["fs_target"] = float(processed.fs_target)
+        g.attrs["export_selection"] = json.dumps(selection.to_dict())
+
+        if selection.output:
+            g.create_dataset("output", data=np.asarray(processed.output, float), compression="gzip")
 
         raw_sig = np.asarray(processed.raw_signal if processed.raw_signal is not None else np.full_like(processed.time, np.nan), float)
         raw_ref = np.asarray(processed.raw_reference if processed.raw_reference is not None else np.full_like(processed.time, np.nan), float)
-        g.create_dataset("raw_465", data=raw_sig, compression="gzip")
-        g.create_dataset("raw_405", data=raw_ref, compression="gzip")
+        if selection.raw:
+            g.create_dataset("raw_465", data=raw_sig, compression="gzip")
+        if selection.isobestic:
+            g.create_dataset("raw_405", data=raw_ref, compression="gzip")
         try:
-            if "raw" not in g:
+            if selection.raw and "raw" not in g:
                 g["raw"] = g["raw_465"]
-            if "isobestic" not in g:
+            if selection.isobestic and "isobestic" not in g:
                 g["isobestic"] = g["raw_405"]
-            if out_type and out_type != "output" and out_type not in g:
+            if selection.output and out_type and out_type != "output" and out_type not in g:
                 g[out_type] = g["output"]
         except Exception:
             pass
 
-        if processed.dio is not None:
+        if selection.dio and processed.dio is not None:
             g.create_dataset("dio", data=np.asarray(processed.dio, float), compression="gzip")
             g.attrs["dio_name"] = str(processed.dio_name)
 
-        if processed.baseline_sig is not None:
+        if selection.baseline_sig and processed.baseline_sig is not None:
             g.create_dataset("baseline_465", data=np.asarray(processed.baseline_sig, float), compression="gzip")
-        if processed.baseline_ref is not None:
+        if selection.baseline_ref and processed.baseline_ref is not None:
             g.create_dataset("baseline_405", data=np.asarray(processed.baseline_ref, float), compression="gzip")
 
         if metadata:

@@ -10,6 +10,7 @@ from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
 from analysis_core import (
+    ExportSelection,
     ProcessingParams,
     ProcessedTrial,
     OUTPUT_MODES,
@@ -1384,6 +1385,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 "Convergence tolerance for robust regression.\n"
                 "Smaller values are stricter but may take more iterations."
             ),
+            "export_selection": (
+                "Choose which processed signals are written during CSV/H5 export.\n"
+                "Time is always exported. These options are saved in the preprocessing configuration file."
+            ),
         }
 
     def _show_help(self, key: str, title: str) -> None:
@@ -1648,6 +1653,35 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.btn_metadata.clicked.connect(self.metadataRequested.emit)
         self.btn_advanced.clicked.connect(self.advancedOptionsRequested.emit)
 
+        self.chk_export_raw = QtWidgets.QCheckBox("Raw 465")
+        self.chk_export_raw.setChecked(True)
+        self.chk_export_iso = QtWidgets.QCheckBox("Isobestic 405")
+        self.chk_export_iso.setChecked(True)
+        self.chk_export_output = QtWidgets.QCheckBox("Processed output")
+        self.chk_export_output.setChecked(True)
+        self.chk_export_dio = QtWidgets.QCheckBox("DIO / trigger")
+        self.chk_export_dio.setChecked(True)
+        self.chk_export_baseline_sig = QtWidgets.QCheckBox("Baseline 465")
+        self.chk_export_baseline_sig.setChecked(True)
+        self.chk_export_baseline_ref = QtWidgets.QCheckBox("Baseline 405")
+        self.chk_export_baseline_ref.setChecked(True)
+
+        export_group = QtWidgets.QGroupBox()
+        export_form = QtWidgets.QFormLayout(export_group)
+        export_form.setContentsMargins(6, 6, 6, 6)
+        export_form.addRow(self._label_with_help("Export fields", "export_selection"))
+        export_checks = QtWidgets.QGridLayout()
+        export_checks.setContentsMargins(0, 0, 0, 0)
+        export_checks.setHorizontalSpacing(10)
+        export_checks.setVerticalSpacing(4)
+        export_checks.addWidget(self.chk_export_raw, 0, 0)
+        export_checks.addWidget(self.chk_export_iso, 0, 1)
+        export_checks.addWidget(self.chk_export_output, 1, 0)
+        export_checks.addWidget(self.chk_export_dio, 1, 1)
+        export_checks.addWidget(self.chk_export_baseline_sig, 2, 0)
+        export_checks.addWidget(self.chk_export_baseline_ref, 2, 1)
+        export_form.addRow(export_checks)
+
         qc_content = QtWidgets.QWidget()
         qc_grid = QtWidgets.QGridLayout(qc_content)
         qc_grid.setContentsMargins(0, 0, 0, 0)
@@ -1661,12 +1695,13 @@ class ParameterPanel(QtWidgets.QGroupBox):
         qc_grid.addWidget(self.btn_metadata, 3, 0)
         qc_grid.addWidget(self.btn_save_config, 3, 1)
         qc_grid.addWidget(self.btn_load_config, 4, 1)
+        qc_grid.addWidget(export_group, 5, 0, 1, 2)
         qc_grid.setColumnStretch(0, 1)
         qc_grid.setColumnStretch(1, 1)
 
         self.lbl_fs = QtWidgets.QLabel("FS: -")
         self.lbl_fs.setProperty("class", "hint")
-        qc_grid.addWidget(self.lbl_fs, 5, 0, 1, 2)
+        qc_grid.addWidget(self.lbl_fs, 6, 0, 1, 2)
 
         # Cards
         self.card_artifacts = CollapsibleSection("Artifacts")
@@ -1891,6 +1926,25 @@ class ParameterPanel(QtWidgets.QGroupBox):
     ) -> None:
         self._config_state_exporter = exporter
         self._config_state_importer = importer
+
+    def export_selection(self) -> ExportSelection:
+        return ExportSelection(
+            raw=self.chk_export_raw.isChecked(),
+            isobestic=self.chk_export_iso.isChecked(),
+            output=self.chk_export_output.isChecked(),
+            dio=self.chk_export_dio.isChecked(),
+            baseline_sig=self.chk_export_baseline_sig.isChecked(),
+            baseline_ref=self.chk_export_baseline_ref.isChecked(),
+        )
+
+    def set_export_selection(self, selection: ExportSelection) -> None:
+        selection = selection if isinstance(selection, ExportSelection) else ExportSelection()
+        self.chk_export_raw.setChecked(bool(selection.raw))
+        self.chk_export_iso.setChecked(bool(selection.isobestic))
+        self.chk_export_output.setChecked(bool(selection.output))
+        self.chk_export_dio.setChecked(bool(selection.dio))
+        self.chk_export_baseline_sig.setChecked(bool(selection.baseline_sig))
+        self.chk_export_baseline_ref.setChecked(bool(selection.baseline_ref))
 
     def _save_config(self) -> None:
         """Save current preprocessing parameters to a JSON file."""

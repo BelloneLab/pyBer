@@ -159,8 +159,8 @@ QPushButton[class="compactSmall"] {
 QPushButton[class="compactPrimary"],
 QPushButton[class="compactPrimarySmall"],
 QPushButton[class="bluePrimarySmall"] {
-    background: #2680eb;
-    border: 1px solid #378ef0;
+    background: #7d4df2;
+    border: 1px solid #9064ff;
     color: #ffffff;
     font-weight: 700;
 }
@@ -181,15 +181,15 @@ QPushButton[class="bluePrimarySmall"] {
 QPushButton[class="compactPrimary"]:hover,
 QPushButton[class="compactPrimarySmall"]:hover,
 QPushButton[class="bluePrimarySmall"]:hover {
-    background: #378ef0;
-    border: 1px solid #4b9df8;
+    background: #8d60ff;
+    border: 1px solid #9f79ff;
 }
 
 QPushButton[class="compactPrimary"]:pressed,
 QPushButton[class="compactPrimarySmall"]:pressed,
 QPushButton[class="bluePrimarySmall"]:pressed {
-    background: #1473e6;
-    border: 1px solid #2680eb;
+    background: #6f3de9;
+    border: 1px solid #8253f3;
 }
 
 QPushButton[class="blueSecondarySmall"] {
@@ -198,24 +198,24 @@ QPushButton[class="blueSecondarySmall"] {
     font-weight: 600;
     font-size: 8.2pt;
     min-height: 18px;
-    background: #2b303b;
-    border: 1px solid #4a5163;
+    background: #312a42;
+    border: 1px solid #5f4a89;
     color: #eef2f7;
 }
 
 QPushButton[class="blueSecondarySmall"]:hover {
-    background: #343a48;
-    border: 1px solid #5b6480;
+    background: #3b3251;
+    border: 1px solid #7059a0;
 }
 
 QPushButton[class="blueSecondarySmall"]:pressed {
-    background: #232833;
+    background: #2a2438;
 }
 
 QPushButton[class="blueSecondarySmall"]:checked,
 QPushButton[class="sectionButton"]:checked {
-    background: #2680eb;
-    border: 1px solid #378ef0;
+    background: #7d4df2;
+    border: 1px solid #9064ff;
     color: #ffffff;
 }
 
@@ -356,3 +356,74 @@ QToolTip {
     padding: 4px 6px;
 }
 """
+
+
+_LIGHT_COLOR_MAP = {
+    "#121722": "#ffffff",
+    "#1473e6": "#1f6fce",
+    "#1b2029": "#ffffff",
+    "#1d4f80": "#2f7fd8",
+    "#1f2229": "#f4f6fb",
+    "#1f242e": "#ffffff",
+    "#20242d": "#ffffff",
+    "#232833": "#d7dfeb",
+    "#242a34": "#f6f8fc",
+    "#252a33": "#eef2f8",
+    "#262b35": "#ffffff",
+    "#2680eb": "#2f7fd8",
+    "#2b303b": "#e8eef6",
+    "#2d3340": "#e1e8f2",
+    "#2d3442": "#f3f6fb",
+    "#2f3543": "#eef3fa",
+    "#313746": "#c8d2e0",
+    "#343a47": "#d2dae6",
+    "#343a48": "#dde6f1",
+    "#363c4a": "#cad3e1",
+    "#373d4a": "#d4dce8",
+    "#378ef0": "#2f7fd8",
+    "#3a4050": "#c2ccda",
+    "#3b4150": "#c5cedc",
+    "#3f4758": "#bcc8d8",
+    "#41495a": "#bcc8da",
+    "#4a5163": "#adb8c9",
+    "#4b9df8": "#5fa8f5",
+    "#4d5568": "#aab6c8",
+    "#5a6274": "#95a3b7",
+    "#5b6480": "#9eadc4",
+    "#5f4a89": "#b9a9df",
+    "#6f3de9": "#8f69d9",
+    "#7059a0": "#b8a8da",
+    "#7d4df2": "#8f69d9",
+    "#8253f3": "#9d7fe0",
+    "#858f9f": "#8c98ab",
+    "#8d60ff": "#9d7fe0",
+    "#9064ff": "#9d7fe0",
+    "#9f79ff": "#b09ae8",
+    "#aeb6c5": "#5d6a7d",
+    "#2a2438": "#ebe4fa",
+    "#312a42": "#e7e0f8",
+    "#3b3251": "#ddd3f3",
+    "#bcc5d6": "#667489",
+    "#ecf0f6": "#243247",
+    "#eef2f7": "#1f2a37",
+    "#f3f5f8": "#1f2a37",
+    "#ffffff": "#ffffff",
+}
+
+
+def _build_light_qss(dark_qss: str) -> str:
+    light = str(dark_qss)
+    # Replace longer tokens first to avoid accidental partial replacement collisions.
+    for dark, bright in sorted(_LIGHT_COLOR_MAP.items(), key=lambda kv: len(kv[0]), reverse=True):
+        light = light.replace(dark, bright)
+    return light
+
+
+APP_QSS_LIGHT = _build_light_qss(APP_QSS)
+
+
+def app_qss(theme_mode: object) -> str:
+    mode = str(theme_mode or "").strip().lower()
+    if mode in {"light", "white", "l", "w"}:
+        return APP_QSS_LIGHT
+    return APP_QSS

@@ -19,9 +19,11 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
+from pyqtgraph.dockarea import DockArea, Dock
 import h5py
 
 from analysis_core import (
+    ExportSelection,
     PhotometryProcessor,
     ProcessingParams,
     LoadedDoricFile,
@@ -45,7 +47,7 @@ from gui_preprocessing import (
     AdvancedOptionsDialog,
 )
 from gui_postprocessing import PostProcessingPanel
-from styles import APP_QSS
+from styles import app_qss
 import numpy as np
 
 
@@ -104,9 +106,16 @@ _DOCK_STATE_VERSION = 3
 _PRE_DOCK_STATE_KEY = "pre_main_dock_state_v4"
 _POST_DOCK_STATE_KEY = "post_main_dock_state_v4"
 _PRE_TAB_GROUPS_KEY = "pre_tab_groups_v1"
+_PRE_DOCKAREA_STATE_KEY = "pre_dockarea_state_v1"
+_PRE_DOCKAREA_VISIBLE_KEY = "pre_dockarea_visible_v1"
+_PRE_DOCKAREA_ACTIVE_KEY = "pre_dockarea_active_v1"
 _PRE_DOCK_PREFIX = "pre."
 _POST_DOCK_PREFIX = "post."
 _FORCE_FIXED_DOCK_LAYOUTS = True
+_USE_PG_DOCKAREA_PRE_LAYOUT = True
+_PRE_DOCKAREA_PRIMARY_ORDER = ("artifacts_list", "artifacts", "filtering", "baseline", "output", "export")
+_PRE_DOCKAREA_OPTIONAL_ORDER = ("qc", "config")
+_PRE_DOCKAREA_DEFAULT_VISIBLE = frozenset(_PRE_DOCKAREA_PRIMARY_ORDER)
 
 _LOG = logging.getLogger(__name__)
 
@@ -317,6 +326,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._box_select_callback: Optional[Callable[[float, float], None]] = None
         self._last_artifact_params: Optional[Tuple[object, ...]] = None
         self._section_docks: Dict[str, QtWidgets.QDockWidget] = {}
+        self._use_pg_dockarea_pre_layout: bool = bool(_USE_PG_DOCKAREA_PRE_LAYOUT)
+        self._pre_dockarea: Optional[DockArea] = None
+        self._pre_dockarea_docks: Dict[str, Dock] = {}
+        self._pre_section_scroll_hosts: Dict[str, QtWidgets.QScrollArea] = {}
+        self._pre_dockarea_fixed_layout_applied: bool = False
         self._shortcuts: List[QtGui.QShortcut] = []
         self._last_opened_section: Optional[str] = None
         self._section_popup_initialized: set[str] = set()
@@ -340,7 +354,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pre_snapshot_max_retries: int = 6
         self._post_docks_ready: bool = False
         self._handling_main_tab_change: bool = False
+        self._pending_main_tab_index: Optional[int] = None
         self._force_fixed_dock_layouts: bool = bool(_FORCE_FIXED_DOCK_LAYOUTS)
+        self._app_theme_mode: str = "dark"
 
         # Worker infra (stable)
         self._pool = QtCore.QThreadPool.globalInstance()
@@ -382,12 +398,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(width, height)
 
     def _build_ui(self) -> None:
-        self.setStyleSheet(APP_QSS)
+        self.setStyleSheet(app_qss(self._app_theme_mode))
 
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
         self._status_bar = QtWidgets.QStatusBar(self)
         self.setStatusBar(self._status_bar)
+        self.btn_app_theme = QtWidgets.QPushButton("Theme")
+        self.btn_app_theme.setProperty("class", "blueSecondarySmall")
+        self.btn_app_theme.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_app_theme.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.menu_app_theme = QtWidgets.QMenu(self.btn_app_theme)
+        self._app_theme_group = QtGui.QActionGroup(self)
+        self._app_theme_group.setExclusive(True)
+        self.act_app_theme_dark = self.menu_app_theme.addAction("Dark mode")
+        self.act_app_theme_dark.setCheckable(True)
+        self.act_app_theme_light = self.menu_app_theme.addAction("Light mode")
+        self.act_app_theme_light.setCheckable(True)
+        self._app_theme_group.addAction(self.act_app_theme_dark)
+        self._app_theme_group.addAction(self.act_app_theme_light)
+        self.act_app_theme_dark.setChecked(True)
+        self.btn_app_theme.setMenu(self.menu_app_theme)
+        self._status_bar.addPermanentWidget(QtWidgets.QLabel("App theme"))
+        self._status_bar.addPermanentWidget(self.btn_app_theme)
 
         # Preprocessing tab
         self.pre_tab = QtWidgets.QWidget()
@@ -399,18 +432,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plots = PlotDashboard(self.pre_tab)
         self.artifact_panel = ArtifactPanel(self.pre_tab)
 
-        # Right artifact panel dock (hidden by default)
-        self.art_dock = QtWidgets.QDockWidget("Artifacts list", self)
-        self.art_dock.setObjectName("pre.artifact.dock")
-        self.art_dock.setWidget(self.artifact_panel)
-        self.art_dock.setAllowedAreas(QtCore.Qt.DockWidgetArea.RightDockWidgetArea)
-        self.art_dock.setVisible(False)
-        self.art_dock.visibilityChanged.connect(lambda *_: self._save_panel_layout_state())
-        self.art_dock.topLevelChanged.connect(lambda *_: self._save_panel_layout_state())
-        self.art_dock.dockLocationChanged.connect(lambda *_: self._save_panel_layout_state())
-        self.art_dock.installEventFilter(self)
-        self.artifact_panel.installEventFilter(self)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.art_dock)
+        self.art_dock: Optional[QtWidgets.QDockWidget] = None
+        # Legacy artifact list dock (kept for non-DockArea preprocessing mode).
+        if not self._use_pg_dockarea_pre_layout:
+            self.art_dock = QtWidgets.QDockWidget("Artifact list", self)
+            self.art_dock.setObjectName("pre.artifact.dock")
+            self.art_dock.setWidget(self.artifact_panel)
+            self.art_dock.setAllowedAreas(QtCore.Qt.DockWidgetArea.RightDockWidgetArea)
+            self.art_dock.setVisible(False)
+            self.art_dock.visibilityChanged.connect(lambda *_: self._save_panel_layout_state())
+            self.art_dock.topLevelChanged.connect(lambda *_: self._save_panel_layout_state())
+            self.art_dock.dockLocationChanged.connect(lambda *_: self._save_panel_layout_state())
+            self.art_dock.installEventFilter(self)
+            self.artifact_panel.installEventFilter(self)
+            self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.art_dock)
 
         # Left pane: data browser
         self.file_panel.setMinimumWidth(260)
@@ -468,7 +503,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_plot_style.setMenu(self.menu_plot_style)
 
         # Inline parameter section buttons (same row as workflow actions).
-        self.btn_section_artifacts = QtWidgets.QPushButton("Artifacts")
+        self.btn_section_artifacts_list = QtWidgets.QPushButton("Artifact list")
+        self.btn_section_artifacts = QtWidgets.QPushButton("Artifact setup")
         self.btn_section_filtering = QtWidgets.QPushButton("Filtering")
         self.btn_section_baseline = QtWidgets.QPushButton("Baseline")
         self.btn_section_output = QtWidgets.QPushButton("Output")
@@ -476,12 +512,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_section_export = QtWidgets.QPushButton("Export")
         self.btn_section_config = QtWidgets.QPushButton("Configuration")
         self._section_buttons: Dict[str, QtWidgets.QPushButton] = {
+            "artifacts_list": self.btn_section_artifacts_list,
             "artifacts": self.btn_section_artifacts,
             "filtering": self.btn_section_filtering,
             "baseline": self.btn_section_baseline,
             "output": self.btn_section_output,
-            "qc": self.btn_section_qc,
             "export": self.btn_section_export,
+            "qc": self.btn_section_qc,
             "config": self.btn_section_config,
         }
         for btn in self._section_buttons.values():
@@ -522,10 +559,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pre_splitter.setObjectName("preprocessing_splitter")
         self.pre_splitter.addWidget(self.file_panel)
         self.pre_splitter.addWidget(center_widget)
+        if self._use_pg_dockarea_pre_layout:
+            self._pre_dockarea = DockArea()
+            self.pre_splitter.addWidget(self._pre_dockarea)
         self.pre_splitter.setChildrenCollapsible(False)
         self.pre_splitter.setStretchFactor(0, 0)
         self.pre_splitter.setStretchFactor(1, 1)
-        self.pre_splitter.setSizes([350, 1350])
+        if self._use_pg_dockarea_pre_layout:
+            self.pre_splitter.setStretchFactor(2, 0)
+            self.pre_splitter.setSizes([320, 1100, 520])
+        else:
+            self.pre_splitter.setSizes([350, 1350])
         self.pre_splitter.splitterMoved.connect(self._save_splitter_sizes)
 
         pre_layout = QtWidgets.QVBoxLayout(self.pre_tab)
@@ -534,6 +578,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Postprocessing tab
         self.post_tab = PostProcessingPanel()
+        if hasattr(self.post_tab, "set_app_theme_mode"):
+            try:
+                self.post_tab.set_app_theme_mode(self._app_theme_mode)
+            except Exception:
+                pass
         if hasattr(self.post_tab, "set_force_fixed_default_layout"):
             try:
                 self.post_tab.set_force_fixed_default_layout(self._force_fixed_dock_layouts)
@@ -580,6 +629,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_plot_bg_dark.triggered.connect(self._on_pre_plot_style_changed)
         self.act_plot_bg_white.triggered.connect(self._on_pre_plot_style_changed)
         self.act_plot_grid.toggled.connect(self._on_pre_plot_style_changed)
+        self.act_app_theme_dark.triggered.connect(self._on_app_theme_changed)
+        self.act_app_theme_light.triggered.connect(self._on_app_theme_changed)
         self.btn_toggle_data.toggled.connect(self._set_data_panel_visible)
         self.btn_workflow_artifacts.clicked.connect(self._toggle_artifacts_panel)
         self.btn_workflow_qc.clicked.connect(self._run_qc_dialog)
@@ -617,7 +668,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setAcceptDrops(True)
 
     def _setup_section_popups(self) -> None:
-        """Create one floating popup per processing section and reuse existing controls."""
+        """Create preprocessing section panels using DockArea or legacy floating docks."""
+        if self._use_pg_dockarea_pre_layout and self._pre_dockarea_docks:
+            return
+        if (not self._use_pg_dockarea_pre_layout) and self._section_docks:
+            return
+
         # Move section cards out of the hidden ParameterPanel container and into docks.
         root_layout = self.param_panel.layout()
         section_cards = [
@@ -634,23 +690,54 @@ class MainWindow(QtWidgets.QMainWindow):
         self.param_panel.card_actions.setVisible(False)
 
         section_widgets: Dict[str, QtWidgets.QWidget] = {
+            "artifacts_list": self.artifact_panel,
             "artifacts": self.param_panel.card_artifacts,
             "filtering": self.param_panel.card_filtering,
             "baseline": self.param_panel.card_baseline,
             "output": self.param_panel.card_output,
-            "qc": self._build_qc_actions_widget(),
             "export": self._build_export_actions_widget(),
+            "qc": self._build_qc_actions_widget(),
             "config": self._build_config_actions_widget(),
         }
         section_titles: Dict[str, str] = {
-            "artifacts": "Artifacts",
+            "artifacts_list": "Artifact list",
+            "artifacts": "Artifact setup",
             "filtering": "Filtering",
             "baseline": "Baseline",
             "output": "Output",
-            "qc": "QC",
             "export": "Export",
+            "qc": "QC",
             "config": "Configuration",
         }
+
+        if self._use_pg_dockarea_pre_layout:
+            if self._pre_dockarea is None:
+                return
+            for key, title in section_titles.items():
+                widget = section_widgets[key]
+                scroll = QtWidgets.QScrollArea()
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+                scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+                widget.setMinimumSize(0, 0)
+                widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+                scroll.setWidget(widget)
+                self._pre_section_scroll_hosts[key] = scroll
+
+                dock = Dock(title, area=self._pre_dockarea, closable=True)
+                dock.setObjectName(f"pre.da.{key}.dock")
+                dock.addWidget(scroll)
+                self._lock_pre_pg_dock_interactions(dock)
+                try:
+                    dock.sigClosed.connect(lambda *_, section_key=key: self._on_pre_dockarea_dock_closed(section_key))
+                except Exception:
+                    pass
+                self._pre_dockarea_docks[key] = dock
+
+            self._restore_pre_dockarea_layout_state()
+            self._pre_dockarea_fixed_layout_applied = False
+            return
 
         for key, title in section_titles.items():
             widget = section_widgets[key]
@@ -673,6 +760,205 @@ class MainWindow(QtWidgets.QMainWindow):
             dock.installEventFilter(self)
             widget.installEventFilter(self)
             self._section_docks[key] = dock
+
+    def _pre_dockarea_dock(self, key: str) -> Optional[Dock]:
+        return self._pre_dockarea_docks.get(key)
+
+    def _pre_dockarea_ordered_keys(self) -> List[str]:
+        ordered = list(_PRE_DOCKAREA_PRIMARY_ORDER) + list(_PRE_DOCKAREA_OPTIONAL_ORDER)
+        return [key for key in ordered if self._pre_dockarea_dock(key) is not None]
+
+    def _pre_dockarea_default_visible_map(self) -> Dict[str, bool]:
+        return {key: (key in _PRE_DOCKAREA_DEFAULT_VISIBLE) for key in self._pre_dockarea_docks.keys()}
+
+    def _lock_pre_pg_dock_interactions(self, dock: Dock) -> None:
+        label = getattr(dock, "label", None)
+        if label is None or bool(getattr(label, "_pyber_fixed_interaction_lock", False)):
+            return
+
+        def _ignore_drag(event: QtGui.QMouseEvent) -> None:
+            event.ignore()
+
+        def _ignore_double_click(event: QtGui.QMouseEvent) -> None:
+            event.accept()
+
+        try:
+            label.mouseMoveEvent = _ignore_drag
+            label.mouseDoubleClickEvent = _ignore_double_click
+            label.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
+            label._pyber_fixed_interaction_lock = True
+        except Exception:
+            pass
+
+    def _arrange_pre_dockarea_default(self) -> None:
+        if self._pre_dockarea is None:
+            return
+        ordered = self._pre_dockarea_ordered_keys()
+        root = self._pre_dockarea_dock("artifacts_list")
+        if root is None and ordered:
+            root = self._pre_dockarea_dock(ordered[0])
+        if root is None:
+            return
+        self._pre_dockarea.addDock(root, "right")
+        for key in ordered:
+            dock = self._pre_dockarea_dock(key)
+            if dock is not None and dock is not root:
+                self._pre_dockarea.addDock(dock, "above", root)
+
+    def _pre_dockarea_active_key(self) -> Optional[str]:
+        active = self._last_opened_section
+        if isinstance(active, str) and active in self._pre_dockarea_docks:
+            return active
+        for key in self._pre_dockarea_ordered_keys():
+            dock = self._pre_dockarea_dock(key)
+            if dock is not None and dock.isVisible():
+                return key
+        return None
+
+    def _set_pre_dockarea_visible(self, key: str, visible: bool) -> None:
+        dock = self._pre_dockarea_dock(key)
+        if dock is None:
+            return
+        if visible:
+            dock.show()
+        else:
+            dock.hide()
+
+    def _save_pre_dockarea_layout_state(self) -> None:
+        if self._pre_dockarea is None:
+            return
+        try:
+            state = dict(self._pre_dockarea.saveState() or {})
+        except Exception:
+            state = {}
+        visible = {key: bool(dock.isVisible()) for key, dock in self._pre_dockarea_docks.items()}
+        active = self._pre_dockarea_active_key() or ""
+        try:
+            self.settings.setValue(_PRE_DOCKAREA_STATE_KEY, json.dumps(state))
+            self.settings.setValue(_PRE_DOCKAREA_VISIBLE_KEY, json.dumps(visible))
+            self.settings.setValue(_PRE_DOCKAREA_ACTIVE_KEY, active)
+            self.settings.remove(_PRE_DOCK_STATE_KEY)
+            self.settings.remove(_PRE_TAB_GROUPS_KEY)
+        except Exception:
+            pass
+
+        right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
+        for key, dock in self._pre_dockarea_docks.items():
+            if key == "artifacts_list":
+                continue
+            try:
+                base = f"pre_section_docks/{key}"
+                self.settings.setValue(f"{base}/visible", bool(dock.isVisible()))
+                self.settings.setValue(f"{base}/floating", False)
+                self.settings.setValue(f"{base}/area", right_i)
+            except Exception:
+                continue
+        try:
+            art_base = "pre_artifact_dock_state"
+            art_vis = bool(visible.get("artifacts_list", False))
+            self.settings.setValue(f"{art_base}/visible", art_vis)
+            self.settings.setValue(f"{art_base}/floating", False)
+            self.settings.setValue(f"{art_base}/area", right_i)
+        except Exception:
+            pass
+
+    def _restore_pre_dockarea_layout_state(self) -> None:
+        if self._pre_dockarea is None or not self._pre_dockarea_docks:
+            return
+        self._pre_dockarea_fixed_layout_applied = False
+        self._arrange_pre_dockarea_default()
+
+        raw_state = self.settings.value(_PRE_DOCKAREA_STATE_KEY, "")
+        try:
+            if isinstance(raw_state, str) and raw_state.strip():
+                parsed = json.loads(raw_state)
+                if isinstance(parsed, dict):
+                    self._pre_dockarea.restoreState(parsed, missing="ignore", extra="bottom")
+        except Exception:
+            pass
+
+        visible_map: Dict[str, bool] = {}
+        raw_vis = self.settings.value(_PRE_DOCKAREA_VISIBLE_KEY, "")
+        try:
+            if isinstance(raw_vis, str) and raw_vis.strip():
+                parsed = json.loads(raw_vis)
+                if isinstance(parsed, dict):
+                    visible_map = {str(k): bool(v) for k, v in parsed.items()}
+        except Exception:
+            visible_map = {}
+
+        if not visible_map:
+            for key in self._pre_dockarea_docks.keys():
+                if key == "artifacts_list":
+                    raw = self.settings.value("pre_artifact_dock_state/visible", None)
+                    if raw is not None:
+                        visible_map[key] = _to_bool(raw, False)
+                    continue
+                raw = self.settings.value(f"pre_section_docks/{key}/visible", None)
+                if raw is not None:
+                    visible_map[key] = _to_bool(raw, False)
+        if not visible_map:
+            visible_map = self._pre_dockarea_default_visible_map()
+
+        for key in self._pre_dockarea_docks.keys():
+            self._set_pre_dockarea_visible(key, bool(visible_map.get(key, False)))
+
+        active = str(self.settings.value(_PRE_DOCKAREA_ACTIVE_KEY, "artifacts_list") or "artifacts_list")
+        active_dock = self._pre_dockarea_dock(active)
+        if active_dock is not None and active_dock.isVisible():
+            try:
+                active_dock.raiseDock()
+            except Exception:
+                pass
+            if active in self._section_buttons:
+                self._last_opened_section = active
+        else:
+            self._last_opened_section = None
+            for key in self._pre_dockarea_ordered_keys():
+                dock = self._pre_dockarea_dock(key)
+                if dock is not None and dock.isVisible():
+                    try:
+                        dock.raiseDock()
+                    except Exception:
+                        pass
+                    self._last_opened_section = key
+                    break
+
+        self._sync_section_button_states_from_docks()
+
+    def _apply_pre_fixed_dockarea_layout(self) -> None:
+        if self._pre_dockarea is None or not self._pre_dockarea_docks:
+            return
+        visible_map = {key: bool(dock.isVisible()) for key, dock in self._pre_dockarea_docks.items()}
+        if not any(visible_map.values()):
+            visible_map = self._pre_dockarea_default_visible_map()
+        self._arrange_pre_dockarea_default()
+        for key in self._pre_dockarea_docks.keys():
+            self._set_pre_dockarea_visible(key, bool(visible_map.get(key, False)))
+
+        active = self._last_opened_section if bool(visible_map.get(self._last_opened_section or "", False)) else None
+        if active is None:
+            for key in self._pre_dockarea_ordered_keys():
+                if bool(visible_map.get(key, False)):
+                    active = key
+                    break
+        dock = self._pre_dockarea_dock(active) if active else None
+        if dock is not None and dock.isVisible():
+            try:
+                dock.raiseDock()
+            except Exception:
+                pass
+        self._last_opened_section = active
+        self._sync_section_button_states_from_docks()
+        self._save_pre_dockarea_layout_state()
+        self._pre_dockarea_fixed_layout_applied = True
+
+    def _on_pre_dockarea_dock_closed(self, key: str) -> None:
+        if key in self._section_buttons:
+            self._set_section_button_checked(key, False)
+            if self._last_opened_section == key:
+                self._last_opened_section = None
+        self._save_panel_layout_state()
 
     def _build_qc_actions_widget(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
@@ -729,6 +1015,23 @@ class MainWindow(QtWidgets.QMainWindow):
         btn.blockSignals(False)
 
     def _toggle_section_popup(self, key: str, checked: bool) -> None:
+        if self._use_pg_dockarea_pre_layout:
+            dock = self._pre_dockarea_dock(key)
+            if dock is None:
+                return
+            if checked:
+                dock.show()
+                try:
+                    dock.raiseDock()
+                except Exception:
+                    pass
+                scroll = self._pre_section_scroll_hosts.get(key)
+                self._focus_first_editable(scroll.widget() if scroll is not None else None)
+                self._last_opened_section = key
+            else:
+                dock.hide()
+            self._save_panel_layout_state()
+            return
         dock = self._section_docks.get(key)
         if dock is None:
             return
@@ -746,6 +1049,15 @@ class MainWindow(QtWidgets.QMainWindow):
             dock.hide()
 
     def _on_section_dock_visibility(self, key: str, visible: bool) -> None:
+        if self._use_pg_dockarea_pre_layout:
+            if key in self._section_buttons:
+                self._set_section_button_checked(key, visible)
+                if not visible and self._last_opened_section == key:
+                    self._last_opened_section = None
+                if visible:
+                    self._last_opened_section = key
+            self._save_panel_layout_state()
+            return
         self._set_section_button_checked(key, visible)
         if not visible and self._last_opened_section == key:
             self._last_opened_section = None
@@ -847,9 +1159,14 @@ class MainWindow(QtWidgets.QMainWindow):
         return super().eventFilter(obj, event)
 
     def getPreDockWidgets(self) -> List[QtWidgets.QDockWidget]:
-        docks: List[QtWidgets.QDockWidget] = list(self._section_docks.values())
-        if hasattr(self, "art_dock") and isinstance(self.art_dock, QtWidgets.QDockWidget):
-            docks.append(self.art_dock)
+        if self._use_pg_dockarea_pre_layout:
+            docks: List[QtWidgets.QDockWidget] = []
+            if isinstance(self.art_dock, QtWidgets.QDockWidget):
+                docks.append(self.art_dock)
+        else:
+            docks = list(self._section_docks.values())
+            if isinstance(self.art_dock, QtWidgets.QDockWidget):
+                docks.append(self.art_dock)
         seen: set[int] = set()
         out: List[QtWidgets.QDockWidget] = []
         for dock in docks:
@@ -891,7 +1208,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def hideOtherTabDocks(self, tab_name: str) -> None:
         if tab_name == "pre":
-            self._hide_dock_widgets(self.getPostDockWidgets(), remove=True)
+            remove_post = not self._force_fixed_dock_layouts
+            self._hide_dock_widgets(self.getPostDockWidgets(), remove=remove_post)
         elif tab_name == "post":
             self._hide_dock_widgets(self.getPreDockWidgets(), remove=True)
             # Final guard: keep post dock registry initialized before post restore paths run.
@@ -1077,6 +1395,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_data_panel_visible(not self.file_panel.isVisible())
 
     def _toggle_all_parameter_popups_shortcut(self) -> None:
+        if self._use_pg_dockarea_pre_layout:
+            any_open = any(
+                bool(dock.isVisible())
+                for key, dock in self._pre_dockarea_docks.items()
+                if key in self._section_buttons
+            )
+            if any_open:
+                for key in self._section_buttons.keys():
+                    self._set_pre_dockarea_visible(key, False)
+                    self._set_section_button_checked(key, False)
+                self._last_opened_section = None
+                self._save_panel_layout_state()
+                return
+            self._toggle_section_shortcut("output")
+            return
         any_open = any(d.isVisible() for d in self._section_docks.values())
         if any_open:
             for key, dock in self._section_docks.items():
@@ -1095,6 +1428,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._toggle_section_popup(key, next_state)
 
     def _close_focused_popup(self) -> None:
+        if self._use_pg_dockarea_pre_layout:
+            if self._last_opened_section:
+                dock = self._pre_dockarea_dock(self._last_opened_section)
+                if dock is not None and dock.isVisible():
+                    dock.hide()
+                    self._set_section_button_checked(self._last_opened_section, False)
+                    self._last_opened_section = None
+                    self._save_panel_layout_state()
+            return
         fw = QtWidgets.QApplication.focusWidget()
         while fw is not None and not isinstance(fw, QtWidgets.QDockWidget):
             fw = fw.parentWidget()
@@ -1446,7 +1788,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 }
             return out
 
-        pre_sections = list(self._section_docks.keys())
+        if self._use_pg_dockarea_pre_layout and self._pre_dockarea_docks:
+            pre_sections = [k for k in self._pre_dockarea_docks.keys() if k != "artifacts_list"]
+        else:
+            pre_sections = list(self._section_docks.keys())
         post_sections = []
         try:
             self.post_tab.ensure_section_popups_initialized()
@@ -1500,6 +1845,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return {
             "artifact_overlay_visible": bool(self.param_panel.artifact_overlay_visible()),
             "artifact_thresholds_visible": bool(self.plots.artifact_thresholds_visible()),
+            "export_selection": self.param_panel.export_selection().to_dict(),
             "panel_layout": self._collect_panel_layout_payload(),
         }
 
@@ -1548,6 +1894,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plots.set_artifact_overlay_visible(visible)
         if "artifact_thresholds_visible" in ui_state:
             self.plots.set_artifact_thresholds_visible(bool(ui_state.get("artifact_thresholds_visible")))
+        if "export_selection" in ui_state:
+            self.param_panel.set_export_selection(ExportSelection.from_dict(ui_state.get("export_selection")))
         panel_layout = ui_state.get("panel_layout")
         if isinstance(panel_layout, dict):
             self._load_panel_config_payload_into_settings(panel_layout)
@@ -1556,6 +1904,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_settings()
 
     def _sync_section_button_states_from_docks(self) -> None:
+        if self._use_pg_dockarea_pre_layout:
+            self._last_opened_section = None
+            for key in self._section_buttons.keys():
+                dock = self._pre_dockarea_dock(key)
+                visible = bool(dock.isVisible()) if dock is not None else False
+                self._set_section_button_checked(key, visible)
+                if visible and self._last_opened_section is None:
+                    self._last_opened_section = key
+            return
         self._last_opened_section = None
         for key, dock in self._section_docks.items():
             vis = bool(dock.isVisible())
@@ -1573,6 +1930,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         # Do not overwrite stored layout while preprocessing panels are hidden for tab switching.
         if self._pre_popups_hidden_by_tab_switch:
+            return
+
+        if self._use_pg_dockarea_pre_layout:
+            self._save_pre_dockarea_layout_state()
+            try:
+                self.settings.sync()
+            except Exception:
+                pass
             return
 
         # Per-dock persistence is isolated so one faulty dock payload cannot drop all others.
@@ -1596,20 +1961,21 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 continue
 
-        try:
-            base = "pre_artifact_dock_state"
-            cached = self._pre_artifact_state_before_tab_switch if self._pre_popups_hidden_by_tab_switch else {}
-            visible = bool(cached.get("visible", self.art_dock.isVisible()))
-            floating = bool(cached.get("floating", self.art_dock.isFloating()))
-            right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
-            area_val = _dock_area_to_int(cached.get("area", self.dockWidgetArea(self.art_dock)), right_i)
-            geom = cached.get("geometry", self.art_dock.saveGeometry())
-            self.settings.setValue(f"{base}/visible", visible)
-            self.settings.setValue(f"{base}/floating", floating)
-            self.settings.setValue(f"{base}/area", area_val)
-            self.settings.setValue(f"{base}/geometry", geom)
-        except Exception:
-            pass
+        if isinstance(self.art_dock, QtWidgets.QDockWidget):
+            try:
+                base = "pre_artifact_dock_state"
+                cached = self._pre_artifact_state_before_tab_switch if self._pre_popups_hidden_by_tab_switch else {}
+                visible = bool(cached.get("visible", self.art_dock.isVisible()))
+                floating = bool(cached.get("floating", self.art_dock.isFloating()))
+                right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
+                area_val = _dock_area_to_int(cached.get("area", self.dockWidgetArea(self.art_dock)), right_i)
+                geom = cached.get("geometry", self.art_dock.saveGeometry())
+                self.settings.setValue(f"{base}/visible", visible)
+                self.settings.setValue(f"{base}/floating", floating)
+                self.settings.setValue(f"{base}/area", area_val)
+                self.settings.setValue(f"{base}/geometry", geom)
+            except Exception:
+                pass
         try:
             self._save_pre_tab_groups_to_settings(self._capture_pre_tab_groups_state())
         except Exception:
@@ -1653,6 +2019,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _restore_panel_layout_state(self) -> None:
         """Restore popup/artifact panel layout from the previous app session."""
+        if self._use_pg_dockarea_pre_layout:
+            self._is_restoring_panel_layout = True
+            try:
+                self._setup_section_popups()
+                self._restore_pre_dockarea_layout_state()
+            finally:
+                self._is_restoring_panel_layout = False
+            return
+
         self._is_restoring_panel_layout = True
         for key, dock in self._section_docks.items():
             base = f"pre_section_docks/{key}"
@@ -1694,28 +2069,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
 
-        try:
-            base = "pre_artifact_dock_state"
-            visible = _to_bool(self.settings.value(f"{base}/visible", False), False)
-            floating = _to_bool(self.settings.value(f"{base}/floating", False), False)
-            area_val = self.settings.value(
-                f"{base}/area",
-                _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2),
-            )
-            area = self._dock_area_from_settings(area_val, QtCore.Qt.DockWidgetArea.RightDockWidgetArea)
-            geom = self._to_qbytearray(self.settings.value(f"{base}/geometry", None))
+        if isinstance(self.art_dock, QtWidgets.QDockWidget):
+            try:
+                base = "pre_artifact_dock_state"
+                visible = _to_bool(self.settings.value(f"{base}/visible", False), False)
+                floating = _to_bool(self.settings.value(f"{base}/floating", False), False)
+                area_val = self.settings.value(
+                    f"{base}/area",
+                    _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2),
+                )
+                area = self._dock_area_from_settings(area_val, QtCore.Qt.DockWidgetArea.RightDockWidgetArea)
+                geom = self._to_qbytearray(self.settings.value(f"{base}/geometry", None))
 
-            if bool(floating):
-                self.art_dock.setFloating(True)
-            else:
-                self.addDockWidget(area, self.art_dock)
-                self.art_dock.setFloating(False)
+                if bool(floating):
+                    self.art_dock.setFloating(True)
+                else:
+                    self.addDockWidget(area, self.art_dock)
+                    self.art_dock.setFloating(False)
 
-            if geom is not None and not geom.isEmpty():
-                self.art_dock.restoreGeometry(geom)
-            self.art_dock.setVisible(bool(visible))
-        except Exception:
-            pass
+                if geom is not None and not geom.isEmpty():
+                    self.art_dock.restoreGeometry(geom)
+                self.art_dock.setVisible(bool(visible))
+            except Exception:
+                pass
 
         self._sync_section_button_states_from_docks()
         self._restore_pre_tab_groups_fallback(self._load_pre_tab_groups_from_settings())
@@ -1723,11 +2099,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _has_saved_pre_layout_state(self) -> bool:
         try:
+            if self._use_pg_dockarea_pre_layout:
+                if self.settings.contains(_PRE_DOCKAREA_STATE_KEY) or self.settings.contains(_PRE_DOCKAREA_VISIBLE_KEY):
+                    return True
             if self.settings.contains(_PRE_DOCK_STATE_KEY):
                 return True
             if self.settings.contains("pre_artifact_dock_state/visible"):
                 return True
-            for key in self._section_docks.keys():
+            keys = list(self._section_docks.keys())
+            if self._use_pg_dockarea_pre_layout and self._pre_dockarea_docks:
+                keys = [k for k in self._pre_dockarea_docks.keys() if k != "artifacts_list"]
+            for key in keys:
                 if self.settings.contains(f"pre_section_docks/{key}/visible"):
                     return True
         except Exception:
@@ -1752,6 +2134,12 @@ class MainWindow(QtWidgets.QMainWindow):
         last_dir = self.settings.value("last_open_dir", "", type=str)
         if last_dir and os.path.isdir(last_dir):
             self.file_panel.set_path_hint(last_dir)
+
+        try:
+            app_theme = self.settings.value("app_theme_mode", "dark", type=str)
+        except Exception:
+            app_theme = "dark"
+        self._apply_app_theme(app_theme, persist=False)
 
         # restore params
         try:
@@ -1782,7 +2170,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         try:
-            plot_bg = self.settings.value("pre_plot_background", "dark", type=str)
+            default_bg = "white" if self._app_theme_mode == "light" else "dark"
+            plot_bg = self.settings.value("pre_plot_background", default_bg, type=str)
         except Exception:
             plot_bg = "dark"
         try:
@@ -1803,7 +2192,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     splitter_sizes = self.settings.value("splitter_sizes", None)
                 if splitter_sizes and hasattr(splitter_sizes, "__len__"):
                     vals = [int(x) for x in splitter_sizes]
-                    if len(vals) >= 3:
+                    if self._use_pg_dockarea_pre_layout:
+                        if len(vals) >= 3:
+                            self.pre_splitter.setSizes(vals[:3])
+                        elif len(vals) == 2:
+                            self.pre_splitter.setSizes([vals[0], vals[1], 520])
+                    elif len(vals) >= 3:
                         left = max(260, vals[0])
                         center = max(640, vals[1] + vals[2])
                         self.pre_splitter.setSizes([left, center])
@@ -1835,7 +2229,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     splitter_sizes = self.settings.value("splitter_sizes", None)
                 if splitter_sizes and hasattr(splitter_sizes, "__len__"):
                     vals = [int(x) for x in splitter_sizes]
-                    if len(vals) >= 3:
+                    if self._use_pg_dockarea_pre_layout:
+                        if len(vals) >= 3:
+                            self.pre_splitter.setSizes(vals[:3])
+                        elif len(vals) == 2:
+                            self.pre_splitter.setSizes([vals[0], vals[1], 520])
+                    elif len(vals) >= 3:
                         # Migrate old 3-pane [left, center, right] into [left, center+right].
                         left = max(260, vals[0])
                         center = max(640, vals[1] + vals[2])
@@ -1892,6 +2291,10 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self.settings.setValue("pre_plot_background", str(self.plots.plot_background_mode()))
             self.settings.setValue("pre_plot_grid", bool(self.plots.plot_grid_visible()))
+        except Exception:
+            pass
+        try:
+            self.settings.setValue("app_theme_mode", str(self._app_theme_mode))
         except Exception:
             pass
 
@@ -2032,6 +2435,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.file_panel.add_file(p)
                 self._show_status_message(f"Loaded: {os.path.basename(p)}", 5000)
             except Exception as e:
+                loaded_from_processed: Optional[LoadedDoricFile] = None
+                ext = os.path.splitext(p)[1].lower()
+                if ext in (".h5", ".hdf5"):
+                    loaded_from_processed = self._load_processed_h5_as_pre_file(p)
+                if loaded_from_processed is not None:
+                    self._loaded_files[p] = loaded_from_processed
+                    self.file_panel.add_file(p)
+                    self._show_status_message(
+                        f"Loaded processed H5 as preprocessing source: {os.path.basename(p)}",
+                        6000,
+                    )
+                    continue
                 QtWidgets.QMessageBox.critical(self, "Load error", f"Failed to load:\n{p}\n\n{e}")
 
         self._push_recent_preprocessing_files(paths)
@@ -2056,6 +2471,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_panel.list_files.setFocus()
 
     def _hide_preprocessing_popups_for_tab_switch(self) -> None:
+        if self._use_pg_dockarea_pre_layout:
+            # DockArea lives inside the Preprocessing tab widget; avoid costly hide/remove
+            # churn during main-tab switches for smoother transitions.
+            return
         if self._pre_popups_hidden_by_tab_switch:
             # Re-apply hide in case late dock events re-show a preprocessing dock.
             self._enforce_preprocessing_popups_hidden()
@@ -2107,6 +2526,14 @@ class MainWindow(QtWidgets.QMainWindow):
         Hard-hide preprocessing docks/dialogs while Post Processing is active.
         This protects against late Qt dock re-show events when dock tab stacks are rebuilt.
         """
+        if self._use_pg_dockarea_pre_layout:
+            if isinstance(self.art_dock, QtWidgets.QDockWidget):
+                try:
+                    self.art_dock.hide()
+                    self.removeDockWidget(self.art_dock)
+                except Exception:
+                    pass
+            return
         if hasattr(self, "tabs") and self.tabs.currentWidget() is self.pre_tab:
             return
         self._suspend_panel_layout_persistence = True
@@ -2132,10 +2559,14 @@ class MainWindow(QtWidgets.QMainWindow):
         """Hide post-processing docks while Preprocessing is active."""
         if hasattr(self, "tabs") and self.tabs.currentWidget() is not self.pre_tab:
             return
-        self._hide_dock_widgets(self.getPostDockWidgets(), remove=True)
+        remove_post = not self._force_fixed_dock_layouts
+        self._hide_dock_widgets(self.getPostDockWidgets(), remove=remove_post)
 
     def _store_pre_main_dock_snapshot(self) -> None:
         """Persist the current preprocessing dock arrangement."""
+        if self._use_pg_dockarea_pre_layout:
+            self._save_panel_layout_state()
+            return
         try:
             state = self.captureDockSnapshotForTab("pre")
             if state is not None and not state.isEmpty():
@@ -2150,6 +2581,9 @@ class MainWindow(QtWidgets.QMainWindow):
         Persist cached preprocessing layout while preprocessing docks are hidden
         during a main-tab switch.
         """
+        if self._use_pg_dockarea_pre_layout:
+            self._save_panel_layout_state()
+            return
         if not self._pre_popups_hidden_by_tab_switch:
             return
         right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
@@ -2192,6 +2626,9 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
     def _apply_pre_main_dock_snapshot_if_needed(self) -> None:
+        if self._use_pg_dockarea_pre_layout:
+            self._pre_snapshot_applied = True
+            return
         if self._force_fixed_dock_layouts:
             self._pre_snapshot_applied = True
             return
@@ -2232,6 +2669,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_pre_default_layout_if_missing(self) -> None:
         """Set a sensible preprocessing dock layout when no saved layout exists."""
+        if self._use_pg_dockarea_pre_layout:
+            self._setup_section_popups()
+            self._restore_pre_dockarea_layout_state()
+            self._save_panel_layout_state()
+            return
         try:
             if self.settings.contains(_PRE_DOCK_STATE_KEY):
                 return
@@ -2316,6 +2758,13 @@ class MainWindow(QtWidgets.QMainWindow):
         - Right column bottom: Export
         - Bottom strip: Configuration
         """
+        if self._use_pg_dockarea_pre_layout:
+            self._setup_section_popups()
+            if not self._pre_dockarea_fixed_layout_applied:
+                self._apply_pre_fixed_dockarea_layout()
+            else:
+                self._sync_section_button_states_from_docks()
+            return
         if not self._section_docks:
             return
 
@@ -2414,6 +2863,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._suspend_panel_layout_persistence = False
 
     def _restore_preprocessing_popups_after_tab_switch(self) -> None:
+        if self._use_pg_dockarea_pre_layout:
+            return
         if not self._pre_popups_hidden_by_tab_switch:
             return
 
@@ -2533,8 +2984,41 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+    def _apply_fixed_post_layout_deferred(self) -> None:
+        if not hasattr(self, "tabs") or self.tabs.currentWidget() is not self.post_tab:
+            return
+        try:
+            self.post_tab.ensure_section_popups_initialized()
+            if hasattr(self.post_tab, "apply_fixed_default_layout"):
+                self.post_tab.apply_fixed_default_layout()
+        except Exception:
+            _LOG.exception("Failed to apply fixed post layout on tab switch")
+            return
+        try:
+            self._enforce_only_tab_docks_visible("post")
+        except Exception:
+            pass
+
+    def _enforce_fixed_layout_for_active_tab(self) -> None:
+        if not self._force_fixed_dock_layouts or not hasattr(self, "tabs"):
+            return
+        try:
+            current = self.tabs.currentWidget()
+        except Exception:
+            return
+        try:
+            if current is self.pre_tab:
+                self._apply_pre_fixed_layout()
+                self._enforce_only_tab_docks_visible("pre")
+            elif current is self.post_tab:
+                self._apply_fixed_post_layout_deferred()
+                self._enforce_only_tab_docks_visible("post")
+        except Exception:
+            _LOG.exception("Failed to enforce fixed layout for active tab")
+
     def _on_main_tab_changed(self, index: int) -> None:
         if self._handling_main_tab_change:
+            self._pending_main_tab_index = int(index)
             return
         self._handling_main_tab_change = True
         was_fullscreen = bool(self.isFullScreen())
@@ -2556,12 +3040,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         self._hide_preprocessing_popups_for_tab_switch()
                         self._enforce_preprocessing_popups_hidden()
                         QtCore.QTimer.singleShot(0, self._enforce_preprocessing_popups_hidden)
-                        try:
-                            self.post_tab.ensure_section_popups_initialized()
-                            if hasattr(self.post_tab, "apply_fixed_default_layout"):
-                                self.post_tab.apply_fixed_default_layout()
-                        except Exception:
-                            _LOG.exception("Failed to apply fixed post layout on tab switch")
+                        self._apply_fixed_post_layout_deferred()
+                        QtCore.QTimer.singleShot(0, self._apply_fixed_post_layout_deferred)
+                        QtCore.QTimer.singleShot(120, self._apply_fixed_post_layout_deferred)
                         self._enforce_only_tab_docks_visible("post")
                     try:
                         self._save_panel_layout_state()
@@ -2577,10 +3058,11 @@ class MainWindow(QtWidgets.QMainWindow):
                             self._persist_hidden_preprocessing_layout_state()
                         except Exception:
                             pass
-                    try:
-                        self.post_tab.persist_layout_state_snapshot()
-                    except Exception:
-                        pass
+                    if current is self.pre_tab:
+                        try:
+                            self.post_tab.persist_layout_state_snapshot()
+                        except Exception:
+                            pass
                     self._save_settings()
                     self._save_panel_config_json()
                 except Exception:
@@ -2612,6 +3094,13 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self._restore_window_state_after_tab_switch(was_fullscreen, was_maximized)
             self._handling_main_tab_change = False
+            if self._force_fixed_dock_layouts:
+                QtCore.QTimer.singleShot(0, self._enforce_fixed_layout_for_active_tab)
+                QtCore.QTimer.singleShot(80, self._enforce_fixed_layout_for_active_tab)
+            if self._pending_main_tab_index is not None:
+                pending = int(self._pending_main_tab_index)
+                self._pending_main_tab_index = None
+                QtCore.QTimer.singleShot(0, lambda idx=pending: self._on_main_tab_changed(idx))
 
     def _on_artifact_overlay_toggled(self, visible: bool) -> None:
         self.plots.set_artifact_overlay_visible(bool(visible))
@@ -2620,6 +3109,51 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_artifact_thresholds_toggled(self, visible: bool) -> None:
         self.plots.set_artifact_thresholds_visible(bool(visible))
         self._save_settings()
+
+    def _normalize_app_theme_mode(self, value: object) -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"light", "white", "l", "w"}:
+            return "light"
+        return "dark"
+
+    def _selected_app_theme_mode(self) -> str:
+        if hasattr(self, "act_app_theme_light") and self.act_app_theme_light.isChecked():
+            return "light"
+        return "dark"
+
+    def _apply_app_theme(self, theme_mode: object, persist: bool = True) -> None:
+        mode = self._normalize_app_theme_mode(theme_mode)
+        self._app_theme_mode = mode
+
+        if hasattr(self, "act_app_theme_dark"):
+            self.act_app_theme_dark.blockSignals(True)
+            self.act_app_theme_dark.setChecked(mode == "dark")
+            self.act_app_theme_dark.blockSignals(False)
+        if hasattr(self, "act_app_theme_light"):
+            self.act_app_theme_light.blockSignals(True)
+            self.act_app_theme_light.setChecked(mode == "light")
+            self.act_app_theme_light.blockSignals(False)
+
+        try:
+            self.setStyleSheet(app_qss(mode))
+        except Exception:
+            pass
+
+        pre_bg = "white" if mode == "light" else "dark"
+        pre_grid = self.act_plot_grid.isChecked() if hasattr(self, "act_plot_grid") else True
+        self._apply_pre_plot_style(pre_bg, pre_grid, persist=False)
+
+        try:
+            if hasattr(self.post_tab, "set_app_theme_mode"):
+                self.post_tab.set_app_theme_mode(mode)
+        except Exception:
+            pass
+
+        if persist:
+            self._save_settings()
+
+    def _on_app_theme_changed(self, *_args) -> None:
+        self._apply_app_theme(self._selected_app_theme_mode(), persist=True)
 
     def _normalize_pre_plot_background(self, value: object) -> str:
         mode = str(value or "").strip().lower()
@@ -3407,12 +3941,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self._trigger_preview()
 
     def _toggle_artifacts_panel(self) -> None:
-        if self.art_dock.isVisible():
-            self.art_dock.setVisible(False)
+        if self._use_pg_dockarea_pre_layout:
+            self._setup_section_popups()
+            dock = self._pre_dockarea_dock("artifacts_list")
+            if dock is None:
+                return
+            if dock.isVisible():
+                dock.hide()
+            else:
+                dock.show()
+                try:
+                    dock.raiseDock()
+                except Exception:
+                    pass
+                self._last_opened_section = "artifacts_list"
+            self._sync_section_button_states_from_docks()
             self._save_panel_layout_state()
             return
-        self.artifact_panel.show()
-        self.art_dock.setVisible(True)
+
+        if isinstance(self.art_dock, QtWidgets.QDockWidget):
+            if self.art_dock.isVisible():
+                self.art_dock.setVisible(False)
+                self._save_panel_layout_state()
+                return
+            self.artifact_panel.show()
+            self.art_dock.setVisible(True)
         self._save_panel_layout_state()
 
     # ---------------- Metadata ----------------
@@ -3539,8 +4092,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     stem = f"{stem}_{suffix}"
                 csv_path = os.path.join(out_dir, f"{stem}.csv")
                 h5_path = os.path.join(out_dir, f"{stem}.h5")
-                export_processed_csv(csv_path, proc, metadata=meta)
-                export_processed_h5(h5_path, proc, metadata=meta)
+                export_processed_csv(csv_path, proc, metadata=meta, selection=export_selection)
+                export_processed_h5(h5_path, proc, metadata=meta, selection=export_selection)
                 n_total += 1
 
             try:
@@ -3710,6 +4263,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_drop(self, paths: List[str]) -> None:
         doric_paths: List[str] = []
         processed: List[ProcessedTrial] = []
+        pre_active = bool(hasattr(self, "tabs") and self.tabs.currentWidget() is self.pre_tab)
 
         for p in paths:
             if not p:
@@ -3724,6 +4278,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     processed.append(trial)
                 continue
             if ext in (".h5", ".hdf5"):
+                if pre_active:
+                    # On preprocessing tab, treat dropped H5 as a raw-input candidate.
+                    # _add_files() will load Doric H5 natively and falls back to processed H5 import.
+                    doric_paths.append(p)
+                    continue
                 trial = self._load_processed_h5(p)
                 if trial is not None:
                     processed.append(trial)
@@ -3770,7 +4329,24 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
 
         time_idx = header.index("time") if "time" in header else None
-        output_idx = _find_col(["dff", "z-score", "zscore", "z score", "output", "raw_signal", "raw_465"])
+        output_idx = _find_col([
+            "dff",
+            "z-score",
+            "zscore",
+            "z score",
+            "output",
+            "raw_signal",
+            "raw_465",
+            "raw",
+            "isobestic",
+            "raw_405",
+            "reference",
+            "reference_405",
+            "ref",
+            "dio",
+            "baseline_465",
+            "baseline_405",
+        ])
         has_header = time_idx is not None and output_idx is not None
 
         raw_idx = _find_col(["raw", "raw_465", "signal", "signal_465"]) if has_header else None
@@ -3873,6 +4449,20 @@ class MainWindow(QtWidgets.QMainWindow):
                     out = np.asarray(g["z-score"][()], float)
                 elif "zscore" in g:
                     out = np.asarray(g["zscore"][()], float)
+                elif "raw_465" in g:
+                    out = np.asarray(g["raw_465"][()], float)
+                elif "raw" in g:
+                    out = np.asarray(g["raw"][()], float)
+                elif "raw_405" in g:
+                    out = np.asarray(g["raw_405"][()], float)
+                elif "isobestic" in g:
+                    out = np.asarray(g["isobestic"][()], float)
+                elif "dio" in g:
+                    out = np.asarray(g["dio"][()], float)
+                elif "baseline_465" in g:
+                    out = np.asarray(g["baseline_465"][()], float)
+                elif "baseline_405" in g:
+                    out = np.asarray(g["baseline_405"][()], float)
                 else:
                     return None
                 raw_sig = np.asarray(g["raw_465"][()], float) if "raw_465" in g else (
@@ -3911,6 +4501,66 @@ class MainWindow(QtWidgets.QMainWindow):
             fs_target=fs_target,
             fs_used=fs_used,
         )
+
+    def _processed_trial_to_loaded_doric(self, processed: ProcessedTrial) -> Optional[LoadedDoricFile]:
+        t = np.asarray(processed.time if processed.time is not None else np.array([], float), float)
+        if t.size < 2:
+            return None
+
+        raw_sig = np.asarray(
+            processed.raw_signal if processed.raw_signal is not None else np.array([], float),
+            float,
+        )
+        raw_ref = np.asarray(
+            processed.raw_reference if processed.raw_reference is not None else np.array([], float),
+            float,
+        )
+        out = np.asarray(processed.output if processed.output is not None else np.array([], float), float)
+
+        if raw_sig.size != t.size:
+            if out.size == t.size:
+                raw_sig = out.copy()
+            else:
+                return None
+        if raw_ref.size != t.size or not np.isfinite(raw_ref).any():
+            # Keep preprocessing numerically stable even if original H5 has no raw_405.
+            raw_ref = raw_sig.copy()
+
+        if not np.isfinite(raw_sig).any():
+            return None
+
+        channel = str(processed.channel_id or "AIN01").strip() or "AIN01"
+        dio_map: Dict[str, np.ndarray] = {}
+        dio_time_map: Dict[str, np.ndarray] = {}
+        digital_time: Optional[np.ndarray] = None
+        dio = np.asarray(processed.dio, float) if processed.dio is not None else np.array([], float)
+        if dio.size == t.size:
+            dio_name = str(processed.dio_name or "DIO_import").strip() or "DIO_import"
+            digital_time = t.copy()
+            dio_map[dio_name] = dio.copy()
+            dio_time_map[dio_name] = t.copy()
+
+        return LoadedDoricFile(
+            path=str(processed.path or ""),
+            channels=[channel],
+            time_by_channel={channel: t.copy()},
+            signal_by_channel={channel: raw_sig.copy()},
+            reference_by_channel={channel: raw_ref.copy()},
+            digital_time=digital_time,
+            digital_by_name={k: v.copy() for k, v in dio_map.items()},
+            trigger_time_by_name={k: v.copy() for k, v in dio_time_map.items()},
+            trigger_by_name={k: v.copy() for k, v in dio_map.items()},
+        )
+
+    def _load_processed_h5_as_pre_file(self, path: str) -> Optional[LoadedDoricFile]:
+        processed = self._load_processed_h5(path)
+        if processed is None:
+            return None
+        loaded = self._processed_trial_to_loaded_doric(processed)
+        if loaded is None:
+            return None
+        loaded.path = path
+        return loaded
 
     def closeEvent(self, event):
         try:

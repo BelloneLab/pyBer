@@ -68,8 +68,9 @@ The GUI exposes seven explicit output definitions:
 
 ### Export
 - Export processed output to:
-  - CSV (`time`, `output`, optional `dio`)
-  - HDF5 with raw, baseline, and metadata fields
+  - CSV with configurable fields (`time` always included; raw/isobestic/output/DIO selectable)
+  - HDF5 with configurable raw/output/DIO/baseline datasets plus metadata
+- Export field selection is saved and restored through the preprocessing configuration file.
 - Drag-and-drop support for preprocessing and post-processing files.
 
 ---

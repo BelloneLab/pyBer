@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
+from pyqtgraph.dockarea import DockArea, Dock
 import h5py
 
 from analysis_core import ProcessedTrial
@@ -20,10 +21,23 @@ from ethovision_process_gui import clean_sheet
 
 _DOCK_STATE_VERSION = 3
 _POST_DOCK_STATE_KEY = "post_main_dock_state_v4"
+_POST_DOCKAREA_STATE_KEY = "post_dockarea_state_v1"
+_POST_DOCKAREA_VISIBLE_KEY = "post_dockarea_visible_v1"
+_POST_DOCKAREA_ACTIVE_KEY = "post_dockarea_active_v1"
 _POST_DOCK_PREFIX = "post."
 _PRE_DOCK_PREFIX = "pre."
 _BEHAVIOR_PARSE_BINARY = "binary_columns"
 _BEHAVIOR_PARSE_TIMESTAMPS = "timestamp_columns"
+_FIXED_POST_RIGHT_SECTIONS = frozenset({"setup", "spatial", "psth", "export"})
+_FIXED_POST_VISIBLE_SECTIONS = frozenset({"setup", "spatial", "psth", "export"})
+_FIXED_POST_RIGHT_TAB_ORDER = ("setup", "psth", "spatial", "export")
+_FIXED_POST_RIGHT_TAB_TITLES: Dict[str, str] = {
+    "setup": "Setup",
+    "psth": "PSTH",
+    "spatial": "Spatial",
+    "export": "Export",
+}
+_USE_PG_DOCKAREA_POST_LAYOUT = True
 _LOG = logging.getLogger(__name__)
 
 
@@ -483,6 +497,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._section_popups: Dict[str, QtWidgets.QDockWidget] = {}
         self._section_scroll_hosts: Dict[str, QtWidgets.QScrollArea] = {}
         self._section_buttons: Dict[str, QtWidgets.QPushButton] = {}
+        self._use_pg_dockarea_layout: bool = bool(_USE_PG_DOCKAREA_POST_LAYOUT)
+        self._dockarea: Optional[DockArea] = None
+        self._dockarea_docks: Dict[str, Dock] = {}
+        self._dockarea_splitter: Optional[QtWidgets.QSplitter] = None
+        self._fixed_right_tab_widget: Optional[QtWidgets.QTabWidget] = None
         self._section_popup_initialized: set[str] = set()
         self._is_restoring_settings: bool = True
         self._settings_save_timer = QtCore.QTimer(self)
@@ -501,6 +520,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._app_closing: bool = False
         self._post_snapshot_applied: bool = False
         self._force_fixed_default_layout: bool = False
+        self._app_theme_mode: str = "dark"
+        self._applying_fixed_default_layout: bool = False
+        self._pending_fixed_layout_retry: bool = False
         self._pending_project_recompute_from_current: bool = False
         self._project_dirty: bool = False
         self._autosave_restoring: bool = False
@@ -522,9 +544,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         root.setSpacing(8)
 
         grp_src = QtWidgets.QGroupBox("Signal Source")
+        grp_src.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
         vsrc = QtWidgets.QVBoxLayout(grp_src)
 
         self.tab_sources = QtWidgets.QTabWidget()
+        self.tab_sources.setObjectName("postSourceTabs")
+        self.tab_sources.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Maximum)
+        self.tab_sources.setStyleSheet(
+            "QTabWidget::pane { border: 0px; background: transparent; padding: 0px; }"
+            "QTabBar::tab { margin-right: 0px; }"
+        )
         tab_single = QtWidgets.QWidget()
         tab_group = QtWidgets.QWidget()
         self.tab_sources.addTab(tab_single, "Single")
@@ -544,7 +573,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         single_layout.addWidget(self.lbl_current)
         single_layout.addWidget(self.btn_use_current)
         single_layout.addWidget(self.btn_load_processed_single)
-        single_layout.addStretch(1)
 
         group_layout = QtWidgets.QVBoxLayout(tab_group)
         self.btn_load_processed = QtWidgets.QPushButton("Load processed files (CSV/H5)")
@@ -554,7 +582,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_group.setProperty("class", "hint")
         group_layout.addWidget(self.btn_load_processed)
         group_layout.addWidget(self.lbl_group)
-        group_layout.addStretch(1)
 
         self.btn_refresh_dio = QtWidgets.QPushButton("Refresh A/D channel list")
         self.btn_refresh_dio.setProperty("class", "compactSmall")
@@ -581,6 +608,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_dio_align = QtWidgets.QComboBox()
         self.combo_dio_align.addItems(["Align to onset", "Align to offset"])
         _compact_combo(self.combo_dio_align, min_chars=6)
+        self.lbl_dio_channel = QtWidgets.QLabel("A/D channel")
+        self.lbl_dio_polarity = QtWidgets.QLabel("A/D polarity")
+        self.lbl_dio_align = QtWidgets.QLabel("A/D align")
 
         self.btn_load_beh = QtWidgets.QPushButton("Load behavior CSV/XLSX...")
         self.btn_load_beh.setProperty("class", "compactSmall")
@@ -647,9 +677,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         lists_layout.addLayout(beh_col)
 
         fal.addRow("Align source", self.combo_align)
-        fal.addRow("A/D channel", self.combo_dio)
-        fal.addRow("A/D polarity", self.combo_dio_polarity)
-        fal.addRow("A/D align", self.combo_dio_align)
+        fal.addRow(self.lbl_dio_channel, self.combo_dio)
+        fal.addRow(self.lbl_dio_polarity, self.combo_dio_polarity)
+        fal.addRow(self.lbl_dio_align, self.combo_dio_align)
         fal.addRow(self.lbl_behavior_file_type, self.combo_behavior_file_type)
         fal.addRow(self.btn_load_beh)
         fal.addRow("Loaded files", self.lbl_beh)
@@ -888,9 +918,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_export_img = QtWidgets.QPushButton("Export images")
         self.btn_export_img.setProperty("class", "compactSmall")
         self.btn_export_img.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-        self.btn_style = QtWidgets.QPushButton("Styling")
+        self.btn_style = QtWidgets.QPushButton("Plot style")
         self.btn_style.setProperty("class", "compactSmall")
-        self.btn_style.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_style.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_save_cfg = QtWidgets.QPushButton("Save config")
         self.btn_save_cfg.setProperty("class", "compactSmall")
         self.btn_save_cfg.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
@@ -1036,7 +1066,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_behavior_summary = QtWidgets.QLabel("Group metrics: -")
         self.lbl_behavior_summary.setProperty("class", "hint")
 
-        grp_spatial = QtWidgets.QGroupBox("Spatial Heatmap")
+        grp_spatial = QtWidgets.QGroupBox("Spatial")
         f_spatial = QtWidgets.QFormLayout(grp_spatial)
         f_spatial.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.DontWrapRows)
         f_spatial.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
@@ -1241,13 +1271,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(6)
 
-        self.btn_action_load = QtWidgets.QPushButton("Load")
+        self.btn_action_load = QtWidgets.QPushButton("File")
         self.btn_action_load.setProperty("class", "compactPrimarySmall")
         self.menu_action_load = QtWidgets.QMenu(self.btn_action_load)
         self.act_load_current = self.menu_action_load.addAction("Use current preprocessed selection")
         self.act_load_single = self.menu_action_load.addAction("Load processed file (single)")
         self.act_load_group = self.menu_action_load.addAction("Load processed files (group)")
         self.menu_action_load.addSeparator()
+        self.act_save_project = self.menu_action_load.addAction("Save project (.h5)")
         self.act_load_project = self.menu_action_load.addAction("Load project (.h5)")
         self.menu_action_load.addSeparator()
         self.act_load_behavior = self.menu_action_load.addAction("Load behavior CSV/XLSX")
@@ -1257,6 +1288,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.menu_recent_projects = self.menu_action_recent.addMenu("Projects")
         self.menu_action_recent.aboutToShow.connect(self._refresh_recent_postprocessing_menus)
         self.act_refresh_dio = self.menu_action_load.addAction("Refresh A/D channel list")
+        self.menu_action_load.addSeparator()
+        self.act_open_plot_style = self.menu_action_load.addAction("Plot style...")
         self.btn_action_load.setMenu(self.menu_action_load)
 
         self.btn_action_compute = QtWidgets.QPushButton("Compute PSTH")
@@ -1268,17 +1301,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         self.btn_panel_setup = QtWidgets.QPushButton("Setup")
         self.btn_panel_psth = QtWidgets.QPushButton("PSTH")
-        self.btn_panel_signal = QtWidgets.QPushButton("Signal")
-        self.btn_panel_behavior = QtWidgets.QPushButton("Behavior")
         self.btn_panel_spatial = QtWidgets.QPushButton("Spatial")
         self.btn_panel_export = QtWidgets.QPushButton("Export")
+        self.btn_panel_signal = QtWidgets.QPushButton("Signal")
+        self.btn_panel_behavior = QtWidgets.QPushButton("Behavior")
         self._section_buttons = {
             "setup": self.btn_panel_setup,
             "psth": self.btn_panel_psth,
-            "signal": self.btn_panel_signal,
-            "behavior": self.btn_panel_behavior,
             "spatial": self.btn_panel_spatial,
             "export": self.btn_panel_export,
+            "signal": self.btn_panel_signal,
+            "behavior": self.btn_panel_behavior,
         }
         for b in self._section_buttons.values():
             b.setCheckable(True)
@@ -1288,16 +1321,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         action_row.addWidget(self.btn_action_compute)
         action_row.addWidget(self.btn_action_export)
         action_row.addWidget(self.btn_action_hide)
+        action_row.addWidget(self.btn_style)
         action_row.addSpacing(8)
         action_row.addWidget(QtWidgets.QLabel("Panels:"))
         action_row.addWidget(self.btn_panel_setup)
         action_row.addWidget(self.btn_panel_psth)
-        action_row.addWidget(self.btn_panel_signal)
-        action_row.addWidget(self.btn_panel_behavior)
         action_row.addWidget(self.btn_panel_spatial)
         action_row.addWidget(self.btn_panel_export)
-        action_row.addStretch(1)
-        action_row.addWidget(self.btn_style)
+        action_row.addWidget(self.btn_panel_signal)
+        action_row.addWidget(self.btn_panel_behavior)
         action_row.addStretch(1)
         root.addLayout(action_row)
 
@@ -1460,6 +1492,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
             symbolBrush=pg.mkBrush(214, 122, 90, 220),
             symbolPen=pg.mkPen((214, 122, 90), width=0.8),
         )
+        self.metrics_err_pre = pg.ErrorBarItem(
+            x=np.array([0.0], float),
+            y=np.array([0.0], float),
+            top=np.array([0.0], float),
+            bottom=np.array([0.0], float),
+            beam=0.22,
+            pen=pg.mkPen((230, 236, 246), width=2.0),
+        )
+        self.metrics_err_post = pg.ErrorBarItem(
+            x=np.array([1.0], float),
+            y=np.array([0.0], float),
+            top=np.array([0.0], float),
+            bottom=np.array([0.0], float),
+            beam=0.22,
+            pen=pg.mkPen((230, 236, 246), width=2.0),
+        )
+        self.plot_metrics.addItem(self.metrics_err_pre)
+        self.plot_metrics.addItem(self.metrics_err_post)
         self.plot_metrics.setXRange(-0.5, 1.5, padding=0)
         self.plot_metrics.getAxis("bottom").setTicks([[(0, "pre"), (1, "post")]])
 
@@ -1467,6 +1517,38 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.global_bar_freq = pg.BarGraphItem(x=[1], height=[0], width=0.6, brush=(220, 160, 120))
         self.plot_global.addItem(self.global_bar_amp)
         self.plot_global.addItem(self.global_bar_freq)
+        self.global_scatter_amp = self.plot_global.plot(
+            pen=None,
+            symbol="o",
+            symbolSize=6,
+            symbolBrush=pg.mkBrush(120, 180, 220, 220),
+            symbolPen=pg.mkPen((120, 180, 220), width=0.9),
+        )
+        self.global_scatter_freq = self.plot_global.plot(
+            pen=None,
+            symbol="o",
+            symbolSize=6,
+            symbolBrush=pg.mkBrush(220, 160, 120, 220),
+            symbolPen=pg.mkPen((220, 160, 120), width=0.9),
+        )
+        self.global_err_amp = pg.ErrorBarItem(
+            x=np.array([0.0], float),
+            y=np.array([0.0], float),
+            top=np.array([0.0], float),
+            bottom=np.array([0.0], float),
+            beam=0.22,
+            pen=pg.mkPen((230, 236, 246), width=2.0),
+        )
+        self.global_err_freq = pg.ErrorBarItem(
+            x=np.array([1.0], float),
+            y=np.array([0.0], float),
+            top=np.array([0.0], float),
+            bottom=np.array([0.0], float),
+            beam=0.22,
+            pen=pg.mkPen((230, 236, 246), width=2.0),
+        )
+        self.plot_global.addItem(self.global_err_amp)
+        self.plot_global.addItem(self.global_err_freq)
         self.plot_global.setXRange(-0.5, 1.5, padding=0)
         self.plot_global.getAxis("bottom").setTicks([[(0, "amp"), (1, "freq")]])
 
@@ -1508,7 +1590,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         behavior_grid.setColumnStretch(2, 1)
 
         self.spatial_plot_dialog = QtWidgets.QDialog(self)
-        self.spatial_plot_dialog.setWindowTitle("Spatial Heatmap")
+        self.spatial_plot_dialog.setWindowTitle("Spatial")
         self.spatial_plot_dialog.setModal(False)
         self.spatial_plot_dialog.resize(980, 920)
         spatial_dialog_layout = QtWidgets.QVBoxLayout(self.spatial_plot_dialog)
@@ -1559,18 +1641,35 @@ class PostProcessingPanel(QtWidgets.QWidget):
         rv.addWidget(self.row_avg, stretch=1)
         rv.addWidget(self.row_signal, stretch=1)
         rv.addWidget(self.row_behavior, stretch=1)
-        root.addWidget(right, stretch=1)
+        if self._use_pg_dockarea_layout:
+            workspace = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+            workspace.setChildrenCollapsible(False)
+            workspace.addWidget(right)
+            self._dockarea = DockArea()
+            workspace.addWidget(self._dockarea)
+            workspace.setStretchFactor(0, 5)
+            workspace.setStretchFactor(1, 2)
+            self._dockarea_splitter = workspace
+            root.addWidget(workspace, stretch=1)
+        else:
+            root.addWidget(right, stretch=1)
         root.setStretch(0, 0)
         root.setStretch(1, 1)
-        self._setup_section_popups()
+        if self._use_pg_dockarea_layout:
+            self._setup_dockarea_sections()
+        else:
+            self._setup_section_popups()
+        self._apply_widget_theme_mode()
 
         # Wiring
         self.act_load_current.triggered.connect(self.requestCurrentProcessed.emit)
         self.act_load_single.triggered.connect(self._load_processed_files_single)
         self.act_load_group.triggered.connect(self._load_processed_files)
+        self.act_save_project.triggered.connect(self._save_project_file)
         self.act_load_project.triggered.connect(self._load_project_file)
         self.act_load_behavior.triggered.connect(self._load_behavior_files)
         self.act_refresh_dio.triggered.connect(self.requestDioList.emit)
+        self.act_open_plot_style.triggered.connect(self._open_style_dialog)
         self.btn_action_compute.clicked.connect(self._compute_psth)
         self.btn_action_export.clicked.connect(self._export_results)
         self.btn_action_hide.clicked.connect(self._hide_all_section_popups)
@@ -1704,7 +1803,314 @@ class PostProcessingPanel(QtWidgets.QWidget):
         host = self.window()
         return host if isinstance(host, QtWidgets.QMainWindow) else None
 
+    def _normalize_app_theme_mode(self, value: object) -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"light", "white", "l", "w"}:
+            return "light"
+        return "dark"
+
+    def _scroll_background_color(self) -> str:
+        if self._app_theme_mode == "light":
+            return "#f6f8fc"
+        return "#242a34"
+
+    def _apply_scroll_theme(self, scroll: QtWidgets.QScrollArea) -> None:
+        bg = self._scroll_background_color()
+        scroll.setStyleSheet(f"QScrollArea {{ background: {bg}; border: none; }}")
+        # Keep viewport painted with dock background so dynamic row visibility
+        # does not produce unstyled gaps.
+        scroll.viewport().setAutoFillBackground(True)
+        scroll.viewport().setStyleSheet(f"background: {bg};")
+
+    def _apply_widget_theme_mode(self) -> None:
+        if hasattr(self, "tab_sources"):
+            self.tab_sources.setStyleSheet(
+                "QTabWidget::pane { border: 0px; background: transparent; padding: 0px; }"
+                "QTabBar::tab { margin-right: 0px; }"
+            )
+        for scroll in self._section_scroll_hosts.values():
+            try:
+                self._apply_scroll_theme(scroll)
+            except Exception:
+                continue
+
+    def set_app_theme_mode(self, theme_mode: object) -> None:
+        self._app_theme_mode = self._normalize_app_theme_mode(theme_mode)
+        self._apply_widget_theme_mode()
+        self._style["plot_bg"] = (248, 250, 255) if self._app_theme_mode == "light" else (36, 42, 52)
+        try:
+            self._apply_plot_style()
+        except Exception:
+            pass
+
+    def _section_widget_map(self) -> Dict[str, Tuple[str, QtWidgets.QWidget]]:
+        return {
+            "setup": ("Setup", self.section_setup),
+            "psth": ("PSTH", self.section_psth),
+            "spatial": ("Spatial", self.section_spatial),
+            "export": ("Export", self.section_export),
+            "signal": ("Signal Event Analyzer", self.section_signal),
+            "behavior": ("Behavior Analysis", self.section_behavior),
+        }
+
+    def _setup_dockarea_sections(self) -> None:
+        if not self._use_pg_dockarea_layout:
+            return
+        if self._dockarea is None:
+            return
+        if self._dockarea_docks:
+            return
+        for key, (title, widget) in self._section_widget_map().items():
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self._apply_scroll_theme(scroll)
+            widget.setMinimumSize(0, 0)
+            widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+            scroll.setWidget(widget)
+            self._section_scroll_hosts[key] = scroll
+            dock = Dock(
+                title,
+                area=self._dockarea,
+                closable=False if key in _FIXED_POST_RIGHT_SECTIONS else True,
+            )
+            dock.setObjectName(f"post.da.{key}.dock")
+            dock.addWidget(scroll)
+            self._lock_pg_dock_interactions(dock)
+            try:
+                dock.sigClosed.connect(lambda *_, section_key=key: self._on_dockarea_dock_closed(section_key))
+            except Exception:
+                pass
+            self._dockarea_docks[key] = dock
+        if self._force_fixed_default_layout:
+            self._apply_fixed_dockarea_layout()
+        else:
+            self._restore_dockarea_layout_state()
+        self._dock_layout_restored = True
+        host = self._dock_main_window()
+        if host is not None:
+            self._dock_host = host
+            try:
+                if hasattr(host, "on_post_docks_ready"):
+                    host.on_post_docks_ready()
+                elif hasattr(host, "onPostDocksReady"):
+                    host.onPostDocksReady()
+            except Exception:
+                pass
+
+    def _dockarea_dock(self, key: str) -> Optional[Dock]:
+        return self._dockarea_docks.get(key)
+
+    def _dockarea_default_visibility_map(self) -> Dict[str, bool]:
+        visible_map = {key: False for key in self._dockarea_docks.keys()}
+        for key in _FIXED_POST_RIGHT_TAB_ORDER:
+            if key in visible_map:
+                visible_map[key] = True
+        return visible_map
+
+    def _lock_pg_dock_interactions(self, dock: Dock) -> None:
+        label = getattr(dock, "label", None)
+        if label is None or bool(getattr(label, "_pyber_fixed_interaction_lock", False)):
+            return
+
+        def _ignore_drag(event: QtGui.QMouseEvent) -> None:
+            event.ignore()
+
+        def _ignore_double_click(event: QtGui.QMouseEvent) -> None:
+            event.accept()
+
+        try:
+            label.mouseMoveEvent = _ignore_drag
+            label.mouseDoubleClickEvent = _ignore_double_click
+            label.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
+            label._pyber_fixed_interaction_lock = True
+        except Exception:
+            pass
+
+    def _dockarea_active_key(self) -> Optional[str]:
+        active = self._last_opened_section if self._last_opened_section in self._dockarea_docks else None
+        if active is not None:
+            return active
+        for key in _FIXED_POST_RIGHT_TAB_ORDER:
+            dock = self._dockarea_dock(key)
+            if dock is not None and dock.isVisible():
+                return key
+        for key, dock in self._dockarea_docks.items():
+            if dock.isVisible():
+                return key
+        return None
+
+    def _set_dockarea_visible(self, key: str, visible: bool) -> None:
+        dock = self._dockarea_dock(key)
+        if dock is None:
+            return
+        if visible:
+            dock.show()
+        else:
+            dock.hide()
+
+    def _arrange_dockarea_default(self) -> None:
+        if self._dockarea is None:
+            return
+        setup = self._dockarea_dock("setup")
+        psth = self._dockarea_dock("psth")
+        spatial = self._dockarea_dock("spatial")
+        signal = self._dockarea_dock("signal")
+        behavior = self._dockarea_dock("behavior")
+        export = self._dockarea_dock("export")
+        if setup is None:
+            return
+        self._dockarea.addDock(setup, "right")
+        # Keep section panels in one tab stack to avoid layout churn/floating glitches.
+        if psth is not None:
+            self._dockarea.addDock(psth, "above", setup)
+        if spatial is not None:
+            self._dockarea.addDock(spatial, "above", setup)
+        if export is not None:
+            self._dockarea.addDock(export, "above", setup)
+        if signal is not None:
+            self._dockarea.addDock(signal, "above", setup)
+        if behavior is not None:
+            self._dockarea.addDock(behavior, "above", setup)
+
+    def _dockarea_state_payload(self) -> Dict[str, object]:
+        if self._dockarea is None:
+            return {}
+        try:
+            return dict(self._dockarea.saveState() or {})
+        except Exception:
+            return {}
+
+    def _dockarea_apply_visibility_map(self, visible_map: Dict[str, bool]) -> None:
+        for key, dock in self._dockarea_docks.items():
+            vis = bool(visible_map.get(key, False))
+            if vis:
+                dock.show()
+            else:
+                dock.hide()
+        self._sync_section_button_states_from_docks()
+
+    def _save_dockarea_layout_state(self) -> None:
+        if self._dockarea is None:
+            return
+        state = self._dockarea_state_payload()
+        visible = {key: bool(dock.isVisible()) for key, dock in self._dockarea_docks.items()}
+        active = self._dockarea_active_key() or ""
+        try:
+            self._settings.setValue(_POST_DOCKAREA_STATE_KEY, json.dumps(state))
+            self._settings.setValue(_POST_DOCKAREA_VISIBLE_KEY, json.dumps(visible))
+            self._settings.setValue(_POST_DOCKAREA_ACTIVE_KEY, active)
+            self._settings.sync()
+        except Exception:
+            pass
+
+    def _restore_dockarea_layout_state(self) -> None:
+        if self._dockarea is None:
+            return
+        self._arrange_dockarea_default()
+        raw_state = self._settings.value(_POST_DOCKAREA_STATE_KEY, "")
+        try:
+            if isinstance(raw_state, str) and raw_state.strip():
+                parsed = json.loads(raw_state)
+                if isinstance(parsed, dict):
+                    self._dockarea.restoreState(parsed, missing="ignore", extra="bottom")
+        except Exception:
+            pass
+        visible_map: Dict[str, bool] = {}
+        raw_vis = self._settings.value(_POST_DOCKAREA_VISIBLE_KEY, "")
+        try:
+            if isinstance(raw_vis, str) and raw_vis.strip():
+                parsed_vis = json.loads(raw_vis)
+                if isinstance(parsed_vis, dict):
+                    visible_map = {str(k): bool(v) for k, v in parsed_vis.items()}
+        except Exception:
+            visible_map = {}
+        if not visible_map:
+            visible_map = self._dockarea_default_visibility_map()
+        self._dockarea_apply_visibility_map(visible_map)
+        active = str(self._settings.value(_POST_DOCKAREA_ACTIVE_KEY, "setup") or "setup")
+        dock = self._dockarea_dock(active)
+        if dock is not None and dock.isVisible():
+            try:
+                dock.raiseDock()
+            except Exception:
+                pass
+            self._last_opened_section = active
+            return
+        self._last_opened_section = None
+        for key in _FIXED_POST_RIGHT_TAB_ORDER:
+            fallback = self._dockarea_dock(key)
+            if fallback is not None and fallback.isVisible():
+                try:
+                    fallback.raiseDock()
+                except Exception:
+                    pass
+                self._last_opened_section = key
+                break
+
+    def _apply_fixed_dockarea_layout(self) -> None:
+        if not self._use_pg_dockarea_layout:
+            return
+        if self._dockarea is None or not self._dockarea_docks:
+            return
+        self._apply_fixed_dock_features()
+        visible_map = {key: bool(dock.isVisible()) for key, dock in self._dockarea_docks.items()}
+        if not any(visible_map.values()):
+            visible_map = self._dockarea_default_visibility_map()
+        self._suspend_panel_layout_persistence = True
+        try:
+            self._arrange_dockarea_default()
+            for key in self._dockarea_docks.keys():
+                should_show = bool(visible_map.get(key, False))
+                self._set_dockarea_visible(key, should_show)
+            active = self._last_opened_section if bool(visible_map.get(self._last_opened_section or "", False)) else None
+            if active is None:
+                for key in _FIXED_POST_RIGHT_TAB_ORDER:
+                    if bool(visible_map.get(key, False)):
+                        active = key
+                        break
+            if active is None:
+                for key in self._dockarea_docks.keys():
+                    if bool(visible_map.get(key, False)):
+                        active = key
+                        break
+            dock = self._dockarea_dock(active) if active else None
+            if dock is not None and dock.isVisible():
+                try:
+                    dock.raiseDock()
+                except Exception:
+                    pass
+            self._last_opened_section = active
+            self._sync_section_button_states_from_docks()
+            self._dock_layout_restored = True
+        finally:
+            self._suspend_panel_layout_persistence = False
+        self._save_dockarea_layout_state()
+
+    def _activate_dockarea_tab(self, key: str) -> None:
+        if key not in self._dockarea_docks:
+            return
+        self._set_dockarea_visible(key, True)
+        dock = self._dockarea_dock(key)
+        if dock is not None:
+            try:
+                dock.raiseDock()
+            except Exception:
+                pass
+        self._last_opened_section = key
+
+    def _on_dockarea_dock_closed(self, key: str) -> None:
+        self._set_section_button_checked(key, False)
+        if self._last_opened_section == key:
+            self._last_opened_section = None
+        self._save_panel_layout_state()
+
     def _setup_section_popups(self) -> None:
+        if self._use_pg_dockarea_layout:
+            self._setup_dockarea_sections()
+            return
         if self._section_popups:
             return
         host = self._dock_main_window()
@@ -1718,7 +2124,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "psth": ("PSTH", self.section_psth),
             "signal": ("Signal Event Analyzer", self.section_signal),
             "behavior": ("Behavior Analysis", self.section_behavior),
-            "spatial": ("Spatial Heatmap", self.section_spatial),
+            "spatial": ("Spatial", self.section_spatial),
             "export": ("Export", self.section_export),
         }
         for key, (title, widget) in section_map.items():
@@ -1727,11 +2133,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
             scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            scroll.setStyleSheet("QScrollArea { background: #242a34; border: none; }")
-            # Keep viewport painted with dock background to avoid dark paint gaps
-            # when section rows are dynamically shown/hidden.
-            scroll.viewport().setAutoFillBackground(True)
-            scroll.viewport().setStyleSheet("background: #242a34;")
+            self._apply_scroll_theme(scroll)
             # Keep section widgets shrinkable so dock stacks do not clip content.
             widget.setMinimumSize(0, 0)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
@@ -1783,15 +2185,33 @@ class PostProcessingPanel(QtWidgets.QWidget):
         btn.blockSignals(False)
 
     def _apply_fixed_dock_features(self) -> None:
+        if self._use_pg_dockarea_layout:
+            for key, dock in self._dockarea_docks.items():
+                if dock is None or not hasattr(dock, "label"):
+                    continue
+                closable = not (self._force_fixed_default_layout and key in _FIXED_POST_RIGHT_SECTIONS)
+                try:
+                    dock.label.setClosable(bool(closable))
+                except Exception:
+                    pass
+            return
         if not self._section_popups:
             return
-        for dock in self._section_popups.values():
+        for key, dock in self._section_popups.items():
             if dock is None:
                 continue
             if self._force_fixed_default_layout:
-                features = (
-                    QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
-                    | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+                if key in _FIXED_POST_RIGHT_SECTIONS:
+                    features = QtWidgets.QDockWidget.DockWidgetFeature.NoDockWidgetFeatures
+                else:
+                    features = (
+                        QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
+                        | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+                    )
+                allowed = (
+                    QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
+                    if key == "export"
+                    else QtCore.Qt.DockWidgetArea.RightDockWidgetArea
                 )
             else:
                 features = (
@@ -1799,16 +2219,43 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
                     | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
                 )
+                allowed = QtCore.Qt.DockWidgetArea.AllDockWidgetAreas
             try:
+                dock.setAllowedAreas(allowed)
                 dock.setFeatures(features)
             except Exception:
                 pass
 
     def _toggle_section_popup(self, key: str, checked: bool) -> None:
+        if self._use_pg_dockarea_layout:
+            self._setup_dockarea_sections()
+            dock = self._dockarea_dock(key)
+            if dock is None:
+                return
+            if checked:
+                self._activate_dockarea_tab(key)
+            else:
+                self._set_dockarea_visible(key, False)
+            self._sync_section_button_states_from_docks()
+            self._save_panel_layout_state()
+            return
         if not self._section_popups:
             self._setup_section_popups()
         dock = self._section_popups.get(key)
         if dock is None:
+            return
+        host = self._dock_host or self._dock_main_window()
+        tabs = getattr(host, "tabs", None) if host is not None else None
+        post_active = not isinstance(tabs, QtWidgets.QTabWidget) or tabs.currentWidget() is self
+        fixed_required = (
+            self._force_fixed_default_layout
+            and key in _FIXED_POST_RIGHT_SECTIONS
+            and post_active
+            and not self._post_docks_hidden_for_tab_switch
+        )
+        if fixed_required:
+            self._activate_fixed_right_tab(key)
+            self._save_panel_layout_state()
             return
         if checked:
             # Keep user-selected docking mode. Only reposition if currently floating off-screen.
@@ -1825,6 +2272,31 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._save_panel_layout_state()
 
     def _on_section_popup_visibility(self, key: str, visible: bool) -> None:
+        if self._use_pg_dockarea_layout:
+            self._set_section_button_checked(key, visible)
+            if visible:
+                self._last_opened_section = key
+            elif self._last_opened_section == key:
+                self._last_opened_section = None
+            self._save_panel_layout_state()
+            return
+        host = self._dock_host or self._dock_main_window()
+        tabs = getattr(host, "tabs", None) if host is not None else None
+        post_active = not isinstance(tabs, QtWidgets.QTabWidget) or tabs.currentWidget() is self
+        fixed_required = (
+            self._force_fixed_default_layout
+            and key in _FIXED_POST_RIGHT_SECTIONS
+            and post_active
+            and not self._post_docks_hidden_for_tab_switch
+        )
+        if fixed_required and not visible:
+            # Spatial/PSTH are represented as tabs inside Setup dock in fixed mode.
+            if key == "setup":
+                self._activate_fixed_right_tab("setup")
+            else:
+                self._set_section_button_checked(key, True)
+            self._save_panel_layout_state()
+            return
         self._set_section_button_checked(key, visible)
         if visible:
             self._last_opened_section = key
@@ -1833,10 +2305,47 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._save_panel_layout_state()
 
     def _hide_all_section_popups(self) -> None:
+        if self._use_pg_dockarea_layout:
+            self._setup_dockarea_sections()
+            for key in self._dockarea_docks.keys():
+                self._set_dockarea_visible(key, False)
+                self._set_section_button_checked(key, False)
+            self._last_opened_section = None
+            self._save_panel_layout_state()
+            return
+        host = self._dock_host or self._dock_main_window()
+        if self._force_fixed_default_layout:
+            if host is not None:
+                self._apply_fixed_right_tabs_as_single_dock(host, active_key="setup")
+            for key in ("signal", "behavior", "export"):
+                dock = self._section_popups.get(key)
+                if dock is None:
+                    continue
+                dock.hide()
+                self._set_section_button_checked(key, False)
+            self._last_opened_section = "setup"
+            self._save_panel_layout_state()
+            return
         for key, dock in self._section_popups.items():
-            dock.hide()
-            self._set_section_button_checked(key, False)
-        self._last_opened_section = None
+            keep_visible = self._force_fixed_default_layout and key in _FIXED_POST_RIGHT_SECTIONS
+            if keep_visible:
+                dock.blockSignals(True)
+                try:
+                    if host is not None:
+                        host.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+                    dock.setFloating(False)
+                    dock.show()
+                    dock.raise_()
+                finally:
+                    dock.blockSignals(False)
+                self._set_section_button_checked(key, True)
+            else:
+                dock.hide()
+                self._set_section_button_checked(key, False)
+        if self._force_fixed_default_layout:
+            self._last_opened_section = "setup"
+        else:
+            self._last_opened_section = None
         self._save_panel_layout_state()
 
     def _default_popup_size(self, key: str) -> Tuple[int, int]:
@@ -1931,14 +2440,30 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return None
 
     def _sync_section_button_states_from_docks(self) -> None:
+        if self._use_pg_dockarea_layout:
+            self._last_opened_section = None
+            for key, dock in self._dockarea_docks.items():
+                visible = bool(dock.isVisible())
+                self._set_section_button_checked(key, visible)
+                if visible and self._last_opened_section is None:
+                    self._last_opened_section = key
+            return
         self._last_opened_section = None
         for key, dock in self._section_popups.items():
             visible = bool(dock.isVisible())
+            if self._force_fixed_default_layout and key in _FIXED_POST_RIGHT_SECTIONS:
+                # In fixed mode these sections are always present as right-side tabs.
+                visible = True
             self._set_section_button_checked(key, visible)
             if visible:
                 self._last_opened_section = key
 
     def _has_saved_layout_state(self) -> bool:
+        if self._use_pg_dockarea_layout:
+            try:
+                return bool(self._settings.contains(_POST_DOCKAREA_STATE_KEY) or self._settings.contains(_POST_DOCKAREA_VISIBLE_KEY))
+            except Exception:
+                return False
         try:
             if self._settings.contains(_POST_DOCK_STATE_KEY):
                 return True
@@ -1952,6 +2477,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _save_panel_layout_state(self) -> None:
         if not self._panel_layout_persistence_ready:
+            return
+        if self._use_pg_dockarea_layout:
+            if self._is_restoring_panel_layout or self._suspend_panel_layout_persistence:
+                return
+            self._save_dockarea_layout_state()
+            return
+        if self._force_fixed_default_layout:
+            self._persist_fixed_post_default_state()
             return
         if self._is_restoring_panel_layout:
             return
@@ -1990,6 +2523,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _persist_hidden_layout_state_from_cache(self) -> None:
         """Persist cached post layout captured when tab-switch hiding post docks."""
+        if self._use_pg_dockarea_layout:
+            return
+        if self._force_fixed_default_layout:
+            self._persist_fixed_post_default_state()
+            return
         if not self._post_docks_hidden_for_tab_switch:
             return
         right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
@@ -2014,6 +2552,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def flush_post_section_state_to_settings(self) -> None:
         """Flush latest post section visibility/layout into QSettings immediately."""
+        if self._use_pg_dockarea_layout:
+            self._save_panel_layout_state()
+            return
         if self._post_docks_hidden_for_tab_switch:
             self._persist_hidden_layout_state_from_cache()
             return
@@ -2024,6 +2565,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         Persist post dock state safely.
         Uses cached tab-switch state while hidden, otherwise captures current host topology.
         """
+        if self._use_pg_dockarea_layout:
+            self._save_panel_layout_state()
+            return
+        if self._force_fixed_default_layout:
+            self._persist_fixed_post_default_state()
+            return
         if self._post_docks_hidden_for_tab_switch:
             self._persist_hidden_layout_state_from_cache()
             return
@@ -2044,6 +2591,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.flush_post_section_state_to_settings()
 
     def _restore_panel_layout_state(self) -> None:
+        if self._use_pg_dockarea_layout:
+            self._setup_dockarea_sections()
+            if self._force_fixed_default_layout:
+                self._apply_fixed_dockarea_layout()
+            else:
+                self._restore_dockarea_layout_state()
+            return
         if self._force_fixed_default_layout:
             self.apply_fixed_default_layout()
             return
@@ -2391,7 +2945,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _update_align_ui(self) -> None:
         use_dio = _is_doric_channel_align(self.combo_align.currentText())
-        for w in (self.combo_dio, self.combo_dio_polarity, self.combo_dio_align):
+        for w in (
+            self.lbl_dio_channel,
+            self.combo_dio,
+            self.lbl_dio_polarity,
+            self.combo_dio_polarity,
+            self.lbl_dio_align,
+            self.combo_dio_align,
+        ):
             w.setEnabled(use_dio)
             w.setVisible(use_dio)
 
@@ -3599,9 +4160,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
             _clear_spatial("Could not compute heatmap for selected trajectories.", x_col, y_col)
             return
 
-        occupancy_map = np.nanmean(np.stack(occ_maps, axis=0), axis=0)
-        activity_map = np.nanmean(np.stack(act_maps, axis=0), axis=0) if act_maps else None
-        velocity_map = np.nanmean(np.stack(vel_maps, axis=0), axis=0) if vel_maps else None
+        def _nanmean_stack_no_warning(maps: List[np.ndarray]) -> Optional[np.ndarray]:
+            if not maps:
+                return None
+            stack = np.asarray(np.stack(maps, axis=0), float)
+            valid = np.isfinite(stack)
+            counts = np.sum(valid, axis=0)
+            sums = np.nansum(stack, axis=0)
+            return np.divide(sums, counts, out=np.full_like(sums, np.nan, dtype=float), where=counts > 0)
+
+        occupancy_map = _nanmean_stack_no_warning(occ_maps)
+        if occupancy_map is None:
+            _clear_spatial("Could not compute heatmap for selected trajectories.", x_col, y_col)
+            return
+        activity_map = _nanmean_stack_no_warning(act_maps)
+        velocity_map = _nanmean_stack_no_warning(vel_maps)
         sigma = float(self.spin_spatial_smooth.value())
         if sigma > 0:
             from scipy.ndimage import gaussian_filter
@@ -4972,6 +5545,40 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.curve_sem_lo.setData(tvec, avg - sem, connect="finite", skipFiniteCheck=True)
         self.plot_avg.setXRange(float(tvec[0]), float(tvec[-1]), padding=0)
 
+    @staticmethod
+    def _finite_mean_sem(values: np.ndarray) -> Tuple[float, float, int]:
+        vals = np.asarray(values, float)
+        vals = vals[np.isfinite(vals)]
+        n = int(vals.size)
+        if n == 0:
+            return 0.0, 0.0, 0
+        mean = float(np.nanmean(vals))
+        if n < 2:
+            return mean, 0.0, n
+        sem = float(np.nanstd(vals, ddof=1) / np.sqrt(float(n)))
+        if not np.isfinite(sem):
+            sem = 0.0
+        return mean, sem, n
+
+    @staticmethod
+    def _jittered_x(center: float, n: int, half_width: float = 0.16) -> np.ndarray:
+        if n <= 0:
+            return np.array([], float)
+        if n == 1:
+            return np.array([float(center)], float)
+        return float(center) + np.linspace(-abs(float(half_width)), abs(float(half_width)), n)
+
+    @staticmethod
+    def _set_error_bar(item: pg.ErrorBarItem, x: float, y: float, err: float) -> None:
+        yy = float(y) if np.isfinite(y) else 0.0
+        ee = float(err) if np.isfinite(err) and err > 0 else 0.0
+        item.setData(
+            x=np.array([float(x)], float),
+            y=np.array([yy], float),
+            top=np.array([ee], float),
+            bottom=np.array([ee], float),
+        )
+
     def _render_metrics(self, mat: np.ndarray, tvec: np.ndarray) -> None:
         if mat.size == 0 or not self.cb_metrics.isChecked():
             self.metrics_bar_pre.setOpts(height=[0])
@@ -4979,6 +5586,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.metrics_pairs_curve.setData([], [])
             self.metrics_scatter_pre.setData([], [])
             self.metrics_scatter_post.setData([], [])
+            self._set_error_bar(self.metrics_err_pre, 0.0, 0.0, 0.0)
+            self._set_error_bar(self.metrics_err_post, 1.0, 0.0, 0.0)
             self._last_metrics = None
             return
         metric = self.combo_metric.currentText()
@@ -5001,28 +5610,32 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.metrics_pairs_curve.setData([], [])
             self.metrics_scatter_pre.setData([], [])
             self.metrics_scatter_post.setData([], [])
+            self._set_error_bar(self.metrics_err_pre, 0.0, 0.0, 0.0)
+            self._set_error_bar(self.metrics_err_post, 1.0, 0.0, 0.0)
             self._last_metrics = None
             return
 
         def _metric_vals(win: np.ndarray, duration: float) -> np.ndarray:
             if win.size == 0:
                 return np.array([], float)
+            w = np.asarray(win, float)
+            valid = np.isfinite(w)
+            counts = np.sum(valid, axis=1)
+            sums = np.nansum(w, axis=1)
+            vals = np.divide(sums, counts, out=np.full(w.shape[0], np.nan, dtype=float), where=counts > 0)
             if metric.startswith("AUC"):
-                with np.errstate(all="ignore"):
-                    vals = np.nanmean(win, axis=1) * float(abs(duration))
-            else:
-                with np.errstate(all="ignore"):
-                    vals = np.nanmean(win, axis=1)
+                vals = vals * float(abs(duration))
             return np.asarray(vals, float)
 
         pre_vals_all = _metric_vals(pre, pre1 - pre0)
         post_vals_all = _metric_vals(post, post1 - post0)
         pre_vals_finite = pre_vals_all[np.isfinite(pre_vals_all)]
         post_vals_finite = post_vals_all[np.isfinite(post_vals_all)]
-        pre_mean = float(np.nanmean(pre_vals_finite)) if pre_vals_finite.size else 0.0
-        post_mean = float(np.nanmean(post_vals_finite)) if post_vals_finite.size else 0.0
+        pre_mean, pre_sem, pre_n = self._finite_mean_sem(pre_vals_finite)
+        post_mean, post_sem, post_n = self._finite_mean_sem(post_vals_finite)
         self.metrics_bar_pre.setOpts(height=[pre_mean])
         self.metrics_bar_post.setOpts(height=[post_mean])
+        group_mode = self.tab_sources.currentIndex() == 1
 
         pair_mask = np.isfinite(pre_vals_all) & np.isfinite(post_vals_all)
         pre_pair = pre_vals_all[pair_mask]
@@ -5041,18 +5654,42 @@ class PostProcessingPanel(QtWidgets.QWidget):
             y_line[1::3] = post_pair
             y_line[2::3] = np.nan
             self.metrics_pairs_curve.setData(x_line, y_line, connect="finite", skipFiniteCheck=True)
-            self.metrics_scatter_pre.setData(np.zeros(n_pair, dtype=float), pre_pair)
-            self.metrics_scatter_post.setData(np.ones(n_pair, dtype=float), post_pair)
+            if group_mode:
+                x_pre = self._jittered_x(0.0, n_pair, half_width=0.16)
+                x_post = self._jittered_x(1.0, n_pair, half_width=0.16)
+            else:
+                x_pre = np.zeros(n_pair, dtype=float)
+                x_post = np.ones(n_pair, dtype=float)
+            self.metrics_scatter_pre.setData(x_pre, pre_pair)
+            self.metrics_scatter_post.setData(x_post, post_pair)
         else:
             self.metrics_pairs_curve.setData([], [])
             self.metrics_scatter_pre.setData([], [])
             self.metrics_scatter_post.setData([], [])
 
+        if group_mode:
+            self._set_error_bar(self.metrics_err_pre, 0.0, pre_mean, pre_sem)
+            self._set_error_bar(self.metrics_err_post, 1.0, post_mean, post_sem)
+        else:
+            self._set_error_bar(self.metrics_err_pre, 0.0, 0.0, 0.0)
+            self._set_error_bar(self.metrics_err_post, 1.0, 0.0, 0.0)
+
         finite_all = np.concatenate(
             [
                 pre_vals_finite if pre_vals_finite.size else np.array([], float),
                 post_vals_finite if post_vals_finite.size else np.array([], float),
-                np.array([pre_mean, post_mean, 0.0], float),
+                np.array(
+                    [
+                        pre_mean,
+                        post_mean,
+                        pre_mean - pre_sem,
+                        pre_mean + pre_sem,
+                        post_mean - post_sem,
+                        post_mean + post_sem,
+                        0.0,
+                    ],
+                    float,
+                ),
             ]
         )
         finite_all = finite_all[np.isfinite(finite_all)]
@@ -5064,7 +5701,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if ymin == ymax:
             ymax = ymin + 1.0
         self.plot_metrics.setYRange(ymin, ymax, padding=0.2)
-        self._last_metrics = {"pre": pre_mean, "post": post_mean, "metric": metric}
+        self._last_metrics = {
+            "pre": pre_mean,
+            "post": post_mean,
+            "pre_sem": pre_sem,
+            "post_sem": post_sem,
+            "pre_n": float(pre_n),
+            "post_n": float(post_n),
+            "metric": metric,
+        }
 
     def _compute_global_metrics_for_trace(
         self,
@@ -5123,6 +5768,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.lbl_global_metrics.setText("Global metrics: -")
             self.global_bar_amp.setOpts(height=[0])
             self.global_bar_freq.setOpts(height=[0])
+            self.global_scatter_amp.setData([], [])
+            self.global_scatter_freq.setData([], [])
+            self._set_error_bar(self.global_err_amp, 0.0, 0.0, 0.0)
+            self._set_error_bar(self.global_err_freq, 1.0, 0.0, 0.0)
             return
 
         if not (self.cb_global_amp.isChecked() or self.cb_global_freq.isChecked()):
@@ -5130,6 +5779,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.lbl_global_metrics.setText("Global metrics: -")
             self.global_bar_amp.setOpts(height=[0])
             self.global_bar_freq.setOpts(height=[0])
+            self.global_scatter_amp.setData([], [])
+            self.global_scatter_freq.setData([], [])
+            self._set_error_bar(self.global_err_amp, 0.0, 0.0, 0.0)
+            self._set_error_bar(self.global_err_freq, 1.0, 0.0, 0.0)
             return
 
         start_s = float(self.spin_global_start.value())
@@ -5153,22 +5806,35 @@ class PostProcessingPanel(QtWidgets.QWidget):
             durations.append(res["duration"])
             thrs.append(res["thr"])
 
-        if not amps and not freqs:
+        amp_vals = np.asarray(amps, float)
+        freq_vals = np.asarray(freqs, float)
+        amp_vals = amp_vals[np.isfinite(amp_vals)]
+        freq_vals = freq_vals[np.isfinite(freq_vals)]
+        if amp_vals.size == 0 and freq_vals.size == 0:
             self._last_global_metrics = None
             self.lbl_global_metrics.setText("Global metrics: -")
             self.global_bar_amp.setOpts(height=[0])
             self.global_bar_freq.setOpts(height=[0])
+            self.global_scatter_amp.setData([], [])
+            self.global_scatter_freq.setData([], [])
+            self._set_error_bar(self.global_err_amp, 0.0, 0.0, 0.0)
+            self._set_error_bar(self.global_err_freq, 1.0, 0.0, 0.0)
             return
 
-        avg_amp = float(np.nanmean(amps)) if amps else 0.0
-        avg_freq = float(np.nanmean(freqs)) if freqs else 0.0
+        avg_amp, sem_amp, n_amp = self._finite_mean_sem(amp_vals)
+        avg_freq, sem_freq, n_freq = self._finite_mean_sem(freq_vals)
         total_peaks = float(np.nansum(peaks)) if peaks else 0.0
         avg_thr = float(np.nanmean(thrs)) if thrs else 0.0
         avg_dur = float(np.nanmean(durations)) if durations else 0.0
+        group_mode = self.tab_sources.currentIndex() == 1
 
         self._last_global_metrics = {
             "amp": avg_amp,
+            "amp_sem": sem_amp,
+            "amp_n": float(n_amp),
             "freq": avg_freq,
+            "freq_sem": sem_freq,
+            "freq_n": float(n_freq),
             "peaks": total_peaks,
             "thr": avg_thr,
             "duration": avg_dur,
@@ -5178,16 +5844,54 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         parts = []
         if self.cb_global_amp.isChecked():
-            parts.append(f"amp={avg_amp:.4g}")
+            if group_mode:
+                parts.append(f"amp={avg_amp:.4g}+-{sem_amp:.3g}")
+            else:
+                parts.append(f"amp={avg_amp:.4g}")
         if self.cb_global_freq.isChecked():
-            parts.append(f"freq={avg_freq:.4g} Hz")
+            if group_mode:
+                parts.append(f"freq={avg_freq:.4g}+-{sem_freq:.3g} Hz")
+            else:
+                parts.append(f"freq={avg_freq:.4g} Hz")
         parts.append(f"peaks={int(total_peaks)}")
         self.lbl_global_metrics.setText("Global metrics: " + " | ".join(parts))
 
         self.global_bar_amp.setOpts(height=[avg_amp if self.cb_global_amp.isChecked() else 0.0])
         self.global_bar_freq.setOpts(height=[avg_freq if self.cb_global_freq.isChecked() else 0.0])
-        ymin = min(0.0, avg_amp if self.cb_global_amp.isChecked() else 0.0, avg_freq if self.cb_global_freq.isChecked() else 0.0)
-        ymax = max(avg_amp if self.cb_global_amp.isChecked() else 0.0, avg_freq if self.cb_global_freq.isChecked() else 0.0, 0.0)
+        if group_mode:
+            if self.cb_global_amp.isChecked() and amp_vals.size:
+                self.global_scatter_amp.setData(self._jittered_x(0.0, int(amp_vals.size), half_width=0.16), amp_vals)
+                self._set_error_bar(self.global_err_amp, 0.0, avg_amp, sem_amp)
+            else:
+                self.global_scatter_amp.setData([], [])
+                self._set_error_bar(self.global_err_amp, 0.0, 0.0, 0.0)
+            if self.cb_global_freq.isChecked() and freq_vals.size:
+                self.global_scatter_freq.setData(self._jittered_x(1.0, int(freq_vals.size), half_width=0.16), freq_vals)
+                self._set_error_bar(self.global_err_freq, 1.0, avg_freq, sem_freq)
+            else:
+                self.global_scatter_freq.setData([], [])
+                self._set_error_bar(self.global_err_freq, 1.0, 0.0, 0.0)
+        else:
+            self.global_scatter_amp.setData([], [])
+            self.global_scatter_freq.setData([], [])
+            self._set_error_bar(self.global_err_amp, 0.0, 0.0, 0.0)
+            self._set_error_bar(self.global_err_freq, 1.0, 0.0, 0.0)
+        y_candidates: List[float] = [0.0]
+        if self.cb_global_amp.isChecked():
+            y_candidates.extend([avg_amp, avg_amp - sem_amp, avg_amp + sem_amp])
+            if group_mode and amp_vals.size:
+                y_candidates.extend(np.asarray(amp_vals, float).tolist())
+        if self.cb_global_freq.isChecked():
+            y_candidates.extend([avg_freq, avg_freq - sem_freq, avg_freq + sem_freq])
+            if group_mode and freq_vals.size:
+                y_candidates.extend(np.asarray(freq_vals, float).tolist())
+        y_arr = np.asarray(y_candidates, float)
+        y_arr = y_arr[np.isfinite(y_arr)]
+        if y_arr.size:
+            ymin = float(np.nanmin(y_arr))
+            ymax = float(np.nanmax(y_arr))
+        else:
+            ymin, ymax = 0.0, 1.0
         if ymin == ymax:
             ymax = ymin + 1.0
         self.plot_global.setYRange(ymin, ymax, padding=0.2)
@@ -6698,7 +7402,25 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def hide_section_popups_for_tab_switch(self) -> None:
         """Hide and detach post-processing docks when tab is inactive."""
+        if self._use_pg_dockarea_layout:
+            # DockArea lives inside the post tab widget; no main-window dock mutation is needed.
+            return
         if not self._section_popups:
+            return
+        if self._applying_fixed_default_layout:
+            return
+        if self._force_fixed_default_layout:
+            self._suspend_panel_layout_persistence = True
+            try:
+                for key, dock in self._section_popups.items():
+                    dock.hide()
+                    self._set_section_button_checked(key, False)
+            finally:
+                self._suspend_panel_layout_persistence = False
+            # Fixed mode does not use cached hidden-state restore.
+            self._post_docks_hidden_for_tab_switch = False
+            self._post_section_visibility_before_hide.clear()
+            self._post_section_state_before_hide.clear()
             return
         if self._post_docks_hidden_for_tab_switch:
             return
@@ -6766,14 +7488,25 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         super().showEvent(event)
+        if self._use_pg_dockarea_layout:
+            self._setup_dockarea_sections()
+            if self._force_fixed_default_layout:
+                if not self._dock_layout_restored:
+                    self._apply_fixed_dockarea_layout()
+                else:
+                    self._sync_section_button_states_from_docks()
+            elif not self._dock_layout_restored:
+                self._restore_dockarea_layout_state()
+                self._dock_layout_restored = True
+            self._ensure_plot_rows_visible()
+            return
         self._setup_section_popups()
         if not self._section_popups:
             # Defer until the widget is fully attached to a main-window host.
             QtCore.QTimer.singleShot(0, self._setup_section_popups)
         if self._force_fixed_default_layout and self._section_popups:
-            if not self._dock_layout_restored:
-                self.apply_fixed_default_layout()
-                self._dock_layout_restored = True
+            self.apply_fixed_default_layout()
+            self._dock_layout_restored = True
         elif not self._dock_layout_restored and self._section_popups:
             self._restore_panel_layout_state()
             self._dock_layout_restored = True
@@ -6839,6 +7572,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._save_panel_layout_state()
 
     def _apply_post_main_dock_snapshot_if_needed(self) -> None:
+        if self._use_pg_dockarea_layout:
+            return
         if self._post_snapshot_applied:
             return
         host = self._dock_host or self._dock_main_window()
@@ -6877,6 +7612,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         """
         Ensure preprocessing docks cannot stay visible while postprocessing tab is active.
         """
+        if self._use_pg_dockarea_layout:
+            return
         if not self.isVisible():
             return
         host = self._dock_host or self._dock_main_window()
@@ -6896,26 +7633,212 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def set_force_fixed_default_layout(self, enabled: bool) -> None:
         self._force_fixed_default_layout = bool(enabled)
         self._apply_fixed_dock_features()
+        if self._use_pg_dockarea_layout:
+            self._setup_dockarea_sections()
+            if self._force_fixed_default_layout:
+                self._apply_fixed_dockarea_layout()
+            else:
+                self._restore_dockarea_layout_state()
+            return
+
+    def _schedule_fixed_layout_retry(self) -> None:
+        if self._pending_fixed_layout_retry:
+            return
+        self._pending_fixed_layout_retry = True
+        QtCore.QTimer.singleShot(0, self._retry_apply_fixed_default_layout)
+
+    def _retry_apply_fixed_default_layout(self) -> None:
+        self._pending_fixed_layout_retry = False
+        try:
+            self.apply_fixed_default_layout()
+        except Exception:
+            _LOG.exception("Deferred fixed post layout apply failed")
+
+    def _ensure_fixed_right_tab_widget(self, host: QtWidgets.QMainWindow) -> Optional[QtWidgets.QTabWidget]:
+        setup_dock = self._section_popups.get("setup")
+        if setup_dock is None:
+            return None
+        tabw = self._fixed_right_tab_widget
+        if tabw is None:
+            tabw = QtWidgets.QTabWidget()
+            tabw.setObjectName("post.fixed.right.tabs")
+            tabw.setDocumentMode(True)
+            tabw.setTabPosition(QtWidgets.QTabWidget.TabPosition.South)
+            self._fixed_right_tab_widget = tabw
+        for key in _FIXED_POST_RIGHT_TAB_ORDER:
+            scroll = self._section_scroll_hosts.get(key)
+            if scroll is None:
+                continue
+            idx = tabw.indexOf(scroll)
+            title = _FIXED_POST_RIGHT_TAB_TITLES.get(key, key.title())
+            if idx < 0:
+                idx = tabw.addTab(scroll, title)
+            else:
+                tabw.setTabText(idx, title)
+        if setup_dock.widget() is not tabw:
+            setup_dock.setWidget(tabw)
+        return tabw
+
+    def _apply_fixed_right_tabs_as_single_dock(self, host: QtWidgets.QMainWindow, active_key: str = "setup") -> None:
+        setup_dock = self._section_popups.get("setup")
+        if setup_dock is None:
+            return
+        tabw = self._ensure_fixed_right_tab_widget(host)
+        if tabw is None:
+            return
+        # Setup dock hosts the fixed tabs; the individual PSTH/Spatial docks stay hidden.
+        setup_dock.blockSignals(True)
+        try:
+            host.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, setup_dock)
+            setup_dock.setFloating(False)
+            setup_dock.show()
+        finally:
+            setup_dock.blockSignals(False)
+        for key in ("psth", "spatial", "signal", "behavior"):
+            dock = self._section_popups.get(key)
+            if dock is None:
+                continue
+            dock.blockSignals(True)
+            try:
+                host.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+                dock.setFloating(False)
+                dock.hide()
+            finally:
+                dock.blockSignals(False)
+        active = active_key if active_key in _FIXED_POST_RIGHT_SECTIONS else "setup"
+        page = self._section_scroll_hosts.get(active)
+        idx = tabw.indexOf(page) if page is not None else -1
+        if idx >= 0:
+            tabw.setCurrentIndex(idx)
+        try:
+            setup_dock.raise_()
+            setup_dock.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+        except Exception:
+            pass
+        for key in _FIXED_POST_RIGHT_SECTIONS:
+            self._set_section_button_checked(key, True)
+        self._last_opened_section = active
+
+    def _activate_fixed_right_tab(self, key: str) -> None:
+        host = self._dock_host or self._dock_main_window()
+        if host is None:
+            return
+        self._apply_fixed_right_tabs_as_single_dock(host, active_key=key)
+
+    def _enforce_fixed_post_default_visibility(self) -> None:
+        if not self._force_fixed_default_layout:
+            return
+        if self._use_pg_dockarea_layout:
+            self._save_dockarea_layout_state()
+            return
+        host = self._dock_host or self._dock_main_window()
+        if host is None or not self._section_popups:
+            return
+        tabs = getattr(host, "tabs", None)
+        if isinstance(tabs, QtWidgets.QTabWidget) and tabs.currentWidget() is not self:
+            return
+        visible_keys = {"setup", "export"}
+        for key, dock in self._section_popups.items():
+            if dock is None:
+                continue
+            dock.blockSignals(True)
+            try:
+                area = (
+                    QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
+                    if key == "export"
+                    else QtCore.Qt.DockWidgetArea.RightDockWidgetArea
+                )
+                host.addDockWidget(area, dock)
+                dock.setFloating(False)
+                if key in visible_keys:
+                    dock.show()
+                else:
+                    dock.hide()
+            finally:
+                dock.blockSignals(False)
+        self._apply_fixed_right_tabs_as_single_dock(host, active_key=self._last_opened_section or "setup")
+        setup = self._section_popups.get("setup")
+        if setup is not None:
+            try:
+                setup.raise_()
+                setup.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+                self._last_opened_section = "setup"
+            except Exception:
+                pass
+        try:
+            self._sync_section_button_states_from_docks()
+        except Exception:
+            pass
+
+    def _persist_fixed_post_default_state(self) -> None:
+        if not self._force_fixed_default_layout:
+            return
+        if self._use_pg_dockarea_layout:
+            self._save_dockarea_layout_state()
+            return
+        right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
+        bottom_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, 8)
+        for key in ("setup", "psth", "signal", "behavior", "spatial", "export"):
+            dock = self._section_popups.get(key)
+            if dock is None:
+                continue
+            base = f"post_section_docks/{key}"
+            visible = key in _FIXED_POST_VISIBLE_SECTIONS
+            area_i = bottom_i if key == "export" else right_i
+            try:
+                self._settings.setValue(f"{base}/visible", visible)
+                self._settings.setValue(f"{base}/floating", False)
+                self._settings.setValue(f"{base}/area", area_i)
+                self._settings.setValue(f"{base}/geometry", dock.saveGeometry())
+            except Exception:
+                continue
+        # Fixed mode should not depend on snapshot restore blobs.
+        try:
+            self._settings.remove(_POST_DOCK_STATE_KEY)
+        except Exception:
+            pass
+        try:
+            self._settings.sync()
+        except Exception:
+            pass
 
     def apply_fixed_default_layout(self) -> None:
         """
-        Apply deterministic Post Processing docking:
-        right-side tab stack with Setup active, and Export docked as bottom strip.
+        Apply deterministic Post Processing docking default:
+        Setup, PSTH, Spatial, and Export as fixed right-side tabs.
         """
+        if self._use_pg_dockarea_layout:
+            self._setup_dockarea_sections()
+            if not self._dock_layout_restored:
+                self._apply_fixed_dockarea_layout()
+            else:
+                self._apply_fixed_dock_features()
+                self._sync_section_button_states_from_docks()
+                self._save_dockarea_layout_state()
+            return
+        if self._applying_fixed_default_layout:
+            return
         self._setup_section_popups()
         host = self._dock_host or self._dock_main_window()
         if host is None or not self._section_popups:
             return
+        tabs = getattr(host, "tabs", None)
+        if isinstance(tabs, QtWidgets.QTabWidget) and tabs.currentWidget() is not self:
+            return
+        self._pending_fixed_layout_retry = False
         self._dock_host = host
+        self._applying_fixed_default_layout = True
 
         setup = self._section_popups.get("setup")
-        ordered_right_keys = ["setup", "psth", "signal", "behavior", "spatial"]
+        ordered_right_keys = ["setup", "spatial", "psth", "signal", "behavior"]
+        visible_right_keys = {"setup"}
         export = self._section_popups.get("export")
 
         self._suspend_panel_layout_persistence = True
         try:
             self._apply_fixed_dock_features()
-            # Reset previous split/tab topology before rebuilding the fixed stack.
+            # Reset post dock topology first so stale tab groups from previous
+            # sessions cannot override the enforced default.
             for key in ("setup", "psth", "signal", "behavior", "spatial", "export"):
                 dock = self._section_popups.get(key)
                 if dock is None:
@@ -6933,7 +7856,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 try:
                     host.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
                     dock.setFloating(False)
-                    dock.show()
+                    if key in visible_right_keys:
+                        dock.show()
+                    else:
+                        dock.hide()
                 finally:
                     dock.blockSignals(False)
 
@@ -6946,15 +7872,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 finally:
                     export.blockSignals(False)
 
-            if setup is not None:
-                for key in ("psth", "signal", "behavior", "spatial"):
-                    dock = self._section_popups.get(key)
-                    if dock is None:
-                        continue
-                    try:
-                        host.tabifyDockWidget(setup, dock)
-                    except Exception:
-                        continue
+            self._apply_fixed_right_tabs_as_single_dock(host, active_key=self._last_opened_section or "setup")
 
             if setup is not None:
                 setup.show()
@@ -6979,19 +7897,33 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._post_docks_hidden_for_tab_switch = False
             self._post_section_visibility_before_hide.clear()
             self._post_section_state_before_hide.clear()
+            self._dock_layout_restored = True
         finally:
             self._suspend_panel_layout_persistence = False
+            self._applying_fixed_default_layout = False
 
+        # Re-apply once after queued dock events for extra stability.
+        QtCore.QTimer.singleShot(0, self._enforce_fixed_post_default_visibility)
+        self._persist_fixed_post_default_state()
         self._enforce_only_post_docks_visible()
 
     def ensure_section_popups_initialized(self) -> None:
+        if self._use_pg_dockarea_layout:
+            self._setup_dockarea_sections()
+            return
         self._setup_section_popups()
 
     def get_section_dock_widgets(self) -> List[QtWidgets.QDockWidget]:
+        if self._use_pg_dockarea_layout:
+            self._setup_dockarea_sections()
+            return []
         self._setup_section_popups()
         return list(self._section_popups.values())
 
     def get_section_popup_keys(self) -> List[str]:
+        if self._use_pg_dockarea_layout:
+            self._setup_dockarea_sections()
+            return list(self._dockarea_docks.keys()) or list(self._section_widget_map().keys())
         self._setup_section_popups()
         return list(self._section_popups.keys())
 
