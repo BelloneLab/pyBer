@@ -1927,7 +1927,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if label is None:
             return
         if not self._force_fixed_default_layout:
-            self._style_pg_dock_label_buttons(label)
+            self._style_pg_dock_label_buttons(dock, label)
             return
         if bool(getattr(label, "_pyber_fixed_interaction_lock", False)):
             return
