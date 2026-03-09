@@ -1666,8 +1666,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.chk_export_baseline_ref = QtWidgets.QCheckBox("Baseline 405")
         self.chk_export_baseline_ref.setChecked(True)
 
-        export_group = QtWidgets.QGroupBox()
-        export_form = QtWidgets.QFormLayout(export_group)
+        self.export_options_group = QtWidgets.QGroupBox("Export fields")
+        export_form = QtWidgets.QFormLayout(self.export_options_group)
         export_form.setContentsMargins(6, 6, 6, 6)
         export_form.addRow(self._label_with_help("Export fields", "export_selection"))
         export_checks = QtWidgets.QGridLayout()
@@ -1695,13 +1695,12 @@ class ParameterPanel(QtWidgets.QGroupBox):
         qc_grid.addWidget(self.btn_metadata, 3, 0)
         qc_grid.addWidget(self.btn_save_config, 3, 1)
         qc_grid.addWidget(self.btn_load_config, 4, 1)
-        qc_grid.addWidget(export_group, 5, 0, 1, 2)
         qc_grid.setColumnStretch(0, 1)
         qc_grid.setColumnStretch(1, 1)
 
         self.lbl_fs = QtWidgets.QLabel("FS: -")
         self.lbl_fs.setProperty("class", "hint")
-        qc_grid.addWidget(self.lbl_fs, 6, 0, 1, 2)
+        qc_grid.addWidget(self.lbl_fs, 5, 0, 1, 2)
 
         # Cards
         self.card_artifacts = CollapsibleSection("Artifacts")
@@ -1910,6 +1909,15 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.combo_smoothing.currentIndexChanged.connect(lambda *_: self._update_smoothing_controls())
         self.cb_invert.stateChanged.connect(emit_noargs)
         self.cb_show_artifact_overlay.toggled.connect(lambda v: self.artifactOverlayToggled.emit(bool(v)))
+        for cb in (
+            self.chk_export_raw,
+            self.chk_export_iso,
+            self.chk_export_output,
+            self.chk_export_dio,
+            self.chk_export_baseline_sig,
+            self.chk_export_baseline_ref,
+        ):
+            cb.toggled.connect(emit_noargs)
 
     def _toggle_advanced_baseline(self) -> None:
         """Toggle visibility of baseline advanced parameters."""
@@ -1936,6 +1944,28 @@ class ParameterPanel(QtWidgets.QGroupBox):
             baseline_sig=self.chk_export_baseline_sig.isChecked(),
             baseline_ref=self.chk_export_baseline_ref.isChecked(),
         )
+
+    def export_selection_summary(self) -> str:
+        selection = self.export_selection()
+        parts: List[str] = []
+        if selection.output:
+            parts.append("output")
+        if selection.dio:
+            parts.append("DIO")
+        if selection.raw:
+            parts.append("raw")
+        if selection.isobestic:
+            parts.append("isobestic")
+        if selection.baseline_sig or selection.baseline_ref:
+            if selection.baseline_sig and selection.baseline_ref:
+                parts.append("baselines")
+            elif selection.baseline_sig:
+                parts.append("baseline465")
+            else:
+                parts.append("baseline405")
+        if not parts:
+            parts.append("time only")
+        return "CSV/H5: " + " + ".join(parts)
 
     def set_export_selection(self, selection: ExportSelection) -> None:
         selection = selection if isinstance(selection, ExportSelection) else ExportSelection()

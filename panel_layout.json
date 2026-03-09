@@ -1,17 +1,17 @@
 {
   "version": 3,
   "pre": {
-    "pre_data_panel_visible": true,
+    "pre_data_panel_visible": false,
     "pre_splitter_sizes": [
       0,
-      1030,
+      1450,
       439
     ],
     "pre_main_dock_state": "",
     "tab_groups": [],
     "sections": {
       "artifacts": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
         "geometry": "AdnQywADAAD///wt///86////gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///86////gv///4L"
