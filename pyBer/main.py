@@ -320,6 +320,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._metadata_by_key: Dict[Tuple[str, str], Dict[str, str]] = {}
         self._cutout_regions_by_key: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
         self._sections_by_key: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
+        self._pending_box_region_by_key: Dict[Tuple[str, str], Tuple[float, float]] = {}
 
         self._last_processed: Dict[Tuple[str, str], ProcessedTrial] = {}
         self._advanced_dialog: Optional[AdvancedOptionsDialog] = None
@@ -652,6 +653,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plots.clearManualRegionsRequested.connect(self._clear_manual_regions_current)
         self.plots.showArtifactsRequested.connect(self._toggle_artifacts_panel)
         self.plots.boxSelectionCleared.connect(self._cancel_box_select_request)
+        self.plots.boxSelectionContextRequested.connect(self._show_box_selection_context_menu)
         self.plots.artifactThresholdsToggled.connect(self._on_artifact_thresholds_toggled)
 
         self.artifact_panel.regionsChanged.connect(self._artifact_regions_changed)
@@ -1062,12 +1064,10 @@ class MainWindow(QtWidgets.QMainWindow):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
         self.param_panel.btn_metadata.setProperty("class", "blueSecondarySmall")
-        self.param_panel.btn_advanced.setProperty("class", "blueSecondarySmall")
         self.param_panel.btn_save_config.setProperty("class", "blueSecondarySmall")
         self.param_panel.btn_load_config.setProperty("class", "blueSecondarySmall")
         for btn in (
             self.param_panel.btn_metadata,
-            self.param_panel.btn_advanced,
             self.param_panel.btn_save_config,
             self.param_panel.btn_load_config,
         ):
@@ -1621,6 +1621,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._bind_shortcut("Ctrl+S", self.param_panel._save_config, require_non_text_focus=True)
         self._bind_shortcut("Ctrl+D", self._toggle_data_panel_shortcut, require_non_text_focus=True)
         self._bind_shortcut("Ctrl+P", self._toggle_all_parameter_popups_shortcut, require_non_text_focus=True)
+        self._bind_shortcut("A", self._assign_pending_box_to_artifact, require_non_text_focus=True)
+        self._bind_shortcut("C", self._assign_pending_box_to_cut, require_non_text_focus=True)
+        self._bind_shortcut("S", self._assign_pending_box_to_section, require_non_text_focus=True)
         self._bind_shortcut("Escape", self._close_focused_popup, require_non_text_focus=True)
 
     def _dock_area_from_settings(
@@ -1929,7 +1932,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "artifact_overlay_visible": bool(self.param_panel.artifact_overlay_visible()),
             "artifact_thresholds_visible": bool(self.plots.artifact_thresholds_visible()),
             "export_selection": self.param_panel.export_selection().to_dict(),
-            "export_trigger_name": self.param_panel.export_trigger_name(),
+            "export_channel_names": self.param_panel.export_channel_names(),
+            "export_trigger_names": self.param_panel.export_trigger_names(),
             "panel_layout": self._collect_panel_layout_payload(),
         }
 
@@ -1980,8 +1984,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plots.set_artifact_thresholds_visible(bool(ui_state.get("artifact_thresholds_visible")))
         if "export_selection" in ui_state:
             self.param_panel.set_export_selection(ExportSelection.from_dict(ui_state.get("export_selection")))
-        if "export_trigger_name" in ui_state:
-            self.param_panel.set_export_trigger_name(str(ui_state.get("export_trigger_name") or ""))
+        if "export_channel_names" in ui_state:
+            self.param_panel.set_export_channel_names(list(ui_state.get("export_channel_names") or []))
+        if "export_trigger_names" in ui_state:
+            self.param_panel.set_export_trigger_names(list(ui_state.get("export_trigger_names") or []))
         self._update_export_summary_label()
         panel_layout = ui_state.get("panel_layout")
         if isinstance(panel_layout, dict):
@@ -3389,6 +3395,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.file_panel.set_available_channels(doric.channels)
         self.file_panel.set_available_triggers(sorted(doric.trigger_by_name.keys()))
+        self.param_panel.set_available_export_channels(doric.channels)
         self.param_panel.set_available_export_triggers(sorted(doric.trigger_by_name.keys()))
         self._update_export_summary_label()
 
@@ -3415,6 +3422,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_channel_changed(self, ch: str) -> None:
         self._current_channel = ch
+        if self._current_path:
+            doric = self._loaded_files.get(self._current_path)
+            if doric is not None:
+                self.param_panel.set_available_export_channels(
+                    doric.channels,
+                    preferred=self.param_panel.export_channel_names(),
+                )
+                self._update_export_summary_label()
         self._update_raw_plot()
         self._trigger_preview()
         self.post_tab.set_current_source_label(os.path.basename(self._current_path or ""), self._current_channel or "")
@@ -3427,7 +3442,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if doric is not None:
                 self.param_panel.set_available_export_triggers(
                     sorted(doric.trigger_by_name.keys()),
-                    preferred=self.param_panel.export_trigger_name(),
+                    preferred=self.param_panel.export_trigger_names(),
                 )
                 self._update_export_summary_label()
         self._update_raw_plot()
@@ -3992,12 +4007,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not np.isfinite(t0) or not np.isfinite(t1) or t0 == t1:
             return
-        regs = self._manual_regions_by_key.get(key, [])
-        regs.append((min(t0, t1), max(t0, t1)))
-        self._manual_regions_by_key[key] = regs
-        start_s, end_s = self._time_window_bounds()
-        self.artifact_panel.set_regions(self._clip_regions_to_window(regs, start_s, end_s))
-        self._trigger_preview()
+        region = (float(min(t0, t1)), float(max(t0, t1)))
+        self._pending_box_region_by_key[key] = region
+        self.plots.set_selector_region(*region, visible=True)
+        self._show_status_message("Selection ready: press A=artifact, C=cut, S=section, or right-click for actions.")
 
     def _clear_manual_regions_current(self) -> None:
         key = self._current_key()
@@ -4005,6 +4018,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._manual_regions_by_key[key] = []
         self._manual_exclude_by_key[key] = []
+        self._pending_box_region_by_key.pop(key, None)
         self.artifact_panel.set_regions([])
         self._trigger_preview()
 
@@ -4014,10 +4028,93 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_status_message("Box select: drag on the raw plot to set the time window; right-click to cancel.")
 
     def _cancel_box_select_request(self) -> None:
-        if not self._box_select_callback:
-            return
+        key = self._current_key()
         self._box_select_callback = None
+        if key:
+            self._pending_box_region_by_key.pop(key, None)
+        self.plots.set_selector_region(0.0, 1.0, visible=False)
         self.plots.btn_box_select.setChecked(False)
+
+    def _pending_box_region(self) -> Optional[Tuple[float, float]]:
+        key = self._current_key()
+        if not key:
+            return None
+        region = self._pending_box_region_by_key.get(key)
+        if not region:
+            return None
+        return (float(min(region)), float(max(region)))
+
+    def _consume_pending_box_region(self) -> Optional[Tuple[float, float]]:
+        key = self._current_key()
+        if not key:
+            return None
+        region = self._pending_box_region_by_key.pop(key, None)
+        self.plots.set_selector_region(0.0, 1.0, visible=False)
+        self.plots.btn_box_select.setChecked(False)
+        if not region:
+            return None
+        return (float(min(region)), float(max(region)))
+
+    def _assign_pending_box_to_artifact(self) -> None:
+        region = self._consume_pending_box_region()
+        key = self._current_key()
+        if not region or not key:
+            return
+        regs = self._manual_regions_by_key.get(key, [])
+        regs.append(region)
+        self._manual_regions_by_key[key] = regs
+        start_s, end_s = self._time_window_bounds()
+        self.artifact_panel.set_regions(self._clip_regions_to_window(regs, start_s, end_s))
+        self._trigger_preview()
+
+    def _assign_pending_box_to_cut(self) -> None:
+        region = self._consume_pending_box_region()
+        key = self._current_key()
+        if not region or not key:
+            return
+        regs = self._cutout_regions_by_key.get(key, [])
+        regs.append(region)
+        regs.sort(key=lambda x: x[0])
+        self._cutout_regions_by_key[key] = regs
+        self._last_processed.clear()
+        self._update_raw_plot()
+        self._trigger_preview()
+
+    def _assign_pending_box_to_section(self) -> None:
+        region = self._consume_pending_box_region()
+        key = self._current_key()
+        if not region or not key:
+            return
+        sections = self._sections_by_key.get(key, [])
+        sections.append({
+            "start": float(region[0]),
+            "end": float(region[1]),
+            "params": self.param_panel.get_params().to_dict(),
+        })
+        sections.sort(key=lambda sec: float(sec.get("start", 0.0)))
+        self._sections_by_key[key] = sections
+        self._show_status_message(f"Section added: {region[0]:.3f}s to {region[1]:.3f}s")
+
+    def _show_box_selection_context_menu(self) -> None:
+        region = self._pending_box_region()
+        if region is None:
+            self._cancel_box_select_request()
+            return
+        menu = QtWidgets.QMenu(self)
+        act_art = menu.addAction("Set as artifact")
+        act_cut = menu.addAction("Set as cut")
+        act_sec = menu.addAction("Set as section")
+        menu.addSeparator()
+        act_cancel = menu.addAction("Cancel selection")
+        chosen = menu.exec(QtGui.QCursor.pos())
+        if chosen is act_art:
+            self._assign_pending_box_to_artifact()
+        elif chosen is act_cut:
+            self._assign_pending_box_to_cut()
+        elif chosen is act_sec:
+            self._assign_pending_box_to_section()
+        elif chosen is act_cancel:
+            self._cancel_box_select_request()
 
     def _artifact_regions_changed(self, regions: List[Tuple[float, float]]) -> None:
         key = self._current_key()
@@ -4162,7 +4259,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         params = self.param_panel.get_params()
         export_selection = self.param_panel.export_selection()
-        export_trigger_name = self.param_panel.export_trigger_name()
+        export_channel_names = self.param_panel.export_channel_names()
+        export_trigger_names = self.param_panel.export_trigger_names()
 
         # Process/export each selected file, for the currently selected channel.
         n_total = 0
@@ -4170,63 +4268,78 @@ class MainWindow(QtWidgets.QMainWindow):
             doric = self._loaded_files.get(path)
             if not doric:
                 continue
-            ch = self._current_channel if (self._current_channel in doric.channels) else (doric.channels[0] if doric.channels else None)
-            if not ch:
-                continue
-            key = (path, ch)
-            export_trigger = self._current_trigger
-            if export_trigger_name:
-                export_trigger = export_trigger_name if export_trigger_name in doric.trigger_by_name else None
-            trial = doric.make_trial(ch, trigger_name=export_trigger)
-            trial = self._apply_time_window(trial)
-            cutouts = self._cutout_regions_by_key.get(key, [])
-            trial = self._apply_cutouts(trial, cutouts)
-            start_s, end_s = self._time_window_bounds()
-            manual = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
-            manual_exclude = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
-            meta = self._metadata_by_key.get(key, {})
-            sections = self._sections_by_key.get(key, [])
+            channels = [name for name in export_channel_names if name in doric.channels]
+            if not channels:
+                fallback = self._current_channel if (self._current_channel in doric.channels) else (doric.channels[0] if doric.channels else None)
+                channels = [fallback] if fallback else []
+            dio_names = [name for name in export_trigger_names if name in doric.trigger_by_name]
+            if not export_selection.dio:
+                dio_names = [None]
+            elif not dio_names:
+                dio_names = [self._current_trigger] if self._current_trigger else [None]
 
-            def _export_one(proc: ProcessedTrial, suffix: str = "") -> None:
-                nonlocal n_total
-                proc = self._apply_cutouts_to_processed(proc, cutouts)
-                stem = safe_stem_from_metadata(path, ch, meta)
-                if suffix:
-                    stem = f"{stem}_{suffix}"
-                csv_path = os.path.join(out_dir, f"{stem}.csv")
-                h5_path = os.path.join(out_dir, f"{stem}.h5")
-                export_processed_csv(csv_path, proc, metadata=meta, selection=export_selection)
-                export_processed_h5(h5_path, proc, metadata=meta, selection=export_selection)
-                n_total += 1
+            for ch in channels:
+                if not ch:
+                    continue
+                key = (path, ch)
+                cutouts = self._cutout_regions_by_key.get(key, [])
+                start_s, end_s = self._time_window_bounds()
+                manual = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
+                manual_exclude = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
+                meta = self._metadata_by_key.get(key, {})
+                sections = self._sections_by_key.get(key, [])
 
-            try:
-                if sections:
-                    for i, sec in enumerate(sections, start=1):
-                        s0 = float(sec.get("start", 0.0))
-                        s1 = float(sec.get("end", 0.0))
-                        sec_trial = self._slice_trial(trial, s0, s1)
-                        if sec_trial is None:
-                            continue
-                        sec_params = ProcessingParams.from_dict(sec.get("params", {})) if isinstance(sec.get("params"), dict) else params
-                        processed = self.processor.process_trial(
-                            trial=sec_trial,
-                            params=sec_params,
-                            manual_regions_sec=manual,
-                            manual_exclude_regions_sec=manual_exclude,
-                            preview_mode=False,
+                for export_trigger in dio_names:
+                    trial = doric.make_trial(ch, trigger_name=export_trigger)
+                    trial = self._apply_time_window(trial)
+                    trial = self._apply_cutouts(trial, cutouts)
+
+                    def _export_one(proc: ProcessedTrial, suffix: str = "") -> None:
+                        nonlocal n_total
+                        proc = self._apply_cutouts_to_processed(proc, cutouts)
+                        stem = safe_stem_from_metadata(path, ch, meta)
+                        if export_trigger:
+                            stem = f"{stem}_{export_trigger}"
+                        if suffix:
+                            stem = f"{stem}_{suffix}"
+                        csv_path = os.path.join(out_dir, f"{stem}.csv")
+                        h5_path = os.path.join(out_dir, f"{stem}.h5")
+                        export_processed_csv(csv_path, proc, metadata=meta, selection=export_selection)
+                        export_processed_h5(h5_path, proc, metadata=meta, selection=export_selection)
+                        n_total += 1
+
+                    try:
+                        if sections:
+                            for i, sec in enumerate(sections, start=1):
+                                s0 = float(sec.get("start", 0.0))
+                                s1 = float(sec.get("end", 0.0))
+                                sec_trial = self._slice_trial(trial, s0, s1)
+                                if sec_trial is None:
+                                    continue
+                                sec_params = ProcessingParams.from_dict(sec.get("params", {})) if isinstance(sec.get("params"), dict) else params
+                                processed = self.processor.process_trial(
+                                    trial=sec_trial,
+                                    params=sec_params,
+                                    manual_regions_sec=manual,
+                                    manual_exclude_regions_sec=manual_exclude,
+                                    preview_mode=False,
+                                )
+                                _export_one(processed, suffix=f"sec{i}_{s0:.2f}_{s1:.2f}")
+                        else:
+                            processed = self.processor.process_trial(
+                                trial=trial,
+                                params=params,
+                                manual_regions_sec=manual,
+                                manual_exclude_regions_sec=manual_exclude,
+                                preview_mode=False,
+                            )
+                            _export_one(processed)
+                    except Exception as e:
+                        QtWidgets.QMessageBox.warning(
+                            self,
+                            "Export error",
+                            f"Failed export:\n{path} [{ch}] [{export_trigger or 'no DIO'}]\n\n{e}",
                         )
-                        _export_one(processed, suffix=f"sec{i}_{s0:.2f}_{s1:.2f}")
-                else:
-                    processed = self.processor.process_trial(
-                        trial=trial,
-                        params=params,
-                        manual_regions_sec=manual,
-                        manual_exclude_regions_sec=manual_exclude,
-                        preview_mode=False,
-                    )
-                    _export_one(processed)
-            except Exception as e:
-                QtWidgets.QMessageBox.warning(self, "Export error", f"Failed export:\n{path} [{ch}]\n\n{e}")
 
         self._show_status_message(f"Export complete: {n_total} recording(s) written to {out_dir}")
 

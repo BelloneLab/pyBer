@@ -126,6 +126,56 @@ class PlaceholderListWidget(QtWidgets.QListWidget):
         p.end()
 
 
+class CheckableListWidget(QtWidgets.QListWidget):
+    changed = QtCore.Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.itemChanged.connect(lambda *_: self.changed.emit())
+
+    def set_items(self, items: List[Tuple[str, str]], checked_values: Optional[List[str]] = None) -> None:
+        selected = {str(v) for v in (checked_values or []) if str(v)}
+        self.blockSignals(True)
+        try:
+            self.clear()
+            for label, value in items or []:
+                item = QtWidgets.QListWidgetItem(str(label))
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, str(value))
+                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable | QtCore.Qt.ItemFlag.ItemIsEnabled)
+                item.setCheckState(
+                    QtCore.Qt.CheckState.Checked if str(value) in selected else QtCore.Qt.CheckState.Unchecked
+                )
+                self.addItem(item)
+        finally:
+            self.blockSignals(False)
+
+    def checked_values(self) -> List[str]:
+        values: List[str] = []
+        for i in range(self.count()):
+            item = self.item(i)
+            if item is None:
+                continue
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                values.append(str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "").strip())
+        return [v for v in values if v]
+
+    def set_checked_values(self, values: List[str]) -> None:
+        selected = {str(v) for v in values or [] if str(v)}
+        self.blockSignals(True)
+        try:
+            for i in range(self.count()):
+                item = self.item(i)
+                if item is None:
+                    continue
+                value = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "").strip()
+                item.setCheckState(
+                    QtCore.Qt.CheckState.Checked if value in selected else QtCore.Qt.CheckState.Unchecked
+                )
+        finally:
+            self.blockSignals(False)
+
+
 class CollapsibleSection(QtWidgets.QWidget):
     toggled = QtCore.Signal(bool)
 
@@ -1277,7 +1327,6 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._help_texts = self._build_help_texts()
         self._config_state_exporter: Optional[Callable[[], Dict[str, object]]] = None
         self._config_state_importer: Optional[Callable[[Dict[str, object]], None]] = None
-        self._pending_export_trigger_name: str = ""
         self._build_ui()
         self._wire()
 
@@ -1393,6 +1442,14 @@ class ParameterPanel(QtWidgets.QGroupBox):
             "export_dio_channel": (
                 "Choose which DIO / trigger channel to export.\n"
                 "If left on Current overlay, export uses the trigger currently selected in the file panel."
+            ),
+            "export_analog_channels": (
+                "Choose one or more analog channels to export.\n"
+                "If none are checked, export uses the current preview channel."
+            ),
+            "export_dio_channels": (
+                "Choose one or more DIO channels to export.\n"
+                "If none are checked, export uses the current overlay trigger."
             ),
         }
 
@@ -1670,10 +1727,15 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.chk_export_baseline_sig.setChecked(True)
         self.chk_export_baseline_ref = QtWidgets.QCheckBox("Baseline 405")
         self.chk_export_baseline_ref.setChecked(True)
-        self.combo_export_dio = QtWidgets.QComboBox()
-        _compact_combo(self.combo_export_dio, min_chars=10)
-        self.combo_export_dio.addItem("Current overlay", "")
-        self.combo_export_dio.setEnabled(self.chk_export_dio.isChecked())
+        self.list_export_channels = CheckableListWidget()
+        self.list_export_channels.setMaximumHeight(84)
+        self.list_export_channels.setMinimumHeight(54)
+        self.list_export_dio = CheckableListWidget()
+        self.list_export_dio.setMaximumHeight(84)
+        self.list_export_dio.setMinimumHeight(54)
+        self._pending_export_channel_names: List[str] = []
+        self._pending_export_trigger_names: List[str] = []
+        self.list_export_dio.setEnabled(self.chk_export_dio.isChecked())
 
         self.export_options_group = QtWidgets.QGroupBox("Export fields")
         export_form = QtWidgets.QFormLayout(self.export_options_group)
@@ -1690,7 +1752,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         export_checks.addWidget(self.chk_export_baseline_sig, 2, 0)
         export_checks.addWidget(self.chk_export_baseline_ref, 2, 1)
         export_form.addRow(export_checks)
-        export_form.addRow(self._label_with_help("DIO channel", "export_dio_channel"), self.combo_export_dio)
+        export_form.addRow(self._label_with_help("AN channels", "export_analog_channels"), self.list_export_channels)
+        export_form.addRow(self._label_with_help("DIO channels", "export_dio_channels"), self.list_export_dio)
 
         qc_content = QtWidgets.QWidget()
         qc_grid = QtWidgets.QGridLayout(qc_content)
@@ -1919,9 +1982,11 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.combo_smoothing.currentIndexChanged.connect(lambda *_: self._update_smoothing_controls())
         self.cb_invert.stateChanged.connect(emit_noargs)
         self.cb_show_artifact_overlay.toggled.connect(lambda v: self.artifactOverlayToggled.emit(bool(v)))
-        self.chk_export_dio.toggled.connect(self.combo_export_dio.setEnabled)
-        self.combo_export_dio.currentIndexChanged.connect(self._on_export_trigger_changed)
-        self.combo_export_dio.currentIndexChanged.connect(emit_noargs)
+        self.chk_export_dio.toggled.connect(self.list_export_dio.setEnabled)
+        self.list_export_channels.changed.connect(self._on_export_channel_selection_changed)
+        self.list_export_channels.changed.connect(emit_noargs)
+        self.list_export_dio.changed.connect(self._on_export_trigger_selection_changed)
+        self.list_export_dio.changed.connect(emit_noargs)
         for cb in (
             self.chk_export_raw,
             self.chk_export_iso,
@@ -1961,11 +2026,14 @@ class ParameterPanel(QtWidgets.QGroupBox):
     def export_selection_summary(self) -> str:
         selection = self.export_selection()
         parts: List[str] = []
+        chans = self.export_channel_names()
+        if chans:
+            parts.append(f"ANx{len(chans)}")
         if selection.output:
             parts.append("output")
         if selection.dio:
-            dio_name = self.export_trigger_name()
-            parts.append(f"DIO({dio_name})" if dio_name else "DIO")
+            dio_names = self.export_trigger_names()
+            parts.append(f"DIOx{len(dio_names)}" if dio_names else "DIO")
         if selection.raw:
             parts.append("raw")
         if selection.isobestic:
@@ -1990,36 +2058,41 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.chk_export_baseline_sig.setChecked(bool(selection.baseline_sig))
         self.chk_export_baseline_ref.setChecked(bool(selection.baseline_ref))
 
-    def export_trigger_name(self) -> str:
-        if self.combo_export_dio.count() > 0 and self.combo_export_dio.currentIndex() == 0:
-            return ""
-        current = str(self.combo_export_dio.currentData() or "").strip()
-        return current or self._pending_export_trigger_name
+    def export_channel_names(self) -> List[str]:
+        checked = self.list_export_channels.checked_values()
+        return checked or list(self._pending_export_channel_names)
 
-    def _on_export_trigger_changed(self, *_args) -> None:
-        self._pending_export_trigger_name = str(self.combo_export_dio.currentData() or "").strip()
+    def export_trigger_names(self) -> List[str]:
+        checked = self.list_export_dio.checked_values()
+        return checked or list(self._pending_export_trigger_names)
 
-    def set_available_export_triggers(self, triggers: List[str], preferred: str = "") -> None:
-        current = preferred.strip() or self.export_trigger_name()
-        self.combo_export_dio.blockSignals(True)
-        try:
-            self.combo_export_dio.clear()
-            self.combo_export_dio.addItem("Current overlay", "")
-            for trig in triggers or []:
-                name = str(trig or "").strip()
-                if name:
-                    self.combo_export_dio.addItem(name, name)
-            idx = self.combo_export_dio.findData(current)
-            self.combo_export_dio.setCurrentIndex(idx if idx >= 0 else 0)
-            self._pending_export_trigger_name = current if idx != 0 else ""
-        finally:
-            self.combo_export_dio.blockSignals(False)
+    def _on_export_channel_selection_changed(self) -> None:
+        self._pending_export_channel_names = self.list_export_channels.checked_values()
 
-    def set_export_trigger_name(self, trigger_name: str) -> None:
-        name = str(trigger_name or "").strip()
-        self._pending_export_trigger_name = name
-        idx = self.combo_export_dio.findData(name)
-        self.combo_export_dio.setCurrentIndex(idx if idx >= 0 else 0)
+    def _on_export_trigger_selection_changed(self) -> None:
+        self._pending_export_trigger_names = self.list_export_dio.checked_values()
+
+    def set_available_export_channels(self, channels: List[str], preferred: Optional[List[str]] = None) -> None:
+        current = list(preferred if preferred is not None else self.export_channel_names())
+        items = [(name, name) for name in channels or [] if str(name or "").strip()]
+        self.list_export_channels.set_items(items, checked_values=current)
+        self._pending_export_channel_names = [name for name in current if name in {v for _, v in items}]
+
+    def set_available_export_triggers(self, triggers: List[str], preferred: Optional[List[str]] = None) -> None:
+        current = list(preferred if preferred is not None else self.export_trigger_names())
+        items = [(name, name) for name in triggers or [] if str(name or "").strip()]
+        self.list_export_dio.set_items(items, checked_values=current)
+        self._pending_export_trigger_names = [name for name in current if name in {v for _, v in items}]
+
+    def set_export_channel_names(self, channel_names: List[str]) -> None:
+        names = [str(name or "").strip() for name in channel_names or [] if str(name or "").strip()]
+        self._pending_export_channel_names = names
+        self.list_export_channels.set_checked_values(names)
+
+    def set_export_trigger_names(self, trigger_names: List[str]) -> None:
+        names = [str(name or "").strip() for name in trigger_names or [] if str(name or "").strip()]
+        self._pending_export_trigger_names = names
+        self.list_export_dio.set_checked_values(names)
 
     def _save_config(self) -> None:
         """Save current preprocessing parameters to a JSON file."""
@@ -2188,6 +2261,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
 class ArtifactSelectViewBox(pg.ViewBox):
     dragSelectionFinished = QtCore.Signal(float, float)
     dragSelectionCleared = QtCore.Signal()
+    dragSelectionContextRequested = QtCore.Signal()
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -2236,8 +2310,11 @@ class ArtifactSelectViewBox(pg.ViewBox):
 
     def mouseClickEvent(self, ev) -> None:
         if self._drag_enabled and ev.button() == QtCore.Qt.MouseButton.RightButton:
-            self.clear_selection()
-            self.dragSelectionCleared.emit()
+            if self._rect_item.isVisible():
+                self.dragSelectionContextRequested.emit()
+            else:
+                self.clear_selection()
+                self.dragSelectionCleared.emit()
             ev.accept()
             return
         super().mouseClickEvent(ev)
@@ -2249,6 +2326,7 @@ class PlotDashboard(QtWidgets.QWidget):
     clearManualRegionsRequested = QtCore.Signal()
     showArtifactsRequested = QtCore.Signal()
     boxSelectionCleared = QtCore.Signal()
+    boxSelectionContextRequested = QtCore.Signal()
     artifactThresholdsToggled = QtCore.Signal(bool)
 
     xRangeChanged = QtCore.Signal(float, float)
@@ -2389,6 +2467,7 @@ class PlotDashboard(QtWidgets.QWidget):
 
         self._raw_vb.dragSelectionFinished.connect(self._on_drag_select_finished)
         self._raw_vb.dragSelectionCleared.connect(self._on_drag_select_cleared)
+        self._raw_vb.dragSelectionContextRequested.connect(self.boxSelectionContextRequested.emit)
 
         self._sync_artifact_threshold_curves_visibility()
         self._toggle_box_select(False)
@@ -2581,6 +2660,10 @@ class PlotDashboard(QtWidgets.QWidget):
     def selector_region(self) -> Tuple[float, float]:
         r = self.selector.getRegion()
         return float(min(r)), float(max(r))
+
+    def set_selector_region(self, t0: float, t1: float, visible: bool = True) -> None:
+        self.selector.setRegion((float(min(t0, t1)), float(max(t0, t1))))
+        self.selector.setVisible(bool(visible))
 
     def _scale_reference_to_signal(self, sig: np.ndarray, ref: np.ndarray) -> np.ndarray:
         s = np.asarray(sig, float)

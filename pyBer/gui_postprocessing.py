@@ -260,15 +260,20 @@ def _numeric_column_array(df, col_name: str) -> np.ndarray:
     return np.asarray(vals, float)
 
 
+def _generated_time_array(n_rows: int, fps: float) -> np.ndarray:
+    n = int(max(0, n_rows))
+    if n <= 0 or not np.isfinite(float(fps)) or float(fps) <= 0:
+        return np.array([], float)
+    return np.arange(n, dtype=float) / float(fps)
+
+
 def _binary_columns_from_df(df) -> Tuple[str, Dict[str, np.ndarray]]:
-    time_col = _detect_time_column(df, fallback_to_first=True)
-    if not time_col:
-        return "", {}
+    time_col = _detect_time_column(df, fallback_to_first=False)
 
     behaviors: Dict[str, np.ndarray] = {}
     for c in df.columns:
         name = str(c)
-        if name == time_col:
+        if time_col and name == time_col:
             continue
         arr = _numeric_column_array(df, name)
         if arr.size == 0:
@@ -323,10 +328,11 @@ def _timestamp_columns_from_df(df) -> Dict[str, np.ndarray]:
     return behaviors
 
 
-def _load_behavior_csv(path: str, parse_mode: str = _BEHAVIOR_PARSE_BINARY) -> Dict[str, Any]:
+def _load_behavior_csv(path: str, parse_mode: str = _BEHAVIOR_PARSE_BINARY, fps: float = 0.0) -> Dict[str, Any]:
     import pandas as pd
 
     df = pd.read_csv(path)
+    row_count = int(len(df.index))
     time_col = _detect_time_column(df)
     trajectory = _trajectory_columns_from_df(df, time_col=time_col)
     trajectory_time = _numeric_column_array(df, time_col) if time_col else np.array([], float)
@@ -336,18 +342,22 @@ def _load_behavior_csv(path: str, parse_mode: str = _BEHAVIOR_PARSE_BINARY) -> D
             "time": np.array([], float),
             "behaviors": _timestamp_columns_from_df(df),
             "trajectory": trajectory,
-            "trajectory_time": trajectory_time,
+            "trajectory_time": trajectory_time if trajectory_time.size else _generated_time_array(row_count, fps),
             "trajectory_time_col": time_col or "",
+            "row_count": row_count,
+            "needs_generated_time": bool(not time_col),
         }
     time_col, behaviors = _binary_columns_from_df(df)
-    time = _numeric_column_array(df, time_col) if time_col else np.array([], float)
+    time = _numeric_column_array(df, time_col) if time_col else _generated_time_array(row_count, fps)
     return {
         "kind": _BEHAVIOR_PARSE_BINARY,
         "time": time,
         "behaviors": behaviors,
         "trajectory": trajectory,
-        "trajectory_time": trajectory_time if trajectory_time.size else time,
+        "trajectory_time": trajectory_time if trajectory_time.size else (time if time.size else _generated_time_array(row_count, fps)),
         "trajectory_time_col": time_col or "",
+        "row_count": row_count,
+        "needs_generated_time": bool(not time_col),
     }
 
 
@@ -355,6 +365,7 @@ def _load_behavior_ethovision(
     path: str,
     sheet_name: Optional[str] = None,
     parse_mode: str = _BEHAVIOR_PARSE_BINARY,
+    fps: float = 0.0,
 ) -> Dict[str, Any]:
     import pandas as pd
 
@@ -369,30 +380,38 @@ def _load_behavior_ethovision(
             "trajectory": {},
             "trajectory_time": np.array([], float),
             "trajectory_time_col": "",
+            "row_count": 0,
+            "needs_generated_time": False,
         }
     if str(parse_mode) == _BEHAVIOR_PARSE_TIMESTAMPS:
         df = pd.read_excel(path, sheet_name=sheet_name, engine="openpyxl")
         time_col = _detect_time_column(df)
+        row_count = int(len(df.index))
         return {
             "kind": _BEHAVIOR_PARSE_TIMESTAMPS,
             "time": np.array([], float),
             "behaviors": _timestamp_columns_from_df(df),
             "trajectory": _trajectory_columns_from_df(df, time_col=time_col),
-            "trajectory_time": _numeric_column_array(df, time_col) if time_col else np.array([], float),
+            "trajectory_time": _numeric_column_array(df, time_col) if time_col else _generated_time_array(row_count, fps),
             "trajectory_time_col": time_col or "",
             "sheet": sheet_name,
+            "row_count": row_count,
+            "needs_generated_time": bool(not time_col),
         }
     df = clean_sheet(Path(path), sheet_name, interpolate=True)
+    row_count = int(len(df.index))
     time_col, behaviors = _binary_columns_from_df(df)
-    time = _numeric_column_array(df, time_col) if time_col else np.array([], float)
+    time = _numeric_column_array(df, time_col) if time_col else _generated_time_array(row_count, fps)
     return {
         "kind": _BEHAVIOR_PARSE_BINARY,
         "time": time,
         "behaviors": behaviors,
         "trajectory": _trajectory_columns_from_df(df, time_col=time_col),
-        "trajectory_time": _numeric_column_array(df, time_col) if time_col else np.array([], float),
+        "trajectory_time": _numeric_column_array(df, time_col) if time_col else _generated_time_array(row_count, fps),
         "trajectory_time_col": time_col or "",
         "sheet": sheet_name,
+        "row_count": row_count,
+        "needs_generated_time": bool(not time_col),
     }
 
 
@@ -630,6 +649,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "Timestamps mode expects one column per behavior containing event times."
         )
         _compact_combo(self.combo_behavior_file_type, min_chars=10)
+        self.grp_behavior_time = QtWidgets.QGroupBox("Time")
+        time_layout = QtWidgets.QHBoxLayout(self.grp_behavior_time)
+        time_layout.setContentsMargins(6, 6, 6, 6)
+        time_layout.setSpacing(6)
+        self.lbl_behavior_time_hint = QtWidgets.QLabel("No time column detected. Generate time from FPS.")
+        self.lbl_behavior_time_hint.setProperty("class", "hint")
+        self.spin_behavior_fps = QtWidgets.QDoubleSpinBox()
+        self.spin_behavior_fps.setRange(0.01, 10000.0)
+        self.spin_behavior_fps.setDecimals(3)
+        self.spin_behavior_fps.setValue(30.0)
+        self.spin_behavior_fps.setSuffix(" fps")
+        self.spin_behavior_fps.setMinimumWidth(90)
+        self.btn_apply_behavior_time = QtWidgets.QPushButton("Apply FPS")
+        self.btn_apply_behavior_time.setProperty("class", "compactSmall")
+        time_layout.addWidget(self.lbl_behavior_time_hint, stretch=1)
+        time_layout.addWidget(self.spin_behavior_fps, stretch=0)
+        time_layout.addWidget(self.btn_apply_behavior_time, stretch=0)
+        self.grp_behavior_time.setVisible(False)
         self.lbl_beh = QtWidgets.QLabel("(none)")
         self.lbl_beh.setProperty("class", "hint")
 
@@ -682,6 +719,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fal.addRow(self.lbl_dio_polarity, self.combo_dio_polarity)
         fal.addRow(self.lbl_dio_align, self.combo_dio_align)
         fal.addRow(self.lbl_behavior_file_type, self.combo_behavior_file_type)
+        fal.addRow(self.grp_behavior_time)
         fal.addRow(self.btn_load_beh)
         fal.addRow("Loaded files", self.lbl_beh)
         fal.addRow(files_layout)
@@ -928,6 +966,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_load_cfg = QtWidgets.QPushButton("Load config")
         self.btn_load_cfg.setProperty("class", "compactSmall")
         self.btn_load_cfg.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_new_project = QtWidgets.QPushButton("New project")
+        self.btn_new_project.setProperty("class", "compactSmall")
+        self.btn_new_project.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_save_project = QtWidgets.QPushButton("Save project (.h5)")
         self.btn_save_project.setProperty("class", "compactSmall")
         self.btn_save_project.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
@@ -1264,6 +1305,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         export_layout.addWidget(self.btn_export_img)
         export_layout.addWidget(self.btn_save_cfg)
         export_layout.addWidget(self.btn_load_cfg)
+        export_layout.addWidget(self.btn_new_project)
         export_layout.addWidget(self.btn_save_project)
         export_layout.addWidget(self.btn_load_project)
         export_layout.addStretch(1)
@@ -1279,6 +1321,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.act_load_single = self.menu_action_load.addAction("Load processed file (single)")
         self.act_load_group = self.menu_action_load.addAction("Load processed files (group)")
         self.menu_action_load.addSeparator()
+        self.act_new_project = self.menu_action_load.addAction("New project")
         self.act_save_project = self.menu_action_load.addAction("Save project (.h5)")
         self.act_load_project = self.menu_action_load.addAction("Load project (.h5)")
         self.menu_action_load.addSeparator()
@@ -1676,6 +1719,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.act_load_current.triggered.connect(self.requestCurrentProcessed.emit)
         self.act_load_single.triggered.connect(self._load_processed_files_single)
         self.act_load_group.triggered.connect(self._load_processed_files)
+        self.act_new_project.triggered.connect(self._new_project)
         self.act_save_project.triggered.connect(self._save_project_file)
         self.act_load_project.triggered.connect(self._load_project_file)
         self.act_load_behavior.triggered.connect(self._load_behavior_files)
@@ -1714,8 +1758,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_style.clicked.connect(self._open_style_dialog)
         self.btn_save_cfg.clicked.connect(self._save_config_file)
         self.btn_load_cfg.clicked.connect(self._load_config_file)
+        self.btn_new_project.clicked.connect(self._new_project)
         self.btn_save_project.clicked.connect(self._save_project_file)
         self.btn_load_project.clicked.connect(self._load_project_file)
+        self.btn_apply_behavior_time.clicked.connect(self._apply_behavior_time_settings)
         self.cb_filter_events.stateChanged.connect(self._update_event_filter_enabled)
         self.cb_metrics.stateChanged.connect(self._update_metrics_enabled)
         self.cb_global_metrics.stateChanged.connect(self._update_global_metrics_enabled)
@@ -1803,6 +1849,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_data_availability()
         self._update_spatial_clip_enabled()
         self._update_spatial_time_filter_enabled()
+        self._update_behavior_time_panel()
         self._refresh_spatial_columns()
         self._compute_spatial_heatmap()
         self._update_status_strip()
@@ -2919,13 +2966,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if replace:
             self._behavior_sources.clear()
         parse_mode = self._current_behavior_parse_mode()
+        fps = float(self.spin_behavior_fps.value()) if hasattr(self, "spin_behavior_fps") else 0.0
         loaded_any = False
         for p in paths:
             stem = os.path.splitext(os.path.basename(p))[0]
             ext = os.path.splitext(p)[1].lower()
             try:
                 if ext == ".csv":
-                    info = _load_behavior_csv(p, parse_mode=parse_mode)
+                    info = _load_behavior_csv(p, parse_mode=parse_mode, fps=fps)
                 elif ext == ".xlsx":
                     import pandas as pd
                     xls = pd.ExcelFile(p, engine="openpyxl")
@@ -2941,7 +2989,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         )
                         if not ok:
                             continue
-                    info = _load_behavior_ethovision(p, sheet_name=sheet, parse_mode=parse_mode)
+                    info = _load_behavior_ethovision(p, sheet_name=sheet, parse_mode=parse_mode, fps=fps)
                 else:
                     continue
                 has_behaviors = bool(info.get("behaviors") or {})
@@ -2964,6 +3012,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 continue
         mode_label = "timestamps" if parse_mode == _BEHAVIOR_PARSE_TIMESTAMPS else "binary"
         self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded [{mode_label}]")
+        self._update_behavior_time_panel()
         self._push_recent_paths("postprocess_recent_behavior_paths", paths)
         if loaded_any and not self._autosave_restoring:
             self._project_dirty = True
@@ -3038,6 +3087,49 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_load_beh.setVisible(use_beh)
         self.combo_behavior_name.setEnabled(use_beh)
         self.combo_behavior_name.setVisible(use_beh)
+        show_time_panel = bool(use_beh and self._behavior_sources_need_generated_time())
+        self.grp_behavior_time.setEnabled(show_time_panel)
+        self.grp_behavior_time.setVisible(show_time_panel)
+
+    def _behavior_sources_need_generated_time(self) -> bool:
+        for info in self._behavior_sources.values():
+            if bool(info.get("needs_generated_time", False)):
+                return True
+        return False
+
+    def _update_behavior_time_panel(self) -> None:
+        need_time = self._behavior_sources_need_generated_time()
+        count = sum(1 for info in self._behavior_sources.values() if bool(info.get("needs_generated_time", False)))
+        if need_time:
+            self.lbl_behavior_time_hint.setText(
+                f"No time column detected in {count} behavior file(s). Generate time from FPS."
+            )
+        else:
+            self.lbl_behavior_time_hint.setText("No missing time columns detected.")
+        self._update_align_ui()
+
+    def _apply_behavior_time_settings(self) -> None:
+        fps = float(self.spin_behavior_fps.value()) if hasattr(self, "spin_behavior_fps") else 0.0
+        updated = False
+        for info in self._behavior_sources.values():
+            if not bool(info.get("needs_generated_time", False)):
+                continue
+            row_count = int(info.get("row_count", 0) or 0)
+            t = _generated_time_array(row_count, fps)
+            info["time"] = t.copy()
+            traj_t = np.asarray(info.get("trajectory_time", np.array([], float)), float)
+            if traj_t.size == 0:
+                info["trajectory_time"] = t.copy()
+            updated = True
+        if not updated:
+            return
+        if not self._autosave_restoring:
+            self._project_dirty = True
+        self._refresh_behavior_list()
+        self._compute_psth()
+        self._compute_spatial_heatmap()
+        self._update_behavior_time_panel()
+        self._update_status_strip()
         self.combo_behavior_align.setEnabled(use_beh)
         self.combo_behavior_align.setVisible(use_beh)
 
@@ -6746,6 +6838,52 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         self._load_project_from_path(path)
 
+    def _confirm_discard_current_project(self) -> bool:
+        if not self._project_dirty and not self._has_project_state_for_autosave():
+            return True
+        ask = QtWidgets.QMessageBox.question(
+            self,
+            "New project",
+            "Discard the current postprocessing project and start a new one?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        return ask == QtWidgets.QMessageBox.StandardButton.Yes
+
+    def _new_project(self) -> None:
+        if not self._confirm_discard_current_project():
+            return
+
+        was_restoring = self._is_restoring_settings
+        self._is_restoring_settings = True
+        try:
+            self._clear_cached_analysis_outputs()
+            self._processed = []
+            self._behavior_sources = {}
+            self._pending_project_recompute_from_current = False
+            self.lbl_group.setText("(none)")
+            self.lbl_beh.setText("(none)")
+            self.lbl_behavior_msg.setText("")
+            self.lbl_signal_msg.setText("")
+            self.lbl_status.setText("")
+            self.tab_sources.setCurrentIndex(0)
+            self._update_file_lists()
+            self._refresh_behavior_list()
+            self._update_trace_preview()
+            self._update_behavior_time_panel()
+            self._update_data_availability()
+        finally:
+            self._is_restoring_settings = was_restoring
+
+        self._compute_psth()
+        self._compute_spatial_heatmap()
+        self._save_settings()
+        self._project_dirty = False
+        self._project_recovered_from_autosave = False
+        self._clear_project_autosave_cache(delete_file=True)
+        self._update_status_strip()
+        self.statusUpdate.emit("Started a new postprocessing project.", 5000)
+
     def _import_project_source_paths(self, recent_paths: Dict[str, object]) -> bool:
         proc_raw = recent_paths.get("processed_paths", []) if isinstance(recent_paths, dict) else []
         beh_raw = recent_paths.get("behavior_paths", []) if isinstance(recent_paths, dict) else []
@@ -6906,6 +7044,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "dio_polarity": self.combo_dio_polarity.currentText(),
             "dio_align": self.combo_dio_align.currentText(),
             "behavior_file_type": self.combo_behavior_file_type.currentText(),
+            "behavior_time_fps": float(self.spin_behavior_fps.value()),
             "behavior": self.combo_behavior_name.currentText(),
             "behavior_align": self.combo_behavior_align.currentText(),
             "behavior_from": self.combo_behavior_from.currentText(),
@@ -6985,6 +7124,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _set_combo(self.combo_dio_polarity, data.get("dio_polarity"))
         _set_combo(self.combo_dio_align, data.get("dio_align"))
         _set_combo(self.combo_behavior_file_type, data.get("behavior_file_type"))
+        if "behavior_time_fps" in data:
+            self.spin_behavior_fps.setValue(float(data["behavior_time_fps"]))
         _set_combo(self.combo_behavior_name, data.get("behavior"))
         _set_combo(self.combo_behavior_align, data.get("behavior_align"))
         _set_combo(self.combo_behavior_from, data.get("behavior_from"))
@@ -7097,6 +7238,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if isinstance(style, dict):
             self._style.update(style)
             self._apply_plot_style()
+        self._apply_behavior_time_settings()
         self._update_event_filter_enabled()
         self._update_metrics_enabled()
         self._update_global_metrics_enabled()

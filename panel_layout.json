@@ -4,38 +4,38 @@
     "pre_data_panel_visible": false,
     "pre_splitter_sizes": [
       0,
-      1450,
-      439
+      1501,
+      388
     ],
     "pre_main_dock_state": "",
     "tab_groups": [],
     "sections": {
       "artifacts": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
         "geometry": "AdnQywADAAD///wt///86////gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///86////gv///4L"
       },
       "filtering": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
         "geometry": "AdnQywADAAD///wt///8fv///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///8fv///gv///4L"
       },
       "baseline": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
         "geometry": "AdnQywADAAD///wt///9Nf///gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///9Nf///gv///4L"
       },
       "output": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
         "geometry": "AdnQywADAAD///wt///9P////gv///4LAAAAAAAAAAD//////////wAAAAAAAAAAB4D///wt///9P////gv///4L"
       },
       "export": {
-        "visible": true,
+        "visible": false,
         "floating": false,
         "area": 2,
         "geometry": "AdnQywADAAAAAAWhAAADFAAAB38AAAOMAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAAWhAAADFAAAB38AAAOM"
@@ -54,7 +54,7 @@
       }
     },
     "artifact": {
-      "visible": true,
+      "visible": false,
       "floating": false,
       "area": 2,
       "geometry": "AdnQywADAAAAAAWhAAAAAAAAB38AAAIQAAAAAAAAAAD//////////wAAAAAAAAAAB4AAAAWhAAAAAAAAB38AAAIQ"
