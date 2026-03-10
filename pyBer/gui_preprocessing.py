@@ -2320,6 +2320,29 @@ class ArtifactSelectViewBox(pg.ViewBox):
         super().mouseClickEvent(ev)
 
 
+    def contextMenuEvent(self, ev) -> None:
+        if self._drag_enabled and self._rect_item.isVisible():
+            self.dragSelectionContextRequested.emit()
+            ev.accept()
+        else:
+            super().contextMenuEvent(ev)
+
+
+class PreprocessingSelector(pg.LinearRegionItem):
+    sigContextRequested = QtCore.Signal()
+
+    def mouseClickEvent(self, ev) -> None:
+        if ev.button() == QtCore.Qt.MouseButton.RightButton:
+            self.sigContextRequested.emit()
+            ev.accept()
+        else:
+            super().mouseClickEvent(ev)
+
+    def contextMenuEvent(self, ev) -> None:
+        self.sigContextRequested.emit()
+        ev.accept()
+
+
 class PlotDashboard(QtWidgets.QWidget):
     manualRegionFromSelectorRequested = QtCore.Signal()
     manualRegionFromDragRequested = QtCore.Signal(float, float)
@@ -2435,7 +2458,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self._proc_y_curves = [self.curve_f465, self.curve_f405, self.curve_b465, self.curve_b405]
         self._out_y_curves = [self.curve_out]
 
-        self.selector = pg.LinearRegionItem(values=(0, 1), brush=(80, 120, 200, 60))
+        self.selector = PreprocessingSelector(values=(0, 1), brush=(80, 120, 200, 60))
         self.plot_raw.addItem(self.selector)
 
         self._dio_pen = pg.mkPen((230, 180, 80), width=1.2)
@@ -2468,6 +2491,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self._raw_vb.dragSelectionFinished.connect(self._on_drag_select_finished)
         self._raw_vb.dragSelectionCleared.connect(self._on_drag_select_cleared)
         self._raw_vb.dragSelectionContextRequested.connect(self.boxSelectionContextRequested.emit)
+        self.selector.sigContextRequested.connect(self.boxSelectionContextRequested.emit)
 
         self._sync_artifact_threshold_curves_visibility()
         self._toggle_box_select(False)
@@ -2660,6 +2684,9 @@ class PlotDashboard(QtWidgets.QWidget):
     def selector_region(self) -> Tuple[float, float]:
         r = self.selector.getRegion()
         return float(min(r)), float(max(r))
+
+    def selector_visible(self) -> bool:
+        return bool(self.selector.isVisible())
 
     def set_selector_region(self, t0: float, t1: float, visible: bool = True) -> None:
         self.selector.setRegion((float(min(t0, t1)), float(max(t0, t1))))

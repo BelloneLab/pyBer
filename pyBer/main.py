@@ -4041,18 +4041,32 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         region = self._pending_box_region_by_key.get(key)
         if not region:
-            return None
+            if not self.plots.selector_visible():
+                return None
+            t0, t1 = self.plots.selector_region()
+            return (float(min(t0, t1)), float(max(t0, t1)))
         return (float(min(region)), float(max(region)))
 
     def _consume_pending_box_region(self) -> Optional[Tuple[float, float]]:
         key = self._current_key()
         if not key:
             return None
+        
+        is_tool_active = self.plots.btn_box_select.isChecked()
         region = self._pending_box_region_by_key.pop(key, None)
+        
+        if not region:
+            if not self.plots.selector_visible():
+                return None
+            t0, t1 = self.plots.selector_region()
+            region = (float(min(t0, t1)), float(max(t0, t1)))
+            # If not using the box-select tool, we do NOT hide the persistent selector.
+            if not is_tool_active:
+                return region
+
+        # Cleanup if we were in tool mode or had a temporary drag selection.
         self.plots.set_selector_region(0.0, 1.0, visible=False)
         self.plots.btn_box_select.setChecked(False)
-        if not region:
-            return None
         return (float(min(region)), float(max(region)))
 
     def _assign_pending_box_to_artifact(self) -> None:
