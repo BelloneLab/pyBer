@@ -3672,6 +3672,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         fs = 1.0 / float(np.nanmedian(np.diff(time))) if time.size > 2 else np.nan
 
+        new_triggers = {}
+        new_trigger_times = {}
+        if hasattr(trial, "triggers") and trial.triggers:
+            for name, val in trial.triggers.items():
+                vt = trial.trigger_times.get(name)
+                if vt is not None:
+                    if vt.size == t.size:
+                        new_triggers[name] = np.asarray(val, float)[mask]
+                        new_trigger_times[name] = np.asarray(vt, float)[mask]
+                    else:
+                        tmask = (vt >= float(start_s)) & (vt <= float(end_s))
+                        new_triggers[name] = np.asarray(val, float)[tmask]
+                        new_trigger_times[name] = np.asarray(vt, float)[tmask]
+
         return LoadedTrial(
             path=trial.path,
             channel_id=trial.channel_id,
@@ -3682,6 +3696,8 @@ class MainWindow(QtWidgets.QMainWindow):
             trigger_time=trig_time,
             trigger=trig,
             trigger_name=trial.trigger_name,
+            triggers=new_triggers,
+            trigger_times=new_trigger_times,
         )
 
     def _apply_cutouts(self, trial: LoadedTrial, cutouts: List[Tuple[float, float]]) -> LoadedTrial:
@@ -3704,6 +3720,8 @@ class MainWindow(QtWidgets.QMainWindow):
             trigger_time=trial.trigger_time,
             trigger=trial.trigger,
             trigger_name=trial.trigger_name,
+            triggers=dict(trial.triggers) if hasattr(trial, "triggers") else {},
+            trigger_times=dict(trial.trigger_times) if hasattr(trial, "trigger_times") else {},
         )
 
     def _apply_cutouts_to_processed(self, processed: ProcessedTrial, cutouts: List[Tuple[float, float]]) -> ProcessedTrial:
@@ -3724,15 +3742,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 y[mask] = np.nan
             return y
 
-        raw_sig = _mask_arr(processed.raw_signal)
-        raw_ref = _mask_arr(processed.raw_reference)
-        processed.raw_signal = raw_sig if raw_sig is not None else processed.raw_signal
-        processed.raw_reference = raw_ref if raw_ref is not None else processed.raw_reference
+        processed.raw_signal = _mask_arr(processed.raw_signal)
+        processed.raw_reference = _mask_arr(processed.raw_reference)
         processed.sig_f = _mask_arr(processed.sig_f)
         processed.ref_f = _mask_arr(processed.ref_f)
         processed.baseline_sig = _mask_arr(processed.baseline_sig)
         processed.baseline_ref = _mask_arr(processed.baseline_ref)
         processed.output = _mask_arr(processed.output)
+        
+        # Mask triggers too if requested by convention, but here we keep them as-is or NaN them
+        if hasattr(processed, "triggers") and processed.triggers:
+            new_triggers = {}
+            for name, val in processed.triggers.items():
+                new_triggers[name] = _mask_arr(val)
+            processed.triggers = new_triggers
+
         return processed
 
     def _slice_trial(self, trial: LoadedTrial, start_s: float, end_s: float) -> Optional[LoadedTrial]:
@@ -3753,6 +3777,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 tmask = (trig_time >= float(start_s)) & (trig_time <= float(end_s))
                 trig_time = np.asarray(trig_time, float)[tmask]
                 trig = np.asarray(trig, float)[tmask]
+        
+        new_triggers = {}
+        new_trigger_times = {}
+        if hasattr(trial, "triggers") and trial.triggers:
+            for name, val in trial.triggers.items():
+                vt = trial.trigger_times.get(name)
+                if vt is not None:
+                    if vt.size == t.size:
+                        new_triggers[name] = np.asarray(val, float)[mask]
+                        new_trigger_times[name] = np.asarray(vt, float)[mask]
+                    else:
+                        tmask = (vt >= float(start_s)) & (vt <= float(end_s))
+                        new_triggers[name] = np.asarray(val, float)[tmask]
+                        new_trigger_times[name] = np.asarray(vt, float)[tmask]
+
         fs = 1.0 / float(np.nanmedian(np.diff(time))) if time.size > 2 else np.nan
         return LoadedTrial(
             path=trial.path,
@@ -3764,6 +3803,8 @@ class MainWindow(QtWidgets.QMainWindow):
             trigger_time=trig_time,
             trigger=trig,
             trigger_name=trial.trigger_name,
+            triggers=new_triggers,
+            trigger_times=new_trigger_times,
         )
 
     def _update_raw_plot(self, preserve_view: bool = False) -> None:
@@ -4303,58 +4344,61 @@ class MainWindow(QtWidgets.QMainWindow):
                 meta = self._metadata_by_key.get(key, {})
                 sections = self._sections_by_key.get(key, [])
 
-                for export_trigger in dio_names:
-                    trial = doric.make_trial(ch, trigger_name=export_trigger)
-                    trial = self._apply_time_window(trial)
-                    trial = self._apply_cutouts(trial, cutouts)
+                # Use all selected triggers for one export per channel
+                # If current trigger is in dio_names, use it as primary for alignment.
+                # Otherwise, pick first available as primary.
+                primary_trigger = None
+                if export_selection.dio and dio_names:
+                    primary_trigger = (self._current_trigger if self._current_trigger in dio_names else (dio_names[0] if dio_names[0] else None))
 
-                    def _export_one(proc: ProcessedTrial, suffix: str = "") -> None:
-                        nonlocal n_total
-                        proc = self._apply_cutouts_to_processed(proc, cutouts)
-                        stem = safe_stem_from_metadata(path, ch, meta)
-                        if export_trigger:
-                            stem = f"{stem}_{export_trigger}"
-                        if suffix:
-                            stem = f"{stem}_{suffix}"
-                        csv_path = os.path.join(out_dir, f"{stem}.csv")
-                        h5_path = os.path.join(out_dir, f"{stem}.h5")
-                        export_processed_csv(csv_path, proc, metadata=meta, selection=export_selection)
-                        export_processed_h5(h5_path, proc, metadata=meta, selection=export_selection)
-                        n_total += 1
+                trial = doric.make_trial(ch, trigger_name=primary_trigger, trigger_names=(dio_names if export_selection.dio else None))
+                trial = self._apply_time_window(trial)
+                trial = self._apply_cutouts(trial, cutouts)
 
-                    try:
-                        if sections:
-                            for i, sec in enumerate(sections, start=1):
-                                s0 = float(sec.get("start", 0.0))
-                                s1 = float(sec.get("end", 0.0))
-                                sec_trial = self._slice_trial(trial, s0, s1)
-                                if sec_trial is None:
-                                    continue
-                                sec_params = ProcessingParams.from_dict(sec.get("params", {})) if isinstance(sec.get("params"), dict) else params
-                                processed = self.processor.process_trial(
-                                    trial=sec_trial,
-                                    params=sec_params,
-                                    manual_regions_sec=manual,
-                                    manual_exclude_regions_sec=manual_exclude,
-                                    preview_mode=False,
-                                )
-                                _export_one(processed, suffix=f"sec{i}_{s0:.2f}_{s1:.2f}")
-                        else:
+                def _export_one(proc: ProcessedTrial, suffix: str = "") -> None:
+                    nonlocal n_total
+                    proc = self._apply_cutouts_to_processed(proc, cutouts)
+                    stem = safe_stem_from_metadata(path, ch, meta)
+                    if suffix:
+                        stem = f"{stem}_{suffix}"
+                    csv_path = os.path.join(out_dir, f"{stem}.csv")
+                    h5_path = os.path.join(out_dir, f"{stem}.h5")
+                    export_processed_csv(csv_path, proc, metadata=meta, selection=export_selection)
+                    export_processed_h5(h5_path, proc, metadata=meta, selection=export_selection)
+                    n_total += 1
+
+                try:
+                    if sections:
+                        for i, sec in enumerate(sections, start=1):
+                            s0 = float(sec.get("start", 0.0))
+                            s1 = float(sec.get("end", 0.0))
+                            sec_trial = self._slice_trial(trial, s0, s1)
+                            if sec_trial is None:
+                                continue
+                            sec_params = ProcessingParams.from_dict(sec.get("params", {})) if isinstance(sec.get("params"), dict) else params
                             processed = self.processor.process_trial(
-                                trial=trial,
-                                params=params,
+                                trial=sec_trial,
+                                params=sec_params,
                                 manual_regions_sec=manual,
                                 manual_exclude_regions_sec=manual_exclude,
                                 preview_mode=False,
                             )
-                            _export_one(processed)
-                    except Exception as e:
-                        QtWidgets.QMessageBox.warning(
-                            self,
-                            "Export error",
-                            f"Failed export:\n{path} [{ch}] [{export_trigger or 'no DIO'}]\n\n{e}",
+                            _export_one(processed, suffix=f"sec{i}_{s0:.2f}_{s1:.2f}")
+                    else:
+                        processed = self.processor.process_trial(
+                            trial=trial,
+                            params=params,
+                            manual_regions_sec=manual,
+                            manual_exclude_regions_sec=manual_exclude,
+                            preview_mode=False,
                         )
-
+                        _export_one(processed)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Export error",
+                        f"Failed export:\n{path} [{ch}] [{primary_trigger or 'no DIO'}]\n\n{e}",
+                    )
         self._show_status_message(f"Export complete: {n_total} recording(s) written to {out_dir}")
 
         # optional: update post tab list by loading exported results? (user can load later)

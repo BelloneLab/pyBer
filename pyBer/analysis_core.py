@@ -5,7 +5,7 @@ import os
 import re
 import time
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -154,6 +154,9 @@ class LoadedTrial:
     trigger_time: Optional[np.ndarray] = None
     trigger: Optional[np.ndarray] = None
     trigger_name: str = ""
+    # Support for multiple triggers (DIO/AOUT)
+    triggers: Dict[str, np.ndarray] = field(default_factory=dict)
+    trigger_times: Dict[str, np.ndarray] = field(default_factory=dict)
 
 
 @dataclass
@@ -168,7 +171,7 @@ class LoadedDoricFile:
     trigger_time_by_name: Dict[str, np.ndarray]
     trigger_by_name: Dict[str, np.ndarray]
 
-    def make_trial(self, channel: str, trigger_name: Optional[str] = None) -> LoadedTrial:
+    def make_trial(self, channel: str, trigger_name: Optional[str] = None, trigger_names: Optional[List[str]] = None) -> LoadedTrial:
         t = self.time_by_channel[channel]
         sig = self.signal_by_channel[channel]
         ref = self.reference_by_channel[channel]
@@ -176,6 +179,8 @@ class LoadedDoricFile:
         trig_t = None
         trig = None
         trig_name = trigger_name or ""
+        all_triggers = {}
+        all_trigger_times = {}
 
         if trigger_name:
             if trigger_name in self.trigger_by_name:
@@ -203,6 +208,26 @@ class LoadedDoricFile:
                 trig_t = self.digital_time
                 trig = self.digital_by_name[trigger_name]
 
+        # Multiple triggers (for export)
+        names_to_collect = list(trigger_names) if trigger_names else []
+        if trigger_name and trigger_name not in names_to_collect:
+            names_to_collect.append(trigger_name)
+
+        for name in names_to_collect:
+            if name in self.trigger_by_name:
+                val = np.asarray(self.trigger_by_name[name], float)
+                vt = self.trigger_time_by_name.get(name, None)
+                if vt is not None:
+                    vt = np.asarray(vt, float)
+                elif self.digital_time is not None and name in self.digital_by_name:
+                    vt = np.asarray(self.digital_time, float)
+                elif val.size == t.size:
+                    vt = np.asarray(t, float)
+                
+                if vt is not None:
+                    all_triggers[name] = val
+                    all_trigger_times[name] = vt
+
         fs = 1.0 / float(np.nanmedian(np.diff(t))) if t.size > 2 else np.nan
 
         return LoadedTrial(
@@ -215,6 +240,8 @@ class LoadedDoricFile:
             trigger_time=np.asarray(trig_t, float) if trig_t is not None else None,
             trigger=np.asarray(trig, float) if trig is not None else None,
             trigger_name=trig_name,
+            triggers=all_triggers,
+            trigger_times=all_trigger_times,
         )
 
 
@@ -234,6 +261,8 @@ class ProcessedTrial:
     # Optional analog/digital trigger channel aligned to processed time
     dio: Optional[np.ndarray] = None
     dio_name: str = ""
+    # Support for multiple triggers
+    triggers: Dict[str, np.ndarray] = field(default_factory=dict)
 
     # Processing intermediates
     sig_f: Optional[np.ndarray] = None
@@ -361,8 +390,18 @@ def export_processed_csv(
             columns.append(("isobestic", iso))
         if selection.output:
             columns.append((out_col, out))
+
+        # Primary trigger name (e.g. "DIO01")
+        primary_name = str(processed.dio_name) if processed.dio_name else "dio"
         if dio is not None:
-            columns.append(("dio", dio))
+            columns.append((primary_name, dio))
+
+        # Add additional triggers
+        if selection.dio and hasattr(processed, "triggers") and processed.triggers:
+            for name, val in processed.triggers.items():
+                if name != processed.dio_name: # Avoid duplicates
+                    columns.append((name, val))
+
         w.writerow([name for name, _ in columns])
         for i in range(t.size):
             row = []
@@ -411,8 +450,17 @@ def export_processed_h5(
             pass
 
         if selection.dio and processed.dio is not None:
-            g.create_dataset("dio", data=np.asarray(processed.dio, float), compression="gzip")
+            primary_name = str(processed.dio_name) if processed.dio_name else "dio"
+            g.create_dataset(primary_name, data=np.asarray(processed.dio, float), compression="gzip")
             g.attrs["dio_name"] = str(processed.dio_name)
+            if primary_name != "dio":
+                g["dio"] = g[primary_name] # link for compatibility
+
+        # Add all selected triggers
+        if selection.dio and hasattr(processed, "triggers") and processed.triggers:
+            for name, val in processed.triggers.items():
+                if name not in g:
+                    g.create_dataset(name, data=np.asarray(val, float), compression="gzip")
 
         if selection.baseline_sig and processed.baseline_sig is not None:
             g.create_dataset("baseline_465", data=np.asarray(processed.baseline_sig, float), compression="gzip")
@@ -1159,6 +1207,14 @@ class PhotometryProcessor:
             dio_interp = np.interp(t2, t, np.asarray(trial.trigger, float))
             dio2 = (dio_interp > 0.5).astype(float)
 
+        all_triggers2 = {}
+        if hasattr(trial, "triggers") and trial.triggers:
+            for name, val in trial.triggers.items():
+                vt = trial.trigger_times.get(name)
+                if vt is not None:
+                    interp_val = np.interp(t2, vt, np.asarray(val, float))
+                    all_triggers2[name] = (interp_val > 0.5).astype(float)
+
         # ---------------------------------------------------------------------
         # 8) Baseline estimation AFTER filtering/resampling (on final timebase)
         # ---------------------------------------------------------------------
@@ -1263,6 +1319,7 @@ class PhotometryProcessor:
             raw_thr_lo=lo2,
             dio=dio2,
             dio_name=dio_name,
+            triggers=all_triggers2,
             sig_f=sig2,
             ref_f=ref2,
             baseline_sig=b_sig,
