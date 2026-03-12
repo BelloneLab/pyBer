@@ -4,13 +4,15 @@ from __future__ import annotations
 import os
 import re
 import time
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import h5py
 
-from scipy.signal import butter, sosfiltfilt, resample_poly
+from scipy.signal import butter, sosfiltfilt, resample_poly, savgol_filter
+from scipy.ndimage import uniform_filter1d, median_filter
 from PySide6 import QtCore  # for QRunnable signals
 
 # Optional: Lasso (requires scikit-learn). If unavailable, we fall back to OLS.
@@ -42,7 +44,13 @@ REFERENCE_FIT_METHODS = [
     "RLM (HuberT)",
 ]
 
-# Output modes (user requested: 7 clear options)
+SMOOTHING_METHODS = [
+    "Savitzky-Golay",
+    "Moving average",
+    "Moving median",
+]
+
+# Output modes
 OUTPUT_MODES = [
     # 1) dFF (non motion corrected)
     "dFF (non motion corrected)",
@@ -58,6 +66,8 @@ OUTPUT_MODES = [
     "dFF (motion corrected with fitted ref)",
     # 7) zscore of that fitted-ref dFF
     "zscore (motion corrected with fitted ref)",
+    # 8) raw signal (processed 465 trace after artifact handling/filtering/resampling)
+    "Raw signal (465)",
 ]
 
 
@@ -77,6 +87,10 @@ class ProcessingParams:
     # -------------------------
     lowpass_hz: float = 12.0
     filter_order: int = 3
+    smoothing_enabled: bool = False
+    smoothing_method: str = "Savitzky-Golay"
+    smoothing_window_s: float = 0.200
+    smoothing_polyorder: int = 2
 
     # -------------------------
     # Decimation / resampling
@@ -140,6 +154,9 @@ class LoadedTrial:
     trigger_time: Optional[np.ndarray] = None
     trigger: Optional[np.ndarray] = None
     trigger_name: str = ""
+    # Support for multiple triggers (DIO/AOUT)
+    triggers: Dict[str, np.ndarray] = field(default_factory=dict)
+    trigger_times: Dict[str, np.ndarray] = field(default_factory=dict)
 
 
 @dataclass
@@ -151,8 +168,10 @@ class LoadedDoricFile:
     reference_by_channel: Dict[str, np.ndarray]
     digital_time: Optional[np.ndarray]
     digital_by_name: Dict[str, np.ndarray]
+    trigger_time_by_name: Dict[str, np.ndarray]
+    trigger_by_name: Dict[str, np.ndarray]
 
-    def make_trial(self, channel: str, trigger_name: Optional[str] = None) -> LoadedTrial:
+    def make_trial(self, channel: str, trigger_name: Optional[str] = None, trigger_names: Optional[List[str]] = None) -> LoadedTrial:
         t = self.time_by_channel[channel]
         sig = self.signal_by_channel[channel]
         ref = self.reference_by_channel[channel]
@@ -160,17 +179,54 @@ class LoadedDoricFile:
         trig_t = None
         trig = None
         trig_name = trigger_name or ""
+        all_triggers = {}
+        all_trigger_times = {}
 
         if trigger_name:
-            if self.digital_time is not None and trigger_name in self.digital_by_name:
-                trig_t = self.digital_time
-                trig = self.digital_by_name[trigger_name]
+            if trigger_name in self.trigger_by_name:
+                trig = np.asarray(self.trigger_by_name[trigger_name], float)
+                trig_t = self.trigger_time_by_name.get(trigger_name, None)
+                if trig_t is not None:
+                    trig_t = np.asarray(trig_t, float)
+                elif self.digital_time is not None and trigger_name in self.digital_by_name:
+                    trig_t = np.asarray(self.digital_time, float)
+                elif trig.size == t.size:
+                    trig_t = np.asarray(t, float)
 
-                # Align analog signals to DIO time base (so DIO overlays correctly).
+                if trig_t is not None and trig_t.size and trig.size:
+                    n = min(trig_t.size, trig.size)
+                    trig_t = trig_t[:n]
+                    trig = trig[:n]
+
+                # Align analog signals to selected trigger time base for overlays/event alignment.
                 if trig_t is not None and trig_t.size and t.size and trig_t.size != t.size:
                     sig = np.interp(trig_t, t, sig)
                     ref = np.interp(trig_t, t, ref)
                     t = trig_t
+            elif self.digital_time is not None and trigger_name in self.digital_by_name:
+                # Backward compatibility for sessions loaded before trigger map support.
+                trig_t = self.digital_time
+                trig = self.digital_by_name[trigger_name]
+
+        # Multiple triggers (for export)
+        names_to_collect = list(trigger_names) if trigger_names else []
+        if trigger_name and trigger_name not in names_to_collect:
+            names_to_collect.append(trigger_name)
+
+        for name in names_to_collect:
+            if name in self.trigger_by_name:
+                val = np.asarray(self.trigger_by_name[name], float)
+                vt = self.trigger_time_by_name.get(name, None)
+                if vt is not None:
+                    vt = np.asarray(vt, float)
+                elif self.digital_time is not None and name in self.digital_by_name:
+                    vt = np.asarray(self.digital_time, float)
+                elif val.size == t.size:
+                    vt = np.asarray(t, float)
+                
+                if vt is not None:
+                    all_triggers[name] = val
+                    all_trigger_times[name] = vt
 
         fs = 1.0 / float(np.nanmedian(np.diff(t))) if t.size > 2 else np.nan
 
@@ -184,6 +240,8 @@ class LoadedDoricFile:
             trigger_time=np.asarray(trig_t, float) if trig_t is not None else None,
             trigger=np.asarray(trig, float) if trig is not None else None,
             trigger_name=trig_name,
+            triggers=all_triggers,
+            trigger_times=all_trigger_times,
         )
 
 
@@ -200,9 +258,11 @@ class ProcessedTrial:
     raw_thr_hi: Optional[np.ndarray] = None
     raw_thr_lo: Optional[np.ndarray] = None
 
-    # Optional DIO aligned to processed time
+    # Optional analog/digital trigger channel aligned to processed time
     dio: Optional[np.ndarray] = None
     dio_name: str = ""
+    # Support for multiple triggers
+    triggers: Dict[str, np.ndarray] = field(default_factory=dict)
 
     # Processing intermediates
     sig_f: Optional[np.ndarray] = None
@@ -221,6 +281,39 @@ class ProcessedTrial:
     fs_actual: float = np.nan
     fs_target: float = np.nan
     fs_used: float = np.nan
+
+
+@dataclass
+class ExportSelection:
+    raw: bool = True
+    isobestic: bool = True
+    output: bool = True
+    dio: bool = True
+    baseline_sig: bool = True
+    baseline_ref: bool = True
+
+    def to_dict(self) -> Dict[str, bool]:
+        return {
+            "raw": bool(self.raw),
+            "isobestic": bool(self.isobestic),
+            "output": bool(self.output),
+            "dio": bool(self.dio),
+            "baseline_sig": bool(self.baseline_sig),
+            "baseline_ref": bool(self.baseline_ref),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, object]]) -> "ExportSelection":
+        if not isinstance(data, dict):
+            return cls()
+        return cls(
+            raw=bool(data.get("raw", True)),
+            isobestic=bool(data.get("isobestic", True)),
+            output=bool(data.get("output", True)),
+            dio=bool(data.get("dio", True)),
+            baseline_sig=bool(data.get("baseline_sig", True)),
+            baseline_ref=bool(data.get("baseline_ref", True)),
+        )
 
 
 # =============================================================================
@@ -256,6 +349,8 @@ def output_label_type(label: str) -> str:
         return "z-score"
     if "dff" in lab:
         return "dFF"
+    if "raw signal" in lab or lab.startswith("raw"):
+        return "raw_signal"
     return "output"
 
 
@@ -263,9 +358,11 @@ def export_processed_csv(
     path: str,
     processed: ProcessedTrial,
     metadata: Optional[Dict[str, str]] = None,
+    selection: Optional[ExportSelection] = None,
 ) -> None:
     import csv
 
+    selection = selection if isinstance(selection, ExportSelection) else ExportSelection()
     t = np.asarray(processed.time, float)
     out = np.asarray(processed.output if processed.output is not None else np.full_like(t, np.nan), float)
     raw = np.asarray(processed.raw_signal if processed.raw_signal is not None else np.full_like(t, np.nan), float)
@@ -276,44 +373,54 @@ def export_processed_csv(
         iso = np.full_like(t, np.nan)
 
     dio = None
-    if processed.dio is not None and processed.dio.size == t.size:
+    if selection.dio and processed.dio is not None and processed.dio.size == t.size:
         dio = np.asarray(processed.dio, float)
 
     out_col = output_label_type(processed.output_label)
 
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        if processed.output_context:
-            w.writerow([f"# output_context: {processed.output_context}"])
         if metadata:
             for k, v in metadata.items():
                 w.writerow([f"# {k}: {v}"])
-        if dio is None:
-            w.writerow(["time", "raw", "isobestic", out_col])
-            for i in range(t.size):
-                w.writerow([
-                    float(t[i]),
-                    float(raw[i]) if np.isfinite(raw[i]) else np.nan,
-                    float(iso[i]) if np.isfinite(iso[i]) else np.nan,
-                    float(out[i]) if np.isfinite(out[i]) else np.nan,
-                ])
-        else:
-            w.writerow(["time", "raw", "isobestic", out_col, "dio"])
-            for i in range(t.size):
-                w.writerow([
-                    float(t[i]),
-                    float(raw[i]) if np.isfinite(raw[i]) else np.nan,
-                    float(iso[i]) if np.isfinite(iso[i]) else np.nan,
-                    float(out[i]) if np.isfinite(out[i]) else np.nan,
-                    float(dio[i]) if np.isfinite(dio[i]) else np.nan,
-                ])
+        columns = [("time", t)]
+        if selection.raw:
+            columns.append(("raw", raw))
+        if selection.isobestic:
+            columns.append(("isobestic", iso))
+        if selection.output:
+            columns.append((out_col, out))
+
+        # Primary trigger name (e.g. "DIO01")
+        primary_name = str(processed.dio_name) if processed.dio_name else "dio"
+        if dio is not None:
+            columns.append((primary_name, dio))
+
+        # Add additional triggers
+        if selection.dio and hasattr(processed, "triggers") and processed.triggers:
+            for name, val in processed.triggers.items():
+                if name != processed.dio_name: # Avoid duplicates
+                    columns.append((name, val))
+
+        w.writerow([name for name, _ in columns])
+        for i in range(t.size):
+            row = []
+            for _, values in columns:
+                v = float(values[i])
+                row.append(v if np.isfinite(v) else np.nan)
+            w.writerow(row)
 
 
-def export_processed_h5(path: str, processed: ProcessedTrial, metadata: Optional[Dict[str, str]] = None) -> None:
+def export_processed_h5(
+    path: str,
+    processed: ProcessedTrial,
+    metadata: Optional[Dict[str, str]] = None,
+    selection: Optional[ExportSelection] = None,
+) -> None:
+    selection = selection if isinstance(selection, ExportSelection) else ExportSelection()
     with h5py.File(path, "w") as f:
         g = f.create_group("data")
         g.create_dataset("time", data=np.asarray(processed.time, float), compression="gzip")
-        g.create_dataset("output", data=np.asarray(processed.output, float), compression="gzip")
         out_type = output_label_type(processed.output_label)
         g.attrs["output_label"] = str(processed.output_label)
         g.attrs["output_context"] = str(processed.output_context)
@@ -321,28 +428,43 @@ def export_processed_h5(path: str, processed: ProcessedTrial, metadata: Optional
         g.attrs["fs_actual"] = float(processed.fs_actual)
         g.attrs["fs_used"] = float(processed.fs_used)
         g.attrs["fs_target"] = float(processed.fs_target)
+        g.attrs["export_selection"] = json.dumps(selection.to_dict())
+
+        if selection.output:
+            g.create_dataset("output", data=np.asarray(processed.output, float), compression="gzip")
 
         raw_sig = np.asarray(processed.raw_signal if processed.raw_signal is not None else np.full_like(processed.time, np.nan), float)
         raw_ref = np.asarray(processed.raw_reference if processed.raw_reference is not None else np.full_like(processed.time, np.nan), float)
-        g.create_dataset("raw_465", data=raw_sig, compression="gzip")
-        g.create_dataset("raw_405", data=raw_ref, compression="gzip")
+        if selection.raw:
+            g.create_dataset("raw_465", data=raw_sig, compression="gzip")
+        if selection.isobestic:
+            g.create_dataset("raw_405", data=raw_ref, compression="gzip")
         try:
-            if "raw" not in g:
+            if selection.raw and "raw" not in g:
                 g["raw"] = g["raw_465"]
-            if "isobestic" not in g:
+            if selection.isobestic and "isobestic" not in g:
                 g["isobestic"] = g["raw_405"]
-            if out_type and out_type != "output" and out_type not in g:
+            if selection.output and out_type and out_type != "output" and out_type not in g:
                 g[out_type] = g["output"]
         except Exception:
             pass
 
-        if processed.dio is not None:
-            g.create_dataset("dio", data=np.asarray(processed.dio, float), compression="gzip")
+        if selection.dio and processed.dio is not None:
+            primary_name = str(processed.dio_name) if processed.dio_name else "dio"
+            g.create_dataset(primary_name, data=np.asarray(processed.dio, float), compression="gzip")
             g.attrs["dio_name"] = str(processed.dio_name)
+            if primary_name != "dio":
+                g["dio"] = g[primary_name] # link for compatibility
 
-        if processed.baseline_sig is not None:
+        # Add all selected triggers
+        if selection.dio and hasattr(processed, "triggers") and processed.triggers:
+            for name, val in processed.triggers.items():
+                if name not in g:
+                    g.create_dataset(name, data=np.asarray(val, float), compression="gzip")
+
+        if selection.baseline_sig and processed.baseline_sig is not None:
             g.create_dataset("baseline_465", data=np.asarray(processed.baseline_sig, float), compression="gzip")
-        if processed.baseline_ref is not None:
+        if selection.baseline_ref and processed.baseline_ref is not None:
             g.create_dataset("baseline_405", data=np.asarray(processed.baseline_ref, float), compression="gzip")
 
         if metadata:
@@ -432,6 +554,81 @@ def _lowpass_sos(x: np.ndarray, fs: float, cutoff: float, order: int) -> np.ndar
     wn = min(0.999, max(1e-6, cutoff / nyq))
     sos = butter(order, wn, btype="low", output="sos")
     return np.asarray(sosfiltfilt(sos, y), float)
+
+
+def _window_samples_from_seconds(
+    fs: float,
+    window_s: float,
+    *,
+    minimum: int = 1,
+    require_odd: bool = False,
+) -> int:
+    if not np.isfinite(fs) or fs <= 0:
+        return int(max(1, minimum))
+    n = int(round(float(window_s) * float(fs)))
+    n = max(int(minimum), n)
+    if require_odd and (n % 2 == 0):
+        n += 1
+    return int(n)
+
+
+def _apply_optional_smoothing(x: np.ndarray, fs: float, params: ProcessingParams) -> np.ndarray:
+    """
+    Optional smoothing stage applied on the processed timebase.
+    Supported methods:
+    - Savitzky-Golay
+    - Moving average
+    - Moving median
+    """
+    y = np.asarray(x, float)
+    if y.size < 3:
+        return y
+    if not bool(getattr(params, "smoothing_enabled", False)):
+        return y
+
+    method = str(getattr(params, "smoothing_method", "Savitzky-Golay") or "Savitzky-Golay").strip()
+    window_s = float(getattr(params, "smoothing_window_s", 0.0))
+    if not np.isfinite(window_s) or window_s <= 0:
+        return y
+
+    if np.any(~np.isfinite(y)):
+        y = interpolate_nans(y)
+
+    if method.startswith("Savitzky"):
+        polyorder = int(max(1, getattr(params, "smoothing_polyorder", 2)))
+        win = _window_samples_from_seconds(fs, window_s, minimum=polyorder + 2, require_odd=True)
+        if win > y.size:
+            win = y.size if (y.size % 2 == 1) else max(1, y.size - 1)
+        if win <= polyorder:
+            polyorder = max(1, min(polyorder, win - 1))
+        if win < 3 or win <= polyorder:
+            return y
+        try:
+            return np.asarray(savgol_filter(y, window_length=int(win), polyorder=int(polyorder), mode="interp"), float)
+        except Exception:
+            return y
+
+    if method.startswith("Moving average"):
+        win = _window_samples_from_seconds(fs, window_s, minimum=1, require_odd=False)
+        if win <= 1:
+            return y
+        try:
+            return np.asarray(uniform_filter1d(y, size=int(win), mode="nearest"), float)
+        except Exception:
+            return y
+
+    if method.startswith("Moving median"):
+        win = _window_samples_from_seconds(fs, window_s, minimum=3, require_odd=True)
+        if win > y.size:
+            win = y.size if (y.size % 2 == 1) else max(1, y.size - 1)
+        if win <= 1:
+            return y
+        try:
+            return np.asarray(median_filter(y, size=int(win), mode="nearest"), float)
+        except Exception:
+            return y
+
+    return y
 
 
 def _compute_resample_ratio(fs: float, target_fs: float) -> Tuple[int, int, float]:
@@ -848,6 +1045,21 @@ class PhotometryProcessor:
                     if k.startswith("DIO"):
                         digital_by[k] = np.asarray(dio[k][()], float)
 
+            trigger_by: Dict[str, np.ndarray] = dict(digital_by)
+            trigger_time_by: Dict[str, np.ndarray] = {}
+            if digital_time is not None:
+                for name in digital_by.keys():
+                    trigger_time_by[name] = np.asarray(digital_time, float)
+
+            if "AnalogOut" in base:
+                aout = base["AnalogOut"]
+                aout_time = np.asarray(aout["Time"][()], float) if "Time" in aout else None
+                for k in aout.keys():
+                    if k.startswith("AOUT"):
+                        trigger_by[k] = np.asarray(aout[k][()], float)
+                        if aout_time is not None:
+                            trigger_time_by[k] = np.asarray(aout_time, float)
+
             return LoadedDoricFile(
                 path=path,
                 channels=chans,
@@ -856,6 +1068,8 @@ class PhotometryProcessor:
                 reference_by_channel=ref_by,
                 digital_time=digital_time,
                 digital_by_name=digital_by,
+                trigger_time_by_name=trigger_time_by,
+                trigger_by_name=trigger_by,
             )
 
     def make_preview_task(
@@ -977,12 +1191,14 @@ class PhotometryProcessor:
         # 6) Resample signals together to target fs (only if true decimation)
         # ---------------------------------------------------------------------
         t2, sig2, ref2, fs_used = _resample_pair_to_target_fs(t, sig_f, ref_f, fs, target_fs)
+        sig2 = _apply_optional_smoothing(sig2, fs_used, params)
+        ref2 = _apply_optional_smoothing(ref2, fs_used, params)
 
         # Resample the envelope for display (same timebase as processed)
         _, hi2, lo2, _ = _resample_pair_to_target_fs(t, hi_raw, lo_raw, fs, target_fs)
 
         # ---------------------------------------------------------------------
-        # 7) DIO overlay (if present): interpolate and binarize
+        # 7) A/D overlay (if present): interpolate and binarize
         # ---------------------------------------------------------------------
         dio2 = None
         dio_name = ""
@@ -991,6 +1207,14 @@ class PhotometryProcessor:
             dio_interp = np.interp(t2, t, np.asarray(trial.trigger, float))
             dio2 = (dio_interp > 0.5).astype(float)
 
+        all_triggers2 = {}
+        if hasattr(trial, "triggers") and trial.triggers:
+            for name, val in trial.triggers.items():
+                vt = trial.trigger_times.get(name)
+                if vt is not None:
+                    interp_val = np.interp(t2, vt, np.asarray(val, float))
+                    all_triggers2[name] = (interp_val > 0.5).astype(float)
+
         # ---------------------------------------------------------------------
         # 8) Baseline estimation AFTER filtering/resampling (on final timebase)
         # ---------------------------------------------------------------------
@@ -998,7 +1222,7 @@ class PhotometryProcessor:
         b_ref = self._baseline(t2, ref2, params)
 
         # ---------------------------------------------------------------------
-        # 9) Compute requested output mode (7 user-defined options)
+        # 9) Compute requested output mode
         # ---------------------------------------------------------------------
         mode = params.output_mode if params.output_mode in OUTPUT_MODES else OUTPUT_MODES[0]
         out: Optional[np.ndarray] = None
@@ -1052,18 +1276,34 @@ class PhotometryProcessor:
             dff_fit = safe_divide(sig2 - fitted_ref, fitted_ref)
             out = zscore_median_std(dff_fit)
 
+        elif mode == "Raw signal (465)":
+            # (8) raw signal (processed 465 trace)
+            # Directly expose the filtered/resampled 465 channel.
+            out = np.asarray(sig2, float)
+
         else:
             # Safety fallback (should not happen if OUTPUT_MODES is authoritative)
             out = dff_sig
 
-        baseline_desc = f"Baseline: {params.baseline_method} (lambda={float(params.baseline_lambda):.2e})"
         context_parts = []
-        if mode in (
-            "dFF (motion corrected with fitted ref)",
-            "zscore (motion corrected with fitted ref)",
-        ):
-            context_parts.append(f"Fit: {params.reference_fit}")
-        context_parts.append(baseline_desc)
+        if mode == "Raw signal (465)":
+            context_parts.append("Raw 465 after artifact interpolation, filtering, and resampling")
+        else:
+            baseline_desc = f"Baseline: {params.baseline_method} (lambda={float(params.baseline_lambda):.2e})"
+            if mode in (
+                "dFF (motion corrected with fitted ref)",
+                "zscore (motion corrected with fitted ref)",
+            ):
+                context_parts.append(f"Fit: {params.reference_fit}")
+            context_parts.append(baseline_desc)
+        if bool(getattr(params, "smoothing_enabled", False)):
+            sm_method = str(getattr(params, "smoothing_method", "Savitzky-Golay") or "Savitzky-Golay")
+            sm_win = float(getattr(params, "smoothing_window_s", 0.0))
+            sm_desc = f"Smoothing: {sm_method} (window={sm_win:.3g}s"
+            if sm_method.startswith("Savitzky"):
+                sm_desc += f", poly={int(getattr(params, 'smoothing_polyorder', 2))}"
+            sm_desc += ")"
+            context_parts.append(sm_desc)
         output_context = " | ".join(context_parts)
 
         # ---------------------------------------------------------------------
@@ -1079,6 +1319,7 @@ class PhotometryProcessor:
             raw_thr_lo=lo2,
             dio=dio2,
             dio_name=dio_name,
+            triggers=all_triggers2,
             sig_f=sig2,
             ref_f=ref2,
             baseline_sig=b_sig,

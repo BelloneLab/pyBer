@@ -10,11 +10,13 @@ from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
 from analysis_core import (
+    ExportSelection,
     ProcessingParams,
     ProcessedTrial,
     OUTPUT_MODES,
     BASELINE_METHODS,
     REFERENCE_FIT_METHODS,
+    SMOOTHING_METHODS,
 )
 
 
@@ -67,6 +69,7 @@ _OUTPUT_DEFINITIONS: Dict[str, str] = {
     "zscore (subtractions)": "z = zscore(dFF_sig) - zscore(dFF_ref)",
     "dFF (motion corrected with fitted ref)": "dFF = (sig_f - fitted_ref) / fitted_ref",
     "zscore (motion corrected with fitted ref)": "z = zscore((sig_f - fitted_ref) / fitted_ref)",
+    "Raw signal (465)": "output = filtered/resampled 465 signal",
 }
 
 
@@ -94,6 +97,164 @@ def _parse_float_text(text: str) -> Optional[float]:
         except Exception:
             pass
     return None
+
+
+class PlaceholderListWidget(QtWidgets.QListWidget):
+    def __init__(self, placeholder_text: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self._placeholder_text = placeholder_text
+
+    def setPlaceholderText(self, text: str) -> None:
+        self._placeholder_text = str(text or "")
+        self.viewport().update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self.count() > 0 or not self._placeholder_text:
+            return
+        p = QtGui.QPainter(self.viewport())
+        p.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
+        color = self.palette().color(QtGui.QPalette.ColorRole.Text)
+        color.setAlpha(110)
+        p.setPen(color)
+        rect = self.viewport().rect().adjusted(12, 12, -12, -12)
+        p.drawText(
+            rect,
+            QtCore.Qt.AlignmentFlag.AlignTop | QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.TextFlag.TextWordWrap,
+            self._placeholder_text,
+        )
+        p.end()
+
+
+class CheckableListWidget(QtWidgets.QListWidget):
+    changed = QtCore.Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.itemChanged.connect(lambda *_: self.changed.emit())
+
+    def set_items(self, items: List[Tuple[str, str]], checked_values: Optional[List[str]] = None) -> None:
+        selected = {str(v) for v in (checked_values or []) if str(v)}
+        self.blockSignals(True)
+        try:
+            self.clear()
+            for label, value in items or []:
+                item = QtWidgets.QListWidgetItem(str(label))
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, str(value))
+                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable | QtCore.Qt.ItemFlag.ItemIsEnabled)
+                item.setCheckState(
+                    QtCore.Qt.CheckState.Checked if str(value) in selected else QtCore.Qt.CheckState.Unchecked
+                )
+                self.addItem(item)
+        finally:
+            self.blockSignals(False)
+
+    def checked_values(self) -> List[str]:
+        values: List[str] = []
+        for i in range(self.count()):
+            item = self.item(i)
+            if item is None:
+                continue
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                values.append(str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "").strip())
+        return [v for v in values if v]
+
+    def set_checked_values(self, values: List[str]) -> None:
+        selected = {str(v) for v in values or [] if str(v)}
+        self.blockSignals(True)
+        try:
+            for i in range(self.count()):
+                item = self.item(i)
+                if item is None:
+                    continue
+                value = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "").strip()
+                item.setCheckState(
+                    QtCore.Qt.CheckState.Checked if value in selected else QtCore.Qt.CheckState.Unchecked
+                )
+        finally:
+            self.blockSignals(False)
+
+
+class CollapsibleSection(QtWidgets.QWidget):
+    toggled = QtCore.Signal(bool)
+
+    def __init__(self, title: str, parent=None) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._expanded = True
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+
+        self.btn_toggle = QtWidgets.QToolButton()
+        self.btn_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.btn_toggle.setArrowType(QtCore.Qt.ArrowType.DownArrow)
+        self.btn_toggle.setCheckable(True)
+        self.btn_toggle.setChecked(True)
+        self.btn_toggle.setText(self._title)
+        self.btn_toggle.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_toggle.clicked.connect(self._on_toggle)
+
+        self.lbl_summary = QtWidgets.QLabel("")
+        self.lbl_summary.setProperty("class", "hint")
+        self.lbl_summary.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self.lbl_summary.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+
+        header = QtWidgets.QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        header.addWidget(self.btn_toggle, stretch=1)
+        header.addWidget(self.lbl_summary, stretch=1)
+
+        self.content = QtWidgets.QWidget()
+        self.content_layout = QtWidgets.QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(8, 8, 8, 8)
+        self.content_layout.setSpacing(8)
+
+        frame = QtWidgets.QFrame()
+        frame.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        frame_layout = QtWidgets.QVBoxLayout(frame)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.setSpacing(0)
+        frame_layout.addWidget(self.content)
+        self.frame = frame
+
+        root.addLayout(header)
+        root.addWidget(frame)
+
+    def set_summary(self, text: str) -> None:
+        self.lbl_summary.setText(str(text or ""))
+
+    def set_content_widget(self, widget: QtWidgets.QWidget) -> None:
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        self.content_layout.addWidget(widget)
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def set_expanded(self, expanded: bool) -> None:
+        exp = bool(expanded)
+        self._expanded = exp
+        self.btn_toggle.setChecked(exp)
+        self.btn_toggle.setArrowType(QtCore.Qt.ArrowType.DownArrow if exp else QtCore.Qt.ArrowType.RightArrow)
+        self.frame.setVisible(exp)
+        self.lbl_summary.setVisible(not exp)
+        self.toggled.emit(exp)
+
+    def _on_toggle(self, checked: bool) -> None:
+        self._expanded = bool(checked)
+        self.btn_toggle.setArrowType(QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow)
+        self.frame.setVisible(bool(checked))
+        self.lbl_summary.setVisible(not bool(checked))
+        self.toggled.emit(bool(checked))
 
 
 # ----------------------------- Metadata dialog -----------------------------
@@ -647,39 +808,37 @@ class FileQueuePanel(QtWidgets.QGroupBox):
 
     def _build_ui(self) -> None:
         v = QtWidgets.QVBoxLayout(self)
-        v.setSpacing(10)
+        v.setSpacing(8)
+        v.setContentsMargins(8, 8, 8, 8)
 
-        row = QtWidgets.QVBoxLayout()
-        row.setSpacing(4)
+        # Top actions
+        top_row = QtWidgets.QHBoxLayout()
         self.btn_open = QtWidgets.QPushButton("Open File")
         self.btn_folder = QtWidgets.QPushButton("Add Folder")
-        self.btn_open.setProperty("class", "compactSmall")
-        self.btn_folder.setProperty("class", "compactSmall")
-        self.btn_open.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-        self.btn_folder.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-        row.addWidget(self.btn_open)
-        row.addWidget(self.btn_folder)
+        self.btn_open.setProperty("class", "bluePrimarySmall")
+        self.btn_folder.setProperty("class", "blueSecondarySmall")
+        for b in (self.btn_open, self.btn_folder):
+            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        top_row.addWidget(self.btn_open)
+        top_row.addWidget(self.btn_folder)
 
-        # File list with remove button
-        file_layout = QtWidgets.QVBoxLayout()
-        self.list_files = QtWidgets.QListWidget()
+        # File list fills available height
+        self.list_files = PlaceholderListWidget("Drop files here or click Open File")
         self.list_files.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.list_files.setMinimumHeight(110)
+        self.list_files.setMinimumHeight(180)
 
         self.btn_remove_file = QtWidgets.QPushButton("Remove selected")
-        self.btn_remove_file.setProperty("class", "compactSmall")
-        self.btn_remove_file.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_remove_file.setProperty("class", "blueSecondarySmall")
+        self.btn_remove_file.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_remove_file.setEnabled(False)
         self.btn_remove_file.clicked.connect(self._remove_selected_files)
 
-        file_layout.addWidget(self.list_files)
-        file_layout.addWidget(self.btn_remove_file)
-
+        # Selection block
         self.grp_sel = QtWidgets.QGroupBox("Selection")
-        form = QtWidgets.QFormLayout(self.grp_sel)
-        form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
-        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
-        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form = QtWidgets.QGridLayout(self.grp_sel)
+        form.setContentsMargins(8, 8, 8, 8)
+        form.setHorizontalSpacing(6)
+        form.setVerticalSpacing(6)
 
         self.combo_channel = QtWidgets.QComboBox()
         self.combo_channel.setMinimumWidth(60)
@@ -694,72 +853,54 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         self.edit_time_end = QtWidgets.QLineEdit()
         for ed in (self.edit_time_start, self.edit_time_end):
             ed.setPlaceholderText("Start (s)" if ed is self.edit_time_start else "End (s)")
-            ed.setMinimumWidth(70)
             val = QtGui.QDoubleValidator(0.0, 1e9, 3, ed)
             val.setLocale(_system_locale())
             ed.setValidator(val)
-            ed.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Fixed)
+            ed.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
 
-        time_row = QtWidgets.QGridLayout()
-        time_row.setHorizontalSpacing(6)
-        time_row.setContentsMargins(0, 0, 0, 0)
-        lbl_start = QtWidgets.QLabel("Start:")
-        lbl_end = QtWidgets.QLabel("End:")
-        lbl_start.setMinimumWidth(45)
-        lbl_end.setMinimumWidth(35)
-        time_row.addWidget(lbl_start, 0, 0)
-        time_row.addWidget(self.edit_time_start, 0, 1)
-        time_row.addWidget(lbl_end, 0, 2)
-        time_row.addWidget(self.edit_time_end, 0, 3)
-        time_row.setColumnStretch(1, 1)
-        time_row.setColumnStretch(3, 1)
-        time_widget = QtWidgets.QWidget()
-        time_widget.setLayout(time_row)
-
-        form.addRow("Channel (preview)", self.combo_channel)
-        form.addRow("Digital trigger (overlay)", self.combo_trigger)
-        form.addRow("Time window (s)", time_widget)
-
-        btncol = QtWidgets.QVBoxLayout()
-        btncol.setSpacing(6)
-
-        self.btn_metadata = QtWidgets.QPushButton("Metadata")
-        self.btn_update = QtWidgets.QPushButton("Update")
-        self.btn_artifacts = QtWidgets.QPushButton("Artifacts?")
-        self.btn_export = QtWidgets.QPushButton("Export CSV/H5?")
-
-        self.btn_advanced = QtWidgets.QPushButton("Advanced options")
-        self.btn_qc = QtWidgets.QPushButton("Quality check")
-        self.btn_qc_batch = QtWidgets.QPushButton("Batch quality metrics")
-
-        for b in (
-            self.btn_metadata, self.btn_update, self.btn_artifacts, self.btn_export,
-            self.btn_advanced, self.btn_qc, self.btn_qc_batch,
-        ):
-            b.setProperty("class", "compactSmall")
-            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
-                            QtWidgets.QSizePolicy.Policy.Fixed)
-
-        self.btn_update.setProperty("class", "compactPrimarySmall")
-        self.btn_export.setProperty("class", "compactPrimarySmall")
-
-        btncol.addWidget(self.btn_metadata)
-        btncol.addWidget(self.btn_update)
-        btncol.addWidget(self.btn_artifacts)
-        btncol.addWidget(self.btn_export)
-        btncol.addWidget(self.btn_advanced)
-        btncol.addWidget(self.btn_qc)
-        btncol.addWidget(self.btn_qc_batch)
+        form.addWidget(QtWidgets.QLabel("Channel"), 0, 0)
+        form.addWidget(self.combo_channel, 0, 1, 1, 3)
+        form.addWidget(QtWidgets.QLabel("Analog/Digital channel"), 1, 0)
+        form.addWidget(self.combo_trigger, 1, 1, 1, 3)
+        form.addWidget(QtWidgets.QLabel("Time window"), 2, 0)
+        form.addWidget(self.edit_time_start, 2, 1)
+        form.addWidget(QtWidgets.QLabel("to"), 2, 2)
+        form.addWidget(self.edit_time_end, 2, 3)
+        self.btn_cutting = QtWidgets.QPushButton("Cutting / Sectioning")
+        self.btn_cutting.setProperty("class", "blueSecondarySmall")
+        self.btn_cutting.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        form.addWidget(self.btn_cutting, 3, 0, 1, 4)
+        form.setColumnStretch(1, 1)
+        form.setColumnStretch(3, 1)
 
         self.lbl_hint = QtWidgets.QLabel("")
         self.lbl_hint.setProperty("class", "hint")
         self.lbl_hint.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
 
-        v.addLayout(row)
-        v.addLayout(file_layout)
+        v.addLayout(top_row)
+        v.addWidget(self.list_files, stretch=1)
+        v.addWidget(self.btn_remove_file)
         v.addWidget(self.grp_sel)
-        v.addLayout(btncol)
         v.addWidget(self.lbl_hint)
+
+        # Legacy action buttons removed from layout; keep hidden buttons for compatibility.
+        self.btn_metadata = QtWidgets.QPushButton("Metadata")
+        self.btn_update = QtWidgets.QPushButton("Update")
+        self.btn_artifacts = QtWidgets.QPushButton("Artifacts")
+        self.btn_export = QtWidgets.QPushButton("Export")
+        self.btn_advanced = QtWidgets.QPushButton("Cutting / Sectioning")
+        self.btn_qc = QtWidgets.QPushButton("Quality check")
+        self.btn_qc_batch = QtWidgets.QPushButton("Batch quality metrics")
+        for b in (
+            self.btn_metadata,
+            self.btn_update,
+            self.btn_artifacts,
+            self.btn_export,
+            self.btn_advanced,
+            self.btn_qc,
+            self.btn_qc_batch,
+        ):
+            b.setVisible(False)
 
         self.btn_open.clicked.connect(self.openFileRequested.emit)
         self.btn_folder.clicked.connect(self.openFolderRequested.emit)
@@ -776,6 +917,7 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         self.btn_export.clicked.connect(self.exportRequested.emit)
         self.btn_artifacts.clicked.connect(self.toggleArtifactsRequested.emit)
         self.btn_advanced.clicked.connect(self.advancedOptionsRequested.emit)
+        self.btn_cutting.clicked.connect(self.advancedOptionsRequested.emit)
         self.btn_qc.clicked.connect(self.qcRequested.emit)
         self.btn_qc_batch.clicked.connect(self.batchQcRequested.emit)
 
@@ -796,7 +938,10 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         return self._current_dir_hint
 
     def add_file(self, path: str) -> None:
-        self.list_files.addItem(path)
+        item = QtWidgets.QListWidgetItem(os.path.basename(path))
+        item.setToolTip(path)
+        item.setData(QtCore.Qt.ItemDataRole.UserRole, path)
+        self.list_files.addItem(item)
         if self.list_files.count() == 1:
             self.list_files.setCurrentRow(0)
             item0 = self.list_files.item(0)
@@ -810,10 +955,21 @@ class FileQueuePanel(QtWidgets.QGroupBox):
             pass
 
     def all_paths(self) -> List[str]:
-        return [self.list_files.item(i).text() for i in range(self.list_files.count())]
+        out: List[str] = []
+        for i in range(self.list_files.count()):
+            item = self.list_files.item(i)
+            if item is None:
+                continue
+            path = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            out.append(str(path if path else item.text()))
+        return out
 
     def selected_paths(self) -> List[str]:
-        return [it.text() for it in self.list_files.selectedItems()]
+        out: List[str] = []
+        for it in self.list_files.selectedItems():
+            path = it.data(QtCore.Qt.ItemDataRole.UserRole)
+            out.append(str(path if path else it.text()))
+        return out
 
     def set_available_channels(self, chans: List[str]) -> None:
         self.combo_channel.blockSignals(True)
@@ -1157,10 +1313,20 @@ class AdvancedOptionsDialog(QtWidgets.QDialog):
 
 class ParameterPanel(QtWidgets.QGroupBox):
     paramsChanged = QtCore.Signal()
+    metadataRequested = QtCore.Signal()
+    previewRequested = QtCore.Signal()
+    artifactsRequested = QtCore.Signal()
+    artifactOverlayToggled = QtCore.Signal(bool)
+    exportRequested = QtCore.Signal()
+    advancedOptionsRequested = QtCore.Signal()
+    qcRequested = QtCore.Signal()
+    batchQcRequested = QtCore.Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__("Processing Parameters", parent)
         self._help_texts = self._build_help_texts()
+        self._config_state_exporter: Optional[Callable[[], Dict[str, object]]] = None
+        self._config_state_importer: Optional[Callable[[Dict[str, object]], None]] = None
         self._build_ui()
         self._wire()
 
@@ -1193,6 +1359,24 @@ class ParameterPanel(QtWidgets.QGroupBox):
             "target_fs_hz": (
                 "Target sampling rate (Hz) for decimation.\n"
                 "Lower values speed processing and plotting but reduce time resolution."
+            ),
+            "smoothing_enabled": (
+                "Optional post-filter smoothing stage on the processed timebase.\n"
+                "Use it to reduce residual high-frequency noise after low-pass/resampling."
+            ),
+            "smoothing_method": (
+                "Smoothing algorithm:\n"
+                "- Savitzky-Golay: polynomial local fit, preserves peak shapes.\n"
+                "- Moving average: uniform sliding mean.\n"
+                "- Moving median: robust to spikes and impulsive noise."
+            ),
+            "smoothing_window_s": (
+                "Smoothing window in seconds.\n"
+                "Larger windows produce stronger smoothing but can attenuate fast transients."
+            ),
+            "smoothing_polyorder": (
+                "Polynomial order for Savitzky-Golay smoothing.\n"
+                "Lower order is smoother; higher order follows curvature more closely."
             ),
             "baseline_method": (
                 "Baseline method (pybaselines):\n"
@@ -1251,6 +1435,22 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 "Convergence tolerance for robust regression.\n"
                 "Smaller values are stricter but may take more iterations."
             ),
+            "export_selection": (
+                "Choose which processed signals are written during CSV/H5 export.\n"
+                "Time is always exported. These options are saved in the preprocessing configuration file."
+            ),
+            "export_dio_channel": (
+                "Choose which DIO / trigger channel to export.\n"
+                "If left on Current overlay, export uses the trigger currently selected in the file panel."
+            ),
+            "export_analog_channels": (
+                "Choose one or more analog channels to export.\n"
+                "If none are checked, export uses the current preview channel."
+            ),
+            "export_dio_channels": (
+                "Choose one or more DIO channels to export.\n"
+                "If none are checked, export uses the current overlay trigger."
+            ),
         }
 
     def _show_help(self, key: str, title: str) -> None:
@@ -1274,10 +1474,9 @@ class ParameterPanel(QtWidgets.QGroupBox):
         return w
 
     def _build_ui(self) -> None:
-        form = QtWidgets.QFormLayout(self)
-        form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
-        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
-        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(8)
 
         def mk_dspin(minw=60, decimals=3) -> QtWidgets.QDoubleSpinBox:
             s = QtWidgets.QDoubleSpinBox()
@@ -1294,139 +1493,134 @@ class ParameterPanel(QtWidgets.QGroupBox):
             s.setKeyboardTracking(False)
             return s
 
-        # Artifact detection toggle and dropdown
-        artifact_row = QtWidgets.QHBoxLayout()
+        # Artifacts controls
         self.cb_artifact = QtWidgets.QCheckBox("Enable artifact detection")
         self.cb_artifact.setChecked(True)
+        self.cb_show_artifact_overlay = QtWidgets.QCheckBox("Show artifact detection overlay")
+        self.cb_show_artifact_overlay.setChecked(True)
+        self.cb_show_artifact_overlay.setToolTip(
+            "Toggle detected artifact interval overlays on the raw plot."
+        )
         self.combo_artifact = QtWidgets.QComboBox()
         self.combo_artifact.addItems(["Global MAD (dx)", "Adaptive MAD (windowed)"])
         _compact_combo(self.combo_artifact, min_chars=6)
-        artifact_row.addWidget(self.cb_artifact)
-        artifact_row.addWidget(self.combo_artifact, stretch=1)
-        artifact_widget = QtWidgets.QWidget()
-        artifact_widget.setLayout(artifact_row)
-
         self.spin_mad = mk_dspin()
         self.spin_mad.setRange(1.0, 50.0)
         self.spin_mad.setValue(8.0)
-
         self.spin_adapt_win = mk_dspin()
         self.spin_adapt_win.setRange(0.2, 60.0)
         self.spin_adapt_win.setValue(5.0)
-
         self.spin_pad = mk_dspin()
         self.spin_pad.setRange(0.0, 10.0)
         self.spin_pad.setValue(0.25)
 
-        # Filtering toggle and dropdown
-        filter_row = QtWidgets.QHBoxLayout()
+        art_content = QtWidgets.QWidget()
+        art_form = QtWidgets.QFormLayout(art_content)
+        art_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        art_form.addRow(self.cb_artifact)
+        art_form.addRow(self.cb_show_artifact_overlay)
+        art_form.addRow(self._label_with_help("Method", "artifact_mode"), self.combo_artifact)
+        art_form.addRow(self._label_with_help("MAD threshold (k)", "mad_k"), self.spin_mad)
+        art_form.addRow(self._label_with_help("Adaptive window (s)", "adaptive_window_s"), self.spin_adapt_win)
+        art_form.addRow(self._label_with_help("Artifact pad (s)", "artifact_pad_s"), self.spin_pad)
+
+        # Filtering controls
         self.cb_filtering = QtWidgets.QCheckBox("Enable filtering")
         self.cb_filtering.setChecked(True)
-        filter_row.addWidget(self.cb_filtering)
-        filter_widget = QtWidgets.QWidget()
-        filter_widget.setLayout(filter_row)
-
         self.spin_lowpass = mk_dspin()
         self.spin_lowpass.setRange(0.1, 200.0)
         self.spin_lowpass.setValue(12.0)
-
         self.spin_filt_order = mk_spin()
         self.spin_filt_order.setRange(1, 8)
         self.spin_filt_order.setValue(3)
-
         self.spin_target_fs = mk_dspin(decimals=1)
         self.spin_target_fs.setRange(1.0, 1000.0)
         self.spin_target_fs.setValue(100.0)
-
+        self.cb_smoothing = QtWidgets.QCheckBox("Enable smoothing")
+        self.cb_smoothing.setChecked(False)
+        self.combo_smoothing = QtWidgets.QComboBox()
+        self.combo_smoothing.addItems(SMOOTHING_METHODS)
+        _compact_combo(self.combo_smoothing, min_chars=8)
+        self.spin_smoothing_window = mk_dspin(decimals=3)
+        self.spin_smoothing_window.setRange(0.001, 60.0)
+        self.spin_smoothing_window.setValue(0.200)
+        self.spin_smoothing_poly = mk_spin()
+        self.spin_smoothing_poly.setRange(1, 7)
+        self.spin_smoothing_poly.setValue(2)
         self.cb_invert = QtWidgets.QCheckBox("Invert signal polarity (465/405)")
         self.cb_invert.setChecked(False)
         self.cb_invert.setToolTip(
             "Flips both raw channels before artifact detection, filtering, baseline, and output computation."
         )
 
-        # Baseline method and lambda (main parameters)
-        baseline_main_row = QtWidgets.QHBoxLayout()
+        filt_content = QtWidgets.QWidget()
+        filt_form = QtWidgets.QFormLayout(filt_content)
+        filt_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        filt_form.addRow(self.cb_filtering)
+        filt_form.addRow(self._label_with_help("Low-pass cutoff (Hz)", "lowpass_hz"), self.spin_lowpass)
+        filt_form.addRow(self._label_with_help("Filter order", "filter_order"), self.spin_filt_order)
+        filt_form.addRow(self._label_with_help("Target FS (Hz)", "target_fs_hz"), self.spin_target_fs)
+        filt_form.addRow(self._label_with_help("Enable smoothing", "smoothing_enabled"), self.cb_smoothing)
+        filt_form.addRow(self._label_with_help("Smoothing method", "smoothing_method"), self.combo_smoothing)
+        filt_form.addRow(self._label_with_help("Smoothing window (s)", "smoothing_window_s"), self.spin_smoothing_window)
+        filt_form.addRow(self._label_with_help("Savitzky polyorder", "smoothing_polyorder"), self.spin_smoothing_poly)
+        filt_form.addRow(self._label_with_help("Invert signal polarity", "invert_polarity"), self.cb_invert)
+
+        # Baseline controls
         self.combo_baseline = QtWidgets.QComboBox()
         self.combo_baseline.addItems([m for m in BASELINE_METHODS])
         _compact_combo(self.combo_baseline, min_chars=6)
-
-        lam_row = QtWidgets.QHBoxLayout()
-        lam_row.setSpacing(6)
-
         self.spin_lam_x = mk_dspin(minw=90, decimals=3)
         self.spin_lam_x.setRange(0.1, 9.999)
         self.spin_lam_x.setValue(1.0)
-
-        self.lbl_e = QtWidgets.QLabel("e")
-        self.lbl_e.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-
         self.spin_lam_y = mk_spin(minw=80)
         self.spin_lam_y.setRange(-3, 12)
         self.spin_lam_y.setValue(9)
-
         self.lbl_lam_preview = QtWidgets.QLabel("= 1e9")
         self.lbl_lam_preview.setProperty("class", "hint")
-
-        lam_row.addWidget(self.spin_lam_x)
-        lam_row.addWidget(self.lbl_e)
-        lam_row.addWidget(self.spin_lam_y)
-        lam_row.addWidget(self.lbl_lam_preview, stretch=1)
-
-        lam_widget = QtWidgets.QWidget()
-        lam_widget.setLayout(lam_row)
-
-        baseline_main_row.addWidget(QtWidgets.QLabel("Method:"))
-        baseline_main_row.addWidget(self.combo_baseline)
-        baseline_main_row.addWidget(QtWidgets.QLabel("Lambda:"))
-        baseline_main_row.addWidget(lam_widget, stretch=1)
-        baseline_main_widget = QtWidgets.QWidget()
-        baseline_main_widget.setLayout(baseline_main_row)
-
-        # Baseline advanced parameters (hidden by default)
-        self.baseline_advanced_group = QtWidgets.QGroupBox("Baseline advanced parameters")
-        self.baseline_advanced_group.setCheckable(True)
-        self.baseline_advanced_group.setChecked(False)
-        self.baseline_advanced_group.setVisible(False)  # Hidden by default
-        baseline_form = QtWidgets.QFormLayout(self.baseline_advanced_group)
-        baseline_form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
-        baseline_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
-
         self.spin_diff = mk_spin()
         self.spin_diff.setRange(1, 3)
         self.spin_diff.setValue(2)
-
         self.spin_iter = mk_spin()
         self.spin_iter.setRange(1, 200)
         self.spin_iter.setValue(50)
-
         self.spin_tol = mk_dspin(decimals=6)
         self.spin_tol.setRange(1e-8, 1e-1)
         self.spin_tol.setValue(1e-3)
-
         self.spin_asls_p = mk_dspin(decimals=4)
         self.spin_asls_p.setRange(0.001, 0.5)
         self.spin_asls_p.setValue(0.01)
 
-        baseline_form.addRow(self._label_with_help("diff_order", "baseline_diff_order"), self.spin_diff)
-        baseline_form.addRow(self._label_with_help("max_iter", "baseline_max_iter"), self.spin_iter)
-        baseline_form.addRow(self._label_with_help("tol", "baseline_tol"), self.spin_tol)
-        baseline_form.addRow(self._label_with_help("AsLS p", "asls_p"), self.spin_asls_p)
+        lam_row = QtWidgets.QHBoxLayout()
+        lam_row.setSpacing(6)
+        lam_row.addWidget(self.spin_lam_x)
+        lam_row.addWidget(QtWidgets.QLabel("e"))
+        lam_row.addWidget(self.spin_lam_y)
+        lam_row.addWidget(self.lbl_lam_preview, stretch=1)
+        lam_widget = QtWidgets.QWidget()
+        lam_widget.setLayout(lam_row)
 
-        # Button to show/hide baseline advanced parameters
+        self.baseline_advanced_group = QtWidgets.QGroupBox("Advanced parameters")
+        self.baseline_advanced_group.setVisible(False)
+        baseline_adv_form = QtWidgets.QFormLayout(self.baseline_advanced_group)
+        baseline_adv_form.addRow(self._label_with_help("diff_order", "baseline_diff_order"), self.spin_diff)
+        baseline_adv_form.addRow(self._label_with_help("max_iter", "baseline_max_iter"), self.spin_iter)
+        baseline_adv_form.addRow(self._label_with_help("tol", "baseline_tol"), self.spin_tol)
+        baseline_adv_form.addRow(self._label_with_help("AsLS p", "asls_p"), self.spin_asls_p)
+
         self.btn_toggle_advanced = QtWidgets.QPushButton("Show advanced baseline options")
         self.btn_toggle_advanced.setProperty("class", "compactSmall")
         self.btn_toggle_advanced.clicked.connect(self._toggle_advanced_baseline)
 
-        self.output_group = QtWidgets.QGroupBox("Output")
-        out_v = QtWidgets.QVBoxLayout(self.output_group)
-        out_v.setContentsMargins(6, 6, 6, 6)
-        out_v.setSpacing(6)
+        base_content = QtWidgets.QWidget()
+        base_form = QtWidgets.QFormLayout(base_content)
+        base_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        base_form.addRow(self._label_with_help("Method", "baseline_method"), self.combo_baseline)
+        base_form.addRow(self._label_with_help("Lambda", "baseline_lambda"), lam_widget)
+        base_form.addRow(self.btn_toggle_advanced)
+        base_form.addRow(self.baseline_advanced_group)
 
-        out_form = QtWidgets.QFormLayout()
-        out_form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
-        out_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
-        out_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-
+        # Output controls
         self.combo_output = QtWidgets.QComboBox()
         self.combo_output.addItems(OUTPUT_MODES)
         _compact_combo(self.combo_output, min_chars=8)
@@ -1437,105 +1631,181 @@ class ParameterPanel(QtWidgets.QGroupBox):
             if mode == "zscore (subtractions)":
                 tip = "Difference of z-scored channels; not the same as zscore of the difference."
             self.combo_output.setItemData(i, tip, QtCore.Qt.ItemDataRole.ToolTipRole)
-
         self.ed_output_definition = QtWidgets.QLineEdit()
         self.ed_output_definition.setReadOnly(True)
         self.ed_output_definition.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.ed_output_definition.setPlaceholderText("Definition updates with output mode")
-
         self.combo_ref_fit = QtWidgets.QComboBox()
         self.combo_ref_fit.addItems(REFERENCE_FIT_METHODS)
         _compact_combo(self.combo_ref_fit, min_chars=6)
         self.combo_ref_fit.setToolTip("Used only for fitted-reference motion correction modes.")
-
         self.spin_lasso = mk_dspin(decimals=6)
         self.spin_lasso.setRange(1e-6, 1.0)
         self.spin_lasso.setValue(1e-3)
         self.spin_lasso.setToolTip(
             "Higher alpha means stronger shrinkage; if sklearn is missing, Lasso falls back to OLS."
         )
-
         self.spin_rlm_huber_t = mk_dspin(decimals=3)
         self.spin_rlm_huber_t.setRange(0.1, 10.0)
         self.spin_rlm_huber_t.setValue(1.345)
-
         self.spin_rlm_max_iter = mk_spin()
         self.spin_rlm_max_iter.setRange(1, 500)
         self.spin_rlm_max_iter.setValue(50)
-
         self.spin_rlm_tol = mk_dspin(decimals=8)
         self.spin_rlm_tol.setRange(1e-12, 1e-2)
         self.spin_rlm_tol.setValue(1e-6)
 
         self.output_params_stack = QtWidgets.QStackedWidget()
-        self.output_params_stack.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
-
         page_none = QtWidgets.QWidget()
         self.output_params_stack.addWidget(page_none)
-
         page_lasso = QtWidgets.QWidget()
         page_lasso_form = QtWidgets.QFormLayout(page_lasso)
         page_lasso_form.setContentsMargins(0, 0, 0, 0)
         page_lasso_form.addRow(self._label_with_help("Lasso alpha", "lasso_alpha"), self.spin_lasso)
         self.output_params_stack.addWidget(page_lasso)
-
         page_rlm = QtWidgets.QWidget()
-        page_rlm_layout = QtWidgets.QVBoxLayout(page_rlm)
-        page_rlm_layout.setContentsMargins(0, 0, 0, 0)
+        page_rlm_v = QtWidgets.QVBoxLayout(page_rlm)
+        page_rlm_v.setContentsMargins(0, 0, 0, 0)
         robust_group = QtWidgets.QGroupBox("Robust fit")
         robust_form = QtWidgets.QFormLayout(robust_group)
-        robust_form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
         robust_form.addRow(self._label_with_help("HuberT (t)", "rlm_huber_t"), self.spin_rlm_huber_t)
         robust_form.addRow(self._label_with_help("Max iter", "rlm_max_iter"), self.spin_rlm_max_iter)
         robust_form.addRow(self._label_with_help("Tol", "rlm_tol"), self.spin_rlm_tol)
-        page_rlm_layout.addWidget(robust_group)
+        page_rlm_v.addWidget(robust_group)
         self.output_params_stack.addWidget(page_rlm)
 
-        out_form.addRow(self._label_with_help("Output mode", "output_mode"), self.combo_output)
+        out_content = QtWidgets.QWidget()
+        out_form = QtWidgets.QFormLayout(out_content)
+        out_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.lbl_output_mode = self._label_with_help("Output mode", "output_mode")
+        self.lbl_reference_fit = self._label_with_help("Reference fit method", "reference_fit")
+        out_form.addRow(self.lbl_output_mode, self.combo_output)
         out_form.addRow("Definition", self.ed_output_definition)
-        out_form.addRow(self._label_with_help("Reference fit method", "reference_fit"), self.combo_ref_fit)
-        out_v.addLayout(out_form)
-        out_v.addWidget(self.output_params_stack)
+        out_form.addRow(self.lbl_reference_fit, self.combo_ref_fit)
+        out_form.addRow(self.output_params_stack)
 
-        # Config buttons
-        config_row = QtWidgets.QHBoxLayout()
+        # QC + Export card
+        self.btn_artifacts_panel = QtWidgets.QPushButton("Artifacts")
+        self.btn_qc = QtWidgets.QPushButton("Quality check")
+        self.btn_qc_batch = QtWidgets.QPushButton("Batch quality metrics")
+        self.btn_export = QtWidgets.QPushButton("Export CSV/H5")
+        self.btn_metadata = QtWidgets.QPushButton("Metadata")
+        self.btn_advanced = QtWidgets.QPushButton("Cutting / Sectioning")
         self.btn_save_config = QtWidgets.QPushButton("Save config")
         self.btn_load_config = QtWidgets.QPushButton("Load config")
-        self.btn_save_config.setProperty("class", "compactSmall")
-        self.btn_load_config.setProperty("class", "compactSmall")
+        for b in (
+            self.btn_artifacts_panel,
+            self.btn_qc,
+            self.btn_qc_batch,
+            self.btn_export,
+            self.btn_metadata,
+            self.btn_advanced,
+            self.btn_save_config,
+            self.btn_load_config,
+        ):
+            b.setProperty("class", "compactSmall")
+            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_export.setProperty("class", "compactPrimarySmall")
         self.btn_save_config.clicked.connect(self._save_config)
         self.btn_load_config.clicked.connect(self._load_config)
-        config_row.addWidget(self.btn_save_config)
-        config_row.addWidget(self.btn_load_config)
-        config_row.addStretch(1)
+        self.btn_artifacts_panel.clicked.connect(self.artifactsRequested.emit)
+        self.btn_qc.clicked.connect(self.qcRequested.emit)
+        self.btn_qc_batch.clicked.connect(self.batchQcRequested.emit)
+        self.btn_export.clicked.connect(self.exportRequested.emit)
+        self.btn_metadata.clicked.connect(self.metadataRequested.emit)
+        self.btn_advanced.clicked.connect(self.advancedOptionsRequested.emit)
+
+        self.chk_export_raw = QtWidgets.QCheckBox("Raw 465")
+        self.chk_export_raw.setChecked(True)
+        self.chk_export_iso = QtWidgets.QCheckBox("Isobestic 405")
+        self.chk_export_iso.setChecked(True)
+        self.chk_export_output = QtWidgets.QCheckBox("Processed output")
+        self.chk_export_output.setChecked(True)
+        self.chk_export_dio = QtWidgets.QCheckBox("DIO / trigger")
+        self.chk_export_dio.setChecked(True)
+        self.chk_export_baseline_sig = QtWidgets.QCheckBox("Baseline 465")
+        self.chk_export_baseline_sig.setChecked(True)
+        self.chk_export_baseline_ref = QtWidgets.QCheckBox("Baseline 405")
+        self.chk_export_baseline_ref.setChecked(True)
+        self.list_export_channels = CheckableListWidget()
+        self.list_export_channels.setMaximumHeight(84)
+        self.list_export_channels.setMinimumHeight(54)
+        self.list_export_dio = CheckableListWidget()
+        self.list_export_dio.setMaximumHeight(84)
+        self.list_export_dio.setMinimumHeight(54)
+        self._pending_export_channel_names: List[str] = []
+        self._pending_export_trigger_names: List[str] = []
+        self.list_export_dio.setEnabled(self.chk_export_dio.isChecked())
+
+        self.export_options_group = QtWidgets.QGroupBox("Export fields")
+        export_form = QtWidgets.QFormLayout(self.export_options_group)
+        export_form.setContentsMargins(6, 6, 6, 6)
+        export_form.addRow(self._label_with_help("Export fields", "export_selection"))
+        export_checks = QtWidgets.QGridLayout()
+        export_checks.setContentsMargins(0, 0, 0, 0)
+        export_checks.setHorizontalSpacing(10)
+        export_checks.setVerticalSpacing(4)
+        export_checks.addWidget(self.chk_export_raw, 0, 0)
+        export_checks.addWidget(self.chk_export_iso, 0, 1)
+        export_checks.addWidget(self.chk_export_output, 1, 0)
+        export_checks.addWidget(self.chk_export_dio, 1, 1)
+        export_checks.addWidget(self.chk_export_baseline_sig, 2, 0)
+        export_checks.addWidget(self.chk_export_baseline_ref, 2, 1)
+        export_form.addRow(export_checks)
+        export_form.addRow(self._label_with_help("AN channels", "export_analog_channels"), self.list_export_channels)
+        export_form.addRow(self._label_with_help("DIO channels", "export_dio_channels"), self.list_export_dio)
+
+        qc_content = QtWidgets.QWidget()
+        qc_grid = QtWidgets.QGridLayout(qc_content)
+        qc_grid.setContentsMargins(0, 0, 0, 0)
+        qc_grid.setHorizontalSpacing(6)
+        qc_grid.setVerticalSpacing(6)
+        qc_grid.addWidget(self.btn_export, 0, 0, 1, 2)
+        qc_grid.addWidget(self.btn_artifacts_panel, 1, 0)
+        qc_grid.addWidget(self.btn_advanced, 1, 1)
+        qc_grid.addWidget(self.btn_qc, 2, 0)
+        qc_grid.addWidget(self.btn_qc_batch, 2, 1)
+        qc_grid.addWidget(self.btn_metadata, 3, 0)
+        qc_grid.addWidget(self.btn_save_config, 3, 1)
+        qc_grid.addWidget(self.btn_load_config, 4, 1)
+        qc_grid.setColumnStretch(0, 1)
+        qc_grid.setColumnStretch(1, 1)
 
         self.lbl_fs = QtWidgets.QLabel("FS: -")
         self.lbl_fs.setProperty("class", "hint")
+        qc_grid.addWidget(self.lbl_fs, 5, 0, 1, 2)
 
-        form.addRow(self._label_with_help("Artifact detection", "artifact_mode"), artifact_widget)
-        form.addRow(self._label_with_help("MAD threshold (k)", "mad_k"), self.spin_mad)
-        form.addRow(self._label_with_help("Adaptive window (s)", "adaptive_window_s"), self.spin_adapt_win)
-        form.addRow(self._label_with_help("Artifact pad (s)", "artifact_pad_s"), self.spin_pad)
-        form.addRow("Filtering", filter_widget)
-        form.addRow(self._label_with_help("Low-pass cutoff (Hz)", "lowpass_hz"), self.spin_lowpass)
-        form.addRow(self._label_with_help("Filter order", "filter_order"), self.spin_filt_order)
-        form.addRow(self._label_with_help("Target FS (Hz)", "target_fs_hz"), self.spin_target_fs)
-        form.addRow(self._label_with_help("Invert signal polarity", "invert_polarity"), self.cb_invert)
+        # Cards
+        self.card_artifacts = CollapsibleSection("Artifacts")
+        self.card_artifacts.set_content_widget(art_content)
+        self.card_filtering = CollapsibleSection("Filtering")
+        self.card_filtering.set_content_widget(filt_content)
+        self.card_baseline = CollapsibleSection("Baseline")
+        self.card_baseline.set_content_widget(base_content)
+        self.card_output = CollapsibleSection("Output")
+        self.card_output.set_content_widget(out_content)
+        self.card_actions = CollapsibleSection("QC + Export")
+        self.card_actions.set_content_widget(qc_content)
+        self.card_actions.set_expanded(True)
 
-        form.addRow("Baseline", baseline_main_widget)
-        form.addRow(self.btn_toggle_advanced)
-        form.addRow(self.baseline_advanced_group)
+        # Expand defaults
+        self.card_artifacts.set_expanded(bool(self.cb_artifact.isChecked()))
+        self.card_filtering.set_expanded(bool(self.cb_filtering.isChecked()))
+        self.card_baseline.set_expanded(True)
+        self.card_output.set_expanded(True)
 
-        form.addRow(self.output_group)
-        form.addRow("Configuration", config_row)
-        form.addRow("", self.lbl_fs)
+        root.addWidget(self.card_artifacts)
+        root.addWidget(self.card_filtering)
+        root.addWidget(self.card_baseline)
+        root.addWidget(self.card_output)
+        root.addWidget(self.card_actions)
+        root.addStretch(1)
 
         self._update_lambda_preview()
         self._update_output_definition()
         self._update_output_controls()
+        self._update_smoothing_controls(emit_signal=False)
+        self._update_section_summaries()
 
     def _update_artifact_enabled(self) -> None:
         enabled = self.cb_artifact.isChecked()
@@ -1543,13 +1813,33 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_mad.setEnabled(enabled)
         self.spin_adapt_win.setEnabled(enabled)
         self.spin_pad.setEnabled(enabled)
+        if not enabled and self.card_artifacts.is_expanded():
+            self.card_artifacts.set_expanded(False)
+        self._update_section_summaries()
         self.paramsChanged.emit()
 
     def _update_filtering_enabled(self) -> None:
         enabled = self.cb_filtering.isChecked()
         self.spin_lowpass.setEnabled(enabled)
         self.spin_filt_order.setEnabled(enabled)
+        self.spin_target_fs.setEnabled(enabled)
+        self.cb_invert.setEnabled(enabled)
+        self.cb_smoothing.setEnabled(enabled)
+        self._update_smoothing_controls(emit_signal=False)
+        if not enabled and self.card_filtering.is_expanded():
+            self.card_filtering.set_expanded(False)
+        self._update_section_summaries()
         self.paramsChanged.emit()
+
+    def _update_smoothing_controls(self, emit_signal: bool = True) -> None:
+        enabled = self.cb_filtering.isChecked() and self.cb_smoothing.isChecked()
+        self.combo_smoothing.setEnabled(enabled)
+        self.spin_smoothing_window.setEnabled(enabled)
+        is_savgol = str(self.combo_smoothing.currentText()).startswith("Savitzky")
+        self.spin_smoothing_poly.setEnabled(enabled and is_savgol)
+        self._update_section_summaries()
+        if emit_signal:
+            self.paramsChanged.emit()
 
     def _update_lambda_preview(self) -> None:
         lam = self._lambda_value()
@@ -1567,11 +1857,14 @@ class ParameterPanel(QtWidgets.QGroupBox):
 
     def _update_output_controls(self) -> None:
         fitted_mode = self._is_fitted_output_mode()
+        self.lbl_reference_fit.setVisible(fitted_mode)
+        self.combo_ref_fit.setVisible(fitted_mode)
         self.combo_ref_fit.setEnabled(fitted_mode)
 
         if not fitted_mode:
             self.output_params_stack.setCurrentIndex(0)
             self.output_params_stack.setVisible(False)
+            self._update_section_summaries()
             return
 
         method = self.combo_ref_fit.currentText()
@@ -1584,6 +1877,57 @@ class ParameterPanel(QtWidgets.QGroupBox):
 
         self.output_params_stack.setCurrentIndex(idx)
         self.output_params_stack.setVisible(idx != 0)
+        self._update_section_summaries()
+
+    def _fmt_num(self, value: float, decimals: int = 3) -> str:
+        text = f"{float(value):.{int(decimals)}f}"
+        text = text.rstrip("0").rstrip(".")
+        return text if text else "0"
+
+    def _update_section_summaries(self) -> None:
+        if self.cb_artifact.isChecked():
+            mode = self.combo_artifact.currentText()
+            method = "Adaptive MAD" if mode.startswith("Adaptive") else "Global MAD"
+            if mode.startswith("Adaptive"):
+                summary = (
+                    f"{method}, k={self._fmt_num(self.spin_mad.value(), 2)}, "
+                    f"window={self._fmt_num(self.spin_adapt_win.value(), 2)}s, "
+                    f"pad={self._fmt_num(self.spin_pad.value(), 2)}s"
+                )
+            else:
+                summary = (
+                    f"{method}, k={self._fmt_num(self.spin_mad.value(), 2)}, "
+                    f"pad={self._fmt_num(self.spin_pad.value(), 2)}s"
+                )
+        else:
+            summary = "Off"
+        self.card_artifacts.set_summary(summary)
+
+        if self.cb_filtering.isChecked():
+            summary = (
+                f"LP {self._fmt_num(self.spin_lowpass.value(), 2)} Hz, "
+                f"order {int(self.spin_filt_order.value())}, "
+                f"target {self._fmt_num(self.spin_target_fs.value(), 2)} Hz"
+            )
+            if self.cb_smoothing.isChecked():
+                method = self.combo_smoothing.currentText()
+                if method.startswith("Savitzky"):
+                    smooth_desc = (
+                        f"SG win={self._fmt_num(self.spin_smoothing_window.value(), 3)}s, "
+                        f"poly={int(self.spin_smoothing_poly.value())}"
+                    )
+                elif method.startswith("Moving average"):
+                    smooth_desc = f"Mean win={self._fmt_num(self.spin_smoothing_window.value(), 3)}s"
+                else:
+                    smooth_desc = f"Median win={self._fmt_num(self.spin_smoothing_window.value(), 3)}s"
+                summary = f"{summary} | {smooth_desc}"
+        else:
+            summary = "Off"
+        self.card_filtering.set_summary(summary)
+
+        summary = f"{self.combo_baseline.currentText()}, lambda={self._lambda_value():.2e}"
+        self.card_baseline.set_summary(summary)
+        self.card_output.set_summary(self.combo_output.currentText())
 
     def _wire(self) -> None:
         def emit_noargs(*_args) -> None:
@@ -1597,6 +1941,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
             self.spin_lowpass,
             self.spin_filt_order,
             self.spin_target_fs,
+            self.spin_smoothing_window,
+            self.spin_smoothing_poly,
             self.combo_baseline,
             self.spin_lam_x,
             self.spin_lam_y,
@@ -1623,9 +1969,33 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.combo_output.currentIndexChanged.connect(lambda *_: self._update_output_controls())
         self.combo_ref_fit.currentIndexChanged.connect(lambda *_: self._update_output_controls())
 
+        # Keep collapsed card summaries synchronized with current values.
+        for w in widgets:
+            if isinstance(w, QtWidgets.QComboBox):
+                w.currentIndexChanged.connect(lambda *_: self._update_section_summaries())
+            else:
+                w.valueChanged.connect(lambda *_: self._update_section_summaries())
+
         self.cb_artifact.stateChanged.connect(self._update_artifact_enabled)
         self.cb_filtering.stateChanged.connect(self._update_filtering_enabled)
+        self.cb_smoothing.stateChanged.connect(self._update_smoothing_controls)
+        self.combo_smoothing.currentIndexChanged.connect(lambda *_: self._update_smoothing_controls())
         self.cb_invert.stateChanged.connect(emit_noargs)
+        self.cb_show_artifact_overlay.toggled.connect(lambda v: self.artifactOverlayToggled.emit(bool(v)))
+        self.chk_export_dio.toggled.connect(self.list_export_dio.setEnabled)
+        self.list_export_channels.changed.connect(self._on_export_channel_selection_changed)
+        self.list_export_channels.changed.connect(emit_noargs)
+        self.list_export_dio.changed.connect(self._on_export_trigger_selection_changed)
+        self.list_export_dio.changed.connect(emit_noargs)
+        for cb in (
+            self.chk_export_raw,
+            self.chk_export_iso,
+            self.chk_export_output,
+            self.chk_export_dio,
+            self.chk_export_baseline_sig,
+            self.chk_export_baseline_ref,
+        ):
+            cb.toggled.connect(emit_noargs)
 
     def _toggle_advanced_baseline(self) -> None:
         """Toggle visibility of baseline advanced parameters."""
@@ -1634,6 +2004,95 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.btn_toggle_advanced.setText(
             "Hide advanced baseline options" if not is_visible else "Show advanced baseline options"
         )
+
+    def set_config_state_hooks(
+        self,
+        exporter: Optional[Callable[[], Dict[str, object]]],
+        importer: Optional[Callable[[Dict[str, object]], None]],
+    ) -> None:
+        self._config_state_exporter = exporter
+        self._config_state_importer = importer
+
+    def export_selection(self) -> ExportSelection:
+        return ExportSelection(
+            raw=self.chk_export_raw.isChecked(),
+            isobestic=self.chk_export_iso.isChecked(),
+            output=self.chk_export_output.isChecked(),
+            dio=self.chk_export_dio.isChecked(),
+            baseline_sig=self.chk_export_baseline_sig.isChecked(),
+            baseline_ref=self.chk_export_baseline_ref.isChecked(),
+        )
+
+    def export_selection_summary(self) -> str:
+        selection = self.export_selection()
+        parts: List[str] = []
+        chans = self.export_channel_names()
+        if chans:
+            parts.append(f"ANx{len(chans)}")
+        if selection.output:
+            parts.append("output")
+        if selection.dio:
+            dio_names = self.export_trigger_names()
+            parts.append(f"DIOx{len(dio_names)}" if dio_names else "DIO")
+        if selection.raw:
+            parts.append("raw")
+        if selection.isobestic:
+            parts.append("isobestic")
+        if selection.baseline_sig or selection.baseline_ref:
+            if selection.baseline_sig and selection.baseline_ref:
+                parts.append("baselines")
+            elif selection.baseline_sig:
+                parts.append("baseline465")
+            else:
+                parts.append("baseline405")
+        if not parts:
+            parts.append("time only")
+        return "CSV/H5: " + " + ".join(parts)
+
+    def set_export_selection(self, selection: ExportSelection) -> None:
+        selection = selection if isinstance(selection, ExportSelection) else ExportSelection()
+        self.chk_export_raw.setChecked(bool(selection.raw))
+        self.chk_export_iso.setChecked(bool(selection.isobestic))
+        self.chk_export_output.setChecked(bool(selection.output))
+        self.chk_export_dio.setChecked(bool(selection.dio))
+        self.chk_export_baseline_sig.setChecked(bool(selection.baseline_sig))
+        self.chk_export_baseline_ref.setChecked(bool(selection.baseline_ref))
+
+    def export_channel_names(self) -> List[str]:
+        checked = self.list_export_channels.checked_values()
+        return checked or list(self._pending_export_channel_names)
+
+    def export_trigger_names(self) -> List[str]:
+        checked = self.list_export_dio.checked_values()
+        return checked or list(self._pending_export_trigger_names)
+
+    def _on_export_channel_selection_changed(self) -> None:
+        self._pending_export_channel_names = self.list_export_channels.checked_values()
+
+    def _on_export_trigger_selection_changed(self) -> None:
+        self._pending_export_trigger_names = self.list_export_dio.checked_values()
+
+    def set_available_export_channels(self, channels: List[str], preferred: Optional[List[str]] = None) -> None:
+        current = list(preferred if preferred is not None else self.export_channel_names())
+        items = [(name, name) for name in channels or [] if str(name or "").strip()]
+        self.list_export_channels.set_items(items, checked_values=current)
+        self._pending_export_channel_names = [name for name in current if name in {v for _, v in items}]
+
+    def set_available_export_triggers(self, triggers: List[str], preferred: Optional[List[str]] = None) -> None:
+        current = list(preferred if preferred is not None else self.export_trigger_names())
+        items = [(name, name) for name in triggers or [] if str(name or "").strip()]
+        self.list_export_dio.set_items(items, checked_values=current)
+        self._pending_export_trigger_names = [name for name in current if name in {v for _, v in items}]
+
+    def set_export_channel_names(self, channel_names: List[str]) -> None:
+        names = [str(name or "").strip() for name in channel_names or [] if str(name or "").strip()]
+        self._pending_export_channel_names = names
+        self.list_export_channels.set_checked_values(names)
+
+    def set_export_trigger_names(self, trigger_names: List[str]) -> None:
+        names = [str(name or "").strip() for name in trigger_names or [] if str(name or "").strip()]
+        self._pending_export_trigger_names = names
+        self.list_export_dio.set_checked_values(names)
 
     def _save_config(self) -> None:
         """Save current preprocessing parameters to a JSON file."""
@@ -1650,9 +2109,17 @@ class ParameterPanel(QtWidgets.QGroupBox):
 
         config = {
             "artifact_detection_enabled": self.cb_artifact.isChecked(),
+            "artifact_overlay_visible": self.cb_show_artifact_overlay.isChecked(),
             "filtering_enabled": self.cb_filtering.isChecked(),
             "parameters": params.to_dict(),
         }
+        if callable(self._config_state_exporter):
+            try:
+                extra_state = self._config_state_exporter()
+                if isinstance(extra_state, dict) and extra_state:
+                    config["ui_state"] = extra_state
+            except Exception:
+                pass
 
         try:
             import json
@@ -1687,8 +2154,17 @@ class ParameterPanel(QtWidgets.QGroupBox):
             # Load toggles
             if "artifact_detection_enabled" in config:
                 self.cb_artifact.setChecked(config["artifact_detection_enabled"])
+            if "artifact_overlay_visible" in config:
+                self.cb_show_artifact_overlay.setChecked(bool(config["artifact_overlay_visible"]))
             if "filtering_enabled" in config:
                 self.cb_filtering.setChecked(config["filtering_enabled"])
+            if callable(self._config_state_importer):
+                try:
+                    ui_state = config.get("ui_state")
+                    if isinstance(ui_state, dict):
+                        self._config_state_importer(ui_state)
+                except Exception:
+                    pass
 
             QtWidgets.QMessageBox.information(self, "Success", "Configuration loaded successfully.")
         except Exception as e:
@@ -1709,6 +2185,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
             lowpass_hz=float(self.spin_lowpass.value()),
             filter_order=int(self.spin_filt_order.value()),
             target_fs_hz=float(self.spin_target_fs.value()),
+            smoothing_enabled=self.cb_filtering.isChecked() and self.cb_smoothing.isChecked(),
+            smoothing_method=self.combo_smoothing.currentText(),
+            smoothing_window_s=float(self.spin_smoothing_window.value()),
+            smoothing_polyorder=int(self.spin_smoothing_poly.value()),
             baseline_method=self.combo_baseline.currentText(),
             baseline_lambda=float(self._lambda_value()),
             baseline_diff_order=int(self.spin_diff.value()),
@@ -1735,6 +2215,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_lowpass.setValue(float(params.lowpass_hz))
         self.spin_filt_order.setValue(int(params.filter_order))
         self.spin_target_fs.setValue(float(params.target_fs_hz))
+        self.cb_smoothing.setChecked(bool(getattr(params, "smoothing_enabled", False)))
+        self.combo_smoothing.setCurrentText(str(getattr(params, "smoothing_method", "Savitzky-Golay")))
+        self.spin_smoothing_window.setValue(float(getattr(params, "smoothing_window_s", 0.200)))
+        self.spin_smoothing_poly.setValue(int(getattr(params, "smoothing_polyorder", 2)))
         self.cb_invert.setChecked(bool(getattr(params, "invert_polarity", False)))
 
         self.combo_baseline.setCurrentText(str(params.baseline_method))
@@ -1760,16 +2244,24 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._update_lambda_preview()
         self._update_output_definition()
         self._update_output_controls()
+        self._update_smoothing_controls(emit_signal=False)
+        self._update_section_summaries()
 
     def set_fs_info(self, fs_actual: float, fs_target: float, fs_used: float) -> None:
-        self.lbl_fs.setText(f"FS: actual={fs_actual:.2f} Hz → used={fs_used:.2f} Hz (target={fs_target:.2f})")
+        self.lbl_fs.setText(f"FS: actual={fs_actual:.2f} Hz -> used={fs_used:.2f} Hz (target={fs_target:.2f})")
 
+    def artifact_overlay_visible(self) -> bool:
+        return bool(self.cb_show_artifact_overlay.isChecked())
+
+    def set_artifact_overlay_visible(self, visible: bool) -> None:
+        self.cb_show_artifact_overlay.setChecked(bool(visible))
 
 # ----------------------------- Plot dashboard -----------------------------
 
 class ArtifactSelectViewBox(pg.ViewBox):
     dragSelectionFinished = QtCore.Signal(float, float)
     dragSelectionCleared = QtCore.Signal()
+    dragSelectionContextRequested = QtCore.Signal()
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -1818,11 +2310,37 @@ class ArtifactSelectViewBox(pg.ViewBox):
 
     def mouseClickEvent(self, ev) -> None:
         if self._drag_enabled and ev.button() == QtCore.Qt.MouseButton.RightButton:
-            self.clear_selection()
-            self.dragSelectionCleared.emit()
+            if self._rect_item.isVisible():
+                self.dragSelectionContextRequested.emit()
+            else:
+                self.clear_selection()
+                self.dragSelectionCleared.emit()
             ev.accept()
             return
         super().mouseClickEvent(ev)
+
+
+    def contextMenuEvent(self, ev) -> None:
+        if self._drag_enabled and self._rect_item.isVisible():
+            self.dragSelectionContextRequested.emit()
+            ev.accept()
+        else:
+            super().contextMenuEvent(ev)
+
+
+class PreprocessingSelector(pg.LinearRegionItem):
+    sigContextRequested = QtCore.Signal()
+
+    def mouseClickEvent(self, ev) -> None:
+        if ev.button() == QtCore.Qt.MouseButton.RightButton:
+            self.sigContextRequested.emit()
+            ev.accept()
+        else:
+            super().mouseClickEvent(ev)
+
+    def contextMenuEvent(self, ev) -> None:
+        self.sigContextRequested.emit()
+        ev.accept()
 
 
 class PlotDashboard(QtWidgets.QWidget):
@@ -1831,15 +2349,24 @@ class PlotDashboard(QtWidgets.QWidget):
     clearManualRegionsRequested = QtCore.Signal()
     showArtifactsRequested = QtCore.Signal()
     boxSelectionCleared = QtCore.Signal()
+    boxSelectionContextRequested = QtCore.Signal()
+    artifactThresholdsToggled = QtCore.Signal(bool)
 
     xRangeChanged = QtCore.Signal(float, float)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._sync_guard = False
+        self._artifact_overlay_visible = True
+        self._artifact_thresholds_visible = True
+        self._plot_background_mode = "dark"
+        self._plot_grid_visible = True
         self._artifact_regions: List[pg.LinearRegionItem] = []
         self._artifact_region_bounds: List[Tuple[float, float]] = []
         self._artifact_labels: List[pg.TextItem] = []
+        self._last_overlay_time: Optional[np.ndarray] = None
+        self._last_overlay_signal: Optional[np.ndarray] = None
+        self._last_overlay_regions: List[Tuple[float, float]] = []
         self._artifact_pen_default = pg.mkPen((240, 130, 90), width=1.0)
         self._artifact_brush_default = pg.mkBrush(240, 130, 90, 40)
         self._artifact_pen_selected = pg.mkPen((255, 220, 120), width=2.0)
@@ -1853,23 +2380,41 @@ class PlotDashboard(QtWidgets.QWidget):
         top = QtWidgets.QHBoxLayout()
         self.lbl_title = QtWidgets.QLabel("No file loaded")
         self.lbl_title.setStyleSheet("font-weight: 900; font-size: 12pt;")
+        self.lbl_status = QtWidgets.QLabel("Channel: - | A/D: None | Fs: - -> - Hz | Mode: -")
+        self.lbl_status.setProperty("class", "hint")
+        self.lbl_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         top.addWidget(self.lbl_title)
         top.addStretch(1)
-
-        self.btn_add_region = QtWidgets.QPushButton("Add from selector")
-        self.btn_clear_regions = QtWidgets.QPushButton("Clear manual")
-        self.btn_artifacts = QtWidgets.QPushButton("Artifacts…")
-        self.btn_box_select = QtWidgets.QPushButton("Box select")
-        self.btn_box_select.setCheckable(True)
-        self.btn_box_select.setProperty("class", "compactSmall")
-        top.addWidget(self.btn_add_region)
-        top.addWidget(self.btn_clear_regions)
-        top.addWidget(self.btn_artifacts)
-        top.addWidget(self.btn_box_select)
+        top.addWidget(self.lbl_status)
         v.addLayout(top)
 
+        tools = QtWidgets.QHBoxLayout()
+        self.btn_add_region = QtWidgets.QPushButton("Add from selector")
+        self.btn_clear_regions = QtWidgets.QPushButton("Clear manual")
+        self.btn_artifacts = QtWidgets.QPushButton("Artifacts")
+        self.btn_box_select = QtWidgets.QPushButton("Box select")
+        self.btn_box_select.setCheckable(True)
+        self.btn_thresholds = QtWidgets.QPushButton("Thresholds: ON")
+        self.btn_thresholds.setCheckable(True)
+        self.btn_thresholds.setChecked(True)
+        for b in (
+            self.btn_add_region,
+            self.btn_clear_regions,
+            self.btn_artifacts,
+            self.btn_box_select,
+            self.btn_thresholds,
+        ):
+            b.setProperty("class", "compactSmall")
+        tools.addWidget(self.btn_add_region)
+        tools.addWidget(self.btn_clear_regions)
+        tools.addWidget(self.btn_artifacts)
+        tools.addWidget(self.btn_box_select)
+        tools.addWidget(self.btn_thresholds)
+        tools.addStretch(1)
+        v.addLayout(tools)
+
         self._raw_vb = ArtifactSelectViewBox()
-        self.plot_raw = pg.PlotWidget(viewBox=self._raw_vb, title="Raw signals (465 / 405)")
+        self.plot_raw = pg.PlotWidget(viewBox=self._raw_vb, title="raw signal")
         self.plot_proc = pg.PlotWidget(title="Filtered + baselines")
         self.plot_out = pg.PlotWidget(title="Output")
         for w in (self.plot_raw, self.plot_proc, self.plot_out):
@@ -1909,14 +2454,17 @@ class PlotDashboard(QtWidgets.QWidget):
         )
 
         self.curve_out = self.plot_out.plot(pen=pg.mkPen((90, 190, 255), width=1.2))
+        self._raw_y_curves = [self.curve_465, self.curve_405, self.curve_b465_raw, self.curve_b405_raw]
+        self._proc_y_curves = [self.curve_f465, self.curve_f405, self.curve_b465, self.curve_b405]
+        self._out_y_curves = [self.curve_out]
 
-        self.selector = pg.LinearRegionItem(values=(0, 1), brush=(80, 120, 200, 60))
+        self.selector = PreprocessingSelector(values=(0, 1), brush=(80, 120, 200, 60))
         self.plot_raw.addItem(self.selector)
 
         self._dio_pen = pg.mkPen((230, 180, 80), width=1.2)
-        self.vb_dio_raw, self.curve_dio_raw = self._add_dio_axis(self.plot_raw, "DIO")
-        self.vb_dio_proc, self.curve_dio_proc = self._add_dio_axis(self.plot_proc, "DIO")
-        self.vb_dio_out, self.curve_dio_out = self._add_dio_axis(self.plot_out, "DIO")
+        self.vb_dio_raw, self.curve_dio_raw = self._add_dio_axis(self.plot_raw, "A/D")
+        self.vb_dio_proc, self.curve_dio_proc = self._add_dio_axis(self.plot_proc, "A/D")
+        self.vb_dio_out, self.curve_dio_out = self._add_dio_axis(self.plot_out, "A/D")
 
         self.lbl_log = QtWidgets.QLabel("")
         self.lbl_log.setProperty("class", "hint")
@@ -1934,6 +2482,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.btn_clear_regions.clicked.connect(self.clearManualRegionsRequested.emit)
         self.btn_artifacts.clicked.connect(self.showArtifactsRequested.emit)
         self.btn_box_select.toggled.connect(self._toggle_box_select)
+        self.btn_thresholds.toggled.connect(self._on_thresholds_toggled)
 
         self.plot_raw.getViewBox().sigXRangeChanged.connect(self._emit_xrange_from_any)
         self.plot_proc.getViewBox().sigXRangeChanged.connect(self._emit_xrange_from_any)
@@ -1941,8 +2490,56 @@ class PlotDashboard(QtWidgets.QWidget):
 
         self._raw_vb.dragSelectionFinished.connect(self._on_drag_select_finished)
         self._raw_vb.dragSelectionCleared.connect(self._on_drag_select_cleared)
+        self._raw_vb.dragSelectionContextRequested.connect(self.boxSelectionContextRequested.emit)
+        self.selector.sigContextRequested.connect(self.boxSelectionContextRequested.emit)
 
+        self._sync_artifact_threshold_curves_visibility()
         self._toggle_box_select(False)
+        self.set_plot_appearance(self._plot_background_mode, self._plot_grid_visible)
+
+    def _normalize_plot_background_mode(self, value: object) -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"white", "light", "w"}:
+            return "white"
+        return "dark"
+
+    def set_plot_appearance(self, background_mode: str, show_grid: bool) -> None:
+        self._plot_background_mode = self._normalize_plot_background_mode(background_mode)
+        self._plot_grid_visible = bool(show_grid)
+
+        if self._plot_background_mode == "white":
+            bg = pg.mkColor("w")
+            axis_pen = pg.mkPen((35, 35, 35), width=1.0)
+            text_pen = pg.mkPen((35, 35, 35), width=1.0)
+            grid_alpha = 0.20
+        else:
+            bg = pg.mkColor((18, 22, 30))
+            axis_pen = pg.mkPen((200, 205, 215), width=1.0)
+            text_pen = pg.mkPen((200, 205, 215), width=1.0)
+            grid_alpha = 0.25
+
+        for plot in (self.plot_raw, self.plot_proc, self.plot_out):
+            try:
+                plot.setBackground(bg)
+                plot.showGrid(
+                    x=self._plot_grid_visible,
+                    y=self._plot_grid_visible,
+                    alpha=grid_alpha if self._plot_grid_visible else 0.0,
+                )
+                pi = plot.getPlotItem()
+                for axis_name in ("left", "right", "bottom"):
+                    axis = pi.getAxis(axis_name)
+                    if axis is not None:
+                        axis.setPen(axis_pen)
+                        axis.setTextPen(text_pen)
+            except Exception:
+                pass
+
+    def plot_background_mode(self) -> str:
+        return str(self._plot_background_mode)
+
+    def plot_grid_visible(self) -> bool:
+        return bool(self._plot_grid_visible)
 
     def _add_dio_axis(self, plot: pg.PlotWidget, label: str):
         pi = plot.getPlotItem()
@@ -1990,6 +2587,19 @@ class PlotDashboard(QtWidgets.QWidget):
         self._raw_vb.set_drag_enabled(enabled)
         self.btn_box_select.setText("Box select: ON" if enabled else "Box select")
 
+    def _sync_artifact_threshold_curves_visibility(self) -> None:
+        visible = bool(self._artifact_thresholds_visible)
+        self.curve_thr_hi.setVisible(visible)
+        self.curve_thr_lo.setVisible(visible)
+        self.btn_thresholds.blockSignals(True)
+        self.btn_thresholds.setChecked(visible)
+        self.btn_thresholds.setText("Thresholds: ON" if visible else "Thresholds: OFF")
+        self.btn_thresholds.blockSignals(False)
+
+    def _on_thresholds_toggled(self, checked: bool) -> None:
+        self.set_artifact_thresholds_visible(bool(checked))
+        self.artifactThresholdsToggled.emit(bool(checked))
+
     def set_xrange_all(self, x0: float, x1: float) -> None:
         self._sync_guard = True
         try:
@@ -2007,9 +2617,66 @@ class PlotDashboard(QtWidgets.QWidget):
         if not np.isfinite(x0) or not np.isfinite(x1) or x0 == x1:
             return
         self.set_xrange_all(x0, x1)
+        self.auto_range_all(x0=x0, x1=x1)
+
+    def _auto_range_plot(
+        self,
+        plot: pg.PlotWidget,
+        curves: List[pg.PlotCurveItem],
+        x0: Optional[float],
+        x1: Optional[float],
+    ) -> None:
+        ymins: List[float] = []
+        ymaxs: List[float] = []
+        for curve in curves:
+            try:
+                xx, yy = curve.getData()
+            except Exception:
+                continue
+            if xx is None or yy is None:
+                continue
+            x = np.asarray(xx, float)
+            y = np.asarray(yy, float)
+            if x.size == 0 or y.size == 0:
+                continue
+            m = np.isfinite(x) & np.isfinite(y)
+            if x0 is not None and x1 is not None:
+                m &= (x >= float(x0)) & (x <= float(x1))
+            if not np.any(m):
+                continue
+            yv = y[m]
+            ymins.append(float(np.nanmin(yv)))
+            ymaxs.append(float(np.nanmax(yv)))
+
+        if ymins and ymaxs:
+            ymin = min(ymins)
+            ymax = max(ymaxs)
+            if not np.isfinite(ymin) or not np.isfinite(ymax):
+                return
+            if ymin == ymax:
+                span = abs(ymin) if ymin != 0 else 1.0
+                ymin -= 0.5 * span
+                ymax += 0.5 * span
+            plot.setYRange(float(ymin), float(ymax), padding=0.08)
+        else:
+            try:
+                plot.getPlotItem().enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+                plot.getPlotItem().autoRange()
+            except Exception:
+                pass
+
+    def auto_range_all(self, x0: Optional[float] = None, x1: Optional[float] = None) -> None:
+        if x0 is not None and x1 is not None and np.isfinite(x0) and np.isfinite(x1) and x1 > x0:
+            self.set_xrange_all(float(x0), float(x1))
+        self._auto_range_plot(self.plot_raw, self._raw_y_curves, x0, x1)
+        self._auto_range_plot(self.plot_proc, self._proc_y_curves, x0, x1)
+        self._auto_range_plot(self.plot_out, self._out_y_curves, x0, x1)
 
     def set_title(self, text: str) -> None:
         self.lbl_title.setText(text)
+
+    def set_status(self, text: str) -> None:
+        self.lbl_status.setText(text or "")
 
     def set_log(self, msg: str) -> None:
         self.lbl_log.setText(msg)
@@ -2017,6 +2684,13 @@ class PlotDashboard(QtWidgets.QWidget):
     def selector_region(self) -> Tuple[float, float]:
         r = self.selector.getRegion()
         return float(min(r)), float(max(r))
+
+    def selector_visible(self) -> bool:
+        return bool(self.selector.isVisible())
+
+    def set_selector_region(self, t0: float, t1: float, visible: bool = True) -> None:
+        self.selector.setRegion((float(min(t0, t1)), float(max(t0, t1))))
+        self.selector.setVisible(bool(visible))
 
     def _scale_reference_to_signal(self, sig: np.ndarray, ref: np.ndarray) -> np.ndarray:
         s = np.asarray(sig, float)
@@ -2047,35 +2721,91 @@ class PlotDashboard(QtWidgets.QWidget):
         raw_sig: np.ndarray,
         regions: Optional[List[Tuple[float, float]]],
     ) -> None:
+        self._last_overlay_time = None if t is None else np.asarray(t, float)
+        self._last_overlay_signal = None if raw_sig is None else np.asarray(raw_sig, float)
+        self._last_overlay_regions = list(regions or [])
         self._clear_artifact_overlays()
+        if not self._artifact_overlay_visible:
+            return
         if t is None or raw_sig is None or not regions:
             return
         tt = np.asarray(t, float)
         yy = np.asarray(raw_sig, float)
-        for idx, (a, b) in enumerate(regions, start=1):
-            region = pg.LinearRegionItem(
-                values=(float(a), float(b)),
-                movable=False,
-                brush=self._artifact_brush_default,
-                pen=self._artifact_pen_default,
+
+        # Optimization: use a single PathItem for many regions to avoid scene graph bloat.
+        if len(regions) > 25:
+            y0, y1 = -1e12, 1e12  # Large range for vertical bars
+            path = QtGui.QPainterPath()
+            for a, b in regions:
+                path.addRect(QtCore.QRectF(float(a), y0, float(b - a), y1 - y0))
+
+            path_item = pg.PathItem(path, pen=self._artifact_pen_default, brush=self._artifact_brush_default)
+            path_item.setZValue(8)
+            self.plot_raw.addItem(path_item)
+            self._artifact_regions.append(path_item)
+            self._artifact_region_bounds.extend(regions)
+
+            # Limit labels to first 100 to avoid lag
+            for idx, (a, b) in enumerate(regions[:100], start=1):
+                mask = (tt >= float(a)) & (tt <= float(b))
+                if np.any(mask):
+                    y_pos = float(np.nanmax(yy[mask]))
+                else:
+                    (vy0, vy1) = self.plot_raw.getViewBox().viewRange()[1]
+                    y_pos = float(vy1 - 0.05 * (vy1 - vy0))
+
+                label = pg.TextItem(str(idx), color=(240, 240, 240), anchor=(0.5, 0.5))
+                label.setPos(float((a + b) * 0.5), y_pos)
+                label.setZValue(9)
+                self.plot_raw.addItem(label)
+                self._artifact_labels.append(label)
+        else:
+            for idx, (a, b) in enumerate(regions, start=1):
+                region = pg.LinearRegionItem(
+                    values=(float(a), float(b)),
+                    movable=False,
+                    brush=self._artifact_brush_default,
+                    pen=self._artifact_pen_default,
+                )
+                region.setZValue(8)
+                self.plot_raw.addItem(region)
+                self._artifact_regions.append(region)
+                self._artifact_region_bounds.append((float(a), float(b)))
+
+                mask = (tt >= float(a)) & (tt <= float(b))
+                if np.any(mask) and np.any(np.isfinite(yy[mask])):
+                    y_pos = float(np.nanmax(yy[mask]))
+                else:
+                    (y0, y1) = self.plot_raw.getViewBox().viewRange()[1]
+                    y_pos = float(y1 - 0.05 * (y1 - y0))
+
+                label = pg.TextItem(str(idx), color=(240, 240, 240), anchor=(0.5, 0.5))
+                label.setPos(float((a + b) * 0.5), y_pos)
+                label.setZValue(9)
+                self.plot_raw.addItem(label)
+                self._artifact_labels.append(label)
+
+    def set_artifact_overlay_visible(self, visible: bool) -> None:
+        self._artifact_overlay_visible = bool(visible)
+        if not self._artifact_overlay_visible:
+            self._clear_artifact_overlays()
+            return
+        if self._last_overlay_time is not None and self._last_overlay_signal is not None:
+            self._update_artifact_overlays(
+                self._last_overlay_time,
+                self._last_overlay_signal,
+                self._last_overlay_regions,
             )
-            region.setZValue(8)
-            self.plot_raw.addItem(region)
-            self._artifact_regions.append(region)
-            self._artifact_region_bounds.append((float(a), float(b)))
 
-            mask = (tt >= float(a)) & (tt <= float(b))
-            if np.any(mask) and np.any(np.isfinite(yy[mask])):
-                y_pos = float(np.nanmax(yy[mask]))
-            else:
-                (y0, y1) = self.plot_raw.getViewBox().viewRange()[1]
-                y_pos = float(y1 - 0.05 * (y1 - y0))
+    def artifact_overlay_visible(self) -> bool:
+        return bool(self._artifact_overlay_visible)
 
-            label = pg.TextItem(str(idx), color=(240, 240, 240), anchor=(0.5, 0.5))
-            label.setPos(float((a + b) * 0.5), y_pos)
-            label.setZValue(9)
-            self.plot_raw.addItem(label)
-            self._artifact_labels.append(label)
+    def set_artifact_thresholds_visible(self, visible: bool) -> None:
+        self._artifact_thresholds_visible = bool(visible)
+        self._sync_artifact_threshold_curves_visibility()
+
+    def artifact_thresholds_visible(self) -> bool:
+        return bool(self._artifact_thresholds_visible)
 
     def highlight_artifact_regions(self, regions: List[Tuple[float, float]]) -> None:
         if not self._artifact_regions or not self._artifact_region_bounds:
@@ -2087,12 +2817,15 @@ class PlotDashboard(QtWidgets.QWidget):
 
         for item, bounds in zip(self._artifact_regions, self._artifact_region_bounds):
             is_sel = any(_overlaps(bounds, s) for s in selected)
-            if is_sel:
-                item.setBrush(self._artifact_brush_selected)
-                item.setPen(self._artifact_pen_selected)
-            else:
-                item.setBrush(self._artifact_brush_default)
-                item.setPen(self._artifact_pen_default)
+            brush = self._artifact_brush_selected if is_sel else self._artifact_brush_default
+            pen = self._artifact_pen_selected if is_sel else self._artifact_pen_default
+
+            item.setBrush(brush)
+            if hasattr(item, "setPen"):
+                item.setPen(pen)
+            elif hasattr(item, "lines"):
+                for line in item.lines:
+                    line.setPen(pen)
 
     def _set_dio(self, t: np.ndarray, dio: Optional[np.ndarray], name: str = "") -> None:
         if dio is None or np.asarray(dio).size == 0:
@@ -2111,13 +2844,13 @@ class PlotDashboard(QtWidgets.QWidget):
         self.curve_dio_out.setData(tt, yy, connect="finite", skipFiniteCheck=True)
 
         if name:
-            self.plot_raw.getPlotItem().getAxis("right").setLabel(f"DIO ({name})")
-            self.plot_proc.getPlotItem().getAxis("right").setLabel(f"DIO ({name})")
-            self.plot_out.getPlotItem().getAxis("right").setLabel(f"DIO ({name})")
+            self.plot_raw.getPlotItem().getAxis("right").setLabel(f"A/D ({name})")
+            self.plot_proc.getPlotItem().getAxis("right").setLabel(f"A/D ({name})")
+            self.plot_out.getPlotItem().getAxis("right").setLabel(f"A/D ({name})")
         else:
-            self.plot_raw.getPlotItem().getAxis("right").setLabel("DIO")
-            self.plot_proc.getPlotItem().getAxis("right").setLabel("DIO")
-            self.plot_out.getPlotItem().getAxis("right").setLabel("DIO")
+            self.plot_raw.getPlotItem().getAxis("right").setLabel("A/D")
+            self.plot_proc.getPlotItem().getAxis("right").setLabel("A/D")
+            self.plot_out.getPlotItem().getAxis("right").setLabel("A/D")
 
     # -------------------- Compatibility API expected by main.py --------------------
 
@@ -2131,6 +2864,14 @@ class PlotDashboard(QtWidgets.QWidget):
           - show_raw(time=..., signal_465=..., reference_405=...)
           - show_raw(time=..., raw_signal=..., raw_reference=...)
         """
+        preserve_view = False
+        for key in ("preserve_view", "preserve_xrange", "keep_view"):
+            if key in kwargs:
+                try:
+                    preserve_view = preserve_view or bool(kwargs.pop(key))
+                except Exception:
+                    kwargs.pop(key, None)
+
         # Positional support: (time, sig, ref)
         t = s = r = None
         if len(args) >= 3:
@@ -2147,6 +2888,7 @@ class PlotDashboard(QtWidgets.QWidget):
             self.curve_405.setData([], [])
             self.curve_thr_hi.setData([], [])
             self.curve_thr_lo.setData([], [])
+            self._sync_artifact_threshold_curves_visibility()
             self._set_dio(np.asarray([]), None, "")
             return
 
@@ -2159,10 +2901,11 @@ class PlotDashboard(QtWidgets.QWidget):
         self.curve_465.setData(t, s, connect="finite", skipFiniteCheck=True)
         r_scaled = self._scale_reference_to_signal(s, r)
         self.curve_405.setData(t, r_scaled, connect="finite", skipFiniteCheck=True)
-        self.set_full_xrange(t)
+        if not preserve_view:
+            self.set_full_xrange(t)
         self._clear_artifact_overlays()
 
-        # Thresholds (either scalars or arrays) — MUST NOT use "or" on arrays
+        # Thresholds (either scalars or arrays): do not use "or" on arrays.
         thr_hi = _first_not_none(kwargs, "thr_hi", "raw_thr_hi", "mad_hi", "hi_thr")
         thr_lo = _first_not_none(kwargs, "thr_lo", "raw_thr_lo", "mad_lo", "lo_thr")
 
@@ -2179,6 +2922,7 @@ class PlotDashboard(QtWidgets.QWidget):
             nn = min(t.size, th.size, tl.size)
             self.curve_thr_hi.setData(t[:nn], th[:nn], connect="finite", skipFiniteCheck=True)
             self.curve_thr_lo.setData(t[:nn], tl[:nn], connect="finite", skipFiniteCheck=True)
+        self._sync_artifact_threshold_curves_visibility()
 
         # Baselines for raw plot (if available)
         baseline_sig = _first_not_none(kwargs, "baseline_sig", "b_sig", "sig_base")
@@ -2215,6 +2959,14 @@ class PlotDashboard(QtWidgets.QWidget):
           - show_processing(time, sig_f=..., ref_f=..., baseline_sig=..., baseline_ref=...)
           - show_processing(time=..., sig_f=..., ref_f=..., b_sig=..., b_ref=...)
         """
+        preserve_view = False
+        for key in ("preserve_view", "preserve_xrange", "keep_view"):
+            if key in kwargs:
+                try:
+                    preserve_view = preserve_view or bool(kwargs.pop(key))
+                except Exception:
+                    kwargs.pop(key, None)
+
         if len(args) >= 1:
             t = args[0]
         else:
@@ -2252,7 +3004,8 @@ class PlotDashboard(QtWidgets.QWidget):
         dio = _first_not_none(kwargs, "dio", "digital", "dio_y")
         dio_name = _first_not_none(kwargs, "dio_name", "digital_name", "trigger_name", default="") or ""
         self._set_dio(t, dio, str(dio_name))
-        self.set_full_xrange(t)
+        if not preserve_view:
+            self.set_full_xrange(t)
 
     def show_output(self, *args, **kwargs) -> None:
         """
@@ -2262,6 +3015,14 @@ class PlotDashboard(QtWidgets.QWidget):
           - show_output(time, output, label="...", dio=..., dio_name=...)
           - show_output(time=..., y=..., label=...)
         """
+        preserve_view = False
+        for key in ("preserve_view", "preserve_xrange", "keep_view"):
+            if key in kwargs:
+                try:
+                    preserve_view = preserve_view or bool(kwargs.pop(key))
+                except Exception:
+                    kwargs.pop(key, None)
+
         if len(args) >= 2:
             t, y = args[0], args[1]
         else:
@@ -2279,7 +3040,8 @@ class PlotDashboard(QtWidgets.QWidget):
         t, y = t[:n], y[:n]
 
         self.curve_out.setData(t, y, connect="finite", skipFiniteCheck=True)
-        self.set_full_xrange(t)
+        if not preserve_view:
+            self.set_full_xrange(t)
 
         label = _first_not_none(kwargs, "label", "output_label", default="Output")
         context = _first_not_none(kwargs, "output_context", "label_context", default="")
@@ -2292,23 +3054,27 @@ class PlotDashboard(QtWidgets.QWidget):
 
     # -------------------- Modern API (kept) --------------------
 
-    def update_plots(self, processed: ProcessedTrial) -> None:
+    def update_plots(self, processed: ProcessedTrial, preserve_view: bool = False) -> None:
         t = np.asarray(processed.time, float)
         self.show_raw(
             t, processed.raw_signal, processed.raw_reference,
             dio=processed.dio, dio_name=processed.dio_name,
-            thr_hi=processed.raw_thr_hi, thr_lo=processed.raw_thr_lo
+            thr_hi=processed.raw_thr_hi, thr_lo=processed.raw_thr_lo,
+            preserve_view=preserve_view,
         )
         self.show_processing(
             t,
             sig_f=processed.sig_f, ref_f=processed.ref_f,
             baseline_sig=processed.baseline_sig, baseline_ref=processed.baseline_ref,
-            dio=processed.dio, dio_name=processed.dio_name
+            dio=processed.dio, dio_name=processed.dio_name,
+            preserve_view=preserve_view,
         )
         self.show_output(
             t, processed.output,
             label=processed.output_label,
             output_context=getattr(processed, "output_context", ""),
-            dio=processed.dio, dio_name=processed.dio_name
+            dio=processed.dio, dio_name=processed.dio_name,
+            preserve_view=preserve_view,
         )
         self._update_artifact_overlays(t, processed.raw_signal, processed.artifact_regions_sec)
+
