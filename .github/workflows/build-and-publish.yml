@@ -11,9 +11,14 @@ on:
 permissions:
   contents: write
 
+env:
+  RELEASE_VERSION: v0.21
+
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      PYTHONNOUSERSITE: "1"
     defaults:
       run:
         shell: bash -el {0}
@@ -35,79 +40,14 @@ jobs:
         run: |
           python --version
           python -m pip --version
+          python -m PyInstaller --version
           python -c "import os, sys; print('CONDA_PREFIX=', os.environ.get('CONDA_PREFIX')); print('PYTHON=', sys.executable)"
 
-      - name: Build Windows icon from assets
+      - name: Verify build inputs
         run: |
-          python -m pip install --upgrade pillow
-          mkdir -p build
-          python - <<'PY'
-          from pathlib import Path
-          from PIL import Image
-
-          src = Path("assets/pyBer_logo_big.png")
-          dst = Path("build/pyBer_logo_big.ico")
-          if not src.exists():
-              raise SystemExit(f"Missing icon source: {src}")
-
-          img = Image.open(src).convert("RGBA")
-          sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
-          img.save(dst, format="ICO", sizes=sizes)
-          print(f"Wrote {dst}")
-          PY
-
-      - name: Build with PyInstaller (last known good method)
-        run: |
-          BIN_DIR="$CONDA_PREFIX/Library/bin"
-          DLL_PATTERNS=(
-            "hdf5*.dll"
-            "zlib*.dll"
-            "blosc*.dll"
-            "libblosc2*.dll"
-            "libpng16*.dll"
-            "freetype*.dll"
-            "liblapack*.dll"
-            "libblas*.dll"
-            "libcblas*.dll"
-            "mkl_rt*.dll"
-            "mkl_core*.dll"
-            "mkl_intel_thread*.dll"
-            "mkl_intel_lp64*.dll"
-            "mkl_sequential*.dll"
-            "libmmd*.dll"
-            "libifcoremd*.dll"
-            "libifportmd*.dll"
-            "libiomp5md*.dll"
-            "libimalloc*.dll"
-            "svml_dispmd*.dll"
-          )
-
-          ADD_ARGS=()
-          declare -A SEEN_DLLS
-          shopt -s nullglob
-          for pattern in "${DLL_PATTERNS[@]}"; do
-            matches=("$BIN_DIR"/$pattern)
-            if [[ ${#matches[@]} -eq 0 ]]; then
-              echo "No matches for pattern: $pattern"
-              continue
-            fi
-            for dll_path in "${matches[@]}"; do
-              dll_name="$(basename "$dll_path")"
-              # Optional cluster/MPI BLACS DLLs are not required for local scipy use.
-              if [[ "$dll_name" =~ ^mkl_blacs_.*(intelmpi|msmpi).*\.dll$ ]]; then
-                echo "Skipping optional BLACS runtime: $dll_name"
-                continue
-              fi
-              if [[ -n "${SEEN_DLLS[$dll_name]:-}" ]]; then
-                continue
-              fi
-              echo "Bundling $dll_name"
-              ADD_ARGS+=(--add-binary "$dll_path;.")
-              SEEN_DLLS["$dll_name"]=1
-            done
-          done
-          shopt -u nullglob
-
+          test -f pyBer.spec
+          test -f assets/pyBer_logo_big.png
+          test -f assets/pyBer.ico
           python - <<'PY'
           import numpy, scipy, h5py, sklearn
           print("Import smoke test OK")
@@ -117,24 +57,11 @@ jobs:
           print("sklearn:", sklearn.__version__)
           PY
 
-          python -m PyInstaller \
-            --noconfirm \
-            --clean \
-            --onefile \
-            --windowed \
-            --icon build/pyBer_logo_big.ico \
-            --add-data "assets;assets" \
-            --collect-binaries numpy \
-            --collect-binaries scipy \
-            --collect-binaries h5py \
-            --collect-binaries sklearn \
-            --exclude-module pyqtgraph.opengl \
-            --exclude-module OpenGL \
-            --name pyBer \
-            "${ADD_ARGS[@]}" \
-            pyBer/main.py
+      - name: Build with PyInstaller
+        run: |
+          python -m PyInstaller --noconfirm --clean pyBer.spec
 
-      - name: Smoke test built EXE (switch to Postprocessing tab)
+      - name: Smoke test built EXE
         run: |
           export PYBER_SMOKE_TEST=1
           ./dist/pyBer.exe
@@ -182,6 +109,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           generateReleaseNotes: true
           allowUpdates: true
-          tag: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
-          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Latest Build' }}
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          removeArtifacts: true
+          replacesArtifacts: true
+          tag: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || env.RELEASE_VERSION }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || env.RELEASE_VERSION }}
+          prerelease: false
