@@ -7312,6 +7312,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _is_group_export_context(self) -> bool:
+        return bool(hasattr(self, "tab_sources") and self.tab_sources.currentIndex() == 1)
+
+    def _group_export_prefix(self, prefix: str) -> str:
+        clean = str(prefix or "").strip() or "postprocess"
+        if self._is_group_export_context() and not clean.lower().startswith("group_"):
+            return f"group_{clean}"
+        return clean
+
     def _default_export_prefix(self) -> str:
         prefix = "postprocess"
         if self._processed:
@@ -7319,7 +7328,146 @@ class PostProcessingPanel(QtWidgets.QWidget):
         beh_suffix = self._behavior_suffix()
         if beh_suffix:
             prefix = f"{prefix}_{beh_suffix}"
-        return prefix
+        return self._group_export_prefix(prefix)
+
+    def _format_export_param_value(self, value: object) -> str:
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        if isinstance(value, (float, np.floating)):
+            return f"{float(value):.6g}" if np.isfinite(value) else "nan"
+        if value is None:
+            return ""
+        return str(value)
+
+    def _write_export_parameter_file(
+        self,
+        base_path: str,
+        sections: List[Tuple[str, List[Tuple[str, object]]]],
+    ) -> Optional[str]:
+        if not base_path:
+            return None
+        out_path = f"{base_path}_params.txt"
+        lines = [
+            "pyBer postprocessing export parameters",
+            f"generated_utc: {datetime.now(timezone.utc).isoformat()}",
+            f"export_mode: {'group' if self._is_group_export_context() else 'single'}",
+            f"processed_files: {len(self._processed)}",
+            f"behavior_files: {len(self._behavior_sources)}",
+        ]
+        for title, items in sections:
+            if not items:
+                continue
+            lines.append("")
+            lines.append(f"[{title}]")
+            for key, value in items:
+                lines.append(f"{key}: {self._format_export_param_value(value)}")
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception:
+            return None
+        return out_path
+
+    def _collect_psth_parameter_sections(self, include_heatmap: bool = False) -> List[Tuple[str, List[Tuple[str, object]]]]:
+        data = self._collect_settings()
+        align_items: List[Tuple[str, object]] = [("align_source", data.get("align", ""))]
+        align_text = str(data.get("align", ""))
+        if align_text.startswith("Analog/Digital"):
+            align_items.extend(
+                [
+                    ("dio_channel", data.get("dio_channel", "")),
+                    ("dio_polarity", data.get("dio_polarity", "")),
+                    ("dio_align", data.get("dio_align", "")),
+                ]
+            )
+        elif align_text.startswith("Behavior"):
+            align_items.extend(
+                [
+                    ("behavior_file_type", data.get("behavior_file_type", "")),
+                    ("behavior", data.get("behavior", "")),
+                    ("behavior_align", data.get("behavior_align", "")),
+                    ("behavior_from", data.get("behavior_from", "")),
+                    ("behavior_to", data.get("behavior_to", "")),
+                    ("transition_gap_s", data.get("transition_gap", 0.0)),
+                    ("generated_time_fps", data.get("behavior_time_fps", 0.0)),
+                ]
+            )
+
+        psth_items: List[Tuple[str, object]] = [
+            ("window_pre_s", data.get("window_pre", 0.0)),
+            ("window_post_s", data.get("window_post", 0.0)),
+            ("baseline_start_s", data.get("baseline_start", 0.0)),
+            ("baseline_end_s", data.get("baseline_end", 0.0)),
+            ("resample_hz", data.get("resample", 0.0)),
+            ("gaussian_smooth_sigma_s", data.get("smooth", 0.0)),
+            ("event_filters_enabled", data.get("filter_enabled", False)),
+            ("event_index_start", data.get("event_start", 0)),
+            ("event_index_end", data.get("event_end", 0)),
+            ("group_events_within_s", data.get("group_window_s", 0.0)),
+            ("event_duration_min_s", data.get("dur_min", 0.0)),
+            ("event_duration_max_s", data.get("dur_max", 0.0)),
+            ("metrics_enabled", data.get("metrics_enabled", False)),
+            ("metric", data.get("metric", "")),
+            ("metric_pre_start_s", data.get("metric_pre0", 0.0)),
+            ("metric_pre_end_s", data.get("metric_pre1", 0.0)),
+            ("metric_post_start_s", data.get("metric_post0", 0.0)),
+            ("metric_post_end_s", data.get("metric_post1", 0.0)),
+            ("global_metrics_enabled", data.get("global_metrics_enabled", False)),
+            ("global_start_s", data.get("global_start", 0.0)),
+            ("global_end_s", data.get("global_end", 0.0)),
+            ("global_peak_amplitude", data.get("global_amp", False)),
+            ("global_transient_frequency", data.get("global_freq", False)),
+        ]
+        sections: List[Tuple[str, List[Tuple[str, object]]]] = [
+            ("Alignment", align_items),
+            ("PSTH", psth_items),
+        ]
+        if include_heatmap:
+            rows = int(self._last_mat.shape[0]) if isinstance(self._last_mat, np.ndarray) and self._last_mat.ndim >= 1 else 0
+            cols = int(self._last_mat.shape[1]) if isinstance(self._last_mat, np.ndarray) and self._last_mat.ndim >= 2 else 0
+            sections.append(
+                (
+                    "Heatmap",
+                    [
+                        ("rows", rows),
+                        ("columns", cols),
+                        ("color_map", self._style.get("heatmap_cmap", "viridis")),
+                        ("display_min", self._style.get("heatmap_min", None)),
+                        ("display_max", self._style.get("heatmap_max", None)),
+                    ],
+                )
+            )
+        return sections
+
+    def _collect_spatial_parameter_sections(self) -> List[Tuple[str, List[Tuple[str, object]]]]:
+        data = self._collect_settings()
+        return [
+            (
+                "Spatial",
+                [
+                    ("x_column", data.get("spatial_x", "")),
+                    ("y_column", data.get("spatial_y", "")),
+                    ("bins_x", data.get("spatial_bins_x", 0)),
+                    ("bins_y", data.get("spatial_bins_y", 0)),
+                    ("occupancy_map_value", data.get("spatial_weight", "")),
+                    ("clip_enabled", data.get("spatial_clip", False)),
+                    ("clip_low_percentile", data.get("spatial_clip_low", 0.0)),
+                    ("clip_high_percentile", data.get("spatial_clip_high", 0.0)),
+                    ("time_filter_enabled", data.get("spatial_time_filter", False)),
+                    ("time_min_s", data.get("spatial_time_min", 0.0)),
+                    ("time_max_s", data.get("spatial_time_max", 0.0)),
+                    ("smooth_bins", data.get("spatial_smooth", 0.0)),
+                    ("activity_map_mode", data.get("spatial_activity_mode", "")),
+                    ("log_scale", data.get("spatial_log", False)),
+                    ("invert_y", data.get("spatial_invert_y", False)),
+                    ("color_map", self._style.get("heatmap_cmap", "viridis")),
+                    ("display_min", self._style.get("heatmap_min", None)),
+                    ("display_max", self._style.get("heatmap_max", None)),
+                ],
+            )
+        ]
 
     def _render_widget_image(
         self,
@@ -7418,6 +7566,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         prefix = self._default_export_prefix()
 
         if choices.get("heatmap"):
+            heat_base = os.path.join(out_dir, f"{prefix}_heatmap")
             mat = np.asarray(self._last_mat, float)
             if mat.ndim == 1:
                 mat = mat[np.newaxis, :]
@@ -7428,23 +7577,26 @@ class PostProcessingPanel(QtWidgets.QWidget):
             arr = np.column_stack([time, mat.T])
             header_cols = ["time"] + [f"trial_{i + 1}" for i in range(mat.shape[0])]
             np.savetxt(
-                os.path.join(out_dir, f"{prefix}_heatmap.csv"),
+                f"{heat_base}.csv",
                 arr,
                 delimiter=",",
                 header=",".join(header_cols),
                 comments="",
             )
+            self._write_export_parameter_file(heat_base, self._collect_psth_parameter_sections(include_heatmap=True))
         if choices.get("avg"):
+            avg_base = os.path.join(out_dir, f"{prefix}_avg_psth")
             avg = np.nanmean(self._last_mat, axis=0)
             sem = np.nanstd(self._last_mat, axis=0) / np.sqrt(max(1, np.sum(np.any(np.isfinite(self._last_mat), axis=1))))
             arr = np.vstack([self._last_tvec, avg, sem]).T
             np.savetxt(
-                os.path.join(out_dir, f"{prefix}_avg_psth.csv"),
+                f"{avg_base}.csv",
                 arr,
                 delimiter=",",
                 header="time,average_psth,sem",
                 comments="",
             )
+            self._write_export_parameter_file(avg_base, self._collect_psth_parameter_sections(include_heatmap=False))
         if choices.get("events"):
             event_path = os.path.join(out_dir, f"{prefix}_events.csv")
             if self._last_event_rows:
@@ -7547,6 +7699,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._remember_export_dir(out_dir)
             ok, png_path, pdf_path = self._export_widget_png_pdf(widget, base_path, transparent=True)
             if ok:
+                if suffix == "heatmap":
+                    self._write_export_parameter_file(base_path, self._collect_psth_parameter_sections(include_heatmap=True))
+                elif suffix in {"avg_metrics", "psth_figure"}:
+                    self._write_export_parameter_file(base_path, self._collect_psth_parameter_sections(include_heatmap=(suffix == "psth_figure")))
+                elif suffix == "spatial":
+                    self._write_export_parameter_file(base_path, self._collect_spatial_parameter_sections())
                 self.statusUpdate.emit(
                     f"Exported image: {os.path.basename(png_path or '')}, {os.path.basename(pdf_path or '')}",
                     5000,
@@ -7565,6 +7723,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             base_path = os.path.join(out_dir, f"{prefix}_{suffix}")
             ok, _png_path, _pdf_path = self._export_widget_png_pdf(widget, base_path, transparent=True)
             if ok:
+                if suffix == "heatmap":
+                    self._write_export_parameter_file(base_path, self._collect_psth_parameter_sections(include_heatmap=True))
+                elif suffix in {"avg_metrics", "psth_figure"}:
+                    self._write_export_parameter_file(base_path, self._collect_psth_parameter_sections(include_heatmap=(suffix == "psth_figure")))
+                elif suffix == "spatial":
+                    self._write_export_parameter_file(base_path, self._collect_spatial_parameter_sections())
                 ok_count += 1
             else:
                 failed.append(suffix)
@@ -7603,6 +7767,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._remember_export_dir(out_dir)
         ok, png_path, pdf_path = self._export_widget_png_pdf(target, base_path, transparent=True)
         if ok:
+            self._write_export_parameter_file(base_path, self._collect_spatial_parameter_sections())
             self.statusUpdate.emit(f"Exported spatial figure: {os.path.basename(png_path or '')}, {os.path.basename(pdf_path or '')}", 5000)
         else:
             QtWidgets.QMessageBox.warning(self, "Export failed", "Could not export spatial figure as PNG/PDF.")
