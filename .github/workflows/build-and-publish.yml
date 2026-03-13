@@ -43,13 +43,40 @@ jobs:
           python -m PyInstaller --version
           python -c "import os, sys; print('CONDA_PREFIX=', os.environ.get('CONDA_PREFIX')); print('PYTHON=', sys.executable)"
 
+      - name: Ensure icon asset
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+
+          png_path = Path("assets/pyBer_logo_big.png")
+          ico_path = Path("assets/pyBer.ico")
+          if not png_path.is_file():
+              raise SystemExit(f"Missing required PNG icon source: {png_path}")
+          if not ico_path.is_file():
+              img = Image.open(png_path).convert("RGBA")
+              img.save(ico_path, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+              print(f"Generated missing icon: {ico_path}")
+          else:
+              print(f"Using checked-in icon: {ico_path}")
+          PY
+
       - name: Verify build inputs
         run: |
-          test -f pyBer.spec
-          test -f assets/pyBer_logo_big.png
-          test -f assets/pyBer.ico
           python - <<'PY'
+          from pathlib import Path
           import numpy, scipy, h5py, sklearn
+
+          required = [
+              Path("pyBer.spec"),
+              Path("assets/pyBer_logo_big.png"),
+              Path("assets/pyBer.ico"),
+          ]
+          missing = [str(p) for p in required if not p.is_file()]
+          if missing:
+              raise SystemExit("Missing required build inputs: " + ", ".join(missing))
+
+          print("Build inputs OK")
           print("Import smoke test OK")
           print("numpy:", numpy.__version__)
           print("scipy:", scipy.__version__)
