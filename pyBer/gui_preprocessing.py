@@ -2524,6 +2524,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.vb_dio_raw, self.curve_dio_raw = self._add_dio_axis(self.plot_raw, "A/D")
         self.vb_dio_proc, self.curve_dio_proc = self._add_dio_axis(self.plot_proc, "A/D")
         self.vb_dio_out, self.curve_dio_out = self._add_dio_axis(self.plot_out, "A/D")
+        self._align_plot_axis_layouts()
 
         self.lbl_log = QtWidgets.QLabel("")
         self.lbl_log.setProperty("class", "hint")
@@ -2599,6 +2600,29 @@ class PlotDashboard(QtWidgets.QWidget):
 
     def plot_grid_visible(self) -> bool:
         return bool(self._plot_grid_visible)
+
+    def _align_plot_axis_layouts(self) -> None:
+        # Fixed side gutters keep the three view boxes the same width, so shared x ranges
+        # produce vertically aligned ticks and grid lines across the stacked plots.
+        left_width = 64
+        right_width = 56
+        bottom_height = 24
+        for plot in (self.plot_raw, self.plot_proc, self.plot_out):
+            pi = plot.getPlotItem()
+            for axis_name, width in (("left", left_width), ("right", right_width)):
+                axis = pi.getAxis(axis_name)
+                if axis is None:
+                    continue
+                try:
+                    axis.setWidth(width)
+                except Exception:
+                    pass
+            bottom = pi.getAxis("bottom")
+            if bottom is not None:
+                try:
+                    bottom.setHeight(bottom_height)
+                except Exception:
+                    pass
 
     def _add_dio_axis(self, plot: pg.PlotWidget, label: str):
         pi = plot.getPlotItem()
@@ -2910,6 +2934,7 @@ class PlotDashboard(QtWidgets.QWidget):
             self.plot_raw.getPlotItem().getAxis("right").setLabel("A/D")
             self.plot_proc.getPlotItem().getAxis("right").setLabel("A/D")
             self.plot_out.getPlotItem().getAxis("right").setLabel("A/D")
+        self._align_plot_axis_layouts()
 
     # -------------------- Compatibility API expected by main.py --------------------
 
