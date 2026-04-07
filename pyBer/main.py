@@ -47,8 +47,23 @@ from gui_preprocessing import (
     AdvancedOptionsDialog,
 )
 from gui_postprocessing import PostProcessingPanel
-from styles import app_qss
+from styles import (
+    app_qss,
+    _make_icon,
+    _paint_database,
+    _paint_list,
+    _paint_sliders,
+    _paint_filter,
+    _paint_wave,
+    _paint_chart,
+    _paint_badge,
+    _paint_export,
+    _paint_gear,
+)
 import numpy as np
+
+
+# Icon painters now live in styles.py and are imported above.
 
 
 def _dock_area_to_int(value: object, fallback: int = 2) -> int:
@@ -116,6 +131,9 @@ _USE_PG_DOCKAREA_PRE_LAYOUT = True
 _PRE_DOCKAREA_PRIMARY_ORDER = ("artifacts_list", "artifacts", "filtering", "baseline", "output", "export")
 _PRE_DOCKAREA_OPTIONAL_ORDER = ("qc", "config")
 _PRE_DOCKAREA_DEFAULT_VISIBLE = frozenset(_PRE_DOCKAREA_PRIMARY_ORDER)
+_CSV_NONE_LABEL = "(none)"
+_PRE_PROJECT_TYPE = "pyber_preprocessing_project"
+_PRE_PROJECT_VERSION = 1
 
 _LOG = logging.getLogger(__name__)
 
@@ -285,6 +303,113 @@ class QcDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
+
+class CsvChannelMappingDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        headers: List[str],
+        numeric_headers: List[str],
+        defaults: Optional[Dict[str, object]] = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("CSV channel mapping")
+        self.setModal(True)
+        self.resize(520, 260)
+        self._headers = list(headers or [])
+        self._numeric_headers = list(numeric_headers or [])
+        self._defaults = defaults or {}
+
+        layout = QtWidgets.QVBoxLayout(self)
+        hint = QtWidgets.QLabel(
+            "Choose how this CSV maps to preprocessing inputs. The same column names will be reused for CSV files in this session."
+        )
+        hint.setWordWrap(True)
+        hint.setProperty("class", "hint")
+        layout.addWidget(hint)
+
+        form = QtWidgets.QFormLayout()
+        self.combo_time = QtWidgets.QComboBox()
+        self.combo_time_unit = QtWidgets.QComboBox()
+        self.combo_raw1 = QtWidgets.QComboBox()
+        self.combo_raw2 = QtWidgets.QComboBox()
+        self.combo_ref = QtWidgets.QComboBox()
+        self.combo_trigger = QtWidgets.QComboBox()
+
+        self.combo_time.addItems(self._headers)
+        self.combo_time_unit.addItems(["Auto", "Seconds", "Milliseconds"])
+        self.combo_raw1.addItems(self._numeric_headers)
+        self.combo_raw2.addItem(_CSV_NONE_LABEL)
+        self.combo_raw2.addItems(self._numeric_headers)
+        self.combo_ref.addItems(self._numeric_headers)
+        self.combo_trigger.addItem(_CSV_NONE_LABEL)
+        self.combo_trigger.addItems(self._numeric_headers)
+
+        form.addRow("Time column", self.combo_time)
+        form.addRow("Time unit", self.combo_time_unit)
+        form.addRow("Raw signal 1", self.combo_raw1)
+        form.addRow("Raw signal 2 (optional)", self.combo_raw2)
+        form.addRow("Isobestic / reference", self.combo_ref)
+        form.addRow("Event / DIO (optional)", self.combo_trigger)
+        layout.addLayout(form)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addStretch(1)
+        self.btn_ok = QtWidgets.QPushButton("OK")
+        self.btn_cancel = QtWidgets.QPushButton("Cancel")
+        self.btn_ok.setDefault(True)
+        btn_row.addWidget(self.btn_ok)
+        btn_row.addWidget(self.btn_cancel)
+        layout.addLayout(btn_row)
+
+        self.btn_ok.clicked.connect(self._accept_if_valid)
+        self.btn_cancel.clicked.connect(self.reject)
+        self._apply_defaults()
+
+    def _set_combo_text(self, combo: QtWidgets.QComboBox, value: object) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        idx = combo.findText(text, QtCore.Qt.MatchFlag.MatchFixedString)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _apply_defaults(self) -> None:
+        self._set_combo_text(self.combo_time, self._defaults.get("time"))
+        self._set_combo_text(self.combo_time_unit, self._defaults.get("time_unit") or "Auto")
+        self._set_combo_text(self.combo_raw1, self._defaults.get("raw1"))
+        self._set_combo_text(self.combo_raw2, self._defaults.get("raw2") or _CSV_NONE_LABEL)
+        self._set_combo_text(self.combo_ref, self._defaults.get("reference"))
+        self._set_combo_text(self.combo_trigger, self._defaults.get("trigger") or _CSV_NONE_LABEL)
+
+    def mapping(self) -> Dict[str, str]:
+        raw2 = self.combo_raw2.currentText().strip()
+        trigger = self.combo_trigger.currentText().strip()
+        return {
+            "time": self.combo_time.currentText().strip(),
+            "time_unit": self.combo_time_unit.currentText().strip() or "Auto",
+            "raw1": self.combo_raw1.currentText().strip(),
+            "raw2": "" if raw2 == _CSV_NONE_LABEL else raw2,
+            "reference": self.combo_ref.currentText().strip(),
+            "trigger": "" if trigger == _CSV_NONE_LABEL else trigger,
+        }
+
+    def _accept_if_valid(self) -> None:
+        m = self.mapping()
+        raw1 = m.get("raw1", "")
+        raw2 = m.get("raw2", "")
+        ref = m.get("reference", "")
+        if not m.get("time") or not raw1 or not ref:
+            QtWidgets.QMessageBox.warning(self, "CSV mapping", "Choose a time column, raw signal 1, and isobestic/reference column.")
+            return
+        if raw1 == ref:
+            QtWidgets.QMessageBox.warning(self, "CSV mapping", "Raw signal 1 and isobestic/reference must use different columns.")
+            return
+        if raw2 and raw2 in {raw1, ref}:
+            QtWidgets.QMessageBox.warning(self, "CSV mapping", "Raw signal 2 must use a different column.")
+            return
+        self.accept()
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -313,6 +438,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_path: Optional[str] = None
         self._current_channel: Optional[str] = None
         self._current_trigger: Optional[str] = None
+        self._pre_project_path: Optional[str] = None
+        self._csv_channel_mapping_session: Optional[Dict[str, str]] = None
+        self._csv_mappings_by_path: Dict[str, Dict[str, str]] = {}
 
         self._manual_regions_by_key: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
         self._manual_exclude_by_key: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
@@ -329,6 +457,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._section_docks: Dict[str, QtWidgets.QDockWidget] = {}
         self._use_pg_dockarea_pre_layout: bool = bool(_USE_PG_DOCKAREA_PRE_LAYOUT)
         self._pre_dockarea: Optional[DockArea] = None
+        self._pre_drawer_splitter: Optional[QtWidgets.QSplitter] = None
         self._pre_dockarea_docks: Dict[str, Dock] = {}
         self._pre_section_scroll_hosts: Dict[str, QtWidgets.QScrollArea] = {}
         self._pre_dockarea_fixed_layout_applied: bool = False
@@ -381,6 +510,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._restore_settings()
         self._panel_layout_persistence_ready = True
+        # Enforce: preprocessing drawer is hidden until the user
+        # explicitly clicks a rail section button (overrides any saved state).
+        self._force_hide_pre_drawer_initially()
 
     # ---------------- UI ----------------
 
@@ -440,14 +572,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.art_dock = QtWidgets.QDockWidget("Artifact list", self)
             self.art_dock.setObjectName("pre.artifact.dock")
             self.art_dock.setWidget(self.artifact_panel)
-            self.art_dock.setAllowedAreas(QtCore.Qt.DockWidgetArea.RightDockWidgetArea)
+            self.art_dock.setAllowedAreas(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea)
             self.art_dock.setVisible(False)
             self.art_dock.visibilityChanged.connect(lambda *_: self._save_panel_layout_state())
             self.art_dock.topLevelChanged.connect(lambda *_: self._save_panel_layout_state())
             self.art_dock.dockLocationChanged.connect(lambda *_: self._save_panel_layout_state())
             self.art_dock.installEventFilter(self)
             self.artifact_panel.installEventFilter(self)
-            self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.art_dock)
+            self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.art_dock)
 
         # Left pane: data browser
         self.file_panel.setMinimumWidth(260)
@@ -455,12 +587,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_panel.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
 
         # Center pane: workflow toolbar + plots
-        self.btn_workflow_load = QtWidgets.QPushButton("Load")
+        self.btn_workflow_load = QtWidgets.QPushButton("File")
         self.btn_workflow_load.setProperty("class", "blueSecondarySmall")
         self.menu_workflow_load = QtWidgets.QMenu(self.btn_workflow_load)
+        self.act_pre_new_project = self.menu_workflow_load.addAction("New Project")
+        self.act_pre_open_project = self.menu_workflow_load.addAction("Open Project...")
+        self.act_pre_save_project = self.menu_workflow_load.addAction("Save Project...")
+        self.menu_workflow_load.addSeparator()
         self.act_open_file = self.menu_workflow_load.addAction("Open File...")
         self.act_add_folder = self.menu_workflow_load.addAction("Add Folder...")
-        self.menu_workflow_load_recent = self.menu_workflow_load.addMenu("Load Recent")
+        self.menu_workflow_load_recent = self.menu_workflow_load.addMenu("Recent Files")
         self.menu_workflow_load_recent.aboutToShow.connect(self._refresh_recent_preprocessing_menu)
         self.menu_workflow_load.addSeparator()
         self.act_focus_data = self.menu_workflow_load.addAction("Focus Data Browser")
@@ -529,49 +665,125 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
             btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
 
-        workflow_row = QtWidgets.QHBoxLayout()
-        workflow_row.setContentsMargins(0, 0, 0, 0)
-        workflow_row.setSpacing(6)
-        workflow_row.addWidget(self.btn_toggle_data)
-        workflow_row.addWidget(self.btn_workflow_load)
-        workflow_row.addWidget(self.btn_workflow_artifacts)
-        workflow_row.addWidget(self.btn_workflow_qc)
-        workflow_row.addWidget(self.btn_workflow_export)
-        workflow_row.addWidget(self.btn_plot_style)
-        workflow_row.addStretch(1)
+        # ----- Modern shell: vertical icon rail + thin transport bar ------
+        # Configure section buttons as icon-only rail buttons.
+        _rail_section_meta = {
+            "artifacts_list": ("Artifact list", _paint_list),
+            "artifacts":      ("Artifact setup", _paint_sliders),
+            "filtering":      ("Filtering", _paint_filter),
+            "baseline":       ("Baseline", _paint_wave),
+            "output":         ("Output", _paint_chart),
+            "qc":             ("Quality control", _paint_badge),
+            "export":         ("Export", _paint_export),
+            "config":         ("Configuration", _paint_gear),
+        }
+        for key, btn in self._section_buttons.items():
+            tip, painter = _rail_section_meta[key]
+            btn.setObjectName("railButton")
+            btn.setProperty("class", "")
+            btn.setText("")
+            btn.setToolTip(tip)
+            btn.setStatusTip(tip)
+            btn.setIcon(_make_icon(painter))
+            btn.setIconSize(QtCore.QSize(22, 22))
+            btn.setFixedSize(44, 44)
 
-        section_row = QtWidgets.QHBoxLayout()
-        section_row.setContentsMargins(0, 0, 0, 0)
-        section_row.setSpacing(6)
-        section_row.addWidget(QtWidgets.QLabel("Parameters:"))
-        for btn in self._section_buttons.values():
-            section_row.addWidget(btn)
-        section_row.addStretch(1)
+        # Data-browser toggle as a rail toggle button.
+        self.btn_toggle_data.setObjectName("railToggleButton")
+        self.btn_toggle_data.setProperty("class", "")
+        self.btn_toggle_data.setText("")
+        self.btn_toggle_data.setToolTip("Show or hide data browser")
+        self.btn_toggle_data.setStatusTip("Show or hide data browser")
+        self.btn_toggle_data.setIcon(_make_icon(_paint_database))
+        self.btn_toggle_data.setIconSize(QtCore.QSize(22, 22))
+        self.btn_toggle_data.setFixedSize(44, 44)
+
+        side_rail = QtWidgets.QFrame()
+        side_rail.setObjectName("sideRail")
+        rail_layout = QtWidgets.QVBoxLayout(side_rail)
+        rail_layout.setContentsMargins(8, 10, 8, 10)
+        rail_layout.setSpacing(6)
+        rail_layout.addWidget(self.btn_toggle_data, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
+        sep = QtWidgets.QFrame()
+        sep.setObjectName("railSeparator")
+        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        rail_layout.addWidget(sep)
+        for key in ("artifacts_list", "artifacts", "filtering", "baseline",
+                    "output", "qc", "export", "config"):
+            rail_layout.addWidget(self._section_buttons[key], 0,
+                                  QtCore.Qt.AlignmentFlag.AlignHCenter)
+        rail_layout.addStretch(1)
+        side_rail.setFixedWidth(64)
+
+        # Transport bar: workflow actions + status meta. Compact, single row.
+        transport_bar = QtWidgets.QFrame()
+        transport_bar.setObjectName("transportBar")
+        transport_layout = QtWidgets.QHBoxLayout(transport_bar)
+        transport_layout.setContentsMargins(12, 8, 12, 8)
+        transport_layout.setSpacing(8)
+        # Rename action buttons to clearer verbs to avoid confusion with rail.
+        self.btn_workflow_load.setText("File")
+        self.btn_workflow_qc.setText("Run QC")
+        self.btn_workflow_export.setText("Run Export")
+        transport_layout.addWidget(self.btn_workflow_load)
+        transport_layout.addWidget(self.btn_workflow_qc)
+        transport_layout.addWidget(self.btn_workflow_export)
+        transport_layout.addSpacing(8)
+        transport_layout.addWidget(self.btn_plot_style)
+        transport_layout.addStretch(1)
+        # Redundant duplicate: 'Detected artifacts' workflow button is covered
+        # by the artifact-list rail button. Hide from layout but keep instance
+        # so existing wiring (signals, references) remains intact.
+        self.btn_workflow_artifacts.setVisible(False)
+
+        center_panel = QtWidgets.QFrame()
+        center_panel.setObjectName("centerPanel")
+        center_panel_layout = QtWidgets.QVBoxLayout(center_panel)
+        center_panel_layout.setContentsMargins(10, 10, 10, 10)
+        center_panel_layout.setSpacing(8)
+        center_panel_layout.addWidget(transport_bar)
+        center_panel_layout.addWidget(self.plots, stretch=1)
 
         center_widget = QtWidgets.QWidget()
-        center_v = QtWidgets.QVBoxLayout(center_widget)
-        center_v.setContentsMargins(0, 0, 0, 0)
-        center_v.setSpacing(6)
-        center_v.addLayout(workflow_row)
-        center_v.addLayout(section_row)
-        center_v.addWidget(self.plots, stretch=1)
+        center_h = QtWidgets.QHBoxLayout(center_widget)
+        center_h.setContentsMargins(0, 0, 0, 0)
+        center_h.setSpacing(8)
+        center_h.addWidget(side_rail)
+        if self._use_pg_dockarea_pre_layout:
+            self._pre_drawer_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+            self._pre_drawer_splitter.setChildrenCollapsible(False)
+            self._pre_dockarea = DockArea()
+            # Wrap the DockArea in a rounded drawer frame so it matches the
+            # modern shell, and start hidden. It sits beside the left rail so
+            # tool panels open on the same side as the data browser.
+            self._pre_drawer = QtWidgets.QFrame()
+            self._pre_drawer.setObjectName("drawerPanel")
+            _drawer_l = QtWidgets.QVBoxLayout(self._pre_drawer)
+            _drawer_l.setContentsMargins(12, 10, 12, 10)
+            _drawer_l.setSpacing(8)
+            self._pre_drawer_title = QtWidgets.QLabel("")
+            self._pre_drawer_title.setObjectName("panelTitle")
+            _drawer_l.addWidget(self._pre_drawer_title)
+            _drawer_l.addWidget(self._pre_dockarea, stretch=1)
+            self._pre_drawer.setVisible(False)
+            self._pre_drawer_splitter.addWidget(self._pre_drawer)
+            self._pre_drawer_splitter.addWidget(center_panel)
+            self._pre_drawer_splitter.setStretchFactor(0, 0)
+            self._pre_drawer_splitter.setStretchFactor(1, 1)
+            self._pre_drawer_splitter.setSizes([0, 1400])
+            center_h.addWidget(self._pre_drawer_splitter, stretch=1)
+        else:
+            center_h.addWidget(center_panel, stretch=1)
 
         # Main splitter: data panel + visuals. Parameter popups are floating by default.
         self.pre_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self.pre_splitter.setObjectName("preprocessing_splitter")
         self.pre_splitter.addWidget(self.file_panel)
         self.pre_splitter.addWidget(center_widget)
-        if self._use_pg_dockarea_pre_layout:
-            self._pre_dockarea = DockArea()
-            self.pre_splitter.addWidget(self._pre_dockarea)
         self.pre_splitter.setChildrenCollapsible(False)
         self.pre_splitter.setStretchFactor(0, 0)
         self.pre_splitter.setStretchFactor(1, 1)
-        if self._use_pg_dockarea_pre_layout:
-            self.pre_splitter.setStretchFactor(2, 0)
-            self.pre_splitter.setSizes([320, 1100, 520])
-        else:
-            self.pre_splitter.setSizes([350, 1350])
+        self.pre_splitter.setSizes([350, 1350])
         self.pre_splitter.splitterMoved.connect(self._save_splitter_sizes)
 
         pre_layout = QtWidgets.QVBoxLayout(self.pre_tab)
@@ -626,6 +838,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         # Workflow toolbar
+        self.act_pre_new_project.triggered.connect(self._new_preprocessing_project)
+        self.act_pre_open_project.triggered.connect(self._open_preprocessing_project_file)
+        self.act_pre_save_project.triggered.connect(self._save_preprocessing_project_file)
         self.act_open_file.triggered.connect(self._open_files_dialog)
         self.act_add_folder.triggered.connect(self._open_folder_dialog)
         self.act_focus_data.triggered.connect(self._focus_data_browser)
@@ -729,9 +944,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 scroll.setWidget(widget)
                 self._pre_section_scroll_hosts[key] = scroll
 
-                dock = Dock(title, area=self._pre_dockarea, closable=True)
+                dock = Dock(title, area=self._pre_dockarea, closable=False)
                 dock.setObjectName(f"pre.da.{key}.dock")
                 dock.addWidget(scroll)
+                # Collapse the per-dock label/tab to 0px without deleting it
+                # (pyqtgraph still references dock.label when restacking).
+                try:
+                    dock.label.setMaximumHeight(0)
+                    dock.label.setMinimumHeight(0)
+                    dock.label.setFixedHeight(0)
+                    dock.label.setVisible(False)
+                except Exception:
+                    pass
                 self._lock_pre_pg_dock_interactions(dock)
                 try:
                     dock.sigClosed.connect(lambda *_, section_key=key: self._on_pre_dockarea_dock_closed(section_key))
@@ -758,7 +982,7 @@ class MainWindow(QtWidgets.QMainWindow):
             dock.topLevelChanged.connect(lambda *_: self._save_panel_layout_state())
             dock.dockLocationChanged.connect(lambda *_: self._save_panel_layout_state())
             # Register with main window once; each popup opens floating by default.
-            self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+            self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
             dock.setFloating(True)
             dock.hide()
             dock.installEventFilter(self)
@@ -853,6 +1077,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self._last_opened_section == key:
                     self._last_opened_section = None
                 break
+        self._update_pre_drawer_visibility()
         self._save_panel_layout_state()
 
     def _arrange_pre_dockarea_default(self) -> None:
@@ -864,7 +1089,7 @@ class MainWindow(QtWidgets.QMainWindow):
             root = self._pre_dockarea_dock(ordered[0])
         if root is None:
             return
-        self._pre_dockarea.addDock(root, "right")
+        self._pre_dockarea.addDock(root, "left")
         for key in ordered:
             dock = self._pre_dockarea_dock(key)
             if dock is not None and dock is not root:
@@ -907,7 +1132,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-        right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
+        left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
         for key, dock in self._pre_dockarea_docks.items():
             if key == "artifacts_list":
                 continue
@@ -915,7 +1140,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 base = f"pre_section_docks/{key}"
                 self.settings.setValue(f"{base}/visible", bool(dock.isVisible()))
                 self.settings.setValue(f"{base}/floating", False)
-                self.settings.setValue(f"{base}/area", right_i)
+                self.settings.setValue(f"{base}/area", left_i)
             except Exception:
                 continue
         try:
@@ -923,7 +1148,7 @@ class MainWindow(QtWidgets.QMainWindow):
             art_vis = bool(visible.get("artifacts_list", False))
             self.settings.setValue(f"{art_base}/visible", art_vis)
             self.settings.setValue(f"{art_base}/floating", False)
-            self.settings.setValue(f"{art_base}/area", right_i)
+            self.settings.setValue(f"{art_base}/area", left_i)
         except Exception:
             pass
 
@@ -990,6 +1215,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     break
 
         self._sync_section_button_states_from_docks()
+        self._update_pre_drawer_visibility()
 
     def _apply_pre_fixed_dockarea_layout(self) -> None:
         if self._pre_dockarea is None or not self._pre_dockarea_docks:
@@ -1015,6 +1241,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         self._last_opened_section = active
         self._sync_section_button_states_from_docks()
+        self._update_pre_drawer_visibility()
         self._save_pre_dockarea_layout_state()
         self._pre_dockarea_fixed_layout_applied = True
 
@@ -1097,12 +1324,102 @@ class MainWindow(QtWidgets.QMainWindow):
         btn.setChecked(bool(checked))
         btn.blockSignals(False)
 
+    def _force_hide_pre_drawer_initially(self) -> None:
+        """Hide every preprocessing section dock and the left drawer at startup."""
+        for key, btn in self._section_buttons.items():
+            if btn.isChecked():
+                blocked = btn.blockSignals(True)
+                try:
+                    btn.setChecked(False)
+                finally:
+                    btn.blockSignals(blocked)
+            try:
+                dock = self._pre_dockarea_dock(key) if self._use_pg_dockarea_pre_layout else self._section_docks.get(key)
+                if dock is not None:
+                    dock.hide()
+            except Exception:
+                pass
+        drawer = getattr(self, "_pre_drawer", None)
+        if drawer is not None:
+            drawer.setVisible(False)
+        splitter = self._pre_drawer_splitter
+        if splitter is not None:
+            try:
+                sizes = splitter.sizes()
+                if len(sizes) >= 2:
+                    sizes[1] += sizes[0]
+                    sizes[0] = 0
+                    splitter.setSizes(sizes)
+            except Exception:
+                pass
+
+    _PRE_SECTION_TITLES = {
+        "artifacts_list": "Artifact list",
+        "artifacts": "Artifact setup",
+        "filtering": "Filtering",
+        "baseline": "Baseline",
+        "output": "Output",
+        "qc": "Quality control",
+        "export": "Export",
+        "config": "Configuration",
+    }
+
+    def _update_pre_drawer_visibility(self) -> None:
+        """Show the left preprocessing drawer iff at least one section is active."""
+        drawer = getattr(self, "_pre_drawer", None)
+        if drawer is None:
+            return
+        any_checked = any(btn.isChecked() for btn in self._section_buttons.values())
+        # Update header label to the active section title.
+        title_lbl = getattr(self, "_pre_drawer_title", None)
+        if title_lbl is not None:
+            active_key = next((k for k, b in self._section_buttons.items() if b.isChecked()), None)
+            title_lbl.setText(self._PRE_SECTION_TITLES.get(active_key or "", ""))
+        drawer.setVisible(any_checked)
+        splitter = self._pre_drawer_splitter
+        if splitter is None:
+            return
+        try:
+            sizes = splitter.sizes()
+            if len(sizes) >= 2:
+                if any_checked:
+                    if sizes[0] < 60:
+                        total = sum(sizes) or 1
+                        drawer_w = max(420, int(total * 0.28))
+                        sizes[0] = drawer_w
+                        sizes[1] = max(400, sizes[1] - drawer_w)
+                        splitter.setSizes(sizes)
+                else:
+                    if sizes[0] > 0:
+                        sizes[1] += sizes[0]
+                        sizes[0] = 0
+                        splitter.setSizes(sizes)
+        except Exception:
+            pass
+
     def _toggle_section_popup(self, key: str, checked: bool) -> None:
         if self._use_pg_dockarea_pre_layout:
             dock = self._pre_dockarea_dock(key)
             if dock is None:
                 return
             if checked:
+                # Radio behavior: hide all other section docks and uncheck
+                # their rail buttons so only one drawer section is visible.
+                for other_key, other_btn in self._section_buttons.items():
+                    if other_key == key:
+                        continue
+                    if other_btn.isChecked():
+                        blocked = other_btn.blockSignals(True)
+                        try:
+                            other_btn.setChecked(False)
+                        finally:
+                            other_btn.blockSignals(blocked)
+                    other_dock = self._pre_dockarea_dock(other_key)
+                    if other_dock is not None:
+                        try:
+                            other_dock.hide()
+                        except Exception:
+                            pass
                 dock.show()
                 try:
                     dock.raiseDock()
@@ -1113,6 +1430,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_opened_section = key
             else:
                 dock.hide()
+            self._update_pre_drawer_visibility()
             self._save_panel_layout_state()
             return
         dock = self._section_docks.get(key)
@@ -1139,6 +1457,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._last_opened_section = None
                 if visible:
                     self._last_opened_section = key
+            self._update_pre_drawer_visibility()
             self._save_panel_layout_state()
             return
         self._set_section_button_checked(key, visible)
@@ -1159,7 +1478,7 @@ class MainWindow(QtWidgets.QMainWindow):
         width = min(pref_w, max_w)
         height = min(pref_h, max_h)
 
-        # Prefer right side of main window, then fall back to left, then clamp.
+        # Prefer the left side of the main window, then fall back to right, then clamp.
         x_right = geom.x() + geom.width() + 12
         x_left = geom.x() - width - 12
         y_pref = geom.y() + 60
@@ -1169,10 +1488,10 @@ class MainWindow(QtWidgets.QMainWindow):
         x_max = screen_rect.x() + max(10, screen_rect.width() - width - 10)
         y_max = screen_rect.y() + max(10, screen_rect.height() - height - 10)
 
-        if x_right <= x_max:
-            x = x_right
-        elif x_left >= x_min:
+        if x_left >= x_min:
             x = x_left
+        elif x_right <= x_max:
+            x = x_right
         else:
             x = x_max
         y = min(max(y_pref, y_min), y_max)
@@ -1489,6 +1808,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._set_pre_dockarea_visible(key, False)
                     self._set_section_button_checked(key, False)
                 self._last_opened_section = None
+                self._update_pre_drawer_visibility()
                 self._save_panel_layout_state()
                 return
             self._toggle_section_shortcut("output")
@@ -1518,6 +1838,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     dock.hide()
                     self._set_section_button_checked(self._last_opened_section, False)
                     self._last_opened_section = None
+                    self._update_pre_drawer_visibility()
                     self._save_panel_layout_state()
             return
         fw = QtWidgets.QApplication.focusWidget()
@@ -1629,7 +1950,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _dock_area_from_settings(
         self,
         value: object,
-        default: QtCore.Qt.DockWidgetArea = QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
+        default: QtCore.Qt.DockWidgetArea = QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
     ) -> QtCore.Qt.DockWidgetArea:
         left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
         right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
@@ -1865,11 +2186,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 floating = self.settings.value(f"{base}/floating", None)
                 area = self.settings.value(f"{base}/area", None)
                 geom = self._to_qbytearray(self.settings.value(f"{base}/geometry", None))
-                right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
+                left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
                 out[key] = {
                     "visible": _to_bool(visible, False) if visible is not None else False,
                     "floating": _to_bool(floating, True) if floating is not None else True,
-                    "area": _dock_area_to_int(area, right_i) if area is not None else right_i,
+                    "area": _dock_area_to_int(area, left_i) if area is not None else left_i,
                     "geometry": self._qbytearray_to_b64(geom),
                 }
             return out
@@ -1905,7 +2226,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "artifact": {
                     "visible": _to_bool(art_visible, False) if art_visible is not None else False,
                     "floating": _to_bool(art_floating, False) if art_floating is not None else False,
-                    "area": int(art_area) if art_area is not None else _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2),
+                    "area": int(art_area) if art_area is not None else _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1),
                     "geometry": self._qbytearray_to_b64(art_geom),
                 },
             },
@@ -2044,8 +2365,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 visible = bool(cached.get("visible", dock.isVisible()))
                 floating = bool(cached.get("floating", dock.isFloating()))
-                right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
-                area_val = _dock_area_to_int(cached.get("area", self.dockWidgetArea(dock)), right_i)
+                left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
+                area_val = _dock_area_to_int(cached.get("area", self.dockWidgetArea(dock)), left_i)
                 geom = cached.get("geometry", dock.saveGeometry())
                 self.settings.setValue(f"{base}/visible", visible)
                 self.settings.setValue(f"{base}/floating", floating)
@@ -2060,8 +2381,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 cached = self._pre_artifact_state_before_tab_switch if self._pre_popups_hidden_by_tab_switch else {}
                 visible = bool(cached.get("visible", self.art_dock.isVisible()))
                 floating = bool(cached.get("floating", self.art_dock.isFloating()))
-                right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
-                area_val = _dock_area_to_int(cached.get("area", self.dockWidgetArea(self.art_dock)), right_i)
+                left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
+                area_val = _dock_area_to_int(cached.get("area", self.dockWidgetArea(self.art_dock)), left_i)
                 geom = cached.get("geometry", self.art_dock.saveGeometry())
                 self.settings.setValue(f"{base}/visible", visible)
                 self.settings.setValue(f"{base}/floating", floating)
@@ -2129,9 +2450,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 floating = _to_bool(self.settings.value(f"{base}/floating", True), True)
                 area_val = self.settings.value(
                     f"{base}/area",
-                    _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2),
+                    _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1),
                 )
-                area = self._dock_area_from_settings(area_val, QtCore.Qt.DockWidgetArea.RightDockWidgetArea)
+                area = self._dock_area_from_settings(area_val, QtCore.Qt.DockWidgetArea.LeftDockWidgetArea)
                 geom = self._to_qbytearray(self.settings.value(f"{base}/geometry", None))
 
                 dock.blockSignals(True)
@@ -2169,9 +2490,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 floating = _to_bool(self.settings.value(f"{base}/floating", False), False)
                 area_val = self.settings.value(
                     f"{base}/area",
-                    _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2),
+                    _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1),
                 )
-                area = self._dock_area_from_settings(area_val, QtCore.Qt.DockWidgetArea.RightDockWidgetArea)
+                area = self._dock_area_from_settings(area_val, QtCore.Qt.DockWidgetArea.LeftDockWidgetArea)
                 geom = self._to_qbytearray(self.settings.value(f"{base}/geometry", None))
 
                 if bool(floating):
@@ -2287,9 +2608,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     vals = [int(x) for x in splitter_sizes]
                     if self._use_pg_dockarea_pre_layout:
                         if len(vals) >= 3:
-                            self.pre_splitter.setSizes(vals[:3])
+                            self.pre_splitter.setSizes([vals[0], max(640, vals[1] + vals[2])])
                         elif len(vals) == 2:
-                            self.pre_splitter.setSizes([vals[0], vals[1], 520])
+                            self.pre_splitter.setSizes(vals[:2])
                     elif len(vals) >= 3:
                         left = max(260, vals[0])
                         center = max(640, vals[1] + vals[2])
@@ -2324,9 +2645,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     vals = [int(x) for x in splitter_sizes]
                     if self._use_pg_dockarea_pre_layout:
                         if len(vals) >= 3:
-                            self.pre_splitter.setSizes(vals[:3])
+                            self.pre_splitter.setSizes([vals[0], max(640, vals[1] + vals[2])])
                         elif len(vals) == 2:
-                            self.pre_splitter.setSizes([vals[0], vals[1], 520])
+                            self.pre_splitter.setSizes(vals[:2])
                     elif len(vals) >= 3:
                         # Migrate old 3-pane [left, center, right] into [left, center+right].
                         left = max(260, vals[0])
@@ -2488,13 +2809,697 @@ class MainWindow(QtWidgets.QMainWindow):
         kept = [p for p in recent if os.path.isfile(p)]
         self._save_recent_preprocessing_files(kept)
 
+    # ---------------- Preprocessing projects ----------------
+
+    def _preprocessing_project_state_exists(self) -> bool:
+        return bool(
+            self._loaded_files
+            or self._manual_regions_by_key
+            or self._manual_exclude_by_key
+            or self._metadata_by_key
+            or self._cutout_regions_by_key
+            or self._sections_by_key
+        )
+
+    def _confirm_discard_preprocessing_project(self, title: str) -> bool:
+        if not self._preprocessing_project_state_exists():
+            return True
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            title,
+            "Discard the current preprocessing project state?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        return reply == QtWidgets.QMessageBox.StandardButton.Yes
+
+    def _clear_preprocessing_project_state(self) -> None:
+        try:
+            self._preview_timer.stop()
+        except Exception:
+            pass
+        self._job_counter += 1
+        self._latest_job_id = self._job_counter
+        self._preview_preserve_view_by_job.clear()
+        self._loaded_files.clear()
+        self._current_path = None
+        self._current_channel = None
+        self._current_trigger = None
+        self._manual_regions_by_key.clear()
+        self._manual_exclude_by_key.clear()
+        self._auto_regions_by_key.clear()
+        self._metadata_by_key.clear()
+        self._cutout_regions_by_key.clear()
+        self._sections_by_key.clear()
+        self._pending_box_region_by_key.clear()
+        self._last_processed.clear()
+        self._csv_channel_mapping_session = None
+        self._csv_mappings_by_path.clear()
+
+        self.file_panel.list_files.clear()
+        self.file_panel.set_available_channels([])
+        self.file_panel.set_available_triggers([])
+        self.param_panel.set_available_export_channels([])
+        self.param_panel.set_available_export_triggers([])
+        for ed in (self.file_panel.edit_time_start, self.file_panel.edit_time_end):
+            ed.blockSignals(True)
+            try:
+                ed.clear()
+            finally:
+                ed.blockSignals(False)
+        self.artifact_panel.set_regions([])
+        self.artifact_panel.set_auto_regions([])
+        self.plots.set_title("No file loaded")
+        self.plots.set_log("")
+        self.plots.show_raw()
+        self._update_plot_status()
+        self.post_tab.set_current_source_label("", "")
+
+    def _new_preprocessing_project(self) -> None:
+        if not self._confirm_discard_preprocessing_project("New preprocessing project"):
+            return
+        self._clear_preprocessing_project_state()
+        self._pre_project_path = None
+        self._show_status_message("Started a new preprocessing project.", 5000)
+
+    def _keyed_regions_to_project(
+        self,
+        mapping: Dict[Tuple[str, str], List[Tuple[float, float]]],
+    ) -> List[Dict[str, object]]:
+        out: List[Dict[str, object]] = []
+        for (path, channel), regions in mapping.items():
+            clean_regions = []
+            for a, b in regions or []:
+                try:
+                    clean_regions.append([float(a), float(b)])
+                except Exception:
+                    continue
+            if clean_regions:
+                out.append({"path": path, "channel": channel, "regions": clean_regions})
+        return out
+
+    def _project_to_keyed_regions(self, data: object) -> Dict[Tuple[str, str], List[Tuple[float, float]]]:
+        out: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
+        if not isinstance(data, list):
+            return out
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("path") or "").strip()
+            channel = str(entry.get("channel") or "").strip()
+            if not path or not channel:
+                continue
+            regions: List[Tuple[float, float]] = []
+            for item in entry.get("regions") or []:
+                try:
+                    a, b = item
+                    regions.append((float(a), float(b)))
+                except Exception:
+                    continue
+            if regions:
+                regions.sort(key=lambda x: x[0])
+                out[(path, channel)] = regions
+        return out
+
+    def _keyed_dict_to_project(self, mapping: Dict[Tuple[str, str], Dict[str, str]]) -> List[Dict[str, object]]:
+        out: List[Dict[str, object]] = []
+        for (path, channel), value in mapping.items():
+            if isinstance(value, dict) and value:
+                out.append({"path": path, "channel": channel, "value": dict(value)})
+        return out
+
+    def _project_to_keyed_dict(self, data: object) -> Dict[Tuple[str, str], Dict[str, str]]:
+        out: Dict[Tuple[str, str], Dict[str, str]] = {}
+        if not isinstance(data, list):
+            return out
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("path") or "").strip()
+            channel = str(entry.get("channel") or "").strip()
+            value = entry.get("value")
+            if path and channel and isinstance(value, dict):
+                out[(path, channel)] = {str(k): str(v) for k, v in value.items()}
+        return out
+
+    def _sections_to_project(self) -> List[Dict[str, object]]:
+        out: List[Dict[str, object]] = []
+        for (path, channel), sections in self._sections_by_key.items():
+            if not sections:
+                continue
+            try:
+                clean_sections = json.loads(json.dumps(sections))
+            except Exception:
+                clean_sections = []
+            if clean_sections:
+                out.append({"path": path, "channel": channel, "sections": clean_sections})
+        return out
+
+    def _project_to_sections(self, data: object) -> Dict[Tuple[str, str], List[Dict[str, object]]]:
+        out: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
+        if not isinstance(data, list):
+            return out
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("path") or "").strip()
+            channel = str(entry.get("channel") or "").strip()
+            sections = entry.get("sections")
+            if path and channel and isinstance(sections, list):
+                out[(path, channel)] = [s for s in sections if isinstance(s, dict)]
+        return out
+
+    def _preprocessing_config_payload(self) -> Dict[str, object]:
+        params = self.param_panel.get_params()
+        return {
+            "artifact_detection_enabled": bool(self.param_panel.cb_artifact.isChecked()),
+            "artifact_overlay_visible": bool(self.param_panel.cb_show_artifact_overlay.isChecked()),
+            "filtering_enabled": bool(self.param_panel.cb_filtering.isChecked()),
+            "parameters": params.to_dict(),
+            "ui_state": self._export_preprocessing_ui_state_for_config(),
+        }
+
+    def _apply_preprocessing_config_payload(self, config: object) -> None:
+        if not isinstance(config, dict):
+            return
+        try:
+            params = config.get("parameters")
+            if isinstance(params, dict):
+                self.param_panel.set_params(ProcessingParams.from_dict(params))
+            if "artifact_detection_enabled" in config:
+                self.param_panel.cb_artifact.setChecked(bool(config.get("artifact_detection_enabled")))
+            if "artifact_overlay_visible" in config:
+                visible = bool(config.get("artifact_overlay_visible"))
+                self.param_panel.cb_show_artifact_overlay.setChecked(visible)
+                self.param_panel.set_artifact_overlay_visible(visible)
+                self.plots.set_artifact_overlay_visible(visible)
+            if "filtering_enabled" in config:
+                self.param_panel.cb_filtering.setChecked(bool(config.get("filtering_enabled")))
+            ui_state = config.get("ui_state")
+            if isinstance(ui_state, dict):
+                self._import_preprocessing_ui_state_from_config(ui_state)
+        except Exception:
+            _LOG.exception("Failed to apply preprocessing project config")
+
+    def _collect_preprocessing_project_payload(self) -> Dict[str, object]:
+        selected_paths = self._selected_paths()
+        start_s, end_s = self._time_window_bounds()
+        return {
+            "project_type": _PRE_PROJECT_TYPE,
+            "project_version": _PRE_PROJECT_VERSION,
+            "source_paths": self.file_panel.all_paths(),
+            "selected_paths": selected_paths,
+            "current_path": self._current_path or "",
+            "current_channel": self._current_channel or "",
+            "current_trigger": self._current_trigger or "",
+            "time_window": {"start_s": start_s, "end_s": end_s},
+            "preprocessing_config": self._preprocessing_config_payload(),
+            "manual_regions": self._keyed_regions_to_project(self._manual_regions_by_key),
+            "manual_exclude_regions": self._keyed_regions_to_project(self._manual_exclude_by_key),
+            "auto_regions": self._keyed_regions_to_project(self._auto_regions_by_key),
+            "metadata": self._keyed_dict_to_project(self._metadata_by_key),
+            "cutout_regions": self._keyed_regions_to_project(self._cutout_regions_by_key),
+            "sections": self._sections_to_project(),
+            "csv_mapping_session": dict(self._csv_channel_mapping_session or {}),
+            "csv_mappings_by_path": [
+                {"path": path, "mapping": dict(mapping)}
+                for path, mapping in self._csv_mappings_by_path.items()
+                if path and isinstance(mapping, dict)
+            ],
+        }
+
+    def _save_preprocessing_project_file(self) -> None:
+        start_dir = (
+            os.path.dirname(self._pre_project_path)
+            if self._pre_project_path
+            else (self.file_panel.current_dir_hint() or self.settings.value("last_open_dir", "", type=str) or os.getcwd())
+        )
+        default_name = os.path.basename(self._pre_project_path) if self._pre_project_path else "pyber_preprocessing_project.json"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save preprocessing project",
+            os.path.join(start_dir, default_name),
+            "pyBer preprocessing project (*.json)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path = f"{path}.json"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._collect_preprocessing_project_payload(), f, indent=2)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Save project", f"Could not save preprocessing project:\n{exc}")
+            return
+        self._pre_project_path = path
+        self._show_status_message(f"Preprocessing project saved: {os.path.basename(path)}", 5000)
+
+    def _open_preprocessing_project_file(self) -> None:
+        start_dir = self.file_panel.current_dir_hint() or self.settings.value("last_open_dir", "", type=str) or os.getcwd()
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open preprocessing project",
+            start_dir,
+            "pyBer preprocessing project (*.json);;All files (*.*)",
+        )
+        if not path:
+            return
+        self._load_preprocessing_project_from_path(path)
+
+    def _load_preprocessing_project_from_path(self, path: str) -> None:
+        if not self._confirm_discard_preprocessing_project("Open preprocessing project"):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Open project", f"Could not read preprocessing project:\n{exc}")
+            return
+        if not isinstance(payload, dict) or payload.get("project_type") != _PRE_PROJECT_TYPE:
+            QtWidgets.QMessageBox.warning(self, "Open project", "This file is not a pyBer preprocessing project.")
+            return
+
+        self._clear_preprocessing_project_state()
+        self._pre_project_path = path
+        self._apply_preprocessing_config_payload(payload.get("preprocessing_config"))
+
+        session_mapping = payload.get("csv_mapping_session")
+        if isinstance(session_mapping, dict):
+            self._csv_channel_mapping_session = {str(k): str(v) for k, v in session_mapping.items()}
+        for entry in payload.get("csv_mappings_by_path") or []:
+            if not isinstance(entry, dict):
+                continue
+            src_path = str(entry.get("path") or "").strip()
+            mapping = entry.get("mapping")
+            if src_path and isinstance(mapping, dict):
+                self._csv_mappings_by_path[src_path] = {str(k): str(v) for k, v in mapping.items()}
+
+        source_paths = [str(p) for p in payload.get("source_paths") or [] if str(p or "").strip()]
+        existing_paths = [p for p in source_paths if os.path.isfile(p)]
+        missing_paths = [p for p in source_paths if p not in existing_paths]
+        if existing_paths:
+            self._add_files(existing_paths, select_after=False)
+
+        self._manual_regions_by_key = self._project_to_keyed_regions(payload.get("manual_regions"))
+        self._manual_exclude_by_key = self._project_to_keyed_regions(payload.get("manual_exclude_regions"))
+        self._auto_regions_by_key = self._project_to_keyed_regions(payload.get("auto_regions"))
+        self._metadata_by_key = self._project_to_keyed_dict(payload.get("metadata"))
+        self._cutout_regions_by_key = self._project_to_keyed_regions(payload.get("cutout_regions"))
+        self._sections_by_key = self._project_to_sections(payload.get("sections"))
+
+        tw = payload.get("time_window") if isinstance(payload.get("time_window"), dict) else {}
+        for ed, value in (
+            (self.file_panel.edit_time_start, tw.get("start_s")),
+            (self.file_panel.edit_time_end, tw.get("end_s")),
+        ):
+            ed.blockSignals(True)
+            try:
+                ed.setText("" if value is None else f"{float(value):.6g}")
+            except Exception:
+                ed.setText("")
+            finally:
+                ed.blockSignals(False)
+
+        self._current_path = str(payload.get("current_path") or "") or None
+        self._current_channel = str(payload.get("current_channel") or "") or None
+        self._current_trigger = str(payload.get("current_trigger") or "") or None
+        selected_paths = [str(p) for p in payload.get("selected_paths") or [] if str(p or "").strip()]
+        self._restore_file_selection(selected_paths, self._current_path)
+        self._push_recent_preprocessing_files(existing_paths)
+        self._on_file_selection_changed()
+
+        if missing_paths:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Open project",
+                "Some linked input files are missing and were skipped:\n" + "\n".join(missing_paths[:12]),
+            )
+        self._show_status_message(f"Preprocessing project loaded: {os.path.basename(path)}", 5000)
+
+    def _restore_file_selection(self, selected_paths: List[str], current_path: Optional[str]) -> None:
+        selected = set(selected_paths or [])
+        if current_path:
+            selected.add(current_path)
+        list_widget = self.file_panel.list_files
+        list_widget.blockSignals(True)
+        try:
+            target_row = -1
+            for i in range(list_widget.count()):
+                item = list_widget.item(i)
+                if item is None:
+                    continue
+                path = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "")
+                item.setSelected(path in selected)
+                if current_path and path == current_path:
+                    target_row = i
+            if target_row >= 0:
+                list_widget.setCurrentRow(target_row)
+            elif list_widget.count() and not selected:
+                list_widget.setCurrentRow(0)
+                item0 = list_widget.item(0)
+                if item0 is not None:
+                    item0.setSelected(True)
+        finally:
+            list_widget.blockSignals(False)
+
+    # ---------------- Raw CSV preprocessing import ----------------
+
+    def _normalize_csv_column_name(self, value: object) -> str:
+        return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+    def _is_csv_time_column(self, value: object) -> bool:
+        norm = self._normalize_csv_column_name(value)
+        return norm in {"time", "t", "timestamp", "times", "timesec", "times", "timems"} or "timestamp" in norm
+
+    def _parse_csv_float(self, value: object) -> float:
+        text = str(value or "").strip()
+        if not text or text.lower() in {"nan", "none", "null", "na"}:
+            return np.nan
+        try:
+            return float(text)
+        except Exception:
+            pass
+        try:
+            return float(text.replace(" ", "").replace(",", "."))
+        except Exception:
+            return np.nan
+
+    def _clean_csv_row(self, row: List[str]) -> List[str]:
+        out = [str(cell or "").strip() for cell in row]
+        while out and not out[-1]:
+            out.pop()
+        return out
+
+    def _read_csv_rows(self, path: str) -> List[List[str]]:
+        import csv
+
+        last_error: Optional[Exception] = None
+        for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+            try:
+                with open(path, "r", newline="", encoding=encoding) as f:
+                    return [self._clean_csv_row(row) for row in csv.reader(f)]
+            except UnicodeDecodeError as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise last_error
+        return []
+
+    def _find_raw_csv_table(self, rows: List[List[str]]) -> Tuple[List[str], List[List[str]]]:
+        cleaned = [row for row in (self._clean_csv_row(r) for r in rows) if row and any(cell for cell in row)]
+        for idx, row in enumerate(cleaned):
+            if len(row) < 2:
+                continue
+            if any(self._is_csv_time_column(cell) for cell in row):
+                headers = [h.strip() or f"Column {i + 1}" for i, h in enumerate(row)]
+                return headers, cleaned[idx + 1 :]
+
+        # Fallback for CSVs without a canonical time header: find the first row whose
+        # following line looks numeric in at least two columns.
+        for idx, row in enumerate(cleaned[:-1]):
+            if len(row) < 2:
+                continue
+            next_row = cleaned[idx + 1]
+            numeric_count = 0
+            for col_idx in range(min(len(row), len(next_row))):
+                if np.isfinite(self._parse_csv_float(next_row[col_idx])):
+                    numeric_count += 1
+            if numeric_count >= 2:
+                headers = [h.strip() or f"Column {i + 1}" for i, h in enumerate(row)]
+                return headers, cleaned[idx + 1 :]
+
+        raise ValueError("Could not find a CSV header row with a time column.")
+
+    def _csv_numeric_headers(self, headers: List[str], rows: List[List[str]]) -> List[str]:
+        out: List[str] = []
+        sample = rows[: min(len(rows), 1000)]
+        min_count = 1 if len(sample) < 10 else 3
+        for idx, name in enumerate(headers):
+            if self._is_csv_time_column(name):
+                continue
+            count = 0
+            for row in sample:
+                if idx < len(row) and np.isfinite(self._parse_csv_float(row[idx])):
+                    count += 1
+            if count >= min_count:
+                out.append(name)
+        return out
+
+    def _resolve_csv_column_name(self, headers: List[str], wanted: object) -> str:
+        text = str(wanted or "").strip()
+        if not text:
+            return ""
+        for h in headers:
+            if h == text:
+                return h
+        for h in headers:
+            if h.lower() == text.lower():
+                return h
+        norm = self._normalize_csv_column_name(text)
+        for h in headers:
+            if self._normalize_csv_column_name(h) == norm:
+                return h
+        return ""
+
+    def _sanitize_csv_mapping_for_headers(
+        self,
+        mapping: object,
+        headers: List[str],
+        *,
+        require_all: bool = True,
+    ) -> Optional[Dict[str, str]]:
+        if not isinstance(mapping, dict):
+            return None
+
+        def _resolve(name_key: str, index_key: str) -> str:
+            col = self._resolve_csv_column_name(headers, mapping.get(name_key))
+            if col:
+                return col
+            try:
+                idx = int(mapping.get(index_key))
+            except Exception:
+                idx = -1
+            if 0 <= idx < len(headers):
+                return headers[idx]
+            return ""
+
+        time_col = _resolve("time", "time_index")
+        raw1 = _resolve("raw1", "raw1_index")
+        ref = _resolve("reference", "reference_index")
+        if require_all and (not time_col or not raw1 or not ref):
+            return None
+        raw2 = _resolve("raw2", "raw2_index")
+        trigger = _resolve("trigger", "trigger_index")
+        unit = str(mapping.get("time_unit") or "Auto").strip()
+        if unit.lower().startswith("milli"):
+            unit = "Milliseconds"
+        elif unit.lower().startswith("sec"):
+            unit = "Seconds"
+        else:
+            unit = "Auto"
+        return {
+            "time": time_col,
+            "time_unit": unit,
+            "raw1": raw1,
+            "raw2": raw2,
+            "reference": ref,
+            "trigger": trigger,
+            "time_index": str(self._csv_column_index(headers, time_col)),
+            "raw1_index": str(self._csv_column_index(headers, raw1)),
+            "raw2_index": str(self._csv_column_index(headers, raw2)),
+            "reference_index": str(self._csv_column_index(headers, ref)),
+            "trigger_index": str(self._csv_column_index(headers, trigger)),
+        }
+
+    def _infer_csv_mapping_defaults(self, headers: List[str], numeric_headers: List[str]) -> Dict[str, str]:
+        time_col = next((h for h in headers if self._is_csv_time_column(h)), headers[0] if headers else "")
+
+        def _has_any(name: str, terms: Tuple[str, ...]) -> bool:
+            norm = self._normalize_csv_column_name(name)
+            return any(term in norm for term in terms)
+
+        candidates = [h for h in numeric_headers if h != time_col]
+        ref = next((h for h in candidates if _has_any(h, ("410", "405", "isob", "isos", "ref"))), "")
+        raw_priority = [h for h in candidates if h != ref and _has_any(h, ("470", "465", "signal", "sig"))]
+        raw_rest = [h for h in candidates if h != ref and h not in raw_priority and not _has_any(h, ("event", "dio", "ttl", "digital"))]
+        raw_candidates = raw_priority + raw_rest
+        if not ref and len(candidates) >= 2:
+            ref = candidates[1] if raw_candidates and candidates[1] != raw_candidates[0] else candidates[0]
+        raw1 = raw_candidates[0] if raw_candidates else next((h for h in candidates if h != ref), "")
+        raw2 = raw_candidates[1] if len(raw_candidates) > 1 else ""
+        trigger = next((h for h in candidates if _has_any(h, ("event", "dio", "ttl", "digital"))), "")
+        return {
+            "time": time_col,
+            "time_unit": "Auto",
+            "raw1": raw1,
+            "raw2": raw2,
+            "reference": ref,
+            "trigger": trigger,
+        }
+
+    def _csv_mapping_for_file(
+        self,
+        path: str,
+        headers: List[str],
+        numeric_headers: List[str],
+    ) -> Optional[Dict[str, str]]:
+        for candidate in (
+            self._csv_mappings_by_path.get(path),
+            self._csv_channel_mapping_session,
+        ):
+            resolved = self._sanitize_csv_mapping_for_headers(candidate, headers)
+            if resolved is not None:
+                self._csv_mappings_by_path[path] = dict(resolved)
+                if self._csv_channel_mapping_session is None:
+                    self._csv_channel_mapping_session = dict(resolved)
+                return resolved
+
+        defaults = self._infer_csv_mapping_defaults(headers, numeric_headers)
+        partial = self._sanitize_csv_mapping_for_headers(self._csv_channel_mapping_session, headers, require_all=False)
+        if partial:
+            for key, value in partial.items():
+                if value:
+                    defaults[key] = value
+        if len(numeric_headers) < 2:
+            raise ValueError("CSV must contain at least two numeric columns for raw signal and isobestic/reference.")
+
+        dlg = CsvChannelMappingDialog(headers, numeric_headers, defaults, self)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return None
+        mapping = self._sanitize_csv_mapping_for_headers(dlg.mapping(), headers)
+        if mapping is None:
+            raise ValueError("Invalid CSV channel mapping.")
+        self._csv_channel_mapping_session = dict(mapping)
+        self._csv_mappings_by_path[path] = dict(mapping)
+        return mapping
+
+    def _csv_column_index(self, headers: List[str], column: str) -> int:
+        try:
+            return headers.index(column)
+        except ValueError:
+            return -1
+
+    def _csv_time_seconds(self, time: np.ndarray, time_col: str, unit: str) -> np.ndarray:
+        t = np.asarray(time, float)
+        unit_l = str(unit or "Auto").strip().lower()
+        if unit_l.startswith("milli"):
+            return t / 1000.0
+        if unit_l.startswith("sec"):
+            return t
+        finite = t[np.isfinite(t)]
+        if finite.size > 2:
+            dt = float(np.nanmedian(np.abs(np.diff(finite))))
+        else:
+            dt = np.nan
+        norm = self._normalize_csv_column_name(time_col)
+        if "ms" in norm or "millisecond" in norm or (np.isfinite(dt) and dt >= 10.0):
+            return t / 1000.0
+        return t
+
+    def _load_raw_csv_as_pre_file(self, path: str) -> Optional[LoadedDoricFile]:
+        rows = self._read_csv_rows(path)
+        if not rows:
+            raise ValueError("CSV file is empty.")
+        headers, data_rows = self._find_raw_csv_table(rows)
+        if not data_rows:
+            raise ValueError("CSV file has no data rows.")
+        numeric_headers = self._csv_numeric_headers(headers, data_rows)
+        mapping = self._csv_mapping_for_file(path, headers, numeric_headers)
+        if mapping is None:
+            return None
+
+        idx_time = self._csv_column_index(headers, mapping["time"])
+        idx_raw1 = self._csv_column_index(headers, mapping["raw1"])
+        idx_raw2 = self._csv_column_index(headers, mapping.get("raw2", ""))
+        idx_ref = self._csv_column_index(headers, mapping["reference"])
+        idx_trig = self._csv_column_index(headers, mapping.get("trigger", ""))
+        if min(idx_time, idx_raw1, idx_ref) < 0:
+            raise ValueError("CSV channel mapping refers to a missing column.")
+
+        time_vals: List[float] = []
+        raw1_vals: List[float] = []
+        raw2_vals: List[float] = []
+        ref_vals: List[float] = []
+        trig_vals: List[float] = []
+        has_raw2 = idx_raw2 >= 0
+        has_trig = idx_trig >= 0
+
+        for row in data_rows:
+            tval = self._parse_csv_float(row[idx_time] if idx_time < len(row) else "")
+            if not np.isfinite(tval):
+                continue
+            time_vals.append(tval)
+            raw1_vals.append(self._parse_csv_float(row[idx_raw1] if idx_raw1 < len(row) else ""))
+            ref_vals.append(self._parse_csv_float(row[idx_ref] if idx_ref < len(row) else ""))
+            if has_raw2:
+                raw2_vals.append(self._parse_csv_float(row[idx_raw2] if idx_raw2 < len(row) else ""))
+            if has_trig:
+                trig_vals.append(self._parse_csv_float(row[idx_trig] if idx_trig < len(row) else ""))
+
+        if len(time_vals) < 2:
+            raise ValueError("CSV file has fewer than two valid time samples.")
+
+        t = self._csv_time_seconds(np.asarray(time_vals, float), mapping["time"], mapping.get("time_unit", "Auto"))
+        raw1 = np.asarray(raw1_vals, float)
+        ref = np.asarray(ref_vals, float)
+        if not np.isfinite(raw1).any():
+            raise ValueError(f"Raw signal column '{mapping['raw1']}' has no numeric values.")
+        if not np.isfinite(ref).any():
+            raise ValueError(f"Isobestic/reference column '{mapping['reference']}' has no numeric values.")
+
+        order = np.argsort(t)
+        if not np.all(order == np.arange(t.size)):
+            t = t[order]
+            raw1 = raw1[order]
+            ref = ref[order]
+            if has_raw2:
+                raw2_vals = list(np.asarray(raw2_vals, float)[order])
+            if has_trig:
+                trig_vals = list(np.asarray(trig_vals, float)[order])
+
+        channels = [mapping["raw1"]]
+        time_by = {mapping["raw1"]: t.copy()}
+        signal_by = {mapping["raw1"]: raw1.copy()}
+        reference_by = {mapping["raw1"]: ref.copy()}
+
+        if has_raw2:
+            raw2 = np.asarray(raw2_vals, float)
+            if np.isfinite(raw2).any():
+                channels.append(mapping["raw2"])
+                time_by[mapping["raw2"]] = t.copy()
+                signal_by[mapping["raw2"]] = raw2.copy()
+                reference_by[mapping["raw2"]] = ref.copy()
+
+        trigger_by: Dict[str, np.ndarray] = {}
+        trigger_time_by: Dict[str, np.ndarray] = {}
+        digital_time: Optional[np.ndarray] = None
+        if has_trig:
+            trig = np.asarray(trig_vals, float)
+            if trig.size == t.size and np.isfinite(trig).any():
+                trig_name = mapping.get("trigger", "") or "Events"
+                digital_time = t.copy()
+                trigger_by[trig_name] = trig.copy()
+                trigger_time_by[trig_name] = t.copy()
+
+        return LoadedDoricFile(
+            path=path,
+            channels=channels,
+            time_by_channel=time_by,
+            signal_by_channel=signal_by,
+            reference_by_channel=reference_by,
+            digital_time=digital_time,
+            digital_by_name={k: v.copy() for k, v in trigger_by.items()},
+            trigger_time_by_name=trigger_time_by,
+            trigger_by_name=trigger_by,
+        )
+
     def _open_files_dialog(self) -> None:
         start_dir = self.file_panel.current_dir_hint() or self.settings.value("last_open_dir", "", type=str) or os.getcwd()
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
             "Open files",
             start_dir,
-            "Doric files (*.doric *.h5 *.hdf5);;All files (*.*)",
+            "Data files (*.doric *.h5 *.hdf5 *.csv);;Doric/HDF5 files (*.doric *.h5 *.hdf5);;CSV files (*.csv);;All files (*.*)",
         )
         if not paths:
             return
@@ -2505,22 +3510,35 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _open_folder_dialog(self) -> None:
         start_dir = self.file_panel.current_dir_hint() or self.settings.value("last_open_dir", "", type=str) or os.getcwd()
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Add folder with .doric", start_dir)
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Add folder with data files", start_dir)
         if not folder:
             return
         self.settings.setValue("last_open_dir", folder)
 
         paths: List[str] = []
         for fn in os.listdir(folder):
-            if fn.lower().endswith((".doric", ".h5", ".hdf5")):
+            if fn.lower().endswith((".doric", ".h5", ".hdf5", ".csv")):
                 paths.append(os.path.join(folder, fn))
         paths.sort()
         self._push_recent_preprocessing_files(paths)
         self._add_files(paths)
 
-    def _add_files(self, paths: List[str]) -> None:
+    def _add_files(self, paths: List[str], select_after: bool = True) -> None:
         for p in paths:
             if p in self._loaded_files:
+                continue
+            ext = os.path.splitext(p)[1].lower()
+            if ext == ".csv":
+                try:
+                    loaded_from_csv = self._load_raw_csv_as_pre_file(p)
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(self, "Load error", f"Failed to load CSV:\n{p}\n\n{e}")
+                    continue
+                if loaded_from_csv is None:
+                    continue
+                self._loaded_files[p] = loaded_from_csv
+                self.file_panel.add_file(p)
+                self._show_status_message(f"Loaded CSV: {os.path.basename(p)}", 5000)
                 continue
             try:
                 doric = self.processor.load_file(p)
@@ -2529,7 +3547,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._show_status_message(f"Loaded: {os.path.basename(p)}", 5000)
             except Exception as e:
                 loaded_from_processed: Optional[LoadedDoricFile] = None
-                ext = os.path.splitext(p)[1].lower()
                 if ext in (".h5", ".hdf5"):
                     loaded_from_processed = self._load_processed_h5_as_pre_file(p)
                 if loaded_from_processed is not None:
@@ -2545,7 +3562,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._push_recent_preprocessing_files(paths)
 
         # set current selection -> triggers preview
-        self._on_file_selection_changed()
+        if select_after:
+            self._on_file_selection_changed()
 
     # ---------------- Current selection ----------------
 
@@ -2578,7 +3596,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         self._pre_section_state_before_tab_switch = {}
         for key, dock in self._section_docks.items():
-            area = _dock_area_to_int(host.dockWidgetArea(dock), _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2))
+            area = _dock_area_to_int(host.dockWidgetArea(dock), _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1))
             self._pre_section_state_before_tab_switch[key] = {
                 "visible": bool(dock.isVisible()),
                 "floating": bool(dock.isFloating()),
@@ -2589,7 +3607,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pre_artifact_state_before_tab_switch = {
             "visible": bool(self.art_dock.isVisible()),
             "floating": bool(self.art_dock.isFloating()),
-            "area": _dock_area_to_int(host.dockWidgetArea(self.art_dock), _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)),
+            "area": _dock_area_to_int(host.dockWidgetArea(self.art_dock), _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)),
             "geometry": self.art_dock.saveGeometry(),
         }
         self._pre_advanced_visible_before_tab_switch = bool(
@@ -2679,14 +3697,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._pre_popups_hidden_by_tab_switch:
             return
-        right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
+        left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
         try:
             for key in self._section_docks.keys():
                 state = self._pre_section_state_before_tab_switch.get(key, {})
                 base = f"pre_section_docks/{key}"
                 self.settings.setValue(f"{base}/visible", bool(state.get("visible", False)))
                 self.settings.setValue(f"{base}/floating", bool(state.get("floating", True)))
-                self.settings.setValue(f"{base}/area", _dock_area_to_int(state.get("area", right_i), right_i))
+                self.settings.setValue(f"{base}/area", _dock_area_to_int(state.get("area", left_i), left_i))
                 geom = state.get("geometry")
                 if isinstance(geom, QtCore.QByteArray) and not geom.isEmpty():
                     self.settings.setValue(f"{base}/geometry", geom)
@@ -2698,7 +3716,7 @@ class MainWindow(QtWidgets.QMainWindow):
             base = "pre_artifact_dock_state"
             self.settings.setValue(f"{base}/visible", bool(art_state.get("visible", False)))
             self.settings.setValue(f"{base}/floating", bool(art_state.get("floating", False)))
-            self.settings.setValue(f"{base}/area", _dock_area_to_int(art_state.get("area", right_i), right_i))
+            self.settings.setValue(f"{base}/area", _dock_area_to_int(art_state.get("area", left_i), left_i))
             art_geom = art_state.get("geometry")
             if isinstance(art_geom, QtCore.QByteArray) and not art_geom.isEmpty():
                 self.settings.setValue(f"{base}/geometry", art_geom)
@@ -2785,8 +3803,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._section_docks:
             return
 
-        right = QtCore.Qt.DockWidgetArea.RightDockWidgetArea
-        bottom = QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
+        left = QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
         self._suspend_panel_layout_persistence = True
         try:
             self._enforce_postprocessing_popups_hidden()
@@ -2794,7 +3811,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # - top tab group: Artifacts list / Artifacts / Filtering / Baseline / Output
             # - middle: QC
             # - bottom: Export
-            # - bottom strip: Configuration
+            # - left tab: Configuration
             artifacts = self._section_docks.get("artifacts")
             filtering = self._section_docks.get("filtering")
             baseline = self._section_docks.get("baseline")
@@ -2809,10 +3826,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 dock.setFloating(False)
                 dock.show()
 
-            self.addDockWidget(right, self.art_dock)
+            self.addDockWidget(left, self.art_dock)
             for dock in (artifacts, filtering, baseline, output, qc, export):
                 if dock is not None:
-                    self.addDockWidget(right, dock)
+                    self.addDockWidget(left, dock)
 
             if qc is not None:
                 self.splitDockWidget(self.art_dock, qc, QtCore.Qt.Orientation.Vertical)
@@ -2823,10 +3840,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.splitDockWidget(self.art_dock, export, QtCore.Qt.Orientation.Vertical)
 
             if config is not None:
-                self.addDockWidget(bottom, config)
+                self.addDockWidget(left, config)
                 config.raise_()
 
-            for dock in (artifacts, filtering, baseline, output):
+            for dock in (artifacts, filtering, baseline, output, config):
                 if dock is not None:
                     self.tabifyDockWidget(self.art_dock, dock)
             self.art_dock.raise_()
@@ -2845,11 +3862,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_pre_fixed_layout(self) -> None:
         """
         Force a deterministic preprocessing dock layout matching the project default:
-        - Right column top: Artifacts list tab group
+        - Left column top: Artifacts list tab group
           (Artifacts list / Artifacts / Filtering / Baseline / Output)
-        - Right column middle: QC
-        - Right column bottom: Export
-        - Bottom strip: Configuration
+        - Left column middle: QC
+        - Left column bottom: Export
+        - Left tab: Configuration
         """
         if self._use_pg_dockarea_pre_layout:
             self._setup_section_popups()
@@ -2862,9 +3879,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         host = self
-        right = QtCore.Qt.DockWidgetArea.RightDockWidgetArea
-        bottom = QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
-
+        left = QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
         artifacts = self._section_docks.get("artifacts")
         filtering = self._section_docks.get("filtering")
         baseline = self._section_docks.get("baseline")
@@ -2877,32 +3892,23 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self._hide_dock_widgets(self.getPostDockWidgets(), remove=True)
             # Attach all preprocessing docks in a deterministic non-floating state first.
-            ordered_right: List[QtWidgets.QDockWidget] = []
+            ordered_left: List[QtWidgets.QDockWidget] = []
             if isinstance(self.art_dock, QtWidgets.QDockWidget):
-                ordered_right.append(self.art_dock)
-            for dock in (artifacts, filtering, baseline, output, qc, export):
+                ordered_left.append(self.art_dock)
+            for dock in (artifacts, filtering, baseline, output, qc, export, config):
                 if isinstance(dock, QtWidgets.QDockWidget):
-                    ordered_right.append(dock)
+                    ordered_left.append(dock)
 
-            for dock in ordered_right:
+            for dock in ordered_left:
                 dock.blockSignals(True)
                 try:
                     dock.setFloating(False)
-                    host.addDockWidget(right, dock)
+                    host.addDockWidget(left, dock)
                     dock.show()
                 finally:
                     dock.blockSignals(False)
 
-            if isinstance(config, QtWidgets.QDockWidget):
-                config.blockSignals(True)
-                try:
-                    config.setFloating(False)
-                    host.addDockWidget(bottom, config)
-                    config.show()
-                finally:
-                    config.blockSignals(False)
-
-            # Vertical stack in right area: top tab group -> QC -> Export.
+            # Vertical stack in left area: top tab group -> QC -> Export.
             if qc is not None:
                 host.splitDockWidget(self.art_dock, qc, QtCore.Qt.Orientation.Vertical)
             if export is not None:
@@ -2920,6 +3926,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 host.tabifyDockWidget(self.art_dock, baseline)
             if output is not None:
                 host.tabifyDockWidget(self.art_dock, output)
+            if config is not None:
+                host.tabifyDockWidget(self.art_dock, config)
 
             # Keep active tabs consistent with the default arrangement.
             try:
@@ -2933,7 +3941,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if config is not None:
                 config.raise_()
 
-            # Approximate default height proportions for right-column groups.
+            # Approximate default height proportions for left-column groups.
             try:
                 vdocks: List[QtWidgets.QDockWidget] = []
                 sizes: List[int] = []
@@ -2987,8 +3995,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     visible = bool(state.get("visible", self._pre_section_visibility_before_tab_switch.get(key, False)))
                     floating = bool(state.get("floating", dock.isFloating()))
                     area = self._dock_area_from_settings(
-                        state.get("area", _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)),
-                        QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
+                        state.get("area", _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)),
+                        QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
                     )
                     geom = state.get("geometry", None)
 
@@ -3018,8 +4026,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 art_visible = bool(art_state.get("visible", self._pre_artifact_visible_before_tab_switch))
                 art_floating = bool(art_state.get("floating", self.art_dock.isFloating()))
                 art_area = self._dock_area_from_settings(
-                    art_state.get("area", _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)),
-                    QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
+                    art_state.get("area", _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)),
+                    QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
                 )
                 art_geom = art_state.get("geometry", None)
                 if art_floating:
@@ -4547,6 +5555,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 doric_paths.append(p)
                 continue
             if ext == ".csv":
+                if pre_active:
+                    doric_paths.append(p)
+                    continue
                 trial = self._load_processed_csv(p)
                 if trial is not None:
                     processed.append(trial)
@@ -4608,6 +5619,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "z-score",
             "zscore",
             "z score",
+            "prominence",
             "output",
             "raw_signal",
             "raw_465",
@@ -4683,6 +5695,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     col = "dFF"
                 elif col == "raw_signal":
                     col = "Raw signal (465)"
+                elif col == "prominence":
+                    col = "Prominence normalized"
                 output_label = f"Imported CSV ({col})"
 
         return ProcessedTrial(
@@ -4723,6 +5737,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     out = np.asarray(g["z-score"][()], float)
                 elif "zscore" in g:
                     out = np.asarray(g["zscore"][()], float)
+                elif "prominence" in g:
+                    out = np.asarray(g["prominence"][()], float)
                 elif "raw_465" in g:
                     out = np.asarray(g["raw_465"][()], float)
                 elif "raw" in g:

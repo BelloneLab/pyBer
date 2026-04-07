@@ -1,4 +1,186 @@
 # styles.py
+from __future__ import annotations
+
+# ---------------------------------------------------------------------------
+# Modern flat icons painted programmatically — used by the side-rail buttons
+# in main.py and gui_postprocessing.py. No external assets needed.
+# ---------------------------------------------------------------------------
+
+def _make_icon(painter_fn, size: int = 40, color: str = "#cdd6f4"):
+    from PySide6 import QtCore, QtGui
+    pix = QtGui.QPixmap(size, size)
+    pix.fill(QtCore.Qt.GlobalColor.transparent)
+    p = QtGui.QPainter(pix)
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    painter_fn(p, QtCore.QRect(6, 6, size - 12, size - 12), QtGui.QColor(color))
+    p.end()
+    return QtGui.QIcon(pix)
+
+
+def _pen(c, w=2.0):
+    from PySide6 import QtCore, QtGui
+    return QtGui.QPen(c, w, QtCore.Qt.PenStyle.SolidLine,
+                      QtCore.Qt.PenCapStyle.RoundCap,
+                      QtCore.Qt.PenJoinStyle.RoundJoin)
+
+
+def _paint_database(p, r, c):
+    from PySide6 import QtCore
+    p.setPen(_pen(c, 1.9)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    cx = r.center().x(); ry = max(2, r.height() // 8)
+    p.drawEllipse(QtCore.QPoint(cx, r.top() + ry), r.width() // 2 - 1, ry)
+    p.drawLine(r.left() + 1, r.top() + ry, r.left() + 1, r.bottom() - ry)
+    p.drawLine(r.right() - 1, r.top() + ry, r.right() - 1, r.bottom() - ry)
+    p.drawArc(QtCore.QRect(r.left() + 1, r.bottom() - 2 * ry, r.width() - 2, 2 * ry),
+              200 * 16, 140 * 16)
+    p.drawArc(QtCore.QRect(r.left() + 1, r.center().y() - ry, r.width() - 2, 2 * ry),
+              200 * 16, 140 * 16)
+
+
+def _paint_list(p, r, c):
+    p.setPen(_pen(c, 2.0))
+    for i in range(3):
+        y = r.top() + 3 + i * (r.height() // 3)
+        p.drawLine(r.left() + 5, y, r.left() + 5, y)
+        p.drawLine(r.left() + 9, y, r.right() - 1, y)
+
+
+def _paint_sliders(p, r, c):
+    from PySide6 import QtCore, QtGui
+    p.setPen(_pen(c, 2.0)); p.setBrush(QtGui.QColor(c))
+    rows = [(0.25, 0.4), (0.55, 0.65), (0.8, 0.3)]
+    for frac_y, knob_x in rows:
+        y = r.top() + int(r.height() * frac_y)
+        p.drawLine(r.left() + 1, y, r.right() - 1, y)
+        kx = r.left() + int(r.width() * knob_x)
+        p.drawEllipse(QtCore.QPoint(kx, y), 2, 2)
+
+
+def _paint_filter(p, r, c):
+    from PySide6 import QtCore, QtGui
+    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    pts = [QtCore.QPoint(r.left() + 1, r.top() + 2),
+           QtCore.QPoint(r.right() - 1, r.top() + 2),
+           QtCore.QPoint(r.center().x() + r.width() // 5, r.center().y()),
+           QtCore.QPoint(r.center().x() + r.width() // 5, r.bottom() - 2),
+           QtCore.QPoint(r.center().x() - r.width() // 5, r.bottom() - 2),
+           QtCore.QPoint(r.center().x() - r.width() // 5, r.center().y())]
+    p.drawPolygon(QtGui.QPolygon(pts))
+
+
+def _paint_wave(p, r, c):
+    from PySide6 import QtCore, QtGui
+    import math
+    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    path = QtGui.QPainterPath()
+    cy = r.center().y()
+    path.moveTo(r.left(), cy)
+    w = r.width()
+    for i in range(w + 1):
+        x = r.left() + i
+        y = cy - math.sin(i / w * 2 * math.pi * 1.4) * (r.height() / 2 - 2)
+        path.lineTo(x, y)
+    p.drawPath(path)
+
+
+def _paint_chart(p, r, c):
+    from PySide6 import QtGui
+    p.setPen(_pen(c, 1.6)); p.setBrush(QtGui.QColor(c))
+    bar_w = max(3, r.width() // 5)
+    gap = max(2, (r.width() - bar_w * 3) // 4)
+    heights = [0.5, 0.85, 0.65]
+    x = r.left() + gap
+    for h in heights:
+        bh = int(r.height() * h)
+        p.drawRect(x, r.bottom() - bh, bar_w, bh)
+        x += bar_w + gap
+
+
+def _paint_badge(p, r, c):
+    from PySide6 import QtCore
+    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    cx, cy = r.center().x(), r.center().y()
+    rad = min(r.width(), r.height()) // 2 - 1
+    p.drawEllipse(QtCore.QPoint(cx, cy), rad, rad)
+    p.drawLine(cx - rad // 2, cy, cx - 2, cy + rad // 2)
+    p.drawLine(cx - 2, cy + rad // 2, cx + rad // 2, cy - rad // 3)
+
+
+def _paint_export(p, r, c):
+    from PySide6 import QtCore
+    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    cx = r.center().x()
+    p.drawLine(cx, r.top() + 1, cx, r.bottom() - r.height() // 3)
+    p.drawLine(cx, r.bottom() - r.height() // 3,
+               cx - r.width() // 4, r.bottom() - r.height() // 3 - r.width() // 4)
+    p.drawLine(cx, r.bottom() - r.height() // 3,
+               cx + r.width() // 4, r.bottom() - r.height() // 3 - r.width() // 4)
+    p.drawLine(r.left() + 1, r.bottom() - 1, r.right() - 1, r.bottom() - 1)
+
+
+def _paint_gear(p, r, c):
+    from PySide6 import QtCore
+    import math
+    p.setPen(_pen(c, 1.8)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    cx, cy = r.center().x(), r.center().y()
+    rad = min(r.width(), r.height()) // 2 - 2
+    p.drawEllipse(QtCore.QPoint(cx, cy), rad - 2, rad - 2)
+    p.drawEllipse(QtCore.QPoint(cx, cy), max(1, rad // 3), max(1, rad // 3))
+    for k in range(8):
+        a = k * math.pi / 4
+        x1 = cx + (rad - 1) * math.cos(a); y1 = cy + (rad - 1) * math.sin(a)
+        x2 = cx + (rad + 2) * math.cos(a); y2 = cy + (rad + 2) * math.sin(a)
+        p.drawLine(int(x1), int(y1), int(x2), int(y2))
+
+
+def _paint_grid(p, r, c):
+    from PySide6 import QtCore
+    p.setPen(_pen(c, 1.6)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    p.drawRect(r)
+    p.drawLine(r.left(), r.center().y(), r.right(), r.center().y())
+    p.drawLine(r.center().x(), r.top(), r.center().x(), r.bottom())
+
+
+def _paint_target(p, r, c):
+    from PySide6 import QtCore
+    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    cx, cy = r.center().x(), r.center().y()
+    rad = min(r.width(), r.height()) // 2 - 1
+    p.drawEllipse(QtCore.QPoint(cx, cy), rad, rad)
+    p.drawEllipse(QtCore.QPoint(cx, cy), rad // 2, rad // 2)
+    p.drawLine(cx - rad - 2, cy, cx - 2, cy)
+    p.drawLine(cx + 2, cy, cx + rad + 2, cy)
+    p.drawLine(cx, cy - rad - 2, cx, cy - 2)
+    p.drawLine(cx, cy + 2, cx, cy + rad + 2)
+
+
+def _paint_pulse(p, r, c):
+    from PySide6 import QtCore
+    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    cy = r.center().y()
+    x0 = r.left()
+    p.drawLine(x0, cy, x0 + r.width() // 4, cy)
+    p.drawLine(x0 + r.width() // 4, cy, x0 + r.width() // 4, r.top() + 1)
+    p.drawLine(x0 + r.width() // 4, r.top() + 1, x0 + r.width() // 2, r.top() + 1)
+    p.drawLine(x0 + r.width() // 2, r.top() + 1, x0 + r.width() // 2, r.bottom() - 1)
+    p.drawLine(x0 + r.width() // 2, r.bottom() - 1, x0 + 3 * r.width() // 4, r.bottom() - 1)
+    p.drawLine(x0 + 3 * r.width() // 4, r.bottom() - 1, x0 + 3 * r.width() // 4, cy)
+    p.drawLine(x0 + 3 * r.width() // 4, cy, r.right(), cy)
+
+
+def _paint_paw(p, r, c):
+    from PySide6 import QtCore, QtGui
+    p.setPen(_pen(c, 1.4)); p.setBrush(QtGui.QColor(c))
+    cx, cy = r.center().x(), r.center().y()
+    rw = r.width(); rh = r.height()
+    # Pad
+    p.drawEllipse(QtCore.QPoint(cx, cy + rh // 6), rw // 3, rh // 4)
+    # Toes
+    for dx in (-rw // 3, -rw // 9, rw // 9, rw // 3):
+        p.drawEllipse(QtCore.QPoint(cx + dx, cy - rh // 4), max(2, rw // 10), max(2, rh // 8))
+
+
+
 
 APP_QSS = r"""
 /* Adobe-like dark palette */
@@ -355,6 +537,78 @@ QToolTip {
     border: 1px solid #4a5163;
     padding: 4px 6px;
 }
+
+/* ---------- Modern shell: side rail, drawers, transport bar ---------- */
+QFrame#sideRail {
+    background: #181a22;
+    border: 1px solid #313746;
+    border-radius: 14px;
+}
+
+QFrame#drawerPanel, QFrame#centerPanel {
+    background: #1a1d26;
+    border: 1px solid #313746;
+    border-radius: 16px;
+}
+
+QFrame#transportBar {
+    background: #181a22;
+    border: 1px solid #313746;
+    border-radius: 14px;
+}
+
+QFrame#railSeparator {
+    background: #313746;
+    max-height: 1px;
+    min-height: 1px;
+    border: none;
+    margin: 4px 8px;
+}
+
+QLabel#panelTitle {
+    color: #eef2f7;
+    font-size: 13pt;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    padding: 2px 4px;
+}
+
+QLabel#transportStatus {
+    color: #aeb6c5;
+    font-size: 9pt;
+    font-weight: 600;
+    padding: 0 6px;
+}
+
+QPushButton#railButton, QPushButton#railToggleButton {
+    background: #20242d;
+    border: 1px solid #313746;
+    border-radius: 10px;
+    min-width: 0;
+    padding: 8px;
+    text-align: center;
+    font-weight: 600;
+    color: #f3f5f8;
+}
+
+QPushButton#railButton:hover,
+QPushButton#railToggleButton:hover {
+    background: #2b303b;
+    border: 1px solid #4a5163;
+}
+
+QPushButton#railButton:checked,
+QPushButton#railToggleButton:checked {
+    background: #7d4df2;
+    border: 1px solid #9064ff;
+    color: #ffffff;
+}
+
+QPushButton#railButton:disabled {
+    background: #20242d;
+    color: #5a6274;
+    border: 1px solid #2b303b;
+}
 """
 
 
@@ -363,6 +617,8 @@ _LIGHT_COLOR_MAP = {
     "#1473e6": "#1f6fce",
     "#1b2029": "#ffffff",
     "#1d4f80": "#2f7fd8",
+    "#181a22": "#eef1f7",
+    "#1a1d26": "#f4f6fb",
     "#1f2229": "#f4f6fb",
     "#1f242e": "#ffffff",
     "#20242d": "#ffffff",

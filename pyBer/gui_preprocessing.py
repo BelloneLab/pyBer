@@ -59,6 +59,7 @@ def _compact_combo(combo: QtWidgets.QComboBox, min_chars: int = 6) -> None:
 _FITTED_REF_MODES = {
     "dFF (motion corrected with fitted ref)",
     "zscore (motion corrected with fitted ref)",
+    "prominence normalized (motion corrected with fitted ref)",
 }
 
 _OUTPUT_DEFINITIONS: Dict[str, str] = {
@@ -69,6 +70,7 @@ _OUTPUT_DEFINITIONS: Dict[str, str] = {
     "zscore (subtractions)": "z = zscore(dFF_sig) - zscore(dFF_ref)",
     "dFF (motion corrected with fitted ref)": "dFF = (sig_f - fitted_ref) / fitted_ref",
     "zscore (motion corrected with fitted ref)": "z = zscore((sig_f - fitted_ref) / fitted_ref)",
+    "prominence normalized (motion corrected with fitted ref)": "p = (dFF_fit - median_baseline) / mean(top baseline peak prominences)",
     "Raw signal (465)": "output = filtered/resampled 465 signal",
 }
 
@@ -1408,6 +1410,11 @@ class ParameterPanel(QtWidgets.QGroupBox):
             "output_mode": (
                 "Defines the exported trace. See formula below."
             ),
+            "prominence_params": (
+                "Prominence normalization estimates a baseline scale from peaks outside event windows.\n"
+                "It detects peaks by prominence, keeps peaks between min/max prominence, averages the top fraction, "
+                "then divides the centered fitted-reference dFF by that mean prominence."
+            ),
             "invert_polarity": (
                 "Flips the sign of both raw channels (465 and 405) before any processing.\n"
                 "Use this only if your acquisition polarity is inverted."
@@ -1654,6 +1661,22 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_rlm_tol = mk_dspin(decimals=8)
         self.spin_rlm_tol.setRange(1e-12, 1e-2)
         self.spin_rlm_tol.setValue(1e-6)
+        self.spin_prominence_top = mk_dspin(decimals=3)
+        self.spin_prominence_top.setRange(0.001, 1.0)
+        self.spin_prominence_top.setSingleStep(0.01)
+        self.spin_prominence_top.setValue(0.10)
+        self.spin_prominence_before = mk_dspin(decimals=3)
+        self.spin_prominence_before.setRange(0.0, 3600.0)
+        self.spin_prominence_before.setValue(0.0)
+        self.spin_prominence_after = mk_dspin(decimals=3)
+        self.spin_prominence_after.setRange(0.0, 3600.0)
+        self.spin_prominence_after.setValue(0.0)
+        self.spin_prominence_min = mk_dspin(decimals=6)
+        self.spin_prominence_min.setRange(0.0, 1e12)
+        self.spin_prominence_min.setValue(0.0)
+        self.spin_prominence_max = mk_dspin(decimals=6)
+        self.spin_prominence_max.setRange(0.0, 1e12)
+        self.spin_prominence_max.setValue(1e6)
 
         self.output_params_stack = QtWidgets.QStackedWidget()
         page_none = QtWidgets.QWidget()
@@ -1673,6 +1696,14 @@ class ParameterPanel(QtWidgets.QGroupBox):
         robust_form.addRow(self._label_with_help("Tol", "rlm_tol"), self.spin_rlm_tol)
         page_rlm_v.addWidget(robust_group)
         self.output_params_stack.addWidget(page_rlm)
+        self.prominence_params_group = QtWidgets.QGroupBox("Prominence normalization")
+        prom_form = QtWidgets.QFormLayout(self.prominence_params_group)
+        prom_form.addRow(self._label_with_help("Top peak fraction", "prominence_params"), self.spin_prominence_top)
+        prom_form.addRow(self._label_with_help("Exclude before event (s)", "prominence_params"), self.spin_prominence_before)
+        prom_form.addRow(self._label_with_help("Exclude after event (s)", "prominence_params"), self.spin_prominence_after)
+        prom_form.addRow(self._label_with_help("Min peak prominence", "prominence_params"), self.spin_prominence_min)
+        prom_form.addRow(self._label_with_help("Max peak prominence", "prominence_params"), self.spin_prominence_max)
+        self.prominence_params_group.setVisible(False)
 
         out_content = QtWidgets.QWidget()
         out_form = QtWidgets.QFormLayout(out_content)
@@ -1683,6 +1714,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         out_form.addRow("Definition", self.ed_output_definition)
         out_form.addRow(self.lbl_reference_fit, self.combo_ref_fit)
         out_form.addRow(self.output_params_stack)
+        out_form.addRow(self.prominence_params_group)
 
         # QC + Export card
         self.btn_artifacts_panel = QtWidgets.QPushButton("Artifacts")
@@ -1848,6 +1880,9 @@ class ParameterPanel(QtWidgets.QGroupBox):
     def _is_fitted_output_mode(self) -> bool:
         return self.combo_output.currentText().strip() in _FITTED_REF_MODES
 
+    def _is_prominence_output_mode(self) -> bool:
+        return self.combo_output.currentText().strip().startswith("prominence normalized")
+
     def _update_output_definition(self) -> None:
         mode = self.combo_output.currentText().strip()
         self.ed_output_definition.setText(_OUTPUT_DEFINITIONS.get(mode, ""))
@@ -1857,9 +1892,11 @@ class ParameterPanel(QtWidgets.QGroupBox):
 
     def _update_output_controls(self) -> None:
         fitted_mode = self._is_fitted_output_mode()
+        prominence_mode = self._is_prominence_output_mode()
         self.lbl_reference_fit.setVisible(fitted_mode)
         self.combo_ref_fit.setVisible(fitted_mode)
         self.combo_ref_fit.setEnabled(fitted_mode)
+        self.prominence_params_group.setVisible(prominence_mode)
 
         if not fitted_mode:
             self.output_params_stack.setCurrentIndex(0)
@@ -1927,7 +1964,14 @@ class ParameterPanel(QtWidgets.QGroupBox):
 
         summary = f"{self.combo_baseline.currentText()}, lambda={self._lambda_value():.2e}"
         self.card_baseline.set_summary(summary)
-        self.card_output.set_summary(self.combo_output.currentText())
+        output_summary = self.combo_output.currentText()
+        if self._is_prominence_output_mode():
+            output_summary = (
+                f"{output_summary} | top={self._fmt_num(self.spin_prominence_top.value(), 3)}, "
+                f"min={self._fmt_num(self.spin_prominence_min.value(), 3)}, "
+                f"max={self._fmt_num(self.spin_prominence_max.value(), 3)}"
+            )
+        self.card_output.set_summary(output_summary)
 
     def _wire(self) -> None:
         def emit_noargs(*_args) -> None:
@@ -1956,6 +2000,11 @@ class ParameterPanel(QtWidgets.QGroupBox):
             self.spin_rlm_huber_t,
             self.spin_rlm_max_iter,
             self.spin_rlm_tol,
+            self.spin_prominence_top,
+            self.spin_prominence_before,
+            self.spin_prominence_after,
+            self.spin_prominence_min,
+            self.spin_prominence_max,
         )
         for w in widgets:
             if isinstance(w, QtWidgets.QComboBox):
@@ -2201,6 +2250,11 @@ class ParameterPanel(QtWidgets.QGroupBox):
             rlm_huber_t=float(self.spin_rlm_huber_t.value()),
             rlm_max_iter=int(self.spin_rlm_max_iter.value()),
             rlm_tol=float(self.spin_rlm_tol.value()),
+            prominence_percent_top=float(self.spin_prominence_top.value()),
+            prominence_exclude_before_s=float(self.spin_prominence_before.value()),
+            prominence_exclude_after_s=float(self.spin_prominence_after.value()),
+            prominence_min_peak=float(self.spin_prominence_min.value()),
+            prominence_max_peak=float(self.spin_prominence_max.value()),
             invert_polarity=self.cb_invert.isChecked(),
         )
 
@@ -2240,6 +2294,11 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_rlm_huber_t.setValue(float(getattr(params, "rlm_huber_t", 1.345)))
         self.spin_rlm_max_iter.setValue(int(getattr(params, "rlm_max_iter", 50)))
         self.spin_rlm_tol.setValue(float(getattr(params, "rlm_tol", 1e-6)))
+        self.spin_prominence_top.setValue(float(getattr(params, "prominence_percent_top", 0.10)))
+        self.spin_prominence_before.setValue(float(getattr(params, "prominence_exclude_before_s", 0.0)))
+        self.spin_prominence_after.setValue(float(getattr(params, "prominence_exclude_after_s", 0.0)))
+        self.spin_prominence_min.setValue(float(getattr(params, "prominence_min_peak", 0.0)))
+        self.spin_prominence_max.setValue(float(getattr(params, "prominence_max_peak", 1e6)))
 
         self._update_lambda_preview()
         self._update_output_definition()

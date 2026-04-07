@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import h5py
 
-from scipy.signal import butter, sosfiltfilt, resample_poly, savgol_filter
+from scipy.signal import butter, sosfiltfilt, resample_poly, savgol_filter, find_peaks
 from scipy.ndimage import uniform_filter1d, median_filter
 from PySide6 import QtCore  # for QRunnable signals
 
@@ -66,7 +66,9 @@ OUTPUT_MODES = [
     "dFF (motion corrected with fitted ref)",
     # 7) zscore of that fitted-ref dFF
     "zscore (motion corrected with fitted ref)",
-    # 8) raw signal (processed 465 trace after artifact handling/filtering/resampling)
+    # 8) prominence-normalized fitted-ref dFF
+    "prominence normalized (motion corrected with fitted ref)",
+    # 9) raw signal (processed 465 trace after artifact handling/filtering/resampling)
     "Raw signal (465)",
 ]
 
@@ -130,6 +132,15 @@ class ProcessingParams:
     rlm_huber_t: float = 1.345  # classic Huber threshold (in sigma units)
     rlm_max_iter: int = 50
     rlm_tol: float = 1e-6
+
+    # Prominence normalization options. The selected trigger channel defines
+    # events; samples inside [event - before, event + after] are excluded when
+    # estimating the baseline peak-prominence scale.
+    prominence_percent_top: float = 0.10
+    prominence_exclude_before_s: float = 0.0
+    prominence_exclude_after_s: float = 0.0
+    prominence_min_peak: float = 0.0
+    prominence_max_peak: float = 1e6
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -351,6 +362,8 @@ def output_label_type(label: str) -> str:
         return "dFF"
     if "raw signal" in lab or lab.startswith("raw"):
         return "raw_signal"
+    if "prominence" in lab:
+        return "prominence"
     return "output"
 
 
@@ -805,6 +818,172 @@ def zscore_median_std(x: np.ndarray) -> np.ndarray:
     return (x - med) / sd
 
 
+def _trigger_rising_edges(time: np.ndarray, trigger: Optional[np.ndarray], threshold: float = 0.5) -> np.ndarray:
+    """Return event times from a thresholded trigger trace."""
+    if trigger is None:
+        return np.array([], float)
+    t = np.asarray(time, float)
+    y = np.asarray(trigger, float)
+    if t.size < 2 or y.size != t.size:
+        return np.array([], float)
+    finite = np.isfinite(t) & np.isfinite(y)
+    if np.sum(finite) < 2:
+        return np.array([], float)
+    tt = t[finite]
+    yy = y[finite]
+    high = yy > float(threshold)
+    idx = np.where((~high[:-1]) & high[1:])[0] + 1
+    if high.size and bool(high[0]):
+        idx = np.concatenate(([0], idx))
+    return np.asarray(tt[idx], float)
+
+
+def _baseline_mask_excluding_events(
+    time: np.ndarray,
+    event_times: np.ndarray,
+    sec_before: float,
+    sec_after: float,
+) -> np.ndarray:
+    """Build the MATLAB-style to_consider mask by dropping windows around events."""
+    t = np.asarray(time, float)
+    keep = np.isfinite(t)
+    before = max(0.0, float(sec_before))
+    after = max(0.0, float(sec_after))
+    for event_t in np.asarray(event_times, float):
+        if not np.isfinite(event_t):
+            continue
+        keep &= ~((t >= event_t - before) & (t <= event_t + after))
+    return keep
+
+
+def prominence_peaks_detection(
+    temp: np.ndarray,
+    percent_top: float,
+    to_consider: np.ndarray,
+    minpeak: float,
+    maxpeak: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Python equivalent of the MATLAB peaks_detection helper.
+
+    Returns:
+      top_prominences, top_indices, top_peak_values
+    """
+    y = np.asarray(temp, float)
+    keep = np.asarray(to_consider, bool)
+    if y.size == 0 or keep.size != y.size:
+        return np.array([], float), np.array([], int), np.array([], float)
+
+    finite = np.isfinite(y)
+    if not np.any(finite):
+        return np.array([], float), np.array([], int), np.array([], float)
+
+    y_for_peaks = y.copy()
+    finite_vals = y_for_peaks[finite]
+    fill = float(np.nanmin(finite_vals) - max(1.0, np.nanstd(finite_vals) * 10.0))
+    y_for_peaks[~finite] = fill
+
+    min_prom = max(0.0, float(minpeak))
+    locs, props = find_peaks(y_for_peaks, prominence=min_prom)
+    if locs.size == 0:
+        return np.array([], float), np.array([], int), np.array([], float)
+    proms = np.asarray(props.get("prominences", np.array([], float)), float)
+    if proms.size != locs.size:
+        return np.array([], float), np.array([], int), np.array([], float)
+
+    max_prom = float(maxpeak)
+    in_range = keep[locs] & finite[locs]
+    if np.isfinite(max_prom):
+        in_range &= proms < max_prom
+    locs_clean = locs[in_range]
+    proms_clean = proms[in_range]
+    peaks_clean = y[locs_clean]
+
+    if proms_clean.size == 0:
+        return np.array([], float), np.array([], int), np.array([], float)
+
+    order = np.argsort(proms_clean)[::-1]
+    fraction = min(1.0, max(0.0, float(percent_top)))
+    num_peaks = int(np.ceil(proms_clean.size * fraction))
+    if num_peaks <= 0:
+        return np.array([], float), np.array([], int), np.array([], float)
+    idx = order[:num_peaks]
+    return proms_clean[idx], locs_clean[idx].astype(int), peaks_clean[idx]
+
+
+def prominence_normalize(
+    signal: np.ndarray,
+    time: np.ndarray,
+    event_times: np.ndarray,
+    params: ProcessingParams,
+    fs_used: float,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """
+    Normalize a trace by baseline peak prominence.
+
+    This mirrors the supplied MATLAB workflow:
+    1) create a to_consider mask by excluding samples around events;
+    2) detect peaks using MinPeakProminence, keep peaks in to_consider, drop
+       peaks above maxpeak, and average the top percentage of prominences.
+
+    The returned trace is centered by the baseline median and divided by the
+    mean selected prominence, making it z-score-like but peak-scale based.
+    """
+    y = np.asarray(signal, float)
+    t = np.asarray(time, float)
+    if y.size == 0 or t.size != y.size:
+        return np.full_like(y, np.nan), {
+            "duration_s": 0.0,
+            "mean_amplitude": np.nan,
+            "sem_amplitude": np.nan,
+            "n_peaks": 0.0,
+            "baseline_median": np.nan,
+        }
+
+    keep = _baseline_mask_excluding_events(
+        t,
+        np.asarray(event_times, float),
+        float(getattr(params, "prominence_exclude_before_s", 0.0)),
+        float(getattr(params, "prominence_exclude_after_s", 0.0)),
+    )
+    finite_keep = keep & np.isfinite(y)
+    baseline_median = float(np.nanmedian(y[finite_keep])) if np.any(finite_keep) else float(np.nanmedian(y))
+
+    amplitudes, _idx_peak, _top_peaks = prominence_peaks_detection(
+        y,
+        float(getattr(params, "prominence_percent_top", 0.10)),
+        keep,
+        float(getattr(params, "prominence_min_peak", 0.0)),
+        float(getattr(params, "prominence_max_peak", 1e6)),
+    )
+    n_peaks = int(amplitudes.size)
+    mean_amp = float(np.nanmean(amplitudes)) if n_peaks else np.nan
+    if n_peaks > 1:
+        sem_amp = float(np.nanstd(amplitudes, ddof=1) / np.sqrt(n_peaks))
+    elif n_peaks == 1:
+        sem_amp = 0.0
+    else:
+        sem_amp = np.nan
+
+    fs = float(fs_used)
+    if not np.isfinite(fs) or fs <= 0:
+        fs = 1.0 / float(np.nanmedian(np.diff(t))) if t.size > 2 else np.nan
+    duration = float(np.sum(keep) / fs) if np.isfinite(fs) and fs > 0 else np.nan
+
+    if not np.isfinite(mean_amp) or mean_amp <= 1e-12 or not np.isfinite(baseline_median):
+        out = np.full_like(y, np.nan)
+    else:
+        out = (y - baseline_median) / mean_amp
+
+    return out, {
+        "duration_s": duration,
+        "mean_amplitude": mean_amp,
+        "sem_amplitude": sem_amp,
+        "n_peaks": float(n_peaks),
+        "baseline_median": baseline_median,
+    }
+
+
 def ols_fit(x: np.ndarray, y: np.ndarray) -> Tuple[float, float]:
     """Fit y ≈ a*x + b with ordinary least squares (finite samples only)."""
     x = np.asarray(x, float)
@@ -1226,6 +1405,7 @@ class PhotometryProcessor:
         # ---------------------------------------------------------------------
         mode = params.output_mode if params.output_mode in OUTPUT_MODES else OUTPUT_MODES[0]
         out: Optional[np.ndarray] = None
+        prominence_stats: Optional[Dict[str, float]] = None
 
         # --- Compute baseline-referenced dFFs (building blocks) ---
         # dFF_sig = (sig_filtered - baseline_sig) / baseline_sig
@@ -1276,8 +1456,20 @@ class PhotometryProcessor:
             dff_fit = safe_divide(sig2 - fitted_ref, fitted_ref)
             out = zscore_median_std(dff_fit)
 
+        elif mode == "prominence normalized (motion corrected with fitted ref)":
+            # (8) prominence-normalized fitted-ref dFF
+            # 1) Fit reference and compute fitted-ref dFF.
+            # 2) Exclude event windows from the selected trigger channel.
+            # 3) Detect baseline peaks by prominence, average the top fraction,
+            #    then scale like a z-score using peak prominence instead of std.
+            a, b = fit_reference_to_signal(ref2, sig2, params)
+            fitted_ref = a * ref2 + b
+            dff_fit = safe_divide(sig2 - fitted_ref, fitted_ref)
+            event_times = _trigger_rising_edges(t2, dio2)
+            out, prominence_stats = prominence_normalize(dff_fit, t2, event_times, params, fs_used)
+
         elif mode == "Raw signal (465)":
-            # (8) raw signal (processed 465 trace)
+            # (9) raw signal (processed 465 trace)
             # Directly expose the filtered/resampled 465 channel.
             out = np.asarray(sig2, float)
 
@@ -1293,9 +1485,24 @@ class PhotometryProcessor:
             if mode in (
                 "dFF (motion corrected with fitted ref)",
                 "zscore (motion corrected with fitted ref)",
+                "prominence normalized (motion corrected with fitted ref)",
             ):
                 context_parts.append(f"Fit: {params.reference_fit}")
             context_parts.append(baseline_desc)
+            if prominence_stats is not None:
+                mean_amp = prominence_stats.get("mean_amplitude", np.nan)
+                sem_amp = prominence_stats.get("sem_amplitude", np.nan)
+                n_peaks = int(prominence_stats.get("n_peaks", 0.0))
+                duration = prominence_stats.get("duration_s", np.nan)
+                context_parts.append(
+                    "Prominence scale: "
+                    f"mean={mean_amp:.3g}, sem={sem_amp:.3g}, n={n_peaks}, "
+                    f"baseline={duration:.3g}s, top={float(getattr(params, 'prominence_percent_top', 0.10)):.3g}, "
+                    f"exclude=-{float(getattr(params, 'prominence_exclude_before_s', 0.0)):.3g}/+"
+                    f"{float(getattr(params, 'prominence_exclude_after_s', 0.0)):.3g}s, "
+                    f"min={float(getattr(params, 'prominence_min_peak', 0.0)):.3g}, "
+                    f"max={float(getattr(params, 'prominence_max_peak', 1e6)):.3g}"
+                )
         if bool(getattr(params, "smoothing_enabled", False)):
             sm_method = str(getattr(params, "smoothing_method", "Savitzky-Golay") or "Savitzky-Golay")
             sm_win = float(getattr(params, "smoothing_window_s", 0.0))

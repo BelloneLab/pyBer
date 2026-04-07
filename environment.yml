@@ -2,6 +2,9 @@ name: pyBer
 channels:
   - conda-forge
 
+variables:
+  PYTHONNOUSERSITE: "1"
+
 dependencies:
   # Core
   - python=3.11

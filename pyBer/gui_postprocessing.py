@@ -553,6 +553,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         finally:
             self._is_restoring_settings = False
         self._panel_layout_persistence_ready = True
+        # Parameter drawer is hidden until the user explicitly
+        # clicks one of the rail panel buttons.
+        self._force_hide_post_drawer_initially()
         app = QtWidgets.QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._on_about_to_quit)
@@ -1361,21 +1364,59 @@ class PostProcessingPanel(QtWidgets.QWidget):
             b.setCheckable(True)
             b.setProperty("class", "compactSmall")
 
-        action_row.addWidget(self.btn_action_load)
-        action_row.addWidget(self.btn_action_compute)
-        action_row.addWidget(self.btn_action_export)
-        action_row.addWidget(self.btn_action_hide)
-        action_row.addWidget(self.btn_style)
-        action_row.addSpacing(8)
-        action_row.addWidget(QtWidgets.QLabel("Panels:"))
-        action_row.addWidget(self.btn_panel_setup)
-        action_row.addWidget(self.btn_panel_psth)
-        action_row.addWidget(self.btn_panel_spatial)
-        action_row.addWidget(self.btn_panel_export)
-        action_row.addWidget(self.btn_panel_signal)
-        action_row.addWidget(self.btn_panel_behavior)
-        action_row.addStretch(1)
-        root.addLayout(action_row)
+        # ----- Modern shell: convert section buttons to a left icon rail
+        # and put workflow actions in a thin transport bar above the plots.
+        from styles import (
+            _make_icon, _paint_sliders, _paint_chart, _paint_grid,
+            _paint_export, _paint_pulse, _paint_paw,
+        )
+        _post_rail_meta = {
+            "setup":    ("Setup", _paint_sliders),
+            "psth":     ("PSTH analysis", _paint_chart),
+            "spatial":  ("Spatial maps", _paint_grid),
+            "export":   ("Export panel", _paint_export),
+            "signal":   ("Signal events", _paint_pulse),
+            "behavior": ("Behavior", _paint_paw),
+        }
+        for key, btn in self._section_buttons.items():
+            tip, painter = _post_rail_meta[key]
+            btn.setObjectName("railButton")
+            btn.setProperty("class", "")
+            btn.setText("")
+            btn.setToolTip(tip)
+            btn.setStatusTip(tip)
+            btn.setIcon(_make_icon(painter))
+            btn.setIconSize(QtCore.QSize(22, 22))
+            btn.setFixedSize(44, 44)
+
+        self._post_side_rail = QtWidgets.QFrame()
+        self._post_side_rail.setObjectName("sideRail")
+        rail_layout = QtWidgets.QVBoxLayout(self._post_side_rail)
+        rail_layout.setContentsMargins(8, 10, 8, 10)
+        rail_layout.setSpacing(6)
+        for key in ("setup", "psth", "spatial", "signal", "behavior", "export"):
+            rail_layout.addWidget(self._section_buttons[key], 0,
+                                  QtCore.Qt.AlignmentFlag.AlignHCenter)
+        rail_layout.addStretch(1)
+        self._post_side_rail.setFixedWidth(64)
+
+        # Transport bar holds the workflow actions.
+        self._post_transport_bar = QtWidgets.QFrame()
+        self._post_transport_bar.setObjectName("transportBar")
+        tb_layout = QtWidgets.QHBoxLayout(self._post_transport_bar)
+        tb_layout.setContentsMargins(12, 8, 12, 8)
+        tb_layout.setSpacing(8)
+        self.btn_action_compute.setText("Compute PSTH")
+        self.btn_action_export.setText("Run Export")
+        self.btn_action_hide.setText("Hide drawer")
+        for b in (self.btn_action_load, self.btn_action_compute,
+                  self.btn_action_export, self.btn_style):
+            tb_layout.addWidget(b)
+        tb_layout.addStretch(1)
+        tb_layout.addWidget(self.btn_action_hide)
+        # action_row is no longer used; left in scope so any later reference
+        # (none expected) does not crash. The transport bar replaces it.
+        del action_row
 
         # Right plots: trace preview + heatmap + avg
         right = QtWidgets.QWidget()
@@ -1696,17 +1737,58 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if self._use_pg_dockarea_layout:
             workspace = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
             workspace.setChildrenCollapsible(False)
-            workspace.addWidget(right)
+            # Wrap the central plots in a rounded center panel.
+            self._post_center_panel = QtWidgets.QFrame()
+            self._post_center_panel.setObjectName("centerPanel")
+            _cp_layout = QtWidgets.QVBoxLayout(self._post_center_panel)
+            _cp_layout.setContentsMargins(10, 10, 10, 10)
+            _cp_layout.setSpacing(8)
+            _cp_layout.addWidget(self._post_transport_bar)
+            _cp_layout.addWidget(right, stretch=1)
             self._dockarea = DockArea()
             self._dockarea.setMinimumWidth(_POST_RIGHT_PANEL_MIN_WIDTH)
-            workspace.addWidget(self._dockarea)
-            workspace.setStretchFactor(0, 5)
-            workspace.setStretchFactor(1, 3)
-            workspace.setSizes([1280, _POST_RIGHT_PANEL_MIN_WIDTH + 40])
+            # Wrap dockarea in a drawer frame; start hidden.
+            self._post_drawer = QtWidgets.QFrame()
+            self._post_drawer.setObjectName("drawerPanel")
+            _drw = QtWidgets.QVBoxLayout(self._post_drawer)
+            _drw.setContentsMargins(12, 10, 12, 10)
+            _drw.setSpacing(8)
+            self._post_drawer_title = QtWidgets.QLabel("")
+            self._post_drawer_title.setObjectName("panelTitle")
+            _drw.addWidget(self._post_drawer_title)
+            _drw.addWidget(self._dockarea, stretch=1)
+            self._post_drawer.setVisible(False)
+            workspace.addWidget(self._post_drawer)
+            workspace.addWidget(self._post_center_panel)
+            workspace.setStretchFactor(0, 0)
+            workspace.setStretchFactor(1, 1)
+            workspace.setSizes([0, 1600])
             self._dockarea_splitter = workspace
-            root.addWidget(workspace, stretch=1)
+
+            # Outer container: rail | workspace
+            container = QtWidgets.QWidget()
+            ch = QtWidgets.QHBoxLayout(container)
+            ch.setContentsMargins(0, 0, 0, 0)
+            ch.setSpacing(8)
+            ch.addWidget(self._post_side_rail)
+            ch.addWidget(workspace, stretch=1)
+            root.addWidget(container, stretch=1)
         else:
-            root.addWidget(right, stretch=1)
+            # Fallback non-DockArea path: still apply rail + transport bar.
+            self._post_center_panel = QtWidgets.QFrame()
+            self._post_center_panel.setObjectName("centerPanel")
+            _cp_layout = QtWidgets.QVBoxLayout(self._post_center_panel)
+            _cp_layout.setContentsMargins(10, 10, 10, 10)
+            _cp_layout.setSpacing(8)
+            _cp_layout.addWidget(self._post_transport_bar)
+            _cp_layout.addWidget(right, stretch=1)
+            container = QtWidgets.QWidget()
+            ch = QtWidgets.QHBoxLayout(container)
+            ch.setContentsMargins(0, 0, 0, 0)
+            ch.setSpacing(8)
+            ch.addWidget(self._post_side_rail)
+            ch.addWidget(self._post_center_panel, stretch=1)
+            root.addWidget(container, stretch=1)
         root.setStretch(0, 0)
         root.setStretch(1, 1)
         if self._use_pg_dockarea_layout:
@@ -1930,13 +2012,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
             scroll.setWidget(widget)
             self._section_scroll_hosts[key] = scroll
-            dock = Dock(
-                title,
-                area=self._dockarea,
-                closable=False if key in _FIXED_POST_RIGHT_SECTIONS else True,
-            )
+            dock = Dock(title, area=self._dockarea, closable=False)
             dock.setObjectName(f"post.da.{key}.dock")
             dock.addWidget(scroll)
+            try:
+                dock.label.setFixedHeight(0)
+                dock.label.setVisible(False)
+            except Exception:
+                pass
             self._lock_pg_dock_interactions(dock)
             try:
                 dock.sigClosed.connect(lambda *_, section_key=key: self._on_dockarea_dock_closed(section_key))
@@ -2047,6 +2130,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if self._last_opened_section == key:
                     self._last_opened_section = None
                 break
+        self._update_post_drawer_visibility()
         self._save_panel_layout_state()
 
     def _dockarea_active_key(self) -> Optional[str]:
@@ -2082,7 +2166,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         export = self._dockarea_dock("export")
         if setup is None:
             return
-        self._dockarea.addDock(setup, "right")
+        self._dockarea.addDock(setup, "left")
         # Keep section panels in one tab stack to avoid layout churn/floating glitches.
         if psth is not None:
             self._dockarea.addDock(psth, "above", setup)
@@ -2122,6 +2206,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._settings.setValue(_POST_DOCKAREA_STATE_KEY, json.dumps(state))
             self._settings.setValue(_POST_DOCKAREA_VISIBLE_KEY, json.dumps(visible))
             self._settings.setValue(_POST_DOCKAREA_ACTIVE_KEY, active)
+            left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
+            for key, dock in self._dockarea_docks.items():
+                base = f"post_section_docks/{key}"
+                self._settings.setValue(f"{base}/visible", bool(dock.isVisible()))
+                self._settings.setValue(f"{base}/floating", False)
+                self._settings.setValue(f"{base}/area", left_i)
             self._settings.sync()
         except Exception:
             pass
@@ -2158,6 +2248,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
             self._last_opened_section = active
+            self._sync_section_button_states_from_docks()
+            self._update_post_drawer_visibility()
             return
         self._last_opened_section = None
         for key in _FIXED_POST_RIGHT_TAB_ORDER:
@@ -2169,6 +2261,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     pass
                 self._last_opened_section = key
                 break
+        self._update_post_drawer_visibility()
 
     def _apply_fixed_dockarea_layout(self) -> None:
         if not self._use_pg_dockarea_layout:
@@ -2204,6 +2297,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     pass
             self._last_opened_section = active
             self._sync_section_button_states_from_docks()
+            self._update_post_drawer_visibility()
             self._dock_layout_restored = True
         finally:
             self._suspend_panel_layout_persistence = False
@@ -2275,7 +2369,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             )
             dock.topLevelChanged.connect(lambda *_: self._save_panel_layout_state())
             dock.dockLocationChanged.connect(lambda *_: self._save_panel_layout_state())
-            host.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+            host.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
             # Match preprocessing behavior: popups open floating by default.
             dock.setFloating(True)
             dock.hide()
@@ -2328,11 +2422,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
                         | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
                     )
-                allowed = (
-                    QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
-                    if key == "export"
-                    else QtCore.Qt.DockWidgetArea.RightDockWidgetArea
-                )
+                allowed = QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
             else:
                 features = (
                     QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
@@ -2346,6 +2436,72 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
 
+    _POST_SECTION_TITLES = {
+        "setup": "Setup",
+        "psth": "PSTH analysis",
+        "spatial": "Spatial maps",
+        "export": "Export",
+        "signal": "Signal events",
+        "behavior": "Behavior",
+    }
+
+    def _update_post_drawer_visibility(self) -> None:
+        drawer = getattr(self, "_post_drawer", None)
+        if drawer is None:
+            return
+        any_checked = any(b.isChecked() for b in self._section_buttons.values())
+        title_lbl = getattr(self, "_post_drawer_title", None)
+        if title_lbl is not None:
+            active_key = next((k for k, b in self._section_buttons.items() if b.isChecked()), None)
+            title_lbl.setText(self._POST_SECTION_TITLES.get(active_key or "", ""))
+        drawer.setVisible(any_checked)
+        splitter = self._dockarea_splitter
+        if splitter is None:
+            return
+        try:
+            sizes = splitter.sizes()
+            if len(sizes) >= 2:
+                if any_checked:
+                    if sizes[0] < 60:
+                        total = sum(sizes) or 1
+                        drawer_w = max(420, int(total * 0.30))
+                        sizes[0] = drawer_w
+                        sizes[1] = max(420, sizes[1] - drawer_w)
+                        splitter.setSizes(sizes)
+                else:
+                    if sizes[0] > 0:
+                        sizes[1] += sizes[0]
+                        sizes[0] = 0
+                        splitter.setSizes(sizes)
+        except Exception:
+            pass
+
+    def _force_hide_post_drawer_initially(self) -> None:
+        for key, btn in self._section_buttons.items():
+            if btn.isChecked():
+                blocked = btn.blockSignals(True)
+                try:
+                    btn.setChecked(False)
+                finally:
+                    btn.blockSignals(blocked)
+            try:
+                if self._use_pg_dockarea_layout:
+                    self._set_dockarea_visible(key, False)
+            except Exception:
+                pass
+        drawer = getattr(self, "_post_drawer", None)
+        if drawer is not None:
+            drawer.setVisible(False)
+        if self._dockarea_splitter is not None:
+            try:
+                sizes = self._dockarea_splitter.sizes()
+                if len(sizes) >= 2:
+                    sizes[1] += sizes[0]
+                    sizes[0] = 0
+                    self._dockarea_splitter.setSizes(sizes)
+            except Exception:
+                pass
+
     def _toggle_section_popup(self, key: str, checked: bool) -> None:
         if self._use_pg_dockarea_layout:
             self._setup_dockarea_sections()
@@ -2353,9 +2509,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if dock is None:
                 return
             if checked:
+                # Radio: hide siblings.
+                for other_key, other_btn in self._section_buttons.items():
+                    if other_key == key:
+                        continue
+                    if other_btn.isChecked():
+                        blocked = other_btn.blockSignals(True)
+                        try:
+                            other_btn.setChecked(False)
+                        finally:
+                            other_btn.blockSignals(blocked)
+                    self._set_dockarea_visible(other_key, False)
                 self._activate_dockarea_tab(key)
             else:
                 self._set_dockarea_visible(key, False)
+            self._update_post_drawer_visibility()
             self._sync_section_button_states_from_docks()
             self._save_panel_layout_state()
             return
@@ -2431,6 +2599,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._set_dockarea_visible(key, False)
                 self._set_section_button_checked(key, False)
             self._last_opened_section = None
+            self._update_post_drawer_visibility()
             self._save_panel_layout_state()
             return
         host = self._dock_host or self._dock_main_window()
@@ -2452,7 +2621,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 dock.blockSignals(True)
                 try:
                     if host is not None:
-                        host.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+                        host.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
                     dock.setFloating(False)
                     dock.show()
                     dock.raise_()
@@ -2507,10 +2676,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         y_min = screen_rect.y() + 8
         y_max = screen_rect.y() + max(8, screen_rect.height() - h - 8)
 
-        if x_right <= x_max:
-            x = x_right
-        elif x_left >= x_min:
+        if x_left >= x_min:
             x = x_left
+        elif x_right <= x_max:
+            x = x_right
         else:
             x = x_max
         y = min(max(y_pref, y_min), y_max)
@@ -2530,7 +2699,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _dock_area_from_settings(
         self,
         value: object,
-        default: QtCore.Qt.DockWidgetArea = QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
+        default: QtCore.Qt.DockWidgetArea = QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
     ) -> QtCore.Qt.DockWidgetArea:
         left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
         right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
@@ -2572,7 +2741,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for key, dock in self._section_popups.items():
             visible = bool(dock.isVisible())
             if self._force_fixed_default_layout and key in _FIXED_POST_RIGHT_SECTIONS:
-                # In fixed mode these sections are always present as right-side tabs.
+                # In fixed mode these sections are always present as left-side tabs.
                 visible = True
             self._set_section_button_checked(key, visible)
             if visible:
@@ -2627,8 +2796,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 cached = self._post_section_state_before_hide.get(key, {}) if self._post_docks_hidden_for_tab_switch else {}
                 visible = bool(cached.get("visible", dock.isVisible()))
                 floating = bool(cached.get("floating", dock.isFloating()))
-                right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
-                area_val = _dock_area_to_int(cached.get("area", host.dockWidgetArea(dock)), right_i)
+                left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
+                area_val = _dock_area_to_int(cached.get("area", host.dockWidgetArea(dock)), left_i)
                 geom = cached.get("geometry", dock.saveGeometry())
                 self._settings.setValue(f"{base}/visible", visible)
                 self._settings.setValue(f"{base}/floating", floating)
@@ -2650,7 +2819,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         if not self._post_docks_hidden_for_tab_switch:
             return
-        right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
+        left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
         if not self._section_popups:
             return
         for key in self._section_popups.keys():
@@ -2659,7 +2828,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 base = f"post_section_docks/{key}"
                 self._settings.setValue(f"{base}/visible", bool(state.get("visible", False)))
                 self._settings.setValue(f"{base}/floating", bool(state.get("floating", True)))
-                self._settings.setValue(f"{base}/area", _dock_area_to_int(state.get("area", right_i), right_i))
+                self._settings.setValue(f"{base}/area", _dock_area_to_int(state.get("area", left_i), left_i))
                 geom = state.get("geometry")
                 if isinstance(geom, QtCore.QByteArray) and not geom.isEmpty():
                     self._settings.setValue(f"{base}/geometry", geom)
@@ -2740,9 +2909,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 floating = _to_bool(self._settings.value(f"{base}/floating", True), True)
                 area_val = self._settings.value(
                     f"{base}/area",
-                    _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2),
+                    _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1),
                 )
-                area = self._dock_area_from_settings(area_val, QtCore.Qt.DockWidgetArea.RightDockWidgetArea)
+                area = self._dock_area_from_settings(area_val, QtCore.Qt.DockWidgetArea.LeftDockWidgetArea)
                 geom = self._to_qbytearray(self._settings.value(f"{base}/geometry", None))
 
                 dock.blockSignals(True)
@@ -7814,9 +7983,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             visible = bool(dock.isVisible())
             self._post_section_visibility_before_hide[key] = visible
             area = (
-                _dock_area_to_int(host.dockWidgetArea(dock), _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2))
+                _dock_area_to_int(host.dockWidgetArea(dock), _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1))
                 if host is not None
-                else _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
+                else _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
             )
             self._post_section_state_before_hide[key] = {
                 "visible": visible,
@@ -7916,8 +8085,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 visible = bool(state.get("visible", self._post_section_visibility_before_hide.get(key, False)))
                 floating = bool(state.get("floating", dock.isFloating()))
                 area = self._dock_area_from_settings(
-                    state.get("area", _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)),
-                    QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
+                    state.get("area", _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)),
+                    QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
                 )
                 geom = state.get("geometry")
                 dock.blockSignals(True)
@@ -8072,7 +8241,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # Setup dock hosts the fixed tabs; the individual PSTH/Spatial docks stay hidden.
         setup_dock.blockSignals(True)
         try:
-            host.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, setup_dock)
+            host.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, setup_dock)
             setup_dock.setFloating(False)
             setup_dock.show()
         finally:
@@ -8083,7 +8252,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 continue
             dock.blockSignals(True)
             try:
-                host.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+                host.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
                 dock.setFloating(False)
                 dock.hide()
             finally:
@@ -8126,11 +8295,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 continue
             dock.blockSignals(True)
             try:
-                area = (
-                    QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
-                    if key == "export"
-                    else QtCore.Qt.DockWidgetArea.RightDockWidgetArea
-                )
+                area = QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
                 host.addDockWidget(area, dock)
                 dock.setFloating(False)
                 if key in visible_keys:
@@ -8159,15 +8324,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if self._use_pg_dockarea_layout:
             self._save_dockarea_layout_state()
             return
-        right_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, 2)
-        bottom_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, 8)
+        left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
         for key in ("setup", "psth", "signal", "behavior", "spatial", "export"):
             dock = self._section_popups.get(key)
             if dock is None:
                 continue
             base = f"post_section_docks/{key}"
             visible = key in _FIXED_POST_VISIBLE_SECTIONS
-            area_i = bottom_i if key == "export" else right_i
+            area_i = left_i
             try:
                 self._settings.setValue(f"{base}/visible", visible)
                 self._settings.setValue(f"{base}/floating", False)
@@ -8188,7 +8352,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def apply_fixed_default_layout(self) -> None:
         """
         Apply deterministic Post Processing docking default:
-        Setup, PSTH, Spatial, and Export as fixed right-side tabs.
+        Setup, PSTH, Spatial, and Export as fixed left-side tabs.
         """
         if self._use_pg_dockarea_layout:
             self._setup_dockarea_sections()
@@ -8237,7 +8401,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     continue
                 dock.blockSignals(True)
                 try:
-                    host.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, dock)
+                    host.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, dock)
                     dock.setFloating(False)
                     if key in visible_right_keys:
                         dock.show()
@@ -8249,7 +8413,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if export is not None:
                 export.blockSignals(True)
                 try:
-                    host.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, export)
+                    host.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, export)
                     export.setFloating(False)
                     export.show()
                 finally:
