@@ -838,6 +838,32 @@ def _trigger_rising_edges(time: np.ndarray, trigger: Optional[np.ndarray], thres
     return np.asarray(tt[idx], float)
 
 
+_HMS_RE = re.compile(r'^\s*(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)\s*$')
+
+
+def parse_hms_to_seconds(text: str) -> float:
+    """Convert an 'HH:MM:SS.fraction' string to seconds (float).
+
+    Returns np.nan if the string does not match the expected pattern.
+    """
+    m = _HMS_RE.match(str(text))
+    if m is None:
+        return np.nan
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+
+def coerce_time_value(text: str) -> float:
+    """Try to parse *text* as a numeric float; fall back to HH:MM:SS."""
+    text = str(text or "").strip()
+    if not text or text.lower() in {"nan", "none", "null", "na"}:
+        return np.nan
+    try:
+        return float(text)
+    except (ValueError, TypeError):
+        pass
+    return parse_hms_to_seconds(text)
+
+
 def _baseline_mask_excluding_events(
     time: np.ndarray,
     event_times: np.ndarray,

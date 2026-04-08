@@ -248,6 +248,7 @@ def _detect_time_column(df, fallback_to_first: bool = False) -> Optional[str]:
 
 def _numeric_column_array(df, col_name: str) -> np.ndarray:
     import pandas as pd
+    from pyBer.analysis_core import coerce_time_value
 
     col_key = None
     for c in df.columns:
@@ -257,6 +258,8 @@ def _numeric_column_array(df, col_name: str) -> np.ndarray:
     if col_key is None:
         return np.array([], float)
     vals = pd.to_numeric(df[col_key], errors="coerce")
+    if vals.isna().all():
+        vals = df[col_key].apply(lambda v: coerce_time_value(str(v)))
     return np.asarray(vals, float)
 
 
@@ -3744,15 +3747,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
         iso_vals = []
         dio_vals = []
 
+        from pyBer.analysis_core import coerce_time_value
         for r in data_rows:
             if time_idx is None or output_idx is None:
                 continue
             if len(r) <= max(time_idx, output_idx):
                 continue
             try:
-                tval = float(r[time_idx])
+                tval = coerce_time_value(r[time_idx])
                 oval = float(r[output_idx])
             except Exception:
+                continue
+            if not np.isfinite(tval):
                 continue
             time.append(tval)
             output.append(oval)

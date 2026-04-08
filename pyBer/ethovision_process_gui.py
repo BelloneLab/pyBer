@@ -205,7 +205,11 @@ def clean_sheet(
 
     # Drop rows without time if we can identify time
     if time_col is not None:
+        time_orig = df[time_col].copy()
         df[time_col] = pd.to_numeric(df[time_col], errors="coerce")
+        if df[time_col].isna().all():
+            from pyBer.analysis_core import coerce_time_value
+            df[time_col] = time_orig.astype(str).apply(coerce_time_value)
         df = df.loc[df[time_col].notna()].copy()
         df = df.sort_values(time_col).reset_index(drop=True)
 

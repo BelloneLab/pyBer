@@ -3174,6 +3174,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return norm in {"time", "t", "timestamp", "times", "timesec", "times", "timems"} or "timestamp" in norm
 
     def _parse_csv_float(self, value: object) -> float:
+        from pyBer.analysis_core import coerce_time_value
         text = str(value or "").strip()
         if not text or text.lower() in {"nan", "none", "null", "na"}:
             return np.nan
@@ -3184,7 +3185,8 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             return float(text.replace(" ", "").replace(",", "."))
         except Exception:
-            return np.nan
+            pass
+        return coerce_time_value(text)
 
     def _clean_csv_row(self, row: List[str]) -> List[str]:
         out = [str(cell or "").strip() for cell in row]
@@ -5655,9 +5657,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if len(r) <= max(time_idx, output_idx):
                 continue
             try:
-                tval = float(r[time_idx])
+                tval = self._parse_csv_float(r[time_idx])
                 oval = float(r[output_idx])
             except Exception:
+                continue
+            if not np.isfinite(tval):
                 continue
             time.append(tval)
             output.append(oval)
