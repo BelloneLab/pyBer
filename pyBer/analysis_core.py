@@ -879,9 +879,12 @@ def prominence_peaks_detection(
         return np.array([], float), np.array([], int), np.array([], float)
 
     y_for_peaks = y.copy()
-    finite_vals = y_for_peaks[finite]
-    fill = float(np.nanmin(finite_vals) - max(1.0, np.nanstd(finite_vals) * 10.0))
-    y_for_peaks[~finite] = fill
+    nan_mask = ~finite
+    if np.any(nan_mask) and not np.all(nan_mask):
+        valid_idx = np.where(finite)[0]
+        y_for_peaks[nan_mask] = np.interp(
+            np.where(nan_mask)[0], valid_idx, y_for_peaks[valid_idx]
+        )
 
     min_prom = max(0.0, float(minpeak))
     locs, props = find_peaks(y_for_peaks, prominence=min_prom)
@@ -894,7 +897,7 @@ def prominence_peaks_detection(
     max_prom = float(maxpeak)
     in_range = keep[locs] & finite[locs]
     if np.isfinite(max_prom):
-        in_range &= proms < max_prom
+        in_range &= proms <= max_prom
     locs_clean = locs[in_range]
     proms_clean = proms[in_range]
     peaks_clean = y[locs_clean]
@@ -949,8 +952,12 @@ def prominence_normalize(
     finite_keep = keep & np.isfinite(y)
     baseline_median = float(np.nanmedian(y[finite_keep])) if np.any(finite_keep) else float(np.nanmedian(y))
 
+    # Center by baseline median BEFORE peak detection so prominences reflect
+    # transient amplitude above baseline (matches MATLAB data_norm.data input).
+    y_centered = y - baseline_median
+
     amplitudes, _idx_peak, _top_peaks = prominence_peaks_detection(
-        y,
+        y_centered,
         float(getattr(params, "prominence_percent_top", 0.10)),
         keep,
         float(getattr(params, "prominence_min_peak", 0.0)),

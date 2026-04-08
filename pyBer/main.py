@@ -1110,7 +1110,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if dock is None:
             return
         if visible:
+            self._arrange_pre_dockarea_default()
             dock.show()
+            try:
+                dock.raiseDock()
+            except Exception:
+                pass
         else:
             dock.hide()
 
@@ -1158,15 +1163,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pre_dockarea_fixed_layout_applied = False
         self._arrange_pre_dockarea_default()
 
-        raw_state = self.settings.value(_PRE_DOCKAREA_STATE_KEY, "")
-        try:
-            if isinstance(raw_state, str) and raw_state.strip():
-                parsed = json.loads(raw_state)
-                if isinstance(parsed, dict):
-                    self._pre_dockarea.restoreState(parsed, missing="ignore", extra="bottom")
-        except Exception:
-            pass
-
+        # The left rail drawer behaves as a single-section stack. Restoring old
+        # DockArea splitter topology can strand the active dock in a zero-height slot.
         visible_map: Dict[str, bool] = {}
         raw_vis = self.settings.value(_PRE_DOCKAREA_VISIBLE_KEY, "")
         try:
@@ -1190,10 +1188,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not visible_map:
             visible_map = self._pre_dockarea_default_visible_map()
 
-        for key in self._pre_dockarea_docks.keys():
-            self._set_pre_dockarea_visible(key, bool(visible_map.get(key, False)))
-
         active = str(self.settings.value(_PRE_DOCKAREA_ACTIVE_KEY, "artifacts_list") or "artifacts_list")
+        if not bool(visible_map.get(active, False)):
+            active = next((key for key in self._pre_dockarea_ordered_keys() if bool(visible_map.get(key, False))), "")
+
+        for key in self._pre_dockarea_docks.keys():
+            self._set_pre_dockarea_visible(key, bool(active and key == active))
+
         active_dock = self._pre_dockarea_dock(active)
         if active_dock is not None and active_dock.isVisible():
             try:
@@ -1403,6 +1404,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if dock is None:
                 return
             if checked:
+                self._arrange_pre_dockarea_default()
                 # Radio behavior: hide all other section docks and uncheck
                 # their rail buttons so only one drawer section is visible.
                 for other_key, other_btn in self._section_buttons.items():
