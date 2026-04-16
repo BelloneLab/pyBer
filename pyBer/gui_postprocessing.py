@@ -3457,6 +3457,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         else:
             # Individual view
             sel_id = self.combo_individual_file.currentText().strip()
+            if not sel_id and self._all_file_ids:
+                sel_id = self._all_file_ids[0]
             if sel_id and sel_id in self._per_file_mats:
                 tvec, mat = self._per_file_mats[sel_id]
                 labels = self._per_file_labels.get(sel_id, [])
@@ -3467,18 +3469,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._last_tvec = tvec
                 self.lbl_plot_file.setText(f"File: {sel_id}")
                 self.plot_avg.setTitle("Average across trials +/- SEM")
-            elif self._all_file_ids:
-                first_id = self._all_file_ids[0]
-                if first_id in self._per_file_mats:
-                    tvec, mat = self._per_file_mats[first_id]
-                    labels = self._per_file_labels.get(first_id, [])
-                    self._render_heatmap(mat, tvec, labels=labels)
-                    self._render_avg(mat, tvec)
-                    self._render_metrics(mat, tvec)
-                    self._last_mat = mat
-                    self._last_tvec = tvec
-                    self.lbl_plot_file.setText(f"File: {first_id}")
-                    self.plot_avg.setTitle("Average across trials +/- SEM")
+        # Always refresh the trace preview to match the selected file
+        self._update_trace_preview()
 
     def _update_data_availability(self) -> None:
         has_processed = bool(self._processed)
@@ -5070,7 +5062,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._signal_peak_lines = []
             return
 
+        # In individual mode, show the selected file's trace
         proc = self._processed[0]
+        if hasattr(self, "tab_visual_mode") and self.tab_visual_mode.currentIndex() == 0:
+            sel_id = self.combo_individual_file.currentText().strip() if hasattr(self, "combo_individual_file") else ""
+            if sel_id:
+                for p in self._processed:
+                    fid = os.path.splitext(os.path.basename(p.path))[0] if p.path else "import"
+                    if fid == sel_id:
+                        proc = p
+                        break
         t = proc.time
         y = proc.output if proc.output is not None else np.full_like(t, np.nan)
 
@@ -8160,40 +8161,55 @@ class PostProcessingPanel(QtWidgets.QWidget):
             col = 0
 
             if mat is None or tvec is None or mat.size == 0:
-                # Empty row
+                # Empty row — still show behavior name as title
+                titled = False
                 if show_heat:
                     ax = fig.add_subplot(gs[row_i, col])
-                    ax.text(0.5, 0.5, f"No data\n{beh_name}", ha="center", va="center",
+                    ax.set_title(beh_name, fontweight="bold", fontsize=10, loc="left", pad=8)
+                    ax.text(0.5, 0.5, "No data", ha="center", va="center",
                             transform=ax.transAxes, fontsize=8, color="#999")
-                    ax.set_ylabel(beh_name, fontweight="bold", fontsize=9)
+                    ax.set_yticks([]); ax.set_xticks([])
+                    titled = True
                     col += 1
                 if show_avg:
                     ax = fig.add_subplot(gs[row_i, col])
+                    if not titled:
+                        ax.set_title(beh_name, fontweight="bold", fontsize=10, loc="left", pad=8)
+                        titled = True
                     ax.text(0.5, 0.5, "No data", ha="center", va="center",
                             transform=ax.transAxes, fontsize=8, color="#999")
+                    ax.set_yticks([]); ax.set_xticks([])
                     col += 1
                 if show_metrics:
                     ax = fig.add_subplot(gs[row_i, col])
+                    if not titled:
+                        ax.set_title(beh_name, fontweight="bold", fontsize=10, loc="left", pad=8)
                     ax.text(0.5, 0.5, "N/A", ha="center", va="center",
                             transform=ax.transAxes, fontsize=8, color="#999")
+                    ax.set_yticks([]); ax.set_xticks([])
                 continue
 
             avg = np.nanmean(mat, axis=0)
             n_valid = max(1, np.sum(np.any(np.isfinite(mat), axis=1)))
             sem = np.nanstd(mat, axis=0) / np.sqrt(n_valid)
 
+            # --- Row title (behavior name) spanning all columns ---
+            # Place as a left-aligned text annotation on the first panel
+            first_ax_placed = False
+
             # --- Heatmap ---
             if show_heat:
                 ax_heat = fig.add_subplot(gs[row_i, col])
+                if not first_ax_placed:
+                    ax_heat.set_title(beh_name, fontweight="bold", fontsize=10, loc="left", pad=8)
+                    first_ax_placed = True
                 extent = [float(tvec[0]), float(tvec[-1]), 0, mat.shape[0]]
                 im = ax_heat.imshow(mat, aspect="auto", origin="lower", extent=extent,
                                      cmap=cmap_name, interpolation="nearest")
                 ax_heat.axvline(0, color="white", linewidth=0.7, linestyle="--", alpha=0.8)
-                ax_heat.set_ylabel(beh_name, fontweight="bold", fontsize=9)
                 if labels:
                     n = min(len(labels), mat.shape[0])
                     tick_pos = [i + 0.5 for i in range(n)]
-                    # Limit tick density for readability
                     if n > 15:
                         step = max(1, n // 10)
                         tick_pos = tick_pos[::step]
@@ -8202,12 +8218,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         tick_labels = labels[:n]
                     ax_heat.set_yticks(tick_pos)
                     ax_heat.set_yticklabels(tick_labels, fontsize=6)
+                else:
+                    ax_heat.set_yticks([])
                 if row_i == n_rows - 1:
                     ax_heat.set_xlabel("Time (s)")
                 else:
                     ax_heat.set_xticklabels([])
-                if row_i == 0:
-                    ax_heat.set_title("Heatmap", fontweight="bold")
                 cbar = fig.colorbar(im, ax=ax_heat, fraction=0.04, pad=0.02)
                 cbar.ax.tick_params(labelsize=6)
                 col += 1
@@ -8215,12 +8231,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
             # --- Average PSTH ---
             if show_avg:
                 ax_avg = fig.add_subplot(gs[row_i, col])
+                if not first_ax_placed:
+                    ax_avg.set_title(beh_name, fontweight="bold", fontsize=10, loc="left", pad=8)
+                    first_ax_placed = True
+                elif row_i == 0:
+                    ax_avg.set_title("Average PSTH \u00b1 SEM", fontweight="bold")
                 ax_avg.fill_between(tvec, avg - sem, avg + sem,
                                      color="#7BC8A4", alpha=0.3, linewidth=0)
                 ax_avg.plot(tvec, avg, color="#3B82F6", linewidth=1.2)
                 ax_avg.axvline(0, color="#666", linewidth=0.7, linestyle="--", alpha=0.7)
                 ax_avg.axhline(0, color="#999", linewidth=0.4, alpha=0.5)
-                # Shade pre/post windows
                 ax_avg.axvspan(pre0, pre1, color="#5B8CD6", alpha=0.08)
                 ax_avg.axvspan(post0, post1, color="#D67B5B", alpha=0.08)
                 ax_avg.set_xlim(float(tvec[0]), float(tvec[-1]))
@@ -8229,8 +8249,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 else:
                     ax_avg.set_xticklabels([])
                 ax_avg.set_ylabel("z-score")
-                if row_i == 0:
-                    ax_avg.set_title("Average PSTH \u00b1 SEM", fontweight="bold")
                 ax_avg.spines["top"].set_visible(False)
                 ax_avg.spines["right"].set_visible(False)
                 col += 1
@@ -8238,6 +8256,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             # --- Metrics bar with t-test ---
             if show_metrics:
                 ax_met = fig.add_subplot(gs[row_i, col])
+                if not first_ax_placed:
+                    ax_met.set_title(beh_name, fontweight="bold", fontsize=10, loc="left", pad=8)
+                    first_ax_placed = True
+                elif row_i == 0:
+                    ax_met.set_title(f"{metric_name} (paired t-test)", fontweight="bold")
                 pre_mask = (tvec >= pre0) & (tvec <= pre1)
                 post_mask = (tvec >= post0) & (tvec <= post1)
                 if np.any(pre_mask) and np.any(post_mask):
@@ -8313,8 +8336,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 ax_met.set_xticks([0, 1])
                 ax_met.set_xticklabels(["Pre", "Post"], fontsize=8)
                 ax_met.set_ylabel(metric_name, fontsize=8)
-                if row_i == 0:
-                    ax_met.set_title(f"{metric_name} (paired t-test)", fontweight="bold")
                 ax_met.spines["top"].set_visible(False)
                 ax_met.spines["right"].set_visible(False)
 
