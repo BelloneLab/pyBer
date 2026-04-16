@@ -496,6 +496,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._last_spatial_velocity_map: Optional[np.ndarray] = None
         self._last_spatial_extent: Optional[Tuple[float, float, float, float]] = None
         self._last_event_rows: List[Dict[str, object]] = []
+        # Per-file / group data for Individual vs Group visual modes
+        self._per_file_mats: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}  # file_id -> (tvec, mat)
+        self._per_file_labels: Dict[str, List[str]] = {}  # file_id -> trial labels
+        self._group_mat: Optional[np.ndarray] = None
+        self._group_tvec: Optional[np.ndarray] = None
+        self._group_labels: List[str] = []
+        self._all_file_ids: List[str] = []
         self.last_signal_events: Optional[Dict[str, object]] = None
         self.last_behavior_analysis: Optional[Dict[str, object]] = None
         self._event_labels: List[pg.TextItem] = []
@@ -1440,6 +1447,31 @@ class PostProcessingPanel(QtWidgets.QWidget):
         header_row.addStretch(1)
         rv.addLayout(header_row)
 
+        # --- Visual mode tabs: Individual / Group ---
+        visual_bar = QtWidgets.QHBoxLayout()
+        visual_bar.setContentsMargins(0, 0, 0, 0)
+        visual_bar.setSpacing(8)
+        self.tab_visual_mode = QtWidgets.QTabBar()
+        self.tab_visual_mode.setObjectName("visualModeBar")
+        self.tab_visual_mode.addTab("Individual")
+        self.tab_visual_mode.addTab("Group")
+        self.tab_visual_mode.setDrawBase(False)
+        self.tab_visual_mode.setExpanding(False)
+        self.tab_visual_mode.setStyleSheet(
+            "QTabBar#visualModeBar::tab { min-width: 90px; padding: 5px 14px; "
+            "border-radius: 6px; margin-right: 4px; font-weight: 600; }"
+            "QTabBar#visualModeBar::tab:selected { background: rgba(90,190,255,0.25); color: #5abeFF; }"
+            "QTabBar#visualModeBar::tab:!selected { background: rgba(255,255,255,0.06); color: #9aa3b4; }"
+        )
+        visual_bar.addWidget(self.tab_visual_mode)
+        visual_bar.addWidget(QtWidgets.QLabel("  File:"))
+        self.combo_individual_file = QtWidgets.QComboBox()
+        _compact_combo(self.combo_individual_file, min_chars=12)
+        self.combo_individual_file.setToolTip("Select file for individual view (each row = trial)")
+        visual_bar.addWidget(self.combo_individual_file, stretch=1)
+        visual_bar.addStretch(1)
+        rv.addLayout(visual_bar)
+
         view_row = QtWidgets.QHBoxLayout()
         view_row.addWidget(QtWidgets.QLabel("View layout"))
         self.combo_view_layout = QtWidgets.QComboBox()
@@ -1858,6 +1890,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_signal_source.currentIndexChanged.connect(self._refresh_signal_file_combo)
         self.combo_signal_scope.currentIndexChanged.connect(self._refresh_signal_file_combo)
         self.tab_sources.currentChanged.connect(self._refresh_signal_file_combo)
+        self.tab_visual_mode.currentChanged.connect(self._on_visual_mode_changed)
+        self.combo_individual_file.currentIndexChanged.connect(self._on_individual_file_changed)
 
         self.combo_align.currentIndexChanged.connect(self._update_align_ui)
         self.combo_behavior_file_type.currentIndexChanged.connect(self._update_align_ui)
@@ -3263,6 +3297,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.grp_behavior_time.setEnabled(show_time_panel)
         self.grp_behavior_time.setVisible(show_time_panel)
 
+        # Behavior align combo + transition settings
+        self.combo_behavior_align.setEnabled(use_beh)
+        self.combo_behavior_align.setVisible(use_beh)
+        is_transition = use_beh and self.combo_behavior_align.currentText().startswith("Transition")
+        for w in (
+            self.combo_behavior_from,
+            self.combo_behavior_to,
+            self.spin_transition_gap,
+            self.lbl_trans_from,
+            self.lbl_trans_to,
+            self.lbl_trans_gap,
+        ):
+            w.setVisible(is_transition)
+            w.setEnabled(is_transition)
+
     def _behavior_sources_need_generated_time(self) -> bool:
         for info in self._behavior_sources.values():
             if bool(info.get("needs_generated_time", False)):
@@ -3301,26 +3350,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._compute_psth()
         self._compute_spatial_heatmap()
         self._update_behavior_time_panel()
-        self._update_status_strip()
-        self.combo_behavior_align.setEnabled(use_beh)
-        self.combo_behavior_align.setVisible(use_beh)
-
-        is_transition = self.combo_behavior_align.currentText().startswith("Transition") and use_beh
-        for w in (
-            self.combo_behavior_from,
-            self.combo_behavior_to,
-            self.spin_transition_gap,
-            self.lbl_trans_from,
-            self.lbl_trans_to,
-            self.lbl_trans_gap,
-        ):
-            w.setVisible(is_transition)
-
-        if use_beh:
-            self.combo_behavior_from.setEnabled(is_transition)
-            self.combo_behavior_to.setEnabled(is_transition)
-            self.spin_transition_gap.setEnabled(is_transition)
-        self._update_trace_preview()
         self._update_status_strip()
 
     def _current_behavior_parse_mode(self) -> str:
@@ -3386,6 +3415,70 @@ class PostProcessingPanel(QtWidgets.QWidget):
         has_multi = self.combo_signal_file.count() > 1
         self.combo_signal_scope.setEnabled(has_multi)
         self.combo_signal_file.setEnabled(self.combo_signal_scope.currentText() == "Per file")
+
+    def _refresh_individual_file_combo(self) -> None:
+        if not hasattr(self, "combo_individual_file"):
+            return
+        prev = self.combo_individual_file.currentText().strip()
+        self.combo_individual_file.blockSignals(True)
+        self.combo_individual_file.clear()
+        for fid in self._all_file_ids:
+            self.combo_individual_file.addItem(fid)
+        if prev:
+            idx = self.combo_individual_file.findText(prev)
+            if idx >= 0:
+                self.combo_individual_file.setCurrentIndex(idx)
+        self.combo_individual_file.blockSignals(False)
+        # Show file selector only in Individual mode
+        is_individual = self.tab_visual_mode.currentIndex() == 0
+        self.combo_individual_file.setVisible(is_individual)
+
+    def _on_visual_mode_changed(self, index: int) -> None:
+        is_individual = index == 0
+        self.combo_individual_file.setVisible(is_individual)
+        self._rerender_visual_from_cache()
+
+    def _on_individual_file_changed(self, _index: int = 0) -> None:
+        if self.tab_visual_mode.currentIndex() == 0:
+            self._rerender_visual_from_cache()
+
+    def _rerender_visual_from_cache(self) -> None:
+        visual_mode = self.tab_visual_mode.currentIndex()
+        if visual_mode == 1:
+            # Group view
+            if self._group_mat is not None and self._group_tvec is not None:
+                self._render_heatmap(self._group_mat, self._group_tvec, labels=self._group_labels)
+                self._render_avg(self._group_mat, self._group_tvec)
+                self._render_metrics(self._group_mat, self._group_tvec)
+                self._last_mat = self._group_mat
+                self._last_tvec = self._group_tvec
+                self.lbl_plot_file.setText(f"Group: {len(self._group_labels)} animal(s)")
+                self.plot_avg.setTitle("Average across animals +/- SEM")
+        else:
+            # Individual view
+            sel_id = self.combo_individual_file.currentText().strip()
+            if sel_id and sel_id in self._per_file_mats:
+                tvec, mat = self._per_file_mats[sel_id]
+                labels = self._per_file_labels.get(sel_id, [])
+                self._render_heatmap(mat, tvec, labels=labels)
+                self._render_avg(mat, tvec)
+                self._render_metrics(mat, tvec)
+                self._last_mat = mat
+                self._last_tvec = tvec
+                self.lbl_plot_file.setText(f"File: {sel_id}")
+                self.plot_avg.setTitle("Average across trials +/- SEM")
+            elif self._all_file_ids:
+                first_id = self._all_file_ids[0]
+                if first_id in self._per_file_mats:
+                    tvec, mat = self._per_file_mats[first_id]
+                    labels = self._per_file_labels.get(first_id, [])
+                    self._render_heatmap(mat, tvec, labels=labels)
+                    self._render_avg(mat, tvec)
+                    self._render_metrics(mat, tvec)
+                    self._last_mat = mat
+                    self._last_tvec = tvec
+                    self.lbl_plot_file.setText(f"File: {first_id}")
+                    self.plot_avg.setTitle("Average across trials +/- SEM")
 
     def _update_data_availability(self) -> None:
         has_processed = bool(self._processed)
@@ -5730,6 +5823,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             group_mode = self.tab_sources.currentIndex() == 1
             mats: List[np.ndarray] = []
             animal_rows: List[np.ndarray] = []
+            animal_labels: List[str] = []
+            per_file_mats: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+            per_file_labels: Dict[str, List[str]] = {}
+            file_ids_order: List[str] = []
             all_dur = []
             all_events: List[float] = []
             event_rows: List[Dict[str, object]] = []
@@ -5760,12 +5857,32 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     continue
                 mats.append(mat)
                 total_events += mat.shape[0]
-                if group_mode:
-                    row = np.nanmean(mat, axis=0)
-                    if np.any(np.isfinite(row)):
-                        animal_rows.append(row)
+                # Store per-file matrix for individual view
+                per_file_mats[file_id] = (tvec.copy(), mat.copy())
+                per_file_labels[file_id] = [f"Trial {j + 1}" for j in range(mat.shape[0])]
+                if file_id not in file_ids_order:
+                    file_ids_order.append(file_id)
+                # Build group (animal-level) row
+                row = np.nanmean(mat, axis=0)
+                if np.any(np.isfinite(row)):
+                    animal_rows.append(row)
+                    animal_labels.append(file_id)
                 if dur is not None and len(dur):
                     all_dur.append(np.asarray(dur, float))
+
+            # Persist per-file and group data for visual tab switching
+            self._per_file_mats = per_file_mats
+            self._per_file_labels = per_file_labels
+            self._all_file_ids = file_ids_order
+            if animal_rows:
+                self._group_mat = np.vstack(animal_rows)
+                self._group_tvec = tvec.copy() if tvec is not None else None
+                self._group_labels = animal_labels
+            else:
+                self._group_mat = None
+                self._group_tvec = None
+                self._group_labels = []
+            self._refresh_individual_file_combo()
 
             self._render_global_metrics()
 
@@ -5778,19 +5895,42 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 return
 
             mat_events = np.vstack(mats)
-            if group_mode:
+            # Determine what to display based on visual mode tab
+            visual_mode = self.tab_visual_mode.currentIndex()  # 0=Individual, 1=Group
+            if visual_mode == 1 and group_mode:
+                # Group view: each row = animal
                 if not animal_rows:
-                    self.lbl_log.setText("No events found for the current alignment.")
+                    self.statusUpdate.emit("No events found for the current alignment.", 5000)
                     self._last_events = np.array([], float)
                     self._last_event_rows = []
                     self._last_durations = np.array([], float)
                     self._update_status_strip()
                     return
-                mat_display = np.vstack(animal_rows)
+                mat_display = self._group_mat
+                display_labels = self._group_labels
+            elif visual_mode == 0 and per_file_mats:
+                # Individual view: show selected file's trials
+                sel_id = self.combo_individual_file.currentText().strip()
+                if sel_id and sel_id in per_file_mats:
+                    _, mat_display = per_file_mats[sel_id]
+                    display_labels = per_file_labels.get(sel_id, [])
+                else:
+                    # Default to first file
+                    first_id = file_ids_order[0] if file_ids_order else None
+                    if first_id and first_id in per_file_mats:
+                        _, mat_display = per_file_mats[first_id]
+                        display_labels = per_file_labels.get(first_id, [])
+                    else:
+                        mat_display = mat_events
+                        display_labels = [f"Trial {j + 1}" for j in range(mat_events.shape[0])]
+            elif group_mode:
+                mat_display = np.vstack(animal_rows) if animal_rows else mat_events
+                display_labels = animal_labels if animal_rows else [f"Trial {j + 1}" for j in range(mat_events.shape[0])]
             else:
                 mat_display = mat_events
+                display_labels = [f"Trial {j + 1}" for j in range(mat_events.shape[0])]
 
-            self._render_heatmap(mat_display, tvec)
+            self._render_heatmap(mat_display, tvec, labels=display_labels)
             self._render_avg(mat_display, tvec)
             dur_all = np.concatenate(all_dur) if all_dur else np.array([], float)
             self._render_duration_hist(dur_all)
@@ -5800,8 +5940,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._last_events = np.asarray(all_events, float) if all_events else np.array([], float)
             self._last_durations = dur_all
             self._last_event_rows = event_rows
-            if group_mode:
-                self.statusUpdate.emit(f"Computed PSTH for {total_events} event(s) across {mat_display.shape[0]} animal(s).", 5000)
+            if visual_mode == 1 and group_mode:
+                self.statusUpdate.emit(
+                    f"Group view: {total_events} event(s) across {mat_display.shape[0]} animal(s).", 5000)
+            elif visual_mode == 0:
+                sel = self.combo_individual_file.currentText().strip() or "(first)"
+                self.statusUpdate.emit(
+                    f"Individual view [{sel}]: {mat_display.shape[0]} trial(s), {total_events} total event(s).", 5000)
             else:
                 self.statusUpdate.emit(f"Computed PSTH for {total_events} event(s).", 5000)
             self._update_metric_regions()
@@ -5811,7 +5956,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.statusUpdate.emit(f"Postprocessing error: {e}", 5000)
             self._update_status_strip()
 
-    def _render_heatmap(self, mat: np.ndarray, tvec: np.ndarray) -> None:
+    def _render_heatmap(self, mat: np.ndarray, tvec: np.ndarray, labels: Optional[List[str]] = None) -> None:
         if mat.size == 0:
             self.img.setImage(np.zeros((1, 1)))
             self.heat_zero_line.setVisible(False)
@@ -5840,11 +5985,23 @@ class PostProcessingPanel(QtWidgets.QWidget):
         x1 = float(tvec[-1]) if tvec.size else 1.0
         if x1 == x0:
             x1 = x0 + 1.0
-        self.img.setRect(QtCore.QRectF(x0, 0, x1 - x0, img.shape[1]))
+        n_rows = img.shape[1]
+        self.img.setRect(QtCore.QRectF(x0, 0, x1 - x0, n_rows))
         self.plot_heat.setXRange(x0, x1, padding=0)
-        self.plot_heat.setYRange(0, float(img.shape[1]), padding=0)
+        self.plot_heat.setYRange(0, float(n_rows), padding=0)
         self.heat_zero_line.setPos(0.0)
         self.heat_zero_line.setVisible(bool(x0 <= 0.0 <= x1))
+
+        # Set Y-axis labels (trial names or animal IDs)
+        y_axis = self.plot_heat.getAxis("left")
+        if labels and len(labels) == n_rows:
+            ticks = [(float(i) + 0.5, str(labels[i])) for i in range(n_rows)]
+            y_axis.setTicks([ticks])
+            visual_mode = self.tab_visual_mode.currentIndex()
+            self.plot_heat.setLabel("left", "Animals" if visual_mode == 1 else "Trials")
+        else:
+            y_axis.setTicks(None)
+            self.plot_heat.setLabel("left", "Trials / Recordings")
 
     def _render_duration_hist(self, durations: np.ndarray) -> None:
         self.plot_dur.clear()
@@ -5887,6 +6044,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.curve_sem_hi.setData(tvec, avg + sem, connect="finite", skipFiniteCheck=True)
         self.curve_sem_lo.setData(tvec, avg - sem, connect="finite", skipFiniteCheck=True)
         self.plot_avg.setXRange(float(tvec[0]), float(tvec[-1]), padding=0)
+        visual_mode = self.tab_visual_mode.currentIndex() if hasattr(self, "tab_visual_mode") else 0
+        if visual_mode == 1:
+            self.plot_avg.setTitle("Average across animals \u00b1 SEM")
+        else:
+            self.plot_avg.setTitle("Average across trials \u00b1 SEM")
 
     @staticmethod
     def _finite_mean_sem(values: np.ndarray) -> Tuple[float, float, int]:
@@ -7729,7 +7891,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _export_results(self) -> None:
         if self._last_mat is None or self._last_tvec is None:
             return
-        dlg = ExportDialog(self)
+        is_group = self.tab_visual_mode.currentIndex() == 1 and bool(self._group_labels)
+        dlg = ExportDialog(self, group_labels=self._group_labels if is_group else None)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         choices = dlg.choices()
@@ -7739,6 +7902,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         self._remember_export_dir(out_dir)
         prefix = self._default_export_prefix()
+        do_csv = bool(choices.get("csv", True))
+        do_h5 = bool(choices.get("h5", False))
+        do_png = bool(choices.get("png", True))
+        do_pdf = bool(choices.get("pdf", True))
+
+        # Determine row labels for heatmap columns
+        if is_group and self._group_labels:
+            row_labels = self._group_labels
+        else:
+            row_labels = [f"trial_{i + 1}" for i in range(self._last_mat.shape[0])]
 
         if choices.get("heatmap"):
             heat_base = os.path.join(out_dir, f"{prefix}_heatmap")
@@ -7750,61 +7923,407 @@ class PostProcessingPanel(QtWidgets.QWidget):
             time = time[:n_time]
             mat = mat[:, :n_time]
             arr = np.column_stack([time, mat.T])
-            header_cols = ["time"] + [f"trial_{i + 1}" for i in range(mat.shape[0])]
-            np.savetxt(
-                f"{heat_base}.csv",
-                arr,
-                delimiter=",",
-                header=",".join(header_cols),
-                comments="",
-            )
+            header_cols = ["time"] + list(row_labels[:mat.shape[0]])
+            if do_csv:
+                np.savetxt(f"{heat_base}.csv", arr, delimiter=",",
+                           header=",".join(header_cols), comments="")
+            if do_h5:
+                with h5py.File(f"{heat_base}.h5", "w") as hf:
+                    hf.create_dataset("time", data=time)
+                    hf.create_dataset("matrix", data=mat)
+                    hf.attrs["row_labels"] = row_labels[:mat.shape[0]]
             self._write_export_parameter_file(heat_base, self._collect_psth_parameter_sections(include_heatmap=True))
+
+        if choices.get("heatmap_aligned"):
+            # Export all per-file heatmaps stacked with file_id column
+            aligned_base = os.path.join(out_dir, f"{prefix}_heatmap_aligned")
+            if self._per_file_mats and do_csv:
+                import csv as csv_mod
+                with open(f"{aligned_base}.csv", "w", newline="") as f:
+                    w = csv_mod.writer(f)
+                    first_id = next(iter(self._per_file_mats))
+                    tvec_ref = self._per_file_mats[first_id][0]
+                    w.writerow(["file_id", "trial"] + [f"{t:.4f}" for t in tvec_ref])
+                    for fid, (tvec_f, mat_f) in self._per_file_mats.items():
+                        for j in range(mat_f.shape[0]):
+                            row_data = [fid, f"trial_{j + 1}"] + [f"{v:.6f}" for v in mat_f[j, :min(tvec_ref.size, mat_f.shape[1])]]
+                            w.writerow(row_data)
+            if self._per_file_mats and do_h5:
+                with h5py.File(f"{aligned_base}.h5", "w") as hf:
+                    for fid, (tvec_f, mat_f) in self._per_file_mats.items():
+                        grp = hf.create_group(fid)
+                        grp.create_dataset("time", data=tvec_f)
+                        grp.create_dataset("matrix", data=mat_f)
+
         if choices.get("avg"):
             avg_base = os.path.join(out_dir, f"{prefix}_avg_psth")
             avg = np.nanmean(self._last_mat, axis=0)
-            sem = np.nanstd(self._last_mat, axis=0) / np.sqrt(max(1, np.sum(np.any(np.isfinite(self._last_mat), axis=1))))
+            n_valid = max(1, np.sum(np.any(np.isfinite(self._last_mat), axis=1)))
+            sem = np.nanstd(self._last_mat, axis=0) / np.sqrt(n_valid)
             arr = np.vstack([self._last_tvec, avg, sem]).T
-            np.savetxt(
-                f"{avg_base}.csv",
-                arr,
-                delimiter=",",
-                header="time,average_psth,sem",
-                comments="",
-            )
+            if do_csv:
+                np.savetxt(f"{avg_base}.csv", arr, delimiter=",",
+                           header="time,average_psth,sem", comments="")
+            if do_h5:
+                with h5py.File(f"{avg_base}.h5", "w") as hf:
+                    hf.create_dataset("time", data=self._last_tvec)
+                    hf.create_dataset("average", data=avg)
+                    hf.create_dataset("sem", data=sem)
             self._write_export_parameter_file(avg_base, self._collect_psth_parameter_sections(include_heatmap=False))
+
         if choices.get("events"):
-            event_path = os.path.join(out_dir, f"{prefix}_events.csv")
+            event_base = os.path.join(out_dir, f"{prefix}_events")
             if self._last_event_rows:
                 import csv
-                with open(event_path, "w", newline="") as f:
-                    w = csv.writer(f)
-                    w.writerow(["file_id", "event_time_sec", "duration_sec"])
-                    for row in self._last_event_rows:
-                        w.writerow([row.get("file_id", ""), row.get("event_time_sec", np.nan), row.get("duration_sec", np.nan)])
-            elif self._last_events is not None:
-                np.savetxt(event_path, self._last_events, delimiter=",")
+                if do_csv:
+                    with open(f"{event_base}.csv", "w", newline="") as f:
+                        w = csv.writer(f)
+                        w.writerow(["file_id", "event_time_sec", "duration_sec"])
+                        for row in self._last_event_rows:
+                            w.writerow([row.get("file_id", ""), row.get("event_time_sec", np.nan), row.get("duration_sec", np.nan)])
+            elif self._last_events is not None and do_csv:
+                np.savetxt(f"{event_base}.csv", self._last_events, delimiter=",")
+
         if choices.get("durations") and self._last_durations is not None:
-            np.savetxt(os.path.join(out_dir, f"{prefix}_durations.csv"), self._last_durations, delimiter=",")
+            dur_base = os.path.join(out_dir, f"{prefix}_durations")
+            if do_csv:
+                np.savetxt(f"{dur_base}.csv", self._last_durations, delimiter=",")
+
         if choices.get("metrics") and (self._last_metrics or self._last_global_metrics):
             import csv
-            with open(os.path.join(out_dir, f"{prefix}_metrics.csv"), "w", newline="") as f:
-                w = csv.writer(f)
-                if self._last_metrics:
-                    w.writerow(["metric", "pre", "post"])
-                    w.writerow([self._last_metrics.get("metric", ""), self._last_metrics.get("pre", ""), self._last_metrics.get("post", "")])
-                if self._last_global_metrics:
+            met_base = os.path.join(out_dir, f"{prefix}_metrics")
+            if do_csv:
+                with open(f"{met_base}.csv", "w", newline="") as f:
+                    w = csv.writer(f)
                     if self._last_metrics:
-                        w.writerow([])
-                    w.writerow(["global_amp", "global_freq_hz", "global_start_s", "global_end_s", "global_peaks", "global_threshold", "global_duration_s"])
-                    w.writerow([
-                        self._last_global_metrics.get("amp", ""),
-                        self._last_global_metrics.get("freq", ""),
-                        self._last_global_metrics.get("start", ""),
-                        self._last_global_metrics.get("end", ""),
-                        self._last_global_metrics.get("peaks", ""),
-                        self._last_global_metrics.get("thr", ""),
-                        self._last_global_metrics.get("duration", ""),
-                    ])
+                        w.writerow(["metric", "pre", "post"])
+                        w.writerow([self._last_metrics.get("metric", ""), self._last_metrics.get("pre", ""), self._last_metrics.get("post", "")])
+                    if self._last_global_metrics:
+                        if self._last_metrics:
+                            w.writerow([])
+                        w.writerow(["global_amp", "global_freq_hz", "global_start_s", "global_end_s", "global_peaks", "global_threshold", "global_duration_s"])
+                        w.writerow([
+                            self._last_global_metrics.get("amp", ""),
+                            self._last_global_metrics.get("freq", ""),
+                            self._last_global_metrics.get("start", ""),
+                            self._last_global_metrics.get("end", ""),
+                            self._last_global_metrics.get("peaks", ""),
+                            self._last_global_metrics.get("thr", ""),
+                            self._last_global_metrics.get("duration", ""),
+                        ])
+
+        # --- Plot exports ---
+        if choices.get("plot_heatmap") and hasattr(self, "row_heat"):
+            base = os.path.join(out_dir, f"{prefix}_plot_heatmap")
+            self._export_widget_selective(self.row_heat, base, do_png, do_pdf)
+        if choices.get("plot_avg") and hasattr(self, "row_avg"):
+            base = os.path.join(out_dir, f"{prefix}_plot_avg")
+            self._export_widget_selective(self.row_avg, base, do_png, do_pdf)
+        if choices.get("plot_trace") and hasattr(self, "plot_trace"):
+            base = os.path.join(out_dir, f"{prefix}_plot_trace")
+            self._export_widget_selective(self.plot_trace, base, do_png, do_pdf)
+
+        # --- Publication figure ---
+        if choices.get("pub_figure"):
+            pub_content = str(choices.get("pub_content", "Heatmap + Avg PSTH + Metrics"))
+            self._export_publication_figure(out_dir, prefix, pub_content)
+
+        self.statusUpdate.emit(f"Export complete \u2192 {out_dir}", 5000)
+
+    def _export_widget_selective(self, widget: QtWidgets.QWidget, base_path: str,
+                                  do_png: bool, do_pdf: bool) -> None:
+        if do_png:
+            image = self._render_widget_image(widget, transparent=True)
+            if image and not image.isNull():
+                image.save(f"{base_path}.png", "PNG")
+        if do_pdf:
+            self._write_widget_pdf(widget, f"{base_path}.pdf")
+
+    def _get_all_behavior_names(self) -> List[str]:
+        names: List[str] = []
+        for info in self._behavior_sources.values():
+            behaviors = info.get("behaviors") or {}
+            for beh in behaviors:
+                if beh not in names:
+                    names.append(beh)
+        return names
+
+    def _compute_psth_for_behavior(self, behavior_name: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[str]]:
+        pre = float(self.spin_pre.value())
+        post = float(self.spin_post.value())
+        b0 = float(self.spin_b0.value())
+        b1 = float(self.spin_b1.value())
+        res_hz = float(self.spin_resample.value())
+        smooth = float(self.spin_smooth.value())
+        window = (-pre, post)
+        baseline = (b0, b1)
+        is_group = self.tab_visual_mode.currentIndex() == 1 and len(self._processed) > 1
+        animal_rows: List[np.ndarray] = []
+        animal_labels: List[str] = []
+        all_mats: List[np.ndarray] = []
+        tvec = None
+        for proc in self._processed:
+            info = self._match_behavior_source(proc)
+            if not info:
+                continue
+            on, off, dur = self._extract_behavior_events(info, behavior_name)
+            if on.size == 0:
+                continue
+            align_mode = self.combo_behavior_align.currentText()
+            if align_mode.endswith("offset"):
+                events = off
+            else:
+                events = on
+            events, dur = self._filter_events(events, dur)
+            if events.size == 0:
+                continue
+            file_id = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
+            tvec, mat = _compute_psth_matrix(proc.time, proc.output, events, window, baseline, res_hz, smooth_sigma_s=smooth)
+            if mat.size == 0:
+                continue
+            all_mats.append(mat)
+            row = np.nanmean(mat, axis=0)
+            if np.any(np.isfinite(row)):
+                animal_rows.append(row)
+                animal_labels.append(file_id)
+        if not all_mats or tvec is None:
+            return None, None, []
+        if is_group and animal_rows:
+            return np.vstack(animal_rows), tvec, animal_labels
+        mat_all = np.vstack(all_mats)
+        labels = [f"Trial {i + 1}" for i in range(mat_all.shape[0])]
+        return mat_all, tvec, labels
+
+    def _export_publication_figure(self, out_dir: str, prefix: str, pub_content: str) -> None:
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            from matplotlib.gridspec import GridSpec
+            from scipy import stats
+        except ImportError as e:
+            self.statusUpdate.emit(f"Publication figure requires matplotlib and scipy: {e}", 5000)
+            return
+
+        behaviors = self._get_all_behavior_names()
+        if not behaviors:
+            self.statusUpdate.emit("No behaviors found for publication figure.", 5000)
+            return
+
+        show_heat = "Heatmap" in pub_content
+        show_avg = "Avg" in pub_content or "PSTH" in pub_content
+        show_metrics = "Metrics" in pub_content
+        n_cols = int(show_heat) + int(show_avg) + int(show_metrics)
+        if n_cols == 0:
+            n_cols = 3
+            show_heat = show_avg = show_metrics = True
+        n_rows = len(behaviors)
+
+        # Publication styling
+        plt.rcParams.update({
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "font.size": 9,
+            "axes.titlesize": 10,
+            "axes.labelsize": 9,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "axes.linewidth": 0.8,
+            "xtick.major.width": 0.6,
+            "ytick.major.width": 0.6,
+            "figure.dpi": 300,
+        })
+
+        width_ratios = []
+        if show_heat:
+            width_ratios.append(3)
+        if show_avg:
+            width_ratios.append(2.5)
+        if show_metrics:
+            width_ratios.append(1.2)
+
+        fig_w = sum(width_ratios) * 1.8
+        fig_h = max(3.5, n_rows * 1.8)
+        fig = plt.figure(figsize=(fig_w, fig_h), facecolor="white")
+        gs = GridSpec(n_rows, n_cols, figure=fig, width_ratios=width_ratios,
+                      hspace=0.45, wspace=0.4, left=0.08, right=0.95, top=0.93, bottom=0.08)
+
+        pre0 = float(self.spin_metric_pre0.value())
+        pre1 = float(self.spin_metric_pre1.value())
+        post0 = float(self.spin_metric_post0.value())
+        post1 = float(self.spin_metric_post1.value())
+        metric_name = self.combo_metric.currentText()
+        cmap_name = str(self._style.get("heatmap_cmap", "viridis"))
+
+        for row_i, beh_name in enumerate(behaviors):
+            mat, tvec, labels = self._compute_psth_for_behavior(beh_name)
+            col = 0
+
+            if mat is None or tvec is None or mat.size == 0:
+                # Empty row
+                if show_heat:
+                    ax = fig.add_subplot(gs[row_i, col])
+                    ax.text(0.5, 0.5, f"No data\n{beh_name}", ha="center", va="center",
+                            transform=ax.transAxes, fontsize=8, color="#999")
+                    ax.set_ylabel(beh_name, fontweight="bold", fontsize=9)
+                    col += 1
+                if show_avg:
+                    ax = fig.add_subplot(gs[row_i, col])
+                    ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                            transform=ax.transAxes, fontsize=8, color="#999")
+                    col += 1
+                if show_metrics:
+                    ax = fig.add_subplot(gs[row_i, col])
+                    ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                            transform=ax.transAxes, fontsize=8, color="#999")
+                continue
+
+            avg = np.nanmean(mat, axis=0)
+            n_valid = max(1, np.sum(np.any(np.isfinite(mat), axis=1)))
+            sem = np.nanstd(mat, axis=0) / np.sqrt(n_valid)
+
+            # --- Heatmap ---
+            if show_heat:
+                ax_heat = fig.add_subplot(gs[row_i, col])
+                extent = [float(tvec[0]), float(tvec[-1]), 0, mat.shape[0]]
+                im = ax_heat.imshow(mat, aspect="auto", origin="lower", extent=extent,
+                                     cmap=cmap_name, interpolation="nearest")
+                ax_heat.axvline(0, color="white", linewidth=0.7, linestyle="--", alpha=0.8)
+                ax_heat.set_ylabel(beh_name, fontweight="bold", fontsize=9)
+                if labels:
+                    n = min(len(labels), mat.shape[0])
+                    tick_pos = [i + 0.5 for i in range(n)]
+                    # Limit tick density for readability
+                    if n > 15:
+                        step = max(1, n // 10)
+                        tick_pos = tick_pos[::step]
+                        tick_labels = labels[::step]
+                    else:
+                        tick_labels = labels[:n]
+                    ax_heat.set_yticks(tick_pos)
+                    ax_heat.set_yticklabels(tick_labels, fontsize=6)
+                if row_i == n_rows - 1:
+                    ax_heat.set_xlabel("Time (s)")
+                else:
+                    ax_heat.set_xticklabels([])
+                if row_i == 0:
+                    ax_heat.set_title("Heatmap", fontweight="bold")
+                cbar = fig.colorbar(im, ax=ax_heat, fraction=0.04, pad=0.02)
+                cbar.ax.tick_params(labelsize=6)
+                col += 1
+
+            # --- Average PSTH ---
+            if show_avg:
+                ax_avg = fig.add_subplot(gs[row_i, col])
+                ax_avg.fill_between(tvec, avg - sem, avg + sem,
+                                     color="#7BC8A4", alpha=0.3, linewidth=0)
+                ax_avg.plot(tvec, avg, color="#3B82F6", linewidth=1.2)
+                ax_avg.axvline(0, color="#666", linewidth=0.7, linestyle="--", alpha=0.7)
+                ax_avg.axhline(0, color="#999", linewidth=0.4, alpha=0.5)
+                # Shade pre/post windows
+                ax_avg.axvspan(pre0, pre1, color="#5B8CD6", alpha=0.08)
+                ax_avg.axvspan(post0, post1, color="#D67B5B", alpha=0.08)
+                ax_avg.set_xlim(float(tvec[0]), float(tvec[-1]))
+                if row_i == n_rows - 1:
+                    ax_avg.set_xlabel("Time (s)")
+                else:
+                    ax_avg.set_xticklabels([])
+                ax_avg.set_ylabel("z-score")
+                if row_i == 0:
+                    ax_avg.set_title("Average PSTH \u00b1 SEM", fontweight="bold")
+                ax_avg.spines["top"].set_visible(False)
+                ax_avg.spines["right"].set_visible(False)
+                col += 1
+
+            # --- Metrics bar with t-test ---
+            if show_metrics:
+                ax_met = fig.add_subplot(gs[row_i, col])
+                pre_mask = (tvec >= pre0) & (tvec <= pre1)
+                post_mask = (tvec >= post0) & (tvec <= post1)
+                if np.any(pre_mask) and np.any(post_mask):
+                    pre_vals = mat[:, pre_mask]
+                    post_vals = mat[:, post_mask]
+                    if metric_name == "AUC":
+                        dt = float(tvec[1] - tvec[0]) if tvec.size > 1 else 1.0
+                        per_row_pre = np.nansum(pre_vals, axis=1) * dt
+                        per_row_post = np.nansum(post_vals, axis=1) * dt
+                    else:
+                        per_row_pre = np.nanmean(pre_vals, axis=1)
+                        per_row_post = np.nanmean(post_vals, axis=1)
+
+                    # Filter valid paired data
+                    valid = np.isfinite(per_row_pre) & np.isfinite(per_row_post)
+                    pre_v = per_row_pre[valid]
+                    post_v = per_row_post[valid]
+                    n_pairs = int(pre_v.size)
+
+                    mean_pre = float(np.mean(pre_v)) if n_pairs else 0.0
+                    mean_post = float(np.mean(post_v)) if n_pairs else 0.0
+                    sem_pre = float(np.std(pre_v, ddof=1) / np.sqrt(n_pairs)) if n_pairs > 1 else 0.0
+                    sem_post = float(np.std(post_v, ddof=1) / np.sqrt(n_pairs)) if n_pairs > 1 else 0.0
+
+                    colors = ["#5B8CD6", "#D67B5B"]
+                    bars = ax_met.bar([0, 1], [mean_pre, mean_post], width=0.55,
+                                       color=colors, edgecolor="white", linewidth=0.5, alpha=0.85)
+                    ax_met.errorbar([0, 1], [mean_pre, mean_post], yerr=[sem_pre, sem_post],
+                                     fmt="none", ecolor="#333", elinewidth=1.0, capsize=3, capthick=0.8)
+
+                    # Paired lines + scatter
+                    if n_pairs > 0 and n_pairs <= 50:
+                        for j in range(n_pairs):
+                            ax_met.plot([0, 1], [pre_v[j], post_v[j]],
+                                         color="#888", linewidth=0.4, alpha=0.5, zorder=1)
+                        jitter_pre = np.random.default_rng(42).uniform(-0.08, 0.08, n_pairs)
+                        jitter_post = np.random.default_rng(43).uniform(-0.08, 0.08, n_pairs)
+                        ax_met.scatter(jitter_pre, pre_v, s=12, color="#3B6CB0",
+                                        edgecolors="white", linewidths=0.3, zorder=3, alpha=0.8)
+                        ax_met.scatter(1 + jitter_post, post_v, s=12, color="#B05B3B",
+                                        edgecolors="white", linewidths=0.3, zorder=3, alpha=0.8)
+
+                    # Paired t-test
+                    p_val = np.nan
+                    if n_pairs >= 2:
+                        try:
+                            _, p_val = stats.ttest_rel(pre_v, post_v)
+                        except Exception:
+                            pass
+
+                    # Significance annotation
+                    y_max = max(mean_pre + sem_pre, mean_post + sem_post)
+                    if np.isfinite(pre_v).any() and np.isfinite(post_v).any():
+                        y_max = max(y_max, float(np.nanmax(np.concatenate([pre_v, post_v]))))
+                    bar_y = y_max * 1.08
+                    if np.isfinite(p_val):
+                        if p_val < 0.001:
+                            sig_str = "***"
+                        elif p_val < 0.01:
+                            sig_str = "**"
+                        elif p_val < 0.05:
+                            sig_str = "*"
+                        else:
+                            sig_str = "n.s."
+                        ax_met.plot([0, 0, 1, 1], [bar_y, bar_y * 1.03, bar_y * 1.03, bar_y],
+                                     color="#333", linewidth=0.8)
+                        ax_met.text(0.5, bar_y * 1.05, f"{sig_str}\np={p_val:.3g}",
+                                     ha="center", va="bottom", fontsize=7, color="#333")
+                else:
+                    ax_met.text(0.5, 0.5, "N/A", ha="center", va="center",
+                                transform=ax_met.transAxes, fontsize=8, color="#999")
+
+                ax_met.set_xticks([0, 1])
+                ax_met.set_xticklabels(["Pre", "Post"], fontsize=8)
+                ax_met.set_ylabel(metric_name, fontsize=8)
+                if row_i == 0:
+                    ax_met.set_title(f"{metric_name} (paired t-test)", fontweight="bold")
+                ax_met.spines["top"].set_visible(False)
+                ax_met.spines["right"].set_visible(False)
+
+        # Save
+        fig_base = os.path.join(out_dir, f"{prefix}_publication_figure")
+        fig.savefig(f"{fig_base}.pdf", format="pdf", bbox_inches="tight", dpi=300)
+        fig.savefig(f"{fig_base}.png", format="png", bbox_inches="tight", dpi=300)
+        plt.close(fig)
+        self.statusUpdate.emit(f"Publication figure saved: {prefix}_publication_figure.pdf/.png", 5000)
 
     def _behavior_suffix(self) -> str:
         if not self.combo_align.currentText().startswith("Behavior"):
@@ -8485,24 +9004,93 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
 
 class ExportDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, group_labels: Optional[List[str]] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Export Results")
         self.setModal(True)
+        self.setMinimumWidth(420)
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(10)
 
+        # --- Data exports ---
+        grp_data = QtWidgets.QGroupBox("Data to export")
+        data_layout = QtWidgets.QVBoxLayout(grp_data)
         self.cb_heatmap = QtWidgets.QCheckBox("Heatmap matrix")
+        self.cb_heatmap_aligned = QtWidgets.QCheckBox("Heatmap aligned (time-locked matrix)")
         self.cb_avg = QtWidgets.QCheckBox("Average PSTH")
         self.cb_events = QtWidgets.QCheckBox("Event times")
         self.cb_durations = QtWidgets.QCheckBox("Event durations")
         self.cb_metrics = QtWidgets.QCheckBox("Metrics table")
-        for cb in (self.cb_heatmap, self.cb_avg, self.cb_events, self.cb_durations, self.cb_metrics):
+        for cb in (self.cb_heatmap, self.cb_heatmap_aligned, self.cb_avg,
+                   self.cb_events, self.cb_durations, self.cb_metrics):
             cb.setChecked(True)
-            layout.addWidget(cb)
+            data_layout.addWidget(cb)
+        self.cb_heatmap_aligned.setChecked(False)
+        layout.addWidget(grp_data)
 
+        # --- Format ---
+        grp_fmt = QtWidgets.QGroupBox("Export format")
+        fmt_layout = QtWidgets.QHBoxLayout(grp_fmt)
+        self.cb_csv = QtWidgets.QCheckBox("CSV")
+        self.cb_csv.setChecked(True)
+        self.cb_h5 = QtWidgets.QCheckBox("HDF5 (.h5)")
+        self.cb_h5.setChecked(False)
+        fmt_layout.addWidget(self.cb_csv)
+        fmt_layout.addWidget(self.cb_h5)
+        fmt_layout.addStretch(1)
+        layout.addWidget(grp_fmt)
+
+        # --- Plot exports ---
+        grp_plots = QtWidgets.QGroupBox("Plot exports")
+        plot_layout = QtWidgets.QVBoxLayout(grp_plots)
+        fmt_row = QtWidgets.QHBoxLayout()
+        self.cb_png = QtWidgets.QCheckBox("PNG")
+        self.cb_png.setChecked(True)
+        self.cb_pdf = QtWidgets.QCheckBox("PDF")
+        self.cb_pdf.setChecked(True)
+        fmt_row.addWidget(self.cb_png)
+        fmt_row.addWidget(self.cb_pdf)
+        fmt_row.addStretch(1)
+        plot_layout.addLayout(fmt_row)
+        self.cb_plot_heatmap = QtWidgets.QCheckBox("Heatmap + durations")
+        self.cb_plot_avg = QtWidgets.QCheckBox("Average PSTH + metrics")
+        self.cb_plot_trace = QtWidgets.QCheckBox("Trace preview")
+        for cb in (self.cb_plot_heatmap, self.cb_plot_avg, self.cb_plot_trace):
+            cb.setChecked(False)
+            plot_layout.addWidget(cb)
+        layout.addWidget(grp_plots)
+
+        # --- Publication figure ---
+        grp_pub = QtWidgets.QGroupBox("Publication figure")
+        pub_layout = QtWidgets.QVBoxLayout(grp_pub)
+        self.cb_pub_figure = QtWidgets.QCheckBox("Multi-panel figure (all behaviors)")
+        self.cb_pub_figure.setChecked(False)
+        self.cb_pub_figure.setToolTip(
+            "Export a publication-ready figure with one row per behavior:\n"
+            "heatmap | average PSTH | pre/post metrics with paired t-test p-value"
+        )
+        pub_layout.addWidget(self.cb_pub_figure)
+        self.combo_pub_content = QtWidgets.QComboBox()
+        self.combo_pub_content.addItems(["Heatmap + Avg PSTH + Metrics", "Heatmap + Metrics", "Avg PSTH + Metrics"])
+        _compact_combo(self.combo_pub_content, min_chars=12)
+        pub_content_row = QtWidgets.QHBoxLayout()
+        pub_content_row.addWidget(QtWidgets.QLabel("Panels:"))
+        pub_content_row.addWidget(self.combo_pub_content, stretch=1)
+        pub_layout.addLayout(pub_content_row)
+        layout.addWidget(grp_pub)
+
+        # Show group info if applicable
+        if group_labels and len(group_labels) > 1:
+            info = QtWidgets.QLabel(f"Group mode: {len(group_labels)} animals — columns will be labeled by animal ID")
+            info.setProperty("class", "hint")
+            info.setStyleSheet("color: #5abeFF; font-style: italic; padding: 4px 0;")
+            layout.addWidget(info)
+
+        # --- Buttons ---
         row = QtWidgets.QHBoxLayout()
         row.addStretch(1)
-        btn_ok = QtWidgets.QPushButton("OK")
+        btn_ok = QtWidgets.QPushButton("Export")
+        btn_ok.setProperty("class", "compactPrimary")
         btn_cancel = QtWidgets.QPushButton("Cancel")
         btn_ok.setDefault(True)
         row.addWidget(btn_ok)
@@ -8512,13 +9100,23 @@ class ExportDialog(QtWidgets.QDialog):
         btn_ok.clicked.connect(self.accept)
         btn_cancel.clicked.connect(self.reject)
 
-    def choices(self) -> Dict[str, bool]:
+    def choices(self) -> Dict[str, object]:
         return {
             "heatmap": self.cb_heatmap.isChecked(),
+            "heatmap_aligned": self.cb_heatmap_aligned.isChecked(),
             "avg": self.cb_avg.isChecked(),
             "events": self.cb_events.isChecked(),
             "durations": self.cb_durations.isChecked(),
             "metrics": self.cb_metrics.isChecked(),
+            "csv": self.cb_csv.isChecked(),
+            "h5": self.cb_h5.isChecked(),
+            "png": self.cb_png.isChecked(),
+            "pdf": self.cb_pdf.isChecked(),
+            "plot_heatmap": self.cb_plot_heatmap.isChecked(),
+            "plot_avg": self.cb_plot_avg.isChecked(),
+            "plot_trace": self.cb_plot_trace.isChecked(),
+            "pub_figure": self.cb_pub_figure.isChecked(),
+            "pub_content": self.combo_pub_content.currentText(),
         }
 
 
