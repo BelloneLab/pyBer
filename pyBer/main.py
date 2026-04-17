@@ -188,7 +188,7 @@ class QcDialog(QtWidgets.QDialog):
         self.plot_corr = pg.PlotWidget(title="Correlation (z_ref vs z_sig)")
         self.plot_zdist = pg.PlotWidget(title="Z distribution")
         self.plot_roll = pg.PlotWidget(title="Rolling corr(z_ref, z_sig)")
-        for w in (self.plot_z, self.plot_corr, self.plot_zdist, self.plot_roll):
+        for w in (self.plot_z, self.plot_corr, self.plot_zdist, self.plot_roll):hello
             w.showGrid(x=True, y=True, alpha=0.25)
             w.showAxis("top", False)
             w.showAxis("right", False)
