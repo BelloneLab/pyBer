@@ -2,7 +2,6 @@
 
 <img width="500" height="500" alt="pyBer_logo_big" src="https://github.com/user-attachments/assets/e5acb000-17cd-451d-9f49-4218b41519aa" />
 
-
 A desktop GUI for visualizing photometry recordings, cleaning artifacts, filtering/resampling, baseline estimation, motion-correction, and exporting processed traces for downstream analysis.
 
 This project is designed for efficient exploratory QC (preview in the GUI) while keeping processing logic deterministic and scriptable (core functions live in `analysis_core.py`).
@@ -81,7 +80,7 @@ The GUI exposes seven explicit output definitions:
   Processing pipeline (loading, filtering, baselines, outputs, export helpers)
 - `main.py` (or similar)  
   PySide6 GUI entry point and UI wiring
-- `requirements.yml`  
+- `environment.yml`  
   Conda environment definition
 
 ---
@@ -91,48 +90,49 @@ The GUI exposes seven explicit output definitions:
 1. Create the environment:
    ```bash
    conda env create -f environment.yml
-## Run
-  cd .\pyBer\
-  python main.py
+   ```
+2. Activate it:
+   ```bash
+   conda activate pyBer
+   ```
+3. Run the GUI:
+   ```bash
+   cd pyBer
+   python main.py
+   ```
+
+---
 
 ## Usage workflow
 
-Open a Doric .h5 file
-
-Choose a channel (e.g., AIN01).
-
-Optionally select a DigitalIO line to overlay events.
+1. Open a Doric `.h5` file.
+2. Choose a channel (e.g., `AIN01`).
+3. Optionally select a DigitalIO line to overlay events.
 
 ### QC & artifact removal
 
-Choose Global MAD (dx) or Adaptive MAD (windowed).
-
-Tune mad_k, window size, and padding.
-
-Add manual mask regions if needed.
+- Choose Global MAD (`dx`) or Adaptive MAD (windowed).
+- Tune `mad_k`, window size, and padding.
+- Add manual mask regions if needed.
 
 ### Filtering & resampling
 
-Set low-pass cutoff (Hz) and filter order.
-
-Set a target sampling rate (Hz) for consistent downstream analysis.
+- Set low-pass cutoff (Hz) and filter order.
+- Set a target sampling rate (Hz) for consistent downstream analysis.
 
 ### Baseline estimation
 
-Choose asls, arpls, or airpls.
-
-Tune lambda and other parameters to avoid baseline leakage into fast transients.
+- Choose `asls`, `arpls`, or `airpls`.
+- Tune lambda and other parameters to avoid baseline leakage into fast transients.
 
 ### Select output
 
-Pick one of the 7 output modes.
-
-For “fitted ref” modes, choose the fit method (OLS/Lasso/RLM-HuberT).
-
+- Pick one of the 7 output modes.
+- For “fitted ref” modes, choose the fit method (OLS/Lasso/RLM-HuberT).
 
 ### Export
 
-Export CSV/H5 for analysis in Python/MATLAB/R.
+- Export CSV/H5 for analysis in Python/MATLAB/R.
 
 ---
 
@@ -165,7 +165,7 @@ You can optionally set a start time, end time, or both:
 
 ### Behavior file formats
 - **CSV**: must include a time column and one or more binary behavior columns
-- **Ethovision XLSX**: the loader preprocess and clean the file, the user has to select the sheet when loading
+- **Ethovision XLSX**: the loader preprocess and clean the file; the user must select the sheet when loading
 
 ### PSTH/Heatmap
 - Heatmap and PSTH refresh automatically when alignment settings change
@@ -194,9 +194,6 @@ Use the **Group** tab in Post-Processing to load multiple processed files (CSV/H
 
 ---
 
+## NeuroMathSchool collaboration note
 
-
-
-
-
-
+If you want to evolve this codebase specifically for **NeuroMathSchool**, a good first milestone is to keep this repository as the core processing engine and add a separate curriculum/demo layer (example datasets, notebooks, and guided exercises) without changing existing file formats.
