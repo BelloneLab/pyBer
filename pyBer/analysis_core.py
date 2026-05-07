@@ -285,6 +285,7 @@ class ProcessedTrial:
     output: Optional[np.ndarray] = None
     output_label: str = ""
     output_context: str = ""
+    outputs: Dict[str, np.ndarray] = field(default_factory=dict)
 
     artifact_regions_sec: Optional[List[Tuple[float, float]]] = None
     artifact_regions_auto_sec: Optional[List[Tuple[float, float]]] = None
@@ -302,8 +303,9 @@ class ExportSelection:
     dio: bool = True
     baseline_sig: bool = True
     baseline_ref: bool = True
+    output_modes: List[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, bool]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "raw": bool(self.raw),
             "isobestic": bool(self.isobestic),
@@ -311,12 +313,16 @@ class ExportSelection:
             "dio": bool(self.dio),
             "baseline_sig": bool(self.baseline_sig),
             "baseline_ref": bool(self.baseline_ref),
+            "output_modes": list(self.output_modes or []),
         }
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, object]]) -> "ExportSelection":
         if not isinstance(data, dict):
             return cls()
+        modes = data.get("output_modes", [])
+        if not isinstance(modes, list):
+            modes = []
         return cls(
             raw=bool(data.get("raw", True)),
             isobestic=bool(data.get("isobestic", True)),
@@ -324,6 +330,7 @@ class ExportSelection:
             dio=bool(data.get("dio", True)),
             baseline_sig=bool(data.get("baseline_sig", True)),
             baseline_ref=bool(data.get("baseline_ref", True)),
+            output_modes=[str(m).strip() for m in modes if str(m or "").strip()],
         )
 
 
@@ -367,6 +374,67 @@ def output_label_type(label: str) -> str:
     return "output"
 
 
+def output_label_key(label: str) -> str:
+    """Return a stable, readable key for one output mode in multi-output exports."""
+    lab = (label or "").strip()
+    key = re.sub(r"[^A-Za-z0-9]+", "_", lab).strip("_").lower()
+    replacements = {
+        "dff_motion_corrected_with_fitted_ref": "dff_mc_fitted_ref",
+        "zscore_motion_corrected_with_fitted_ref": "zscore_mc_fitted_ref",
+        "prominence_normalized_motion_corrected_with_fitted_ref": "prominence_mc_fitted_ref",
+        "dff_motion_corrected_via_subtraction": "dff_mc_subtraction",
+        "zscore_motion_corrected_via_subtraction": "zscore_mc_subtraction",
+        "dff_non_motion_corrected": "dff_non_mc",
+        "zscore_non_motion_corrected": "zscore_non_mc",
+        "zscore_subtractions": "zscore_subtractions",
+        "raw_signal_465": "raw_signal_465",
+    }
+    return replacements.get(key, key or "output")
+
+
+def _unique_export_name(name: str, used: set) -> str:
+    base = str(name or "output").strip() or "output"
+    out = base
+    i = 2
+    while out in used:
+        out = f"{base}_{i}"
+        i += 1
+    used.add(out)
+    return out
+
+
+def _output_items_for_export(
+    processed: ProcessedTrial,
+    selection: ExportSelection,
+) -> List[Tuple[str, np.ndarray]]:
+    """Return output traces in requested export order, falling back to the selected output."""
+    source = getattr(processed, "outputs", None) or {}
+    items: List[Tuple[str, np.ndarray]] = []
+
+    if source:
+        requested = [str(m).strip() for m in (selection.output_modes or []) if str(m or "").strip()]
+        seen = set()
+        for label in requested:
+            if label in source and label not in seen:
+                items.append((label, np.asarray(source[label], float)))
+                seen.add(label)
+        for label, values in source.items():
+            if label not in seen:
+                items.append((str(label), np.asarray(values, float)))
+                seen.add(label)
+
+    if not items and processed.output is not None:
+        label = str(processed.output_label or "output")
+        items.append((label, np.asarray(processed.output, float)))
+
+    return items
+
+
+def _csv_output_values(label: str, values: np.ndarray, t: np.ndarray) -> np.ndarray:
+    values = values if values.size == t.size else np.full_like(t, np.nan)
+    return np.asarray(values, float)
+
+
 def export_processed_csv(
     path: str,
     processed: ProcessedTrial,
@@ -389,10 +457,15 @@ def export_processed_csv(
     if selection.dio and processed.dio is not None and processed.dio.size == t.size:
         dio = np.asarray(processed.dio, float)
 
-    out_col = output_label_type(processed.output_label)
+    output_items = _output_items_for_export(processed, selection) if selection.output else []
 
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
+        w.writerow([f"# output_label: {processed.output_label}"])
+        if processed.output_context:
+            w.writerow([f"# output_context: {processed.output_context}"])
+        if output_items:
+            w.writerow([f"# output_modes: {json.dumps([label for label, _ in output_items])}"])
         if metadata:
             for k, v in metadata.items():
                 w.writerow([f"# {k}: {v}"])
@@ -401,8 +474,20 @@ def export_processed_csv(
             columns.append(("raw", raw))
         if selection.isobestic:
             columns.append(("isobestic", iso))
-        if selection.output:
-            columns.append((out_col, out))
+        if selection.output and output_items:
+            if len(output_items) == 1:
+                label, values = output_items[0]
+                values = _csv_output_values(label, values, t)
+                columns.append((output_label_type(label), values))
+            else:
+                used_names = {name for name, _ in columns}
+                primary_label, primary_values = output_items[0]
+                primary_values = _csv_output_values(primary_label, primary_values, t)
+                columns.append((_unique_export_name("output", used_names), primary_values))
+                for label, values in output_items:
+                    values = _csv_output_values(label, values, t)
+                    col = _unique_export_name(f"output__{output_label_key(label)}", used_names)
+                    columns.append((col, values))
 
         # Primary trigger name (e.g. "DIO01")
         primary_name = str(processed.dio_name) if processed.dio_name else "dio"
@@ -435,16 +520,32 @@ def export_processed_h5(
         g = f.create_group("data")
         g.create_dataset("time", data=np.asarray(processed.time, float), compression="gzip")
         out_type = output_label_type(processed.output_label)
+        output_items = _output_items_for_export(processed, selection) if selection.output else []
         g.attrs["output_label"] = str(processed.output_label)
         g.attrs["output_context"] = str(processed.output_context)
         g.attrs["output_type"] = str(out_type)
+        if output_items:
+            g.attrs["output_modes"] = json.dumps([label for label, _ in output_items])
         g.attrs["fs_actual"] = float(processed.fs_actual)
         g.attrs["fs_used"] = float(processed.fs_used)
         g.attrs["fs_target"] = float(processed.fs_target)
         g.attrs["export_selection"] = json.dumps(selection.to_dict())
 
-        if selection.output:
-            g.create_dataset("output", data=np.asarray(processed.output, float), compression="gzip")
+        if selection.output and output_items:
+            t = np.asarray(processed.time, float)
+            _primary_label, primary_output = output_items[0]
+            primary_output = primary_output if primary_output.size == t.size else np.full_like(t, np.nan)
+            g.create_dataset("output", data=np.asarray(primary_output, float), compression="gzip")
+
+            if len(output_items) > 1:
+                out_group = g.create_group("outputs")
+                used = set()
+                for label, values in output_items:
+                    values = values if values.size == t.size else np.full_like(t, np.nan)
+                    ds_name = _unique_export_name(output_label_key(label), used)
+                    ds = out_group.create_dataset(ds_name, data=np.asarray(values, float), compression="gzip")
+                    ds.attrs["label"] = str(label)
+                    ds.attrs["output_type"] = str(output_label_type(label))
 
         raw_sig = np.asarray(processed.raw_signal if processed.raw_signal is not None else np.full_like(processed.time, np.nan), float)
         raw_ref = np.asarray(processed.raw_reference if processed.raw_reference is not None else np.full_like(processed.time, np.nan), float)
@@ -1567,6 +1668,7 @@ class PhotometryProcessor:
             output=out,
             output_label=mode,
             output_context=output_context,
+            outputs={mode: np.asarray(out, float)} if out is not None else {},
             artifact_regions_sec=regions_from_mask(t, mask),
             artifact_regions_auto_sec=auto_regions,
             fs_actual=float(fs),

@@ -16,8 +16,9 @@ import pyqtgraph as pg
 from pyqtgraph.dockarea import DockArea, Dock
 import h5py
 
-from analysis_core import ProcessedTrial
+from analysis_core import ProcessedTrial, coerce_time_value
 from ethovision_process_gui import clean_sheet
+from temporal_modeling import TemporalModelingWidget
 
 _DOCK_STATE_VERSION = 3
 _POST_DOCK_STATE_KEY = "post_main_dock_state_v4"
@@ -28,14 +29,15 @@ _POST_DOCK_PREFIX = "post."
 _PRE_DOCK_PREFIX = "pre."
 _BEHAVIOR_PARSE_BINARY = "binary_columns"
 _BEHAVIOR_PARSE_TIMESTAMPS = "timestamp_columns"
-_FIXED_POST_RIGHT_SECTIONS = frozenset({"setup", "spatial", "psth", "export"})
-_FIXED_POST_VISIBLE_SECTIONS = frozenset({"setup", "spatial", "psth", "export"})
-_FIXED_POST_RIGHT_TAB_ORDER = ("setup", "psth", "spatial", "export")
+_FIXED_POST_RIGHT_SECTIONS = frozenset({"setup", "spatial", "psth", "export", "temporal"})
+_FIXED_POST_VISIBLE_SECTIONS = frozenset({"setup", "spatial", "psth", "export", "temporal"})
+_FIXED_POST_RIGHT_TAB_ORDER = ("setup", "psth", "spatial", "temporal", "export")
 _POST_RIGHT_PANEL_MIN_WIDTH = 420
 _FIXED_POST_RIGHT_TAB_TITLES: Dict[str, str] = {
     "setup": "Setup",
     "psth": "PSTH",
     "spatial": "Spatial",
+    "temporal": "Temporal",
     "export": "Export",
 }
 _USE_PG_DOCKAREA_POST_LAYOUT = True
@@ -248,7 +250,6 @@ def _detect_time_column(df, fallback_to_first: bool = False) -> Optional[str]:
 
 def _numeric_column_array(df, col_name: str) -> np.ndarray:
     import pandas as pd
-    from pyBer.analysis_core import coerce_time_value
 
     col_key = None
     for c in df.columns:
@@ -508,6 +509,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._event_labels: List[pg.TextItem] = []
         self._event_regions: List[pg.LinearRegionItem] = []
         self._signal_peak_lines: List[pg.InfiniteLine] = []
+        self._signal_noise_items: List[object] = []
         self._pre_region: Optional[pg.LinearRegionItem] = None
         self._post_region: Optional[pg.LinearRegionItem] = None
         self._settings = QtCore.QSettings("FiberPhotometryApp", "DoricProcessor")
@@ -624,6 +626,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         vsrc.addWidget(self.btn_refresh_dio)
 
         grp_align = QtWidgets.QGroupBox("Behavior / Events")
+        grp_align.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Expanding)
         fal = QtWidgets.QFormLayout(grp_align)
         fal.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
         fal.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
@@ -685,12 +688,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         # Preprocessed files list
         self.list_preprocessed = FileDropList()
-        self.list_preprocessed.setMaximumHeight(120)
+        self.list_preprocessed.setMinimumHeight(180)
+        self.list_preprocessed.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         self.list_preprocessed.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
 
         # Behaviors list
         self.list_behaviors = FileDropList()
-        self.list_behaviors.setMaximumHeight(120)
+        self.list_behaviors.setMinimumHeight(180)
+        self.list_behaviors.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         self.list_behaviors.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
 
         # Control buttons for ordering
@@ -724,6 +735,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         beh_col = QtWidgets.QVBoxLayout()
         beh_col.addWidget(self.list_behaviors)
         beh_col.addWidget(self.btn_remove_beh)
+        pre_col.setStretch(0, 1)
+        beh_col.setStretch(0, 1)
         lists_layout.addLayout(pre_col)
         lists_layout.addLayout(beh_col)
 
@@ -764,16 +777,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fal.addRow(self.lbl_trans_gap, self.spin_transition_gap)
 
 
-        grp_opt = QtWidgets.QGroupBox("PSTH Options")
-        fopt = QtWidgets.QFormLayout(grp_opt)
-        fopt.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
-        fopt.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        # ── Shared QSS for PSTH subsection headers ──
+        _psth_section_qss = (
+            "QGroupBox { font-weight: 700; font-size: 11px; "
+            "border: 1px solid rgba(255,255,255,0.07); border-radius: 6px; "
+            "margin-top: 10px; padding: 14px 8px 8px 8px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; "
+            "padding: 0 6px; color: #8899b0; }"
+        )
 
+        # ── Widget creation (unchanged logic, reordered for sections) ──
         self.spin_pre = QtWidgets.QDoubleSpinBox(); self.spin_pre.setRange(0.1, 60); self.spin_pre.setValue(2.0); self.spin_pre.setDecimals(2)
-        self.spin_post= QtWidgets.QDoubleSpinBox(); self.spin_post.setRange(0.1, 120); self.spin_post.setValue(5.0); self.spin_post.setDecimals(2)
-        self.spin_b0  = QtWidgets.QDoubleSpinBox(); self.spin_b0.setRange(-60, 0); self.spin_b0.setValue(-1.0); self.spin_b0.setDecimals(2)
-        self.spin_b1  = QtWidgets.QDoubleSpinBox(); self.spin_b1.setRange(-60, 0); self.spin_b1.setValue(0.0); self.spin_b1.setDecimals(2)
-
+        self.spin_post = QtWidgets.QDoubleSpinBox(); self.spin_post.setRange(0.1, 120); self.spin_post.setValue(5.0); self.spin_post.setDecimals(2)
+        self.spin_b0 = QtWidgets.QDoubleSpinBox(); self.spin_b0.setRange(-60, 0); self.spin_b0.setValue(-1.0); self.spin_b0.setDecimals(2)
+        self.spin_b1 = QtWidgets.QDoubleSpinBox(); self.spin_b1.setRange(-60, 0); self.spin_b1.setValue(0.0); self.spin_b1.setDecimals(2)
         self.spin_resample = QtWidgets.QDoubleSpinBox(); self.spin_resample.setRange(1, 1000); self.spin_resample.setValue(50); self.spin_resample.setDecimals(1)
         self.spin_smooth = QtWidgets.QDoubleSpinBox(); self.spin_smooth.setRange(0, 5); self.spin_smooth.setValue(0.0); self.spin_smooth.setDecimals(2)
 
@@ -787,6 +804,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_group_window = QtWidgets.QDoubleSpinBox(); self.spin_group_window.setRange(0.0, 1e6); self.spin_group_window.setValue(0.0); self.spin_group_window.setDecimals(3)
         self.spin_dur_min = QtWidgets.QDoubleSpinBox(); self.spin_dur_min.setRange(0, 1e6); self.spin_dur_min.setValue(0.0); self.spin_dur_min.setDecimals(2)
         self.spin_dur_max = QtWidgets.QDoubleSpinBox(); self.spin_dur_max.setRange(0, 1e6); self.spin_dur_max.setValue(0.0); self.spin_dur_max.setDecimals(2)
+
         self.cb_metrics = QtWidgets.QCheckBox("Enable PSTH metrics")
         self.cb_metrics.setChecked(True)
         self.btn_hide_metrics = QtWidgets.QToolButton()
@@ -800,163 +818,133 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_metric_post0 = QtWidgets.QDoubleSpinBox(); self.spin_metric_post0.setRange(0, 120); self.spin_metric_post0.setValue(0.0); self.spin_metric_post0.setDecimals(2)
         self.spin_metric_post1 = QtWidgets.QDoubleSpinBox(); self.spin_metric_post1.setRange(0, 120); self.spin_metric_post1.setValue(1.0); self.spin_metric_post1.setDecimals(2)
 
-        for w in (
-            self.spin_pre, self.spin_post, self.spin_b0, self.spin_b1,
-            self.spin_resample, self.spin_smooth,
-            self.spin_event_start, self.spin_event_end, self.spin_group_window, self.spin_dur_min, self.spin_dur_max,
-            self.spin_metric_pre0, self.spin_metric_pre1, self.spin_metric_post0, self.spin_metric_post1,
-        ):
-            w.setMinimumWidth(60)
-            w.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-
-        win_row = QtWidgets.QGridLayout()
-        win_row.setHorizontalSpacing(6)
-        win_row.setContentsMargins(0, 0, 0, 0)
-        win_pre = QtWidgets.QLabel("Pre:")
-        win_post = QtWidgets.QLabel("Post:")
-        win_pre.setMinimumWidth(35)
-        win_post.setMinimumWidth(35)
-        win_row.addWidget(win_pre, 0, 0)
-        win_row.addWidget(self.spin_pre, 0, 1)
-        win_row.addWidget(win_post, 0, 2)
-        win_row.addWidget(self.spin_post, 0, 3)
-        win_row.setColumnStretch(1, 1)
-        win_row.setColumnStretch(3, 1)
-        win_widget = QtWidgets.QWidget(); win_widget.setLayout(win_row)
-
-        base_row = QtWidgets.QGridLayout()
-        base_row.setHorizontalSpacing(6)
-        base_row.setContentsMargins(0, 0, 0, 0)
-        base_start = QtWidgets.QLabel("Start:")
-        base_end = QtWidgets.QLabel("End:")
-        base_start.setMinimumWidth(45)
-        base_end.setMinimumWidth(35)
-        base_row.addWidget(base_start, 0, 0)
-        base_row.addWidget(self.spin_b0, 0, 1)
-        base_row.addWidget(base_end, 0, 2)
-        base_row.addWidget(self.spin_b1, 0, 3)
-        base_row.setColumnStretch(1, 1)
-        base_row.setColumnStretch(3, 1)
-        base_widget = QtWidgets.QWidget(); base_widget.setLayout(base_row)
-
-        metric_pre_row = QtWidgets.QGridLayout()
-        metric_pre_row.setHorizontalSpacing(6)
-        metric_pre_row.setContentsMargins(0, 0, 0, 0)
-        metric_pre_start = QtWidgets.QLabel("Start:")
-        metric_pre_end = QtWidgets.QLabel("End:")
-        metric_pre_start.setMinimumWidth(45)
-        metric_pre_end.setMinimumWidth(35)
-        metric_pre_row.addWidget(metric_pre_start, 0, 0)
-        metric_pre_row.addWidget(self.spin_metric_pre0, 0, 1)
-        metric_pre_row.addWidget(metric_pre_end, 0, 2)
-        metric_pre_row.addWidget(self.spin_metric_pre1, 0, 3)
-        metric_pre_row.setColumnStretch(1, 1)
-        metric_pre_row.setColumnStretch(3, 1)
-        metric_pre_widget = QtWidgets.QWidget(); metric_pre_widget.setLayout(metric_pre_row)
-
-        metric_post_row = QtWidgets.QGridLayout()
-        metric_post_row.setHorizontalSpacing(6)
-        metric_post_row.setContentsMargins(0, 0, 0, 0)
-        metric_post_start = QtWidgets.QLabel("Start:")
-        metric_post_end = QtWidgets.QLabel("End:")
-        metric_post_start.setMinimumWidth(45)
-        metric_post_end.setMinimumWidth(35)
-        metric_post_row.addWidget(metric_post_start, 0, 0)
-        metric_post_row.addWidget(self.spin_metric_post0, 0, 1)
-        metric_post_row.addWidget(metric_post_end, 0, 2)
-        metric_post_row.addWidget(self.spin_metric_post1, 0, 3)
-        metric_post_row.setColumnStretch(1, 1)
-        metric_post_row.setColumnStretch(3, 1)
-        metric_post_widget = QtWidgets.QWidget(); metric_post_widget.setLayout(metric_post_row)
-
-        fopt.addRow("Window (s)", win_widget)
-        fopt.addRow("Baseline (s)", base_widget)
-        fopt.addRow("Resample (Hz)", self.spin_resample)
-        filt_row = QtWidgets.QHBoxLayout()
-        filt_row.setContentsMargins(0, 0, 0, 0)
-        filt_row.setSpacing(6)
-        filt_row.addWidget(self.cb_filter_events)
-        filt_row.addStretch(1)
-        filt_row.addWidget(self.btn_hide_filters)
-        filt_widget = QtWidgets.QWidget(); filt_widget.setLayout(filt_row)
-        fopt.addRow(filt_widget)
-        self.lbl_event_start = QtWidgets.QLabel("Event index start (1-based)")
-        self.lbl_event_end = QtWidgets.QLabel("Event index end (0=all)")
-        self.lbl_group_window = QtWidgets.QLabel("Group events within (s) (0=off)")
-        self.lbl_dur_min = QtWidgets.QLabel("Event duration min (s)")
-        self.lbl_dur_max = QtWidgets.QLabel("Event duration max (s)")
-        fopt.addRow(self.lbl_event_start, self.spin_event_start)
-        fopt.addRow(self.lbl_event_end, self.spin_event_end)
-        fopt.addRow(self.lbl_group_window, self.spin_group_window)
-        fopt.addRow(self.lbl_dur_min, self.spin_dur_min)
-        fopt.addRow(self.lbl_dur_max, self.spin_dur_max)
-        fopt.addRow("Gaussian smooth sigma (s)", self.spin_smooth)
-        met_row = QtWidgets.QHBoxLayout()
-        met_row.setContentsMargins(0, 0, 0, 0)
-        met_row.setSpacing(6)
-        met_row.addWidget(self.cb_metrics)
-        met_row.addStretch(1)
-        met_row.addWidget(self.btn_hide_metrics)
-        met_widget = QtWidgets.QWidget(); met_widget.setLayout(met_row)
-        fopt.addRow(met_widget)
-        self.lbl_metric = QtWidgets.QLabel("Metric")
-        self.lbl_metric_pre = QtWidgets.QLabel("Metric pre (s)")
-        self.lbl_metric_post = QtWidgets.QLabel("Metric post (s)")
-        fopt.addRow(self.lbl_metric, self.combo_metric)
-        fopt.addRow(self.lbl_metric_pre, metric_pre_widget)
-        fopt.addRow(self.lbl_metric_post, metric_post_widget)
-
         self.cb_global_metrics = QtWidgets.QCheckBox("Enable global metrics")
         self.cb_global_metrics.setChecked(True)
-        fopt.addRow(self.cb_global_metrics)
-
-        self.spin_global_start = QtWidgets.QDoubleSpinBox()
-        self.spin_global_start.setRange(-1e6, 1e6)
-        self.spin_global_start.setValue(0.0)
-        self.spin_global_start.setDecimals(2)
-        self.spin_global_end = QtWidgets.QDoubleSpinBox()
-        self.spin_global_end.setRange(-1e6, 1e6)
-        self.spin_global_end.setValue(0.0)
-        self.spin_global_end.setDecimals(2)
-        self.spin_global_start.setMinimumWidth(60)
-        self.spin_global_end.setMinimumWidth(60)
-        self.spin_global_start.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-        self.spin_global_end.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-
-        global_row = QtWidgets.QGridLayout()
-        global_row.setHorizontalSpacing(6)
-        global_row.setContentsMargins(0, 0, 0, 0)
-        global_row.addWidget(QtWidgets.QLabel("Start:"), 0, 0)
-        global_row.addWidget(self.spin_global_start, 0, 1)
-        global_row.addWidget(QtWidgets.QLabel("End:"), 0, 2)
-        global_row.addWidget(self.spin_global_end, 0, 3)
-        global_row.setColumnStretch(1, 1)
-        global_row.setColumnStretch(3, 1)
-        global_widget = QtWidgets.QWidget()
-        global_widget.setLayout(global_row)
-        fopt.addRow("Global range (s)", global_widget)
-
+        self.spin_global_start = QtWidgets.QDoubleSpinBox(); self.spin_global_start.setRange(-1e6, 1e6); self.spin_global_start.setValue(0.0); self.spin_global_start.setDecimals(2)
+        self.spin_global_end = QtWidgets.QDoubleSpinBox(); self.spin_global_end.setRange(-1e6, 1e6); self.spin_global_end.setValue(0.0); self.spin_global_end.setDecimals(2)
         self.cb_global_amp = QtWidgets.QCheckBox("Peak amplitude")
         self.cb_global_amp.setChecked(True)
         self.cb_global_freq = QtWidgets.QCheckBox("Transient frequency")
         self.cb_global_freq.setChecked(True)
+        self.lbl_global_metrics = QtWidgets.QLabel("Global metrics: -")
+        self.lbl_global_metrics.setProperty("class", "hint")
+
+        for w in (
+            self.spin_pre, self.spin_post, self.spin_b0, self.spin_b1,
+            self.spin_resample, self.spin_smooth,
+            self.spin_event_start, self.spin_event_end, self.spin_group_window,
+            self.spin_dur_min, self.spin_dur_max,
+            self.spin_metric_pre0, self.spin_metric_pre1,
+            self.spin_metric_post0, self.spin_metric_post1,
+            self.spin_global_start, self.spin_global_end,
+        ):
+            w.setMinimumWidth(60)
+            w.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+
+        # ── Helper: dual-spin row ──
+        def _dual_row(lbl_a: str, w_a, lbl_b: str, w_b):
+            g = QtWidgets.QGridLayout()
+            g.setHorizontalSpacing(6); g.setContentsMargins(0, 0, 0, 0)
+            la = QtWidgets.QLabel(lbl_a); la.setMinimumWidth(35)
+            lb = QtWidgets.QLabel(lbl_b); lb.setMinimumWidth(35)
+            g.addWidget(la, 0, 0); g.addWidget(w_a, 0, 1)
+            g.addWidget(lb, 0, 2); g.addWidget(w_b, 0, 3)
+            g.setColumnStretch(1, 1); g.setColumnStretch(3, 1)
+            w = QtWidgets.QWidget(); w.setLayout(g); return w
+
+        win_widget = _dual_row("Pre:", self.spin_pre, "Post:", self.spin_post)
+        base_widget = _dual_row("Start:", self.spin_b0, "End:", self.spin_b1)
+        metric_pre_widget = _dual_row("Start:", self.spin_metric_pre0, "End:", self.spin_metric_pre1)
+        metric_post_widget = _dual_row("Start:", self.spin_metric_post0, "End:", self.spin_metric_post1)
+        global_widget = _dual_row("Start:", self.spin_global_start, "End:", self.spin_global_end)
+
+        # ═══════════════════════════════════════════════════════
+        # Section 1 — Window & Baseline
+        # ═══════════════════════════════════════════════════════
+        grp_window = QtWidgets.QGroupBox("Window && baseline")
+        grp_window.setStyleSheet(_psth_section_qss)
+        fw = QtWidgets.QFormLayout(grp_window)
+        fw.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        fw.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        fw.addRow("Window (s)", win_widget)
+        fw.addRow("Baseline (s)", base_widget)
+        fw.addRow("Resample (Hz)", self.spin_resample)
+        fw.addRow("Smooth sigma (s)", self.spin_smooth)
+
+        # ═══════════════════════════════════════════════════════
+        # Section 2 — Event filters
+        # ═══════════════════════════════════════════════════════
+        grp_filt = QtWidgets.QGroupBox("Event filters")
+        grp_filt.setStyleSheet(_psth_section_qss)
+        ff = QtWidgets.QFormLayout(grp_filt)
+        ff.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        ff.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        filt_row = QtWidgets.QHBoxLayout()
+        filt_row.setContentsMargins(0, 0, 0, 0); filt_row.setSpacing(6)
+        filt_row.addWidget(self.cb_filter_events); filt_row.addStretch(1)
+        filt_row.addWidget(self.btn_hide_filters)
+        filt_widget = QtWidgets.QWidget(); filt_widget.setLayout(filt_row)
+        ff.addRow(filt_widget)
+        self.lbl_event_start = QtWidgets.QLabel("Start index (1-based)")
+        self.lbl_event_end = QtWidgets.QLabel("End index (0 = all)")
+        self.lbl_group_window = QtWidgets.QLabel("Group within (s)")
+        self.lbl_dur_min = QtWidgets.QLabel("Duration min (s)")
+        self.lbl_dur_max = QtWidgets.QLabel("Duration max (s)")
+        ff.addRow(self.lbl_event_start, self.spin_event_start)
+        ff.addRow(self.lbl_event_end, self.spin_event_end)
+        ff.addRow(self.lbl_group_window, self.spin_group_window)
+        ff.addRow(self.lbl_dur_min, self.spin_dur_min)
+        ff.addRow(self.lbl_dur_max, self.spin_dur_max)
+
+        # ═══════════════════════════════════════════════════════
+        # Section 3 — PSTH metrics
+        # ═══════════════════════════════════════════════════════
+        grp_met = QtWidgets.QGroupBox("PSTH metrics")
+        grp_met.setStyleSheet(_psth_section_qss)
+        fm = QtWidgets.QFormLayout(grp_met)
+        fm.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        fm.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        met_row = QtWidgets.QHBoxLayout()
+        met_row.setContentsMargins(0, 0, 0, 0); met_row.setSpacing(6)
+        met_row.addWidget(self.cb_metrics); met_row.addStretch(1)
+        met_row.addWidget(self.btn_hide_metrics)
+        met_widget = QtWidgets.QWidget(); met_widget.setLayout(met_row)
+        fm.addRow(met_widget)
+        self.lbl_metric = QtWidgets.QLabel("Metric")
+        self.lbl_metric_pre = QtWidgets.QLabel("Pre window (s)")
+        self.lbl_metric_post = QtWidgets.QLabel("Post window (s)")
+        fm.addRow(self.lbl_metric, self.combo_metric)
+        fm.addRow(self.lbl_metric_pre, metric_pre_widget)
+        fm.addRow(self.lbl_metric_post, metric_post_widget)
+
+        # ═══════════════════════════════════════════════════════
+        # Section 4 — Global metrics
+        # ═══════════════════════════════════════════════════════
+        grp_global = QtWidgets.QGroupBox("Global metrics")
+        grp_global.setStyleSheet(_psth_section_qss)
+        fg = QtWidgets.QFormLayout(grp_global)
+        fg.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        fg.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        fg.addRow(self.cb_global_metrics)
+        fg.addRow("Range (s)", global_widget)
         global_opts = QtWidgets.QHBoxLayout()
-        global_opts.setContentsMargins(0, 0, 0, 0)
-        global_opts.setSpacing(6)
+        global_opts.setContentsMargins(0, 0, 0, 0); global_opts.setSpacing(6)
         global_opts.addWidget(self.cb_global_amp)
         global_opts.addWidget(self.cb_global_freq)
         global_opts.addStretch(1)
-        global_opts_widget = QtWidgets.QWidget()
-        global_opts_widget.setLayout(global_opts)
-        fopt.addRow("Global metrics", global_opts_widget)
+        global_opts_widget = QtWidgets.QWidget(); global_opts_widget.setLayout(global_opts)
+        fg.addRow("Compute", global_opts_widget)
+        fg.addRow("", self.lbl_global_metrics)
 
-        self.lbl_global_metrics = QtWidgets.QLabel("Global metrics: -")
-        self.lbl_global_metrics.setProperty("class", "hint")
-        fopt.addRow("", self.lbl_global_metrics)
-
-        for w in (self.spin_global_start, self.spin_global_end):
-            w.setMinimumWidth(60)
-            w.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        # Container for all subsections (replaces old grp_opt)
+        grp_opt = QtWidgets.QWidget()
+        _psth_vbox = QtWidgets.QVBoxLayout(grp_opt)
+        _psth_vbox.setContentsMargins(0, 0, 0, 0)
+        _psth_vbox.setSpacing(4)
+        _psth_vbox.addWidget(grp_window)
+        _psth_vbox.addWidget(grp_filt)
+        _psth_vbox.addWidget(grp_met)
+        _psth_vbox.addWidget(grp_global)
 
         self.btn_compute = QtWidgets.QPushButton("Postprocessing (compute PSTH)")
         self.btn_compute.setProperty("class", "compactPrimarySmall")
@@ -1007,6 +995,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_peak_prominence.setRange(0.0, 1e6)
         self.spin_peak_prominence.setValue(0.5)
         self.spin_peak_prominence.setDecimals(4)
+        self.cb_peak_auto_mad = QtWidgets.QCheckBox("Auto transient threshold (MAD noise)")
+        self.cb_peak_auto_mad.setChecked(False)
+        self.cb_peak_auto_mad.setToolTip(
+            "Estimate trace noise as 1.4826 x MAD after baseline/smoothing and use "
+            "the multiplier below as the minimum peak prominence."
+        )
+        self.spin_peak_mad_multiplier = QtWidgets.QDoubleSpinBox()
+        self.spin_peak_mad_multiplier.setRange(0.5, 50.0)
+        self.spin_peak_mad_multiplier.setValue(5.0)
+        self.spin_peak_mad_multiplier.setDecimals(2)
         self.spin_peak_height = QtWidgets.QDoubleSpinBox()
         self.spin_peak_height.setRange(0.0, 1e6)
         self.spin_peak_height.setValue(0.0)
@@ -1033,8 +1031,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_peak_auc_window.setRange(0.0, 30.0)
         self.spin_peak_auc_window.setValue(0.5)
         self.spin_peak_auc_window.setDecimals(3)
+        self.cb_peak_norm_prominence = QtWidgets.QCheckBox("Baseline-prominence normalized amplitude")
+        self.cb_peak_norm_prominence.setChecked(False)
+        self.cb_peak_norm_prominence.setToolTip(
+            "Report peak amplitude after scaling by the top baseline peak prominences."
+        )
         self.cb_peak_overlay = QtWidgets.QCheckBox("Show detected peaks on trace")
         self.cb_peak_overlay.setChecked(True)
+        self.cb_peak_noise_overlay = QtWidgets.QCheckBox("Show noise trace / MAD threshold overlay")
+        self.cb_peak_noise_overlay.setChecked(False)
+        self.cb_peak_noise_overlay.setToolTip(
+            "After peak detection, overlay the preprocessed detection trace, robust noise band, "
+            "and effective prominence threshold used for the visible file."
+        )
         self.btn_detect_peaks = QtWidgets.QPushButton("Detect peaks")
         self.btn_detect_peaks.setProperty("class", "compactPrimarySmall")
         self.btn_export_peaks = QtWidgets.QPushButton("Export peaks CSV")
@@ -1046,14 +1055,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
         f_signal.addRow("File", self.combo_signal_file)
         f_signal.addRow("Method", self.combo_signal_method)
         f_signal.addRow("Min prominence", self.spin_peak_prominence)
+        f_signal.addRow(self.cb_peak_auto_mad)
+        f_signal.addRow("MAD multiplier", self.spin_peak_mad_multiplier)
         f_signal.addRow("Min height (0=off)", self.spin_peak_height)
         f_signal.addRow("Min distance (s)", self.spin_peak_distance)
         f_signal.addRow("Smooth sigma (s)", self.spin_peak_smooth)
         f_signal.addRow("Baseline handling", self.combo_peak_baseline)
         f_signal.addRow("Baseline window (s)", self.spin_peak_baseline_window)
+        f_signal.addRow(self.cb_peak_norm_prominence)
         f_signal.addRow("Rate bin (s)", self.spin_peak_rate_bin)
         f_signal.addRow("AUC window (+/- s)", self.spin_peak_auc_window)
         f_signal.addRow(self.cb_peak_overlay)
+        f_signal.addRow(self.cb_peak_noise_overlay)
         signal_btn_row = QtWidgets.QHBoxLayout()
         signal_btn_row.addWidget(self.btn_detect_peaks)
         signal_btn_row.addWidget(self.btn_export_peaks)
@@ -1258,7 +1271,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         setup_layout.setContentsMargins(6, 6, 6, 6)
         setup_layout.setSpacing(8)
         setup_layout.addWidget(grp_src)
-        setup_layout.addWidget(grp_align)
+        setup_layout.addWidget(grp_align, stretch=1)
         setup_btn_row = QtWidgets.QHBoxLayout()
         self.btn_setup_load = QtWidgets.QPushButton("Load")
         self.btn_setup_load.setProperty("class", "compactPrimarySmall")
@@ -1302,6 +1315,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         behavior_layout.addWidget(self.tbl_behavior_metrics)
         behavior_layout.addWidget(self.lbl_behavior_summary)
         behavior_layout.addStretch(1)
+
+        self.section_temporal = TemporalModelingWidget()
+        self.section_temporal.statusMessage.connect(
+            lambda msg, ms: self.statusUpdate.emit(msg, ms)
+        )
 
         self.section_spatial = QtWidgets.QWidget()
         spatial_layout = QtWidgets.QVBoxLayout(self.section_spatial)
@@ -1362,6 +1380,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_panel_export = QtWidgets.QPushButton("Export")
         self.btn_panel_signal = QtWidgets.QPushButton("Signal")
         self.btn_panel_behavior = QtWidgets.QPushButton("Behavior")
+        self.btn_panel_temporal = QtWidgets.QPushButton("Temporal")
         self._section_buttons = {
             "setup": self.btn_panel_setup,
             "psth": self.btn_panel_psth,
@@ -1369,6 +1388,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "export": self.btn_panel_export,
             "signal": self.btn_panel_signal,
             "behavior": self.btn_panel_behavior,
+            "temporal": self.btn_panel_temporal,
         }
         for b in self._section_buttons.values():
             b.setCheckable(True)
@@ -1378,7 +1398,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # and put workflow actions in a thin transport bar above the plots.
         from styles import (
             _make_icon, _paint_sliders, _paint_chart, _paint_grid,
-            _paint_export, _paint_pulse, _paint_paw,
+            _paint_export, _paint_pulse, _paint_paw, _paint_temporal,
         )
         _post_rail_meta = {
             "setup":    ("Setup", _paint_sliders),
@@ -1387,6 +1407,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "export":   ("Export panel", _paint_export),
             "signal":   ("Signal events", _paint_pulse),
             "behavior": ("Behavior", _paint_paw),
+            "temporal": ("Temporal modeling (GLM / FLMM)", _paint_temporal),
         }
         for key, btn in self._section_buttons.items():
             tip, painter = _post_rail_meta[key]
@@ -1404,7 +1425,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         rail_layout = QtWidgets.QVBoxLayout(self._post_side_rail)
         rail_layout.setContentsMargins(8, 10, 8, 10)
         rail_layout.setSpacing(6)
-        for key in ("setup", "psth", "spatial", "signal", "behavior", "export"):
+        for key in ("setup", "psth", "spatial", "temporal", "signal", "behavior", "export"):
             rail_layout.addWidget(self._section_buttons[key], 0,
                                   QtCore.Qt.AlignmentFlag.AlignHCenter)
         rail_layout.addStretch(1)
@@ -1520,6 +1541,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         self.curve_trace = self.plot_trace.plot(pen=pg.mkPen(self._style["trace"], width=1.1))
         self.curve_behavior = self.plot_trace.plot(pen=pg.mkPen(self._style["behavior"], width=1.0))
+        self.curve_behavior.setVisible(False)
         self.curve_peak_markers = self.plot_trace.plot(
             pen=None,
             symbol="o",
@@ -1889,6 +1911,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_peak_overlay.toggled.connect(self._refresh_signal_overlay)
         self.combo_signal_source.currentIndexChanged.connect(self._refresh_signal_file_combo)
         self.combo_signal_scope.currentIndexChanged.connect(self._refresh_signal_file_combo)
+        self.combo_signal_file.currentIndexChanged.connect(self._on_signal_file_changed)
+        self.cb_peak_auto_mad.toggled.connect(self._update_peak_auto_mad_enabled)
+        self.cb_peak_noise_overlay.toggled.connect(self._refresh_signal_overlay)
+        self.cb_peak_norm_prominence.toggled.connect(lambda _checked=False: self._save_settings())
         self.tab_sources.currentChanged.connect(self._refresh_signal_file_combo)
         self.tab_visual_mode.currentChanged.connect(self._on_visual_mode_changed)
         self.combo_individual_file.currentIndexChanged.connect(self._on_individual_file_changed)
@@ -2025,6 +2051,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "setup": ("Setup", self.section_setup),
             "psth": ("PSTH", self.section_psth),
             "spatial": ("Spatial", self.section_spatial),
+            "temporal": ("Temporal Modeling", self.section_temporal),
             "export": ("Export", self.section_export),
             "signal": ("Signal Event Analyzer", self.section_signal),
             "behavior": ("Behavior Analysis", self.section_behavior),
@@ -2376,6 +2403,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "signal": ("Signal Event Analyzer", self.section_signal),
             "behavior": ("Behavior Analysis", self.section_behavior),
             "spatial": ("Spatial", self.section_spatial),
+            "temporal": ("Temporal Modeling", self.section_temporal),
             "export": ("Export", self.section_export),
         }
         for key, (title, widget) in section_map.items():
@@ -3415,6 +3443,50 @@ class PostProcessingPanel(QtWidgets.QWidget):
         has_multi = self.combo_signal_file.count() > 1
         self.combo_signal_scope.setEnabled(has_multi)
         self.combo_signal_file.setEnabled(self.combo_signal_scope.currentText() == "Per file")
+        self._refresh_signal_overlay()
+
+    def _on_signal_file_changed(self, _index: int = 0) -> None:
+        if not hasattr(self, "combo_signal_file"):
+            return
+        if self.combo_signal_source.currentText().startswith("Use PSTH input trace"):
+            self._refresh_signal_overlay()
+            return
+        if self.combo_signal_scope.currentText() != "Per file":
+            self._refresh_signal_overlay()
+            return
+
+        file_id = self.combo_signal_file.currentText().strip()
+        if not file_id:
+            self._refresh_signal_overlay()
+            return
+        try:
+            idx = self.combo_individual_file.findText(file_id)
+            if idx >= 0 and self.combo_individual_file.currentIndex() != idx:
+                self.combo_individual_file.setCurrentIndex(idx)
+            else:
+                self._update_trace_preview()
+        except Exception:
+            self._update_trace_preview()
+        self._refresh_signal_overlay()
+
+    def _current_signal_overlay_file_id(self) -> str:
+        if self.combo_signal_source.currentText().startswith("Use PSTH input trace"):
+            return "psth_trace"
+        if self.combo_signal_scope.currentText() == "Per file":
+            file_id = self.combo_signal_file.currentText().strip()
+            if file_id:
+                return file_id
+        try:
+            if self.tab_visual_mode.currentIndex() == 0:
+                file_id = self.combo_individual_file.currentText().strip()
+                if file_id:
+                    return file_id
+        except Exception:
+            pass
+        if self._processed:
+            proc = self._processed[0]
+            return os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
+        return ""
 
     def _refresh_individual_file_combo(self) -> None:
         if not hasattr(self, "combo_individual_file"):
@@ -3490,17 +3562,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.combo_signal_scope,
             self.combo_signal_file,
             self.combo_signal_method,
-            self.spin_peak_prominence,
+            self.cb_peak_auto_mad,
+            self.spin_peak_mad_multiplier,
             self.spin_peak_height,
             self.spin_peak_distance,
             self.spin_peak_smooth,
             self.combo_peak_baseline,
             self.spin_peak_baseline_window,
+            self.cb_peak_norm_prominence,
             self.spin_peak_rate_bin,
             self.spin_peak_auc_window,
             self.cb_peak_overlay,
+            self.cb_peak_noise_overlay,
         ):
             w.setEnabled(has_processed)
+        self._update_peak_auto_mad_enabled(queue=False)
         for w in (
             self.btn_compute_behavior,
             self.btn_export_behavior_metrics,
@@ -3600,6 +3676,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._apply_view_layout()
         self._queue_settings_save()
 
+    def _update_peak_auto_mad_enabled(self, _checked: object = None, *, queue: bool = True) -> None:
+        has_processed = bool(self._processed)
+        auto_mad = bool(self.cb_peak_auto_mad.isChecked())
+        self.spin_peak_prominence.setEnabled(has_processed and not auto_mad)
+        self.spin_peak_mad_multiplier.setEnabled(has_processed and auto_mad)
+        if queue:
+            self._queue_settings_save()
+
     def _queue_settings_save(self, *_args: object) -> None:
         if self._is_restoring_settings:
             return
@@ -3656,6 +3740,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_global_start,
             self.spin_global_end,
             self.spin_peak_prominence,
+            self.spin_peak_mad_multiplier,
             self.spin_peak_height,
             self.spin_peak_distance,
             self.spin_peak_smooth,
@@ -3679,7 +3764,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.cb_global_metrics,
             self.cb_global_amp,
             self.cb_global_freq,
+            self.cb_peak_auto_mad,
+            self.cb_peak_norm_prominence,
             self.cb_peak_overlay,
+            self.cb_peak_noise_overlay,
             self.cb_behavior_aligned,
             self.cb_spatial_clip,
             self.cb_spatial_time_filter,
@@ -3832,7 +3920,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         iso_vals = []
         dio_vals = []
 
-        from pyBer.analysis_core import coerce_time_value
         for r in data_rows:
             if time_idx is None or output_idx is None:
                 continue
@@ -5112,55 +5199,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._refresh_signal_overlay()
 
     def _update_behavior_overlay(self, proc: ProcessedTrial) -> None:
-        if not proc or proc.time is None:
-            self.curve_behavior.setData([], [])
-            return
-        if not self.combo_align.currentText().startswith("Behavior"):
-            self.curve_behavior.setData([], [])
-            return
-        info = self._match_behavior_source(proc)
-        if not info:
-            self.curve_behavior.setData([], [])
-            return
-        behaviors = info.get("behaviors") or {}
-        beh = self.combo_behavior_name.currentText().strip()
-        if not beh and behaviors:
-            beh = next(iter(behaviors.keys()))
-        if beh not in behaviors:
-            self.curve_behavior.setData([], [])
-            return
-        t_proc = np.asarray(proc.time, float)
-        if t_proc.size == 0:
-            self.curve_behavior.setData([], [])
-            return
-        kind = str(info.get("kind", _BEHAVIOR_PARSE_BINARY))
-        if kind == _BEHAVIOR_PARSE_TIMESTAMPS:
-            events = np.asarray(behaviors[beh], float)
-            events = events[np.isfinite(events)]
-            if events.size == 0:
-                self.curve_behavior.setData([], [])
-                return
-            events = np.sort(np.unique(events))
-            marker = np.zeros_like(t_proc, dtype=float)
-            for ev in events:
-                pos = int(np.searchsorted(t_proc, ev, side="left"))
-                if pos <= 0:
-                    idx = 0
-                elif pos >= t_proc.size:
-                    idx = t_proc.size - 1
-                else:
-                    idx = pos if abs(float(t_proc[pos] - ev)) <= abs(float(t_proc[pos - 1] - ev)) else (pos - 1)
-                marker[idx] = 1.0
-            self.curve_behavior.setData(t_proc, marker, connect="finite", skipFiniteCheck=True)
-            return
-
-        t = np.asarray(info.get("time", np.array([], float)), float)
-        if t.size == 0:
-            self.curve_behavior.setData([], [])
-            return
-        b = np.asarray(behaviors[beh], float)
-        b_interp = np.interp(t_proc, t, b)
-        self.curve_behavior.setData(t_proc, b_interp, connect="finite", skipFiniteCheck=True)
+        # The trace preview should only show the processed signal trace.
+        # Behavior/event data remain available for alignment and analysis,
+        # but the binary edge overlay is intentionally not rendered here.
+        self.curve_behavior.setData([], [])
 
     def _resolve_signal_detection_targets(self) -> List[Tuple[str, np.ndarray, np.ndarray]]:
         targets: List[Tuple[str, np.ndarray, np.ndarray]] = []
@@ -5195,14 +5237,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         targets.append((file_id, np.asarray(proc.time, float), np.asarray(proc.output, float)))
         return targets
 
-    def _preprocess_signal_for_peaks(self, t: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _preprocess_signal_for_peaks(self, t: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         t = np.asarray(t, float)
         y = np.asarray(y, float)
         m = np.isfinite(t) & np.isfinite(y)
         t = t[m]
         y = y[m]
         if t.size < 3:
-            return np.array([], float), np.array([], float)
+            return np.array([], float), np.array([], float), np.array([], float)
 
         dt = float(np.nanmedian(np.diff(t))) if t.size > 2 else np.nan
         if not np.isfinite(dt) or dt <= 0:
@@ -5214,6 +5256,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if win % 2 == 0:
             win += 1
 
+        y_trace = y.copy()
         y_proc = y.copy()
         if baseline_mode.endswith("rolling median"):
             try:
@@ -5237,7 +5280,121 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
 
-        return t, y_proc
+        return t, y_proc, y_trace
+
+    def _signal_baseline_prominence_stats(
+        self,
+        t: np.ndarray,
+        y: np.ndarray,
+        min_prominence: float,
+    ) -> Dict[str, float]:
+        t = np.asarray(t, float)
+        y = np.asarray(y, float)
+        finite = np.isfinite(t) & np.isfinite(y)
+        if t.size < 3 or y.size != t.size or not np.any(finite):
+            return {
+                "scale": np.nan,
+                "baseline_median": np.nan,
+                "n_baseline_peaks": 0.0,
+                "baseline_duration_s": 0.0,
+                "scale_source": "unavailable",
+                "mad_noise_sigma": np.nan,
+            }
+
+        t_finite = t[finite]
+        t0 = float(np.nanmin(t_finite))
+        baseline_window = max(0.1, float(self.spin_peak_baseline_window.value()))
+        keep = finite & (t <= t0 + baseline_window)
+        if np.sum(keep) < 3:
+            keep = finite
+
+        baseline = y[keep]
+        baseline_median = float(np.nanmedian(baseline)) if baseline.size else np.nan
+        if not np.isfinite(baseline_median):
+            return {
+                "scale": np.nan,
+                "baseline_median": np.nan,
+                "n_baseline_peaks": 0.0,
+                "baseline_duration_s": 0.0,
+                "scale_source": "unavailable",
+                "mad_noise_sigma": np.nan,
+            }
+
+        centered_baseline = np.asarray(baseline, float) - baseline_median
+        mad_stats = self._signal_mad_noise_stats(centered_baseline)
+        mad_sigma = float(mad_stats.get("noise_sigma", np.nan))
+        if not np.isfinite(mad_sigma) or mad_sigma <= 1e-12:
+            full_centered = np.asarray(y[finite], float) - float(np.nanmedian(y[finite]))
+            full_mad_stats = self._signal_mad_noise_stats(full_centered)
+            mad_sigma = float(full_mad_stats.get("noise_sigma", np.nan))
+        try:
+            from scipy.signal import find_peaks
+            peaks, props = find_peaks(centered_baseline, prominence=max(0.0, float(min_prominence)))
+        except Exception:
+            peaks = np.array([], int)
+            props = {}
+        proms = np.asarray(props.get("prominences", np.array([], float)), float)
+        proms = proms[np.isfinite(proms) & (proms > 1e-12)]
+        if proms.size == 0:
+            scale = mad_sigma if np.isfinite(mad_sigma) and mad_sigma > 1e-12 else np.nan
+            scale_source = "mad_noise_fallback" if np.isfinite(scale) else "unavailable"
+        else:
+            top_count = max(1, int(np.ceil(proms.size * 0.10)))
+            scale = float(np.nanmean(np.sort(proms)[-top_count:]))
+            scale_source = "baseline_peak_prominence"
+
+        duration = float(np.nanmax(t[keep]) - np.nanmin(t[keep])) if np.sum(keep) >= 2 else 0.0
+        return {
+            "scale": scale,
+            "baseline_median": baseline_median,
+            "n_baseline_peaks": float(proms.size),
+            "baseline_duration_s": duration,
+            "scale_source": scale_source,
+            "mad_noise_sigma": mad_sigma,
+        }
+
+    @staticmethod
+    def _signal_mad_noise_stats(y: np.ndarray) -> Dict[str, float]:
+        arr = np.asarray(y, float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size < 5:
+            return {"center": np.nan, "mad": np.nan, "noise_sigma": np.nan, "n_samples": float(arr.size)}
+
+        center = float(np.nanmedian(arr))
+        abs_dev = np.abs(arr - center)
+        mad = float(np.nanmedian(abs_dev))
+        sigma = 1.4826 * mad
+
+        # Re-estimate from the central mass so large transients do not inflate the noise estimate.
+        if np.isfinite(sigma) and sigma > 1e-12:
+            keep = abs_dev <= (3.0 * sigma)
+            if np.sum(keep) >= max(5, int(0.10 * arr.size)):
+                core = arr[keep]
+                center = float(np.nanmedian(core))
+                mad = float(np.nanmedian(np.abs(core - center)))
+                sigma = 1.4826 * mad
+
+        if not np.isfinite(sigma) or sigma <= 1e-12:
+            q25, q75 = np.nanpercentile(arr, [25.0, 75.0])
+            sigma = float((q75 - q25) / 1.349) if np.isfinite(q25) and np.isfinite(q75) else np.nan
+        if not np.isfinite(sigma) or sigma <= 1e-12:
+            sigma = float(np.nanstd(arr))
+        if not np.isfinite(sigma) or sigma <= 1e-12:
+            sigma = np.nan
+
+        return {
+            "center": center,
+            "mad": mad,
+            "noise_sigma": sigma,
+            "n_samples": float(arr.size),
+        }
+
+    @staticmethod
+    def _trapz_area(y: np.ndarray, x: np.ndarray) -> float:
+        try:
+            return float(np.trapezoid(y, x))
+        except AttributeError:
+            return float(np.trapz(y, x))
 
     def _refresh_signal_overlay(self) -> None:
         for ln in self._signal_peak_lines:
@@ -5246,21 +5403,32 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
         self._signal_peak_lines = []
+        for item in self._signal_noise_items:
+            try:
+                self.plot_trace.removeItem(item)
+            except Exception:
+                pass
+        self._signal_noise_items = []
         self.curve_peak_markers.setData([], [])
 
-        if not self.cb_peak_overlay.isChecked():
-            return
         if not self.last_signal_events or not self._processed:
             return
 
-        current_file = os.path.splitext(os.path.basename(self._processed[0].path))[0] if self._processed[0].path else "import"
+        current_file = self._current_signal_overlay_file_id()
+        self._draw_signal_noise_overlay(current_file)
+
+        if not self.cb_peak_overlay.isChecked():
+            return
+
         file_ids = self.last_signal_events.get("file_ids", [])
         times = np.asarray(self.last_signal_events.get("peak_times_sec", np.array([], float)), float)
-        heights = np.asarray(self.last_signal_events.get("peak_heights", np.array([], float)), float)
+        heights = np.asarray(self.last_signal_events.get("peak_trace_values", np.array([], float)), float)
+        if heights.size != times.size:
+            heights = np.asarray(self.last_signal_events.get("peak_heights", np.array([], float)), float)
         if times.size == 0 or heights.size == 0:
             return
-        if file_ids and len(file_ids) == times.size:
-            mask = np.asarray([fid == current_file or fid == "psth_trace" for fid in file_ids], bool)
+        if current_file and file_ids and len(file_ids) == times.size:
+            mask = np.asarray([str(fid) == current_file for fid in file_ids], bool)
             times = times[mask]
             heights = heights[mask]
         if times.size == 0:
@@ -5275,6 +5443,55 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_trace.addItem(ln)
             self._signal_peak_lines.append(ln)
 
+    def _draw_signal_noise_overlay(self, current_file: str) -> None:
+        if not getattr(self, "cb_peak_noise_overlay", None) or not self.cb_peak_noise_overlay.isChecked():
+            return
+        overlays = self.last_signal_events.get("noise_overlay_by_file", {}) if self.last_signal_events else {}
+        if not isinstance(overlays, dict) or not overlays:
+            return
+        overlay = overlays.get(str(current_file or ""))
+        if overlay is None and len(overlays) == 1:
+            overlay = next(iter(overlays.values()))
+        if not isinstance(overlay, dict):
+            return
+
+        t = np.asarray(overlay.get("time", np.array([], float)), float)
+        y = np.asarray(overlay.get("detection_trace", np.array([], float)), float)
+        if t.size != y.size or t.size < 2:
+            return
+
+        step = max(1, int(np.ceil(t.size / 5000)))
+        trace_item = pg.PlotDataItem(
+            t[::step],
+            y[::step],
+            pen=pg.mkPen((80, 220, 220, 150), width=1.0, style=QtCore.Qt.PenStyle.DashLine),
+            name="detection trace",
+        )
+        trace_item.setZValue(8)
+        self.plot_trace.addItem(trace_item)
+        self._signal_noise_items.append(trace_item)
+
+        center = float(overlay.get("center", np.nan))
+        sigma = float(overlay.get("noise_sigma", np.nan))
+        used_prominence = float(overlay.get("used_prominence", np.nan))
+        for y0, color, width, style in (
+            (center, (80, 220, 220, 170), 1.0, QtCore.Qt.PenStyle.DotLine),
+            (center + sigma, (80, 220, 220, 110), 0.8, QtCore.Qt.PenStyle.DotLine),
+            (center - sigma, (80, 220, 220, 110), 0.8, QtCore.Qt.PenStyle.DotLine),
+            (center + used_prominence, (255, 210, 80, 190), 1.2, QtCore.Qt.PenStyle.DashLine),
+        ):
+            if not np.isfinite(y0):
+                continue
+            ln = pg.InfiniteLine(
+                pos=float(y0),
+                angle=0,
+                pen=pg.mkPen(color, width=width, style=style),
+                movable=False,
+            )
+            ln.setZValue(9)
+            self.plot_trace.addItem(ln)
+            self._signal_noise_items.append(ln)
+
     def _detect_signal_events(self) -> None:
         self.last_signal_events = None
         targets = self._resolve_signal_detection_targets()
@@ -5287,20 +5504,57 @@ class PostProcessingPanel(QtWidgets.QWidget):
         all_times: List[float] = []
         all_idx: List[int] = []
         all_heights: List[float] = []
+        all_signal_heights: List[float] = []
+        all_trace_values: List[float] = []
         all_proms: List[float] = []
+        all_norm_proms: List[float] = []
+        all_norm_scales: List[float] = []
+        all_mad_sigmas: List[float] = []
+        all_auto_prominence_thresholds: List[float] = []
         all_widths_sec: List[float] = []
         all_auc: List[float] = []
         all_file_ids: List[str] = []
+        normalization_by_file: Dict[str, Dict[str, float]] = {}
+        mad_threshold_by_file: Dict[str, Dict[str, float]] = {}
+        noise_overlay_by_file: Dict[str, Dict[str, object]] = {}
+        normalize_amplitude = bool(self.cb_peak_norm_prominence.isChecked())
+        auto_mad = bool(self.cb_peak_auto_mad.isChecked())
+        mad_multiplier = float(self.spin_peak_mad_multiplier.value())
 
         for file_id, t_raw, y_raw in targets:
-            t, y = self._preprocess_signal_for_peaks(t_raw, y_raw)
+            t, y, y_trace = self._preprocess_signal_for_peaks(t_raw, y_raw)
             if t.size < 5:
                 continue
             dt = float(np.nanmedian(np.diff(t)))
             if not np.isfinite(dt) or dt <= 0:
                 continue
 
-            prominence = max(0.0, float(self.spin_peak_prominence.value()))
+            manual_prominence = max(0.0, float(self.spin_peak_prominence.value()))
+            prominence = manual_prominence
+            mad_stats = self._signal_mad_noise_stats(y)
+            mad_sigma = float(mad_stats.get("noise_sigma", np.nan))
+            auto_prominence = np.nan
+            if auto_mad:
+                if np.isfinite(mad_sigma) and mad_sigma > 1e-12:
+                    auto_prominence = max(0.0, mad_multiplier * mad_sigma)
+                    prominence = auto_prominence
+                mad_threshold_by_file[str(file_id)] = {
+                    **mad_stats,
+                    "multiplier": mad_multiplier,
+                    "auto_prominence": auto_prominence,
+                    "fallback_manual_prominence": manual_prominence,
+                    "used_prominence": prominence,
+                }
+            noise_overlay_by_file[str(file_id)] = {
+                "time": t.copy(),
+                "detection_trace": y.copy(),
+                "center": float(mad_stats.get("center", np.nan)),
+                "mad": float(mad_stats.get("mad", np.nan)),
+                "noise_sigma": mad_sigma,
+                "auto_prominence": auto_prominence,
+                "manual_prominence": manual_prominence,
+                "used_prominence": prominence,
+            }
             min_height = float(self.spin_peak_height.value())
             min_distance_sec = max(0.0, float(self.spin_peak_distance.value()))
             min_dist_samples = max(1, int(round(min_distance_sec / dt))) if min_distance_sec > 0 else None
@@ -5325,8 +5579,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if peaks.size == 0:
                 continue
 
-            p_heights = y[peaks]
+            p_signal_heights = np.asarray(y[peaks], float)
+            p_trace_values = np.asarray(y_trace[peaks], float) if y_trace.size == y.size else p_signal_heights.copy()
             p_proms = np.asarray(props.get("prominences", np.full(peaks.size, np.nan)), float)
+            p_heights = p_signal_heights.copy()
+            p_norm_proms = np.full(peaks.size, np.nan, float)
+            p_norm_scales = np.full(peaks.size, np.nan, float)
+
+            if normalize_amplitude:
+                norm_stats = self._signal_baseline_prominence_stats(t, y, prominence)
+                normalization_by_file[str(file_id)] = norm_stats
+                scale = float(norm_stats.get("scale", np.nan))
+                baseline_median = float(norm_stats.get("baseline_median", np.nan))
+                if np.isfinite(scale) and scale > 1e-12 and np.isfinite(baseline_median):
+                    p_heights = (p_signal_heights - baseline_median) / scale
+                    p_norm_proms = p_proms / scale
+                    p_norm_scales[:] = scale
+                else:
+                    p_heights = np.full(peaks.size, np.nan, float)
             try:
                 widths_samp = peak_widths(y, peaks, rel_height=0.5)[0]
                 widths_sec = np.asarray(widths_samp, float) * dt
@@ -5345,12 +5615,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if i1 - i0 < 2:
                     auc_vals.append(np.nan)
                     continue
-                auc_vals.append(float(np.trapz(y[i0:i1], t[i0:i1])))
+                auc_vals.append(self._trapz_area(y[i0:i1], t[i0:i1]))
 
             all_times.extend(t[peaks].tolist())
             all_idx.extend(peaks.tolist())
             all_heights.extend(np.asarray(p_heights, float).tolist())
+            all_signal_heights.extend(np.asarray(p_signal_heights, float).tolist())
+            all_trace_values.extend(np.asarray(p_trace_values, float).tolist())
             all_proms.extend(np.asarray(p_proms, float).tolist())
+            all_norm_proms.extend(np.asarray(p_norm_proms, float).tolist())
+            all_norm_scales.extend(np.asarray(p_norm_scales, float).tolist())
+            all_mad_sigmas.extend([mad_sigma] * peaks.size)
+            all_auto_prominence_thresholds.extend([auto_prominence] * peaks.size)
             all_widths_sec.extend(np.asarray(widths_sec, float).tolist())
             all_auc.extend(np.asarray(auc_vals, float).tolist())
             all_file_ids.extend([file_id] * peaks.size)
@@ -5364,7 +5640,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         peak_times = np.asarray(all_times, float)
         peak_idx = np.asarray(all_idx, int)
         peak_heights = np.asarray(all_heights, float)
+        peak_signal_heights = np.asarray(all_signal_heights, float)
+        peak_trace_values = np.asarray(all_trace_values, float)
         peak_proms = np.asarray(all_proms, float)
+        peak_norm_proms = np.asarray(all_norm_proms, float)
+        peak_norm_scales = np.asarray(all_norm_scales, float)
+        peak_mad_sigmas = np.asarray(all_mad_sigmas, float)
+        peak_auto_prominence_thresholds = np.asarray(all_auto_prominence_thresholds, float)
         peak_widths_sec = np.asarray(all_widths_sec, float)
         peak_auc = np.asarray(all_auc, float)
 
@@ -5372,7 +5654,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         peak_times = peak_times[sort_idx]
         peak_idx = peak_idx[sort_idx]
         peak_heights = peak_heights[sort_idx]
+        peak_signal_heights = peak_signal_heights[sort_idx]
+        peak_trace_values = peak_trace_values[sort_idx]
         peak_proms = peak_proms[sort_idx]
+        peak_norm_proms = peak_norm_proms[sort_idx]
+        peak_norm_scales = peak_norm_scales[sort_idx]
+        peak_mad_sigmas = peak_mad_sigmas[sort_idx]
+        peak_auto_prominence_thresholds = peak_auto_prominence_thresholds[sort_idx]
         peak_widths_sec = peak_widths_sec[sort_idx]
         peak_auc = peak_auc[sort_idx]
         all_file_ids = [all_file_ids[i] for i in sort_idx]
@@ -5389,31 +5677,115 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "peak_frequency_per_min": freq_per_min,
             "mean_inter_peak_interval_s": float(np.nanmean(ipi)) if ipi.size else np.nan,
             "mean_auc": float(np.nanmean(peak_auc)) if np.any(np.isfinite(peak_auc)) else np.nan,
+            "baseline_prominence_normalized": bool(normalize_amplitude),
+            "mad_auto_threshold_enabled": bool(auto_mad),
         }
+        if auto_mad:
+            metrics.update(
+                {
+                    "mad_multiplier": float(mad_multiplier),
+                    "mean_mad_noise_sigma": (
+                        float(np.nanmean(peak_mad_sigmas)) if np.any(np.isfinite(peak_mad_sigmas)) else np.nan
+                    ),
+                    "mean_auto_prominence_threshold": (
+                        float(np.nanmean(peak_auto_prominence_thresholds))
+                        if np.any(np.isfinite(peak_auto_prominence_thresholds))
+                        else np.nan
+                    ),
+                    "mad_threshold_files_with_estimate": float(
+                        sum(
+                            1
+                            for stats in mad_threshold_by_file.values()
+                            if np.isfinite(float(stats.get("noise_sigma", np.nan)))
+                        )
+                    ),
+                }
+            )
+        if normalize_amplitude:
+            metrics.update(
+                {
+                    "mean_raw_amplitude": float(np.nanmean(peak_signal_heights)),
+                    "median_raw_amplitude": float(np.nanmedian(peak_signal_heights)),
+                    "mean_normalized_prominence": (
+                        float(np.nanmean(peak_norm_proms)) if np.any(np.isfinite(peak_norm_proms)) else np.nan
+                    ),
+                    "mean_baseline_prominence_scale": (
+                        float(np.nanmean(peak_norm_scales)) if np.any(np.isfinite(peak_norm_scales)) else np.nan
+                    ),
+                    "baseline_prominence_files_with_scale": float(
+                        sum(
+                            1
+                            for stats in normalization_by_file.values()
+                            if np.isfinite(float(stats.get("scale", np.nan)))
+                        )
+                    ),
+                    "baseline_prominence_files_with_peak_scale": float(
+                        sum(
+                            1
+                            for stats in normalization_by_file.values()
+                            if str(stats.get("scale_source", "")) == "baseline_peak_prominence"
+                        )
+                    ),
+                    "baseline_prominence_files_with_mad_fallback": float(
+                        sum(
+                            1
+                            for stats in normalization_by_file.values()
+                            if str(stats.get("scale_source", "")) == "mad_noise_fallback"
+                        )
+                    ),
+                }
+            )
 
         self.last_signal_events = {
             "peak_times_sec": peak_times,
             "peak_indices": peak_idx,
             "peak_heights": peak_heights,
+            "peak_signal_heights": peak_signal_heights,
+            "peak_trace_values": peak_trace_values,
             "peak_prominences": peak_proms,
+            "peak_normalized_prominences": peak_norm_proms,
+            "peak_baseline_prominence_scale": peak_norm_scales,
+            "peak_mad_noise_sigma": peak_mad_sigmas,
+            "peak_auto_prominence_threshold": peak_auto_prominence_thresholds,
             "peak_widths_sec": peak_widths_sec,
             "peak_auc": peak_auc,
             "file_ids": all_file_ids,
             "derived_metrics": metrics,
+            "normalization_by_file": normalization_by_file,
+            "mad_threshold_by_file": mad_threshold_by_file,
+            "noise_overlay_by_file": noise_overlay_by_file,
             "params": {
                 "method": self.combo_signal_method.currentText(),
                 "prominence": float(self.spin_peak_prominence.value()),
+                "auto_mad_threshold": bool(auto_mad),
+                "mad_multiplier": float(mad_multiplier),
                 "min_height": float(self.spin_peak_height.value()),
                 "min_distance_sec": float(self.spin_peak_distance.value()),
                 "smooth_sigma_sec": float(self.spin_peak_smooth.value()),
                 "baseline_mode": self.combo_peak_baseline.currentText(),
                 "baseline_window_sec": float(self.spin_peak_baseline_window.value()),
+                "baseline_prominence_normalized": bool(normalize_amplitude),
                 "rate_bin_sec": float(self.spin_peak_rate_bin.value()),
                 "auc_half_window_sec": float(self.spin_peak_auc_window.value()),
             },
         }
 
-        self.statusUpdate.emit(f"Detected {peak_times.size} peak(s).", 5000)
+        msg = f"Detected {peak_times.size} peak(s)."
+        if auto_mad:
+            auto_vals = [
+                float(stats.get("auto_prominence", np.nan))
+                for stats in mad_threshold_by_file.values()
+                if np.isfinite(float(stats.get("auto_prominence", np.nan)))
+            ]
+            if auto_vals:
+                msg += f" Auto-MAD prominence ~{float(np.nanmean(auto_vals)):.4g}."
+            else:
+                msg += " Auto-MAD estimate unavailable; manual prominence used."
+        if normalize_amplitude and not any(np.isfinite(float(s.get("scale", np.nan))) for s in normalization_by_file.values()):
+            msg += " Baseline prominence scale unavailable."
+        elif normalize_amplitude and any(str(s.get("scale_source", "")) == "mad_noise_fallback" for s in normalization_by_file.values()):
+            msg += " Normalization used MAD fallback for files without baseline peaks."
+        self.statusUpdate.emit(msg, 5000)
         self._refresh_signal_overlay()
         self._render_signal_event_plots()
         self._update_signal_metrics_table()
@@ -5431,6 +5803,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         peak_heights = np.asarray(self.last_signal_events.get("peak_heights", np.array([], float)), float)
         if peak_times.size == 0 or peak_heights.size == 0:
             return
+        metrics = self.last_signal_events.get("derived_metrics", {}) or {}
+        if bool(metrics.get("baseline_prominence_normalized", False)):
+            self.plot_peak_amp.setLabel("bottom", "Prominence-normalized amplitude")
+        else:
+            self.plot_peak_amp.setLabel("bottom", "Amplitude")
 
         def _bar_hist(plot: pg.PlotWidget, values: np.ndarray, color: Tuple[int, int, int]) -> None:
             vals = np.asarray(values, float)
@@ -5461,10 +5838,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not self.last_signal_events:
             return
         metrics = self.last_signal_events.get("derived_metrics", {}) or {}
+        normalized = bool(metrics.get("baseline_prominence_normalized", False))
+        amp_label = "mean amplitude (prom-norm)" if normalized else "mean amplitude"
+        med_amp_label = "median amplitude (prom-norm)" if normalized else "median amplitude"
         rows = [
             ("number of peaks", metrics.get("number_of_peaks", np.nan)),
-            ("mean amplitude", metrics.get("mean_amplitude", np.nan)),
-            ("median amplitude", metrics.get("median_amplitude", np.nan)),
+            (amp_label, metrics.get("mean_amplitude", np.nan)),
+            (med_amp_label, metrics.get("median_amplitude", np.nan)),
             ("amplitude std", metrics.get("amplitude_std", np.nan)),
             ("mean prominence", metrics.get("mean_prominence", np.nan)),
             ("mean width at half prom (s)", metrics.get("mean_width_half_prom_s", np.nan)),
@@ -5472,6 +5852,26 @@ class PostProcessingPanel(QtWidgets.QWidget):
             ("mean inter-peak interval (s)", metrics.get("mean_inter_peak_interval_s", np.nan)),
             ("mean AUC", metrics.get("mean_auc", np.nan)),
         ]
+        if normalized:
+            rows.extend(
+                [
+                    ("mean raw amplitude", metrics.get("mean_raw_amplitude", np.nan)),
+                    ("mean normalized prominence", metrics.get("mean_normalized_prominence", np.nan)),
+                    ("baseline prominence scale", metrics.get("mean_baseline_prominence_scale", np.nan)),
+                    ("files with scale", metrics.get("baseline_prominence_files_with_scale", np.nan)),
+                    ("files using baseline peaks", metrics.get("baseline_prominence_files_with_peak_scale", np.nan)),
+                    ("files using MAD fallback", metrics.get("baseline_prominence_files_with_mad_fallback", np.nan)),
+                ]
+            )
+        if bool(metrics.get("mad_auto_threshold_enabled", False)):
+            rows.extend(
+                [
+                    ("MAD multiplier", metrics.get("mad_multiplier", np.nan)),
+                    ("mean MAD noise sigma", metrics.get("mean_mad_noise_sigma", np.nan)),
+                    ("mean auto prominence", metrics.get("mean_auto_prominence_threshold", np.nan)),
+                    ("files with MAD estimate", metrics.get("mad_threshold_files_with_estimate", np.nan)),
+                ]
+            )
         for key, value in rows:
             r = self.tbl_signal_metrics.rowCount()
             self.tbl_signal_metrics.insertRow(r)
@@ -5492,8 +5892,33 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._remember_export_dir(out_dir)
         peak_times = np.asarray(self.last_signal_events.get("peak_times_sec", np.array([], float)), float)
         peak_heights = np.asarray(self.last_signal_events.get("peak_heights", np.array([], float)), float)
+        peak_signal_heights = np.asarray(
+            self.last_signal_events.get("peak_signal_heights", peak_heights),
+            float,
+        )
+        peak_trace_values = np.asarray(
+            self.last_signal_events.get("peak_trace_values", peak_signal_heights),
+            float,
+        )
         peak_proms = np.asarray(self.last_signal_events.get("peak_prominences", np.array([], float)), float)
+        peak_norm_proms = np.asarray(
+            self.last_signal_events.get("peak_normalized_prominences", np.full_like(peak_proms, np.nan)),
+            float,
+        )
+        peak_norm_scales = np.asarray(
+            self.last_signal_events.get("peak_baseline_prominence_scale", np.full_like(peak_heights, np.nan)),
+            float,
+        )
+        peak_mad_sigmas = np.asarray(
+            self.last_signal_events.get("peak_mad_noise_sigma", np.full_like(peak_heights, np.nan)),
+            float,
+        )
+        peak_auto_prominence = np.asarray(
+            self.last_signal_events.get("peak_auto_prominence_threshold", np.full_like(peak_heights, np.nan)),
+            float,
+        )
         peak_widths = np.asarray(self.last_signal_events.get("peak_widths_sec", np.array([], float)), float)
+        peak_auc = np.asarray(self.last_signal_events.get("peak_auc", np.array([], float)), float)
         file_ids = self.last_signal_events.get("file_ids", [])
         if peak_times.size == 0:
             return
@@ -5504,7 +5929,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
         import csv
         with open(out_path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["peak_time_sec", "height", "prominence", "width_sec", "file_id"])
+            w.writerow(
+                [
+                    "peak_time_sec",
+                    "height",
+                    "prominence",
+                    "width_sec",
+                    "auc",
+                    "trace_value",
+                    "signal_height",
+                    "normalized_prominence",
+                    "baseline_prominence_scale",
+                    "mad_noise_sigma",
+                    "auto_prominence_threshold",
+                    "file_id",
+                ]
+            )
             for i in range(peak_times.size):
                 fid = file_ids[i] if isinstance(file_ids, list) and i < len(file_ids) else ""
                 w.writerow(
@@ -5513,6 +5953,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         float(peak_heights[i]) if i < peak_heights.size else np.nan,
                         float(peak_proms[i]) if i < peak_proms.size else np.nan,
                         float(peak_widths[i]) if i < peak_widths.size else np.nan,
+                        float(peak_auc[i]) if i < peak_auc.size else np.nan,
+                        float(peak_trace_values[i]) if i < peak_trace_values.size else np.nan,
+                        float(peak_signal_heights[i]) if i < peak_signal_heights.size else np.nan,
+                        float(peak_norm_proms[i]) if i < peak_norm_proms.size else np.nan,
+                        float(peak_norm_scales[i]) if i < peak_norm_scales.size else np.nan,
+                        float(peak_mad_sigmas[i]) if i < peak_mad_sigmas.size else np.nan,
+                        float(peak_auto_prominence[i]) if i < peak_auto_prominence.size else np.nan,
                         fid,
                     ]
                 )
@@ -5953,6 +6400,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._update_metric_regions()
             self._update_status_strip()
             self._save_settings()
+            # Feed data to temporal modeling widget
+            try:
+                self.section_temporal.set_data(
+                    processed_trials=self._processed,
+                    psth_mat=mat_display,
+                    psth_tvec=tvec,
+                    event_times=self._last_events,
+                    file_ids=self._all_file_ids,
+                    per_file_mats=self._per_file_mats,
+                )
+            except Exception:
+                pass
         except Exception as e:
             self.statusUpdate.emit(f"Postprocessing error: {e}", 5000)
             self._update_status_strip()
@@ -6657,7 +7116,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "peak_times_sec",
             "peak_indices",
             "peak_heights",
+            "peak_signal_heights",
+            "peak_trace_values",
             "peak_prominences",
+            "peak_normalized_prominences",
+            "peak_baseline_prominence_scale",
+            "peak_mad_noise_sigma",
+            "peak_auto_prominence_threshold",
             "peak_widths_sec",
             "peak_auc",
         ):
@@ -6665,6 +7130,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._write_h5_str_list(group, "file_ids", [str(v) for v in self.last_signal_events.get("file_ids", []) or []])
         self._write_h5_json(group, "derived_metrics_json", dict(self.last_signal_events.get("derived_metrics", {}) or {}))
         self._write_h5_json(group, "params_json", dict(self.last_signal_events.get("params", {}) or {}))
+        self._write_h5_json_any(
+            group,
+            "normalization_by_file_json",
+            dict(self.last_signal_events.get("normalization_by_file", {}) or {}),
+        )
+        self._write_h5_json_any(
+            group,
+            "mad_threshold_by_file_json",
+            dict(self.last_signal_events.get("mad_threshold_by_file", {}) or {}),
+        )
 
     def _load_signal_events_h5(self, parent: Optional[h5py.Group]) -> Optional[Dict[str, object]]:
         if parent is None:
@@ -6683,12 +7158,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "peak_times_sec": _num("peak_times_sec"),
             "peak_indices": _num("peak_indices"),
             "peak_heights": _num("peak_heights"),
+            "peak_signal_heights": _num("peak_signal_heights"),
+            "peak_trace_values": _num("peak_trace_values"),
             "peak_prominences": _num("peak_prominences"),
+            "peak_normalized_prominences": _num("peak_normalized_prominences"),
+            "peak_baseline_prominence_scale": _num("peak_baseline_prominence_scale"),
+            "peak_mad_noise_sigma": _num("peak_mad_noise_sigma"),
+            "peak_auto_prominence_threshold": _num("peak_auto_prominence_threshold"),
             "peak_widths_sec": _num("peak_widths_sec"),
             "peak_auc": _num("peak_auc"),
             "file_ids": self._read_h5_str_list(group, "file_ids"),
             "derived_metrics": self._read_h5_json(group, "derived_metrics_json"),
             "params": self._read_h5_json(group, "params_json"),
+            "normalization_by_file": self._read_h5_json_any(group, "normalization_by_file_json", {}),
+            "mad_threshold_by_file": self._read_h5_json_any(group, "mad_threshold_by_file_json", {}),
         }
         return out
 
@@ -7188,10 +7671,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         return ask == QtWidgets.QMessageBox.StandardButton.Yes
 
-    def _new_project(self) -> None:
-        if not self._confirm_discard_current_project():
-            return
-
+    def _reset_project_state(self) -> None:
         was_restoring = self._is_restoring_settings
         self._is_restoring_settings = True
         try:
@@ -7199,6 +7679,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._processed = []
             self._behavior_sources = {}
             self._pending_project_recompute_from_current = False
+            self._dio_cache.clear()
             self.lbl_group.setText("(none)")
             self.lbl_beh.setText("(none)")
             self.lbl_behavior_msg.setText("")
@@ -7220,6 +7701,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._project_recovered_from_autosave = False
         self._clear_project_autosave_cache(delete_file=True)
         self._update_status_strip()
+
+    def reset_for_new_preprocessing_project(self) -> None:
+        self._reset_project_state()
+        self.statusUpdate.emit("Cleared postprocessing project state.", 5000)
+
+    def _new_project(self) -> None:
+        if not self._confirm_discard_current_project():
+            return
+
+        self._reset_project_state()
         self.statusUpdate.emit("Started a new postprocessing project.", 5000)
 
     def _import_project_source_paths(self, recent_paths: Dict[str, object]) -> bool:
@@ -7417,14 +7908,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "signal_file": self.combo_signal_file.currentText(),
             "signal_method": self.combo_signal_method.currentText(),
             "signal_prominence": float(self.spin_peak_prominence.value()),
+            "signal_auto_mad": self.cb_peak_auto_mad.isChecked(),
+            "signal_mad_multiplier": float(self.spin_peak_mad_multiplier.value()),
             "signal_height": float(self.spin_peak_height.value()),
             "signal_distance": float(self.spin_peak_distance.value()),
             "signal_smooth": float(self.spin_peak_smooth.value()),
             "signal_baseline": self.combo_peak_baseline.currentText(),
             "signal_baseline_window": float(self.spin_peak_baseline_window.value()),
+            "signal_norm_prominence": self.cb_peak_norm_prominence.isChecked(),
             "signal_rate_bin": float(self.spin_peak_rate_bin.value()),
             "signal_auc_window": float(self.spin_peak_auc_window.value()),
             "signal_overlay": self.cb_peak_overlay.isChecked(),
+            "signal_noise_overlay": self.cb_peak_noise_overlay.isChecked(),
             "behavior_analysis_name": self.combo_behavior_analysis.currentText(),
             "behavior_analysis_bin": float(self.spin_behavior_bin.value()),
             "behavior_analysis_aligned": self.cb_behavior_aligned.isChecked(),
@@ -7520,6 +8015,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _set_combo(self.combo_signal_method, data.get("signal_method"))
         if "signal_prominence" in data:
             self.spin_peak_prominence.setValue(float(data["signal_prominence"]))
+        if "signal_auto_mad" in data:
+            self.cb_peak_auto_mad.setChecked(bool(data["signal_auto_mad"]))
+        if "signal_mad_multiplier" in data:
+            self.spin_peak_mad_multiplier.setValue(float(data["signal_mad_multiplier"]))
+        self._update_peak_auto_mad_enabled(queue=False)
         if "signal_height" in data:
             self.spin_peak_height.setValue(float(data["signal_height"]))
         if "signal_distance" in data:
@@ -7529,12 +8029,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _set_combo(self.combo_peak_baseline, data.get("signal_baseline"))
         if "signal_baseline_window" in data:
             self.spin_peak_baseline_window.setValue(float(data["signal_baseline_window"]))
+        if "signal_norm_prominence" in data:
+            self.cb_peak_norm_prominence.setChecked(bool(data["signal_norm_prominence"]))
         if "signal_rate_bin" in data:
             self.spin_peak_rate_bin.setValue(float(data["signal_rate_bin"]))
         if "signal_auc_window" in data:
             self.spin_peak_auc_window.setValue(float(data["signal_auc_window"]))
         if "signal_overlay" in data:
             self.cb_peak_overlay.setChecked(bool(data["signal_overlay"]))
+        if "signal_noise_overlay" in data:
+            self.cb_peak_noise_overlay.setChecked(bool(data["signal_noise_overlay"]))
         _set_combo(self.combo_behavior_analysis, data.get("behavior_analysis_name"))
         if "behavior_analysis_bin" in data:
             self.spin_behavior_bin.setValue(float(data["behavior_analysis_bin"]))

@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
 
 import pyqtgraph as pg
 
+from analysis_core import coerce_time_value
+
 
 MISSING_MARKERS = {"", " ", "-", "NaN", "nan", "NAN", "n/a", "N/A", None}
 
@@ -208,7 +210,6 @@ def clean_sheet(
         time_orig = df[time_col].copy()
         df[time_col] = pd.to_numeric(df[time_col], errors="coerce")
         if df[time_col].isna().all():
-            from pyBer.analysis_core import coerce_time_value
             df[time_col] = time_orig.astype(str).apply(coerce_time_value)
         df = df.loc[df[time_col].notna()].copy()
         df = df.sort_values(time_col).reset_index(drop=True)
