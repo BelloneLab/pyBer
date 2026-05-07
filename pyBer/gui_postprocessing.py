@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import copy
 import logging
 from pathlib import Path
 from dataclasses import dataclass
@@ -525,6 +526,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "heatmap_cmap": "viridis",
             "heatmap_min": None,
             "heatmap_max": None,
+            "heatmap_levels_manual": False,
         }
         self._section_popups: Dict[str, QtWidgets.QDockWidget] = {}
         self._section_scroll_hosts: Dict[str, QtWidgets.QScrollArea] = {}
@@ -559,6 +561,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._project_dirty: bool = False
         self._autosave_restoring: bool = False
         self._project_recovered_from_autosave: bool = False
+        self._suppress_heatmap_level_store: bool = False
+        self._history_undo: List[Dict[str, object]] = []
+        self._history_redo: List[Dict[str, object]] = []
+        self._history_current: Optional[Dict[str, object]] = None
+        self._history_key: str = ""
+        self._history_restoring: bool = False
+        self._history_limit: int = 60
         try:
             self._build_ui()
             self._restore_settings()
@@ -572,6 +581,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if app is not None:
             app.aboutToQuit.connect(self._on_about_to_quit)
         QtCore.QTimer.singleShot(0, self._restore_project_autosave_if_needed)
+        QtCore.QTimer.singleShot(0, self._reset_history_snapshot)
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
@@ -967,6 +977,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_load_cfg = QtWidgets.QPushButton("Load config")
         self.btn_load_cfg.setProperty("class", "compactSmall")
         self.btn_load_cfg.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_reset_cfg = QtWidgets.QPushButton("Reset defaults")
+        self.btn_reset_cfg.setProperty("class", "compactSmall")
+        self.btn_reset_cfg.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_new_project = QtWidgets.QPushButton("New project")
         self.btn_new_project.setProperty("class", "compactSmall")
         self.btn_new_project.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
@@ -1336,6 +1349,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         export_layout.addWidget(self.btn_export_img)
         export_layout.addWidget(self.btn_save_cfg)
         export_layout.addWidget(self.btn_load_cfg)
+        export_layout.addWidget(self.btn_reset_cfg)
         export_layout.addWidget(self.btn_new_project)
         export_layout.addWidget(self.btn_save_project)
         export_layout.addWidget(self.btn_load_project)
@@ -1371,6 +1385,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_action_compute.setProperty("class", "compactPrimarySmall")
         self.btn_action_export = QtWidgets.QPushButton("Export")
         self.btn_action_export.setProperty("class", "compactPrimarySmall")
+        self.btn_action_undo = QtWidgets.QPushButton("Undo")
+        self.btn_action_undo.setProperty("class", "compactSmall")
+        self.btn_action_undo.setToolTip("Undo last postprocessing setting or view action")
+        self.btn_action_redo = QtWidgets.QPushButton("Redo")
+        self.btn_action_redo.setProperty("class", "compactSmall")
+        self.btn_action_redo.setToolTip("Redo last undone postprocessing setting or view action")
         self.btn_action_hide = QtWidgets.QPushButton("Hide Panels")
         self.btn_action_hide.setProperty("class", "compactSmall")
 
@@ -1441,8 +1461,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_action_export.setText("Run Export")
         self.btn_action_hide.setText("Hide drawer")
         for b in (self.btn_action_load, self.btn_action_compute,
-                  self.btn_action_export, self.btn_style):
+                  self.btn_action_export, self.btn_action_undo,
+                  self.btn_action_redo, self.btn_style):
             tb_layout.addWidget(b)
+        self._update_history_buttons()
         tb_layout.addStretch(1)
         tb_layout.addWidget(self.btn_action_hide)
         # action_row is no longer used; left in scope so any later reference
@@ -1660,6 +1682,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         self.plot_metrics.addItem(self.metrics_err_pre)
         self.plot_metrics.addItem(self.metrics_err_post)
+        self.metrics_p_text = pg.TextItem("", color=(230, 236, 246), anchor=(0.5, 1.0))
+        self.metrics_p_text.setZValue(20)
+        self.metrics_p_text.setVisible(False)
+        self.plot_metrics.addItem(self.metrics_p_text)
         self.plot_metrics.setXRange(-0.5, 1.5, padding=0)
         self.plot_metrics.getAxis("bottom").setTicks([[(0, "pre"), (1, "post")]])
 
@@ -1866,6 +1892,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.act_open_plot_style.triggered.connect(self._open_style_dialog)
         self.btn_action_compute.clicked.connect(self._compute_psth)
         self.btn_action_export.clicked.connect(self._export_results)
+        self.btn_action_undo.clicked.connect(self._undo_post_action)
+        self.btn_action_redo.clicked.connect(self._redo_post_action)
         self.btn_action_hide.clicked.connect(self._hide_all_section_popups)
         for key, btn in self._section_buttons.items():
             btn.toggled.connect(lambda checked, section_key=key: self._toggle_section_popup(section_key, checked))
@@ -1897,6 +1925,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_style.clicked.connect(self._open_style_dialog)
         self.btn_save_cfg.clicked.connect(self._save_config_file)
         self.btn_load_cfg.clicked.connect(self._load_config_file)
+        self.btn_reset_cfg.clicked.connect(self._reset_config_defaults)
         self.btn_new_project.clicked.connect(self._new_project)
         self.btn_save_project.clicked.connect(self._save_project_file)
         self.btn_load_project.clicked.connect(self._load_project_file)
@@ -1917,7 +1946,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_peak_norm_prominence.toggled.connect(lambda _checked=False: self._save_settings())
         self.tab_sources.currentChanged.connect(self._refresh_signal_file_combo)
         self.tab_visual_mode.currentChanged.connect(self._on_visual_mode_changed)
+        self.tab_visual_mode.currentChanged.connect(self._queue_settings_save)
         self.combo_individual_file.currentIndexChanged.connect(self._on_individual_file_changed)
+        self.combo_individual_file.currentIndexChanged.connect(self._queue_settings_save)
 
         self.combo_align.currentIndexChanged.connect(self._update_align_ui)
         self.combo_behavior_file_type.currentIndexChanged.connect(self._update_align_ui)
@@ -3684,9 +3715,112 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if queue:
             self._queue_settings_save()
 
+    def _history_snapshot(self) -> Dict[str, object]:
+        state = self._collect_settings()
+        try:
+            state["visual_mode"] = int(self.tab_visual_mode.currentIndex())
+        except Exception:
+            state["visual_mode"] = 0
+        try:
+            state["individual_file"] = self.combo_individual_file.currentText().strip()
+        except Exception:
+            state["individual_file"] = ""
+        return copy.deepcopy(state)
+
+    def _history_state_key(self, state: Dict[str, object]) -> str:
+        try:
+            return json.dumps(state, sort_keys=True, separators=(",", ":"), default=str)
+        except Exception:
+            return repr(state)
+
+    def _update_history_buttons(self) -> None:
+        for button, enabled in (
+            (getattr(self, "btn_action_undo", None), bool(self._history_undo)),
+            (getattr(self, "btn_action_redo", None), bool(self._history_redo)),
+        ):
+            if button is not None:
+                button.setEnabled(enabled)
+
+    def _reset_history_snapshot(self) -> None:
+        if not hasattr(self, "combo_align"):
+            return
+        self._history_undo.clear()
+        self._history_redo.clear()
+        self._history_current = self._history_snapshot()
+        self._history_key = self._history_state_key(self._history_current)
+        self._update_history_buttons()
+
+    def _record_history_change(self) -> None:
+        if self._is_restoring_settings or self._history_restoring:
+            return
+        state = self._history_snapshot()
+        key = self._history_state_key(state)
+        if self._history_current is None:
+            self._history_current = copy.deepcopy(state)
+            self._history_key = key
+            self._update_history_buttons()
+            return
+        if key == self._history_key:
+            return
+        self._history_undo.append(copy.deepcopy(self._history_current))
+        if len(self._history_undo) > self._history_limit:
+            self._history_undo = self._history_undo[-self._history_limit:]
+        self._history_redo.clear()
+        self._history_current = copy.deepcopy(state)
+        self._history_key = key
+        self._update_history_buttons()
+
+    def _restore_history_state(self, state: Dict[str, object]) -> None:
+        was_restoring = self._is_restoring_settings
+        self._history_restoring = True
+        self._is_restoring_settings = True
+        try:
+            self._apply_settings(copy.deepcopy(state))
+            if "visual_mode" in state:
+                idx = int(state.get("visual_mode") or 0)
+                if 0 <= idx < self.tab_visual_mode.count():
+                    self.tab_visual_mode.setCurrentIndex(idx)
+            if "individual_file" in state:
+                file_id = str(state.get("individual_file") or "").strip()
+                if file_id:
+                    combo_idx = self.combo_individual_file.findText(file_id)
+                    if combo_idx >= 0:
+                        self.combo_individual_file.setCurrentIndex(combo_idx)
+            self._rerender_visual_from_cache()
+            self._update_trace_preview()
+            self._save_settings()
+        finally:
+            self._is_restoring_settings = was_restoring
+            self._history_restoring = False
+
+    def _undo_post_action(self) -> None:
+        if not self._history_undo:
+            return
+        current = self._history_snapshot()
+        previous = self._history_undo.pop()
+        self._history_redo.append(copy.deepcopy(current))
+        self._restore_history_state(previous)
+        self._history_current = copy.deepcopy(previous)
+        self._history_key = self._history_state_key(previous)
+        self._update_history_buttons()
+        self.statusUpdate.emit("Undid postprocessing action.", 2500)
+
+    def _redo_post_action(self) -> None:
+        if not self._history_redo:
+            return
+        current = self._history_snapshot()
+        next_state = self._history_redo.pop()
+        self._history_undo.append(copy.deepcopy(current))
+        self._restore_history_state(next_state)
+        self._history_current = copy.deepcopy(next_state)
+        self._history_key = self._history_state_key(next_state)
+        self._update_history_buttons()
+        self.statusUpdate.emit("Redid postprocessing action.", 2500)
+
     def _queue_settings_save(self, *_args: object) -> None:
         if self._is_restoring_settings:
             return
+        self._record_history_change()
         if not self._autosave_restoring:
             self._project_dirty = True
         timer = getattr(self, "_settings_save_timer", None)
@@ -6418,7 +6552,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _render_heatmap(self, mat: np.ndarray, tvec: np.ndarray, labels: Optional[List[str]] = None) -> None:
         if mat.size == 0:
-            self.img.setImage(np.zeros((1, 1)))
+            self._suppress_heatmap_level_store = True
+            try:
+                self.img.setImage(np.zeros((1, 1)), autoLevels=False)
+                self.img.setLevels([0.0, 1.0])
+                if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
+                    try:
+                        self.heat_lut.item.setLevels(0.0, 1.0)
+                    except TypeError:
+                        self.heat_lut.item.setLevels((0.0, 1.0))
+            finally:
+                self._suppress_heatmap_level_store = False
             self.heat_zero_line.setVisible(False)
             return
 
@@ -6433,12 +6577,38 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self.heat_lut.item.gradient.setColorMap(cmap)
         except Exception:
             pass
+        finite = img[np.isfinite(img)]
+        if finite.size:
+            lo = float(np.nanmin(finite))
+            hi = float(np.nanmax(finite))
+        else:
+            lo, hi = 0.0, 1.0
+        manual_levels = bool(self._style.get("heatmap_levels_manual", False))
+        if not manual_levels:
+            self._style["heatmap_min"] = None
+            self._style["heatmap_max"] = None
         hmin = self._style.get("heatmap_min", None)
         hmax = self._style.get("heatmap_max", None)
-        # set image (auto-level)
-        self.img.setImage(img, autoLevels=True)
-        if hmin is not None and hmax is not None:
-            self.img.setLevels([float(hmin), float(hmax)])
+        if manual_levels and hmin is not None and hmax is not None:
+            try:
+                lo = float(hmin)
+                hi = float(hmax)
+            except Exception:
+                pass
+        if (not np.isfinite(lo)) or (not np.isfinite(hi)) or hi <= lo:
+            center = lo if np.isfinite(lo) else 0.0
+            lo, hi = center - 0.5, center + 0.5
+        self._suppress_heatmap_level_store = True
+        try:
+            self.img.setImage(img, autoLevels=False)
+            self.img.setLevels([lo, hi])
+            if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
+                try:
+                    self.heat_lut.item.setLevels(lo, hi)
+                except TypeError:
+                    self.heat_lut.item.setLevels((lo, hi))
+        finally:
+            self._suppress_heatmap_level_store = False
 
         # Map image to time axis using a rect (avoids scale() incompatibilities)
         x0 = float(tvec[0]) if tvec.size else 0.0
@@ -6553,6 +6723,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.metrics_scatter_post.setData([], [])
             self._set_error_bar(self.metrics_err_pre, 0.0, 0.0, 0.0)
             self._set_error_bar(self.metrics_err_post, 1.0, 0.0, 0.0)
+            self.metrics_p_text.setVisible(False)
             self._last_metrics = None
             return
         metric = self.combo_metric.currentText()
@@ -6577,6 +6748,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.metrics_scatter_post.setData([], [])
             self._set_error_bar(self.metrics_err_pre, 0.0, 0.0, 0.0)
             self._set_error_bar(self.metrics_err_post, 1.0, 0.0, 0.0)
+            self.metrics_p_text.setVisible(False)
             self._last_metrics = None
             return
 
@@ -6605,10 +6777,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
         pair_mask = np.isfinite(pre_vals_all) & np.isfinite(post_vals_all)
         pre_pair = pre_vals_all[pair_mask]
         post_pair = post_vals_all[pair_mask]
+        p_value = np.nan
+        n_pair = int(min(pre_pair.size, post_pair.size))
         if pre_pair.size and post_pair.size:
-            n_pair = int(min(pre_pair.size, post_pair.size))
             pre_pair = pre_pair[:n_pair]
             post_pair = post_pair[:n_pair]
+            if n_pair >= 2:
+                diffs = post_pair - pre_pair
+                diffs = diffs[np.isfinite(diffs)]
+                if diffs.size >= 2:
+                    if float(np.nanstd(diffs, ddof=1)) == 0.0:
+                        p_value = 1.0 if float(np.nanmean(diffs)) == 0.0 else 0.0
+                    else:
+                        try:
+                            from scipy import stats
+                            result = stats.ttest_rel(pre_pair, post_pair, nan_policy="omit")
+                            p_value = float(result.pvalue)
+                        except Exception:
+                            p_value = np.nan
             # Build segmented polyline: (0, pre_i) -> (1, post_i), NaN separator.
             x_line = np.empty(n_pair * 3, dtype=float)
             y_line = np.empty(n_pair * 3, dtype=float)
@@ -6666,6 +6852,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if ymin == ymax:
             ymax = ymin + 1.0
         self.plot_metrics.setYRange(ymin, ymax, padding=0.2)
+        span = float(ymax - ymin) if np.isfinite(ymax - ymin) and ymax != ymin else 1.0
+        if n_pair >= 2:
+            if np.isfinite(p_value):
+                p_label = "paired p < 1e-4" if p_value < 1e-4 else f"paired p = {p_value:.4g}"
+            else:
+                p_label = "paired p = n/a"
+            self.metrics_p_text.setText(p_label)
+            self.metrics_p_text.setPos(0.5, ymax + 0.14 * span)
+            self.metrics_p_text.setVisible(True)
+        else:
+            self.metrics_p_text.setVisible(False)
         self._last_metrics = {
             "pre": pre_mean,
             "post": post_mean,
@@ -6673,6 +6870,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "post_sem": post_sem,
             "pre_n": float(pre_n),
             "post_n": float(post_n),
+            "paired_n": float(n_pair),
+            "paired_p": float(p_value) if np.isfinite(p_value) else np.nan,
             "metric": metric,
         }
 
@@ -6951,7 +7150,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             pass
 
     def _on_heatmap_levels_changed(self) -> None:
-        if self._is_restoring_settings:
+        if self._is_restoring_settings or self._suppress_heatmap_level_store:
             return
         if not hasattr(self, "heat_lut") or getattr(self.heat_lut, "item", None) is None:
             return
@@ -6966,6 +7165,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
             self._style["heatmap_min"] = lo
             self._style["heatmap_max"] = hi
+            self._style["heatmap_levels_manual"] = True
             self._queue_settings_save()
 
     def _open_style_dialog(self) -> None:
@@ -6974,6 +7174,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         self._style = dlg.get_style()
         self._apply_plot_style()
+        self._record_history_change()
         self._render_heatmap(self._last_mat if self._last_mat is not None else np.zeros((1, 1)), self._last_tvec if self._last_tvec is not None else np.array([0.0, 1.0]))
         self._render_spatial_heatmap(
             self._last_spatial_occupancy_map,
@@ -7704,6 +7905,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def reset_for_new_preprocessing_project(self) -> None:
         self._reset_project_state()
+        self._reset_history_snapshot()
         self.statusUpdate.emit("Cleared postprocessing project state.", 5000)
 
     def _new_project(self) -> None:
@@ -7711,6 +7913,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
 
         self._reset_project_state()
+        self._reset_history_snapshot()
         self.statusUpdate.emit("Started a new postprocessing project.", 5000)
 
     def _import_project_source_paths(self, recent_paths: Dict[str, object]) -> bool:
@@ -7834,7 +8037,115 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.statusUpdate.emit("Recovered autosaved postprocessing project.", 5000)
         else:
             self.statusUpdate.emit(f"Project loaded: {os.path.basename(path)}", 5000)
+        self._reset_history_snapshot()
         return True
+
+    def _default_settings_payload(self) -> Dict[str, object]:
+        return {
+            "align": "Behavior (CSV/XLSX)",
+            "dio_channel": self.combo_dio.currentText(),
+            "dio_polarity": "Event high (0->1)",
+            "dio_align": "Align to onset",
+            "behavior_file_type": "Binary states (time + 0/1 columns)",
+            "behavior_time_fps": 30.0,
+            "behavior": self.combo_behavior_name.currentText(),
+            "behavior_align": self.combo_behavior_align.currentText(),
+            "behavior_from": self.combo_behavior_from.currentText(),
+            "behavior_to": self.combo_behavior_to.currentText(),
+            "transition_gap": 1.0,
+            "window_pre": 2.0,
+            "window_post": 5.0,
+            "baseline_start": -1.0,
+            "baseline_end": 0.0,
+            "resample": 50.0,
+            "smooth": 0.0,
+            "filter_enabled": True,
+            "event_start": 1,
+            "event_end": 0,
+            "group_window_s": 0.0,
+            "dur_min": 0.0,
+            "dur_max": 0.0,
+            "metrics_enabled": True,
+            "metric": "AUC",
+            "metric_pre0": -1.0,
+            "metric_pre1": 0.0,
+            "metric_post0": 0.0,
+            "metric_post1": 1.0,
+            "global_metrics_enabled": True,
+            "global_start": 0.0,
+            "global_end": 0.0,
+            "global_amp": True,
+            "global_freq": True,
+            "view_layout": "Standard",
+            "visual_mode": 0,
+            "individual_file": self.combo_individual_file.currentText().strip(),
+            "signal_source": "Use processed output trace (loaded file)",
+            "signal_scope": "Per file",
+            "signal_file": self.combo_signal_file.currentText(),
+            "signal_method": "SciPy find_peaks",
+            "signal_prominence": 0.5,
+            "signal_auto_mad": False,
+            "signal_mad_multiplier": 5.0,
+            "signal_height": 0.0,
+            "signal_distance": 0.5,
+            "signal_smooth": 0.0,
+            "signal_baseline": "Use trace as-is",
+            "signal_baseline_window": 10.0,
+            "signal_norm_prominence": False,
+            "signal_rate_bin": 60.0,
+            "signal_auc_window": 0.5,
+            "signal_overlay": True,
+            "signal_noise_overlay": False,
+            "behavior_analysis_name": self.combo_behavior_analysis.currentText(),
+            "behavior_analysis_bin": 30.0,
+            "behavior_analysis_aligned": False,
+            "spatial_x": self.combo_spatial_x.currentText(),
+            "spatial_y": self.combo_spatial_y.currentText(),
+            "spatial_bins_x": 64,
+            "spatial_bins_y": 64,
+            "spatial_weight": "Occupancy (samples)",
+            "spatial_clip": True,
+            "spatial_clip_low": 1.0,
+            "spatial_clip_high": 99.0,
+            "spatial_time_filter": False,
+            "spatial_time_min": 0.0,
+            "spatial_time_max": 0.0,
+            "spatial_smooth": 0.0,
+            "spatial_activity_mode": "Mean z-score/bin (occupancy normalized)",
+            "spatial_activity_norm": True,
+            "spatial_log": False,
+            "spatial_invert_y": False,
+            "style": {
+                "trace": (90, 190, 255),
+                "behavior": (220, 180, 80),
+                "avg": (90, 190, 255),
+                "sem_edge": (152, 201, 143),
+                "sem_fill": (188, 230, 178, 96),
+                "plot_bg": (248, 250, 255) if self._app_theme_mode == "light" else (36, 42, 52),
+                "grid_enabled": True,
+                "grid_alpha": 0.25,
+                "heatmap_cmap": "viridis",
+                "heatmap_min": None,
+                "heatmap_max": None,
+                "heatmap_levels_manual": False,
+            },
+        }
+
+    def _reset_config_defaults(self) -> None:
+        previous_restoring = self._is_restoring_settings
+        previous_history_restoring = self._history_restoring
+        self._is_restoring_settings = True
+        self._history_restoring = True
+        try:
+            self._apply_settings(self._default_settings_payload())
+        finally:
+            self._is_restoring_settings = previous_restoring
+            self._history_restoring = previous_history_restoring
+        self._record_history_change()
+        self._rerender_visual_from_cache()
+        self._compute_spatial_heatmap()
+        self._save_settings()
+        self.statusUpdate.emit("Reset postprocessing parameters to defaults.", 3000)
 
     def _save_config_file(self) -> None:
         start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
@@ -7903,6 +8214,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "global_amp": self.cb_global_amp.isChecked(),
             "global_freq": self.cb_global_freq.isChecked(),
             "view_layout": self.combo_view_layout.currentText(),
+            "visual_mode": int(self.tab_visual_mode.currentIndex()),
+            "individual_file": self.combo_individual_file.currentText().strip(),
             "signal_source": self.combo_signal_source.currentText(),
             "signal_scope": self.combo_signal_scope.currentText(),
             "signal_file": self.combo_signal_file.currentText(),
@@ -8008,6 +8321,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if "global_freq" in data:
             self.cb_global_freq.setChecked(bool(data["global_freq"]))
         _set_combo(self.combo_view_layout, data.get("view_layout"))
+        if "visual_mode" in data:
+            try:
+                idx = int(data.get("visual_mode") or 0)
+                if 0 <= idx < self.tab_visual_mode.count():
+                    self.tab_visual_mode.setCurrentIndex(idx)
+            except Exception:
+                pass
+        if "individual_file" in data:
+            file_id = str(data.get("individual_file") or "").strip()
+            if file_id:
+                idx = self.combo_individual_file.findText(file_id)
+                if idx >= 0:
+                    self.combo_individual_file.setCurrentIndex(idx)
         _set_combo(self.combo_signal_source, data.get("signal_source"))
         _set_combo(self.combo_signal_scope, data.get("signal_scope"))
         self._refresh_signal_file_combo()
@@ -9796,8 +10122,10 @@ class StyleDialog(QtWidgets.QDialog):
 
     def get_style(self) -> Dict[str, object]:
         self._style["heatmap_cmap"] = self.combo_cmap.currentText()
-        self._style["heatmap_min"] = float(self.spin_hmin.value()) if self.spin_hmin.value() != 0.0 else None
-        self._style["heatmap_max"] = float(self.spin_hmax.value()) if self.spin_hmax.value() != 0.0 else None
+        manual_levels = self.spin_hmin.value() != 0.0 or self.spin_hmax.value() != 0.0
+        self._style["heatmap_min"] = float(self.spin_hmin.value()) if manual_levels else None
+        self._style["heatmap_max"] = float(self.spin_hmax.value()) if manual_levels else None
+        self._style["heatmap_levels_manual"] = bool(manual_levels)
         self._style["grid_enabled"] = bool(self.cb_grid.isChecked())
         self._style["grid_alpha"] = float(self.spin_grid_alpha.value())
         self._style.setdefault("plot_bg", (36, 42, 52))

@@ -1735,6 +1735,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.btn_advanced = QtWidgets.QPushButton("Cutting / Sectioning")
         self.btn_save_config = QtWidgets.QPushButton("Save config")
         self.btn_load_config = QtWidgets.QPushButton("Load config")
+        self.btn_reset_defaults = QtWidgets.QPushButton("Reset defaults")
         for b in (
             self.btn_artifacts_panel,
             self.btn_qc,
@@ -1744,12 +1745,14 @@ class ParameterPanel(QtWidgets.QGroupBox):
             self.btn_advanced,
             self.btn_save_config,
             self.btn_load_config,
+            self.btn_reset_defaults,
         ):
             b.setProperty("class", "compactSmall")
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_export.setProperty("class", "compactPrimarySmall")
         self.btn_save_config.clicked.connect(self._save_config)
         self.btn_load_config.clicked.connect(self._load_config)
+        self.btn_reset_defaults.clicked.connect(self._reset_defaults)
         self.btn_artifacts_panel.clicked.connect(self.artifactsRequested.emit)
         self.btn_qc.clicked.connect(self.qcRequested.emit)
         self.btn_qc_batch.clicked.connect(self.batchQcRequested.emit)
@@ -1827,6 +1830,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         qc_grid.addWidget(self.btn_qc_batch, 2, 1)
         qc_grid.addWidget(self.btn_metadata, 3, 0)
         qc_grid.addWidget(self.btn_save_config, 3, 1)
+        qc_grid.addWidget(self.btn_reset_defaults, 4, 0)
         qc_grid.addWidget(self.btn_load_config, 4, 1)
         qc_grid.setColumnStretch(0, 1)
         qc_grid.setColumnStretch(1, 1)
@@ -2298,6 +2302,19 @@ class ParameterPanel(QtWidgets.QGroupBox):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Error", f"Failed to load config: {e}")
 
+    def _reset_defaults(self) -> None:
+        """Restore processing parameters and export toggles to application defaults."""
+        self.set_params(ProcessingParams())
+        self.cb_artifact.setChecked(True)
+        self.cb_filtering.setChecked(True)
+        self.cb_show_artifact_overlay.setChecked(True)
+        self.set_export_selection(ExportSelection())
+        self.set_export_output_modes([self.combo_output.currentText()], follow_current=True)
+        self.chk_auto_export.setChecked(False)
+        self._update_auto_export_controls()
+        self._update_section_summaries()
+        self.paramsChanged.emit()
+
     def _lambda_value(self) -> float:
         x = float(self.spin_lam_x.value())
         y = int(self.spin_lam_y.value())
@@ -2485,6 +2502,8 @@ class PlotDashboard(QtWidgets.QWidget):
     manualRegionFromSelectorRequested = QtCore.Signal()
     manualRegionFromDragRequested = QtCore.Signal(float, float)
     clearManualRegionsRequested = QtCore.Signal()
+    undoRequested = QtCore.Signal()
+    redoRequested = QtCore.Signal()
     showArtifactsRequested = QtCore.Signal()
     boxSelectionCleared = QtCore.Signal()
     boxSelectionContextRequested = QtCore.Signal()
@@ -2531,6 +2550,8 @@ class PlotDashboard(QtWidgets.QWidget):
         tools = QtWidgets.QHBoxLayout()
         self.btn_add_region = QtWidgets.QPushButton("Add from selector")
         self.btn_clear_regions = QtWidgets.QPushButton("Clear manual")
+        self.btn_undo = QtWidgets.QPushButton("Undo")
+        self.btn_redo = QtWidgets.QPushButton("Redo")
         self.btn_artifacts = QtWidgets.QPushButton("Artifacts")
         self.btn_box_select = QtWidgets.QPushButton("Box select")
         self.btn_box_select.setCheckable(True)
@@ -2540,6 +2561,8 @@ class PlotDashboard(QtWidgets.QWidget):
         for b in (
             self.btn_add_region,
             self.btn_clear_regions,
+            self.btn_undo,
+            self.btn_redo,
             self.btn_artifacts,
             self.btn_box_select,
             self.btn_thresholds,
@@ -2547,6 +2570,8 @@ class PlotDashboard(QtWidgets.QWidget):
             b.setProperty("class", "compactSmall")
         tools.addWidget(self.btn_add_region)
         tools.addWidget(self.btn_clear_regions)
+        tools.addWidget(self.btn_undo)
+        tools.addWidget(self.btn_redo)
         tools.addWidget(self.btn_artifacts)
         tools.addWidget(self.btn_box_select)
         tools.addWidget(self.btn_thresholds)
@@ -2614,6 +2639,8 @@ class PlotDashboard(QtWidgets.QWidget):
 
         self.btn_add_region.clicked.connect(self.manualRegionFromSelectorRequested.emit)
         self.btn_clear_regions.clicked.connect(self.clearManualRegionsRequested.emit)
+        self.btn_undo.clicked.connect(self.undoRequested.emit)
+        self.btn_redo.clicked.connect(self.redoRequested.emit)
         self.btn_artifacts.clicked.connect(self.showArtifactsRequested.emit)
         self.btn_box_select.toggled.connect(self._toggle_box_select)
         self.btn_thresholds.toggled.connect(self._on_thresholds_toggled)
@@ -2629,7 +2656,12 @@ class PlotDashboard(QtWidgets.QWidget):
 
         self._sync_artifact_threshold_curves_visibility()
         self._toggle_box_select(False)
+        self.set_history_available(False, False)
         self.set_plot_appearance(self._plot_background_mode, self._plot_grid_visible)
+
+    def set_history_available(self, can_undo: bool, can_redo: bool) -> None:
+        self.btn_undo.setEnabled(bool(can_undo))
+        self.btn_redo.setEnabled(bool(can_redo))
 
     def _normalize_plot_background_mode(self, value: object) -> str:
         mode = str(value or "").strip().lower()
