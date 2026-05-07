@@ -3300,6 +3300,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 per_file_mats=self._per_file_mats,
                 behavior_sources=self._behavior_sources,
                 event_rows=self._last_event_rows,
+                group_mat=self._group_mat,
+                group_tvec=self._group_tvec,
+                group_labels=self._group_labels,
+                visual_mode=int(self.tab_visual_mode.currentIndex()) if hasattr(self, "tab_visual_mode") else 0,
+                group_mode=bool(self.tab_sources.currentIndex() == 1) if hasattr(self, "tab_sources") else False,
             )
         except Exception:
             _LOG.debug("Could not sync temporal modeling context", exc_info=True)
@@ -3594,6 +3599,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self.plot_avg.setTitle("Average across trials +/- SEM")
         # Always refresh the trace preview to match the selected file
         self._update_trace_preview()
+        self._sync_temporal_modeling_context()
 
     def _update_data_availability(self) -> None:
         has_processed = bool(self._processed)

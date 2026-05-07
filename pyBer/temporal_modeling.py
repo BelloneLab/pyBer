@@ -441,7 +441,7 @@ class TrialFLMM:
         mat: np.ndarray,
         tvec: np.ndarray,
         design: Dict[str, np.ndarray],
-        formula_fixed: str = "Y.obs ~ group",
+        formula_fixed: str = "Y.obs ~ 1",
         random_effects: str = "~1",
         group_var: str = "subject",
         parallel: bool = False,
@@ -737,6 +737,11 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._behavior_sources: Dict[str, Dict[str, Any]] = {}
         self._event_rows: List[Dict[str, object]] = []
         self._predictor_catalog: Dict[str, Dict[str, Any]] = {}
+        self._group_mat: Optional[np.ndarray] = None
+        self._group_tvec: Optional[np.ndarray] = None
+        self._group_labels: List[str] = []
+        self._visual_mode: int = 0
+        self._group_mode: bool = False
 
         self._build_compact_ui()
         self._connect_signals()
@@ -816,8 +821,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         fl = QtWidgets.QFormLayout(self.grp_flmm)
         fl.setSpacing(4)
 
-        self.edit_formula = QtWidgets.QLineEdit("Y.obs ~ group")
-        self.edit_formula.setPlaceholderText("e.g. Y.obs ~ group + condition")
+        self.edit_formula = QtWidgets.QLineEdit("Y.obs ~ 1")
+        self.edit_formula.setPlaceholderText("Leave as Y.obs ~ 1 to auto-use selected predictors")
         fl.addRow("Fixed formula:", self.edit_formula)
 
         self.edit_random = QtWidgets.QLineEdit("~1")
@@ -1071,8 +1076,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.lbl_flmm_status.setWordWrap(True)
         fl.addRow("Backend", self.lbl_flmm_status)
 
-        self.edit_formula = QtWidgets.QLineEdit("Y.obs ~ group")
-        self.edit_formula.setPlaceholderText("e.g. Y.obs ~ group + condition")
+        self.edit_formula = QtWidgets.QLineEdit("Y.obs ~ 1")
+        self.edit_formula.setPlaceholderText("Leave as Y.obs ~ 1 to auto-use selected predictors")
         fl.addRow("Fixed formula", self.edit_formula)
         self.edit_random = QtWidgets.QLineEdit("~1")
         self.edit_random.setPlaceholderText("e.g. ~1 or ~time")
@@ -1242,6 +1247,11 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         per_file_mats: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None,
         behavior_sources: Optional[Dict[str, Dict[str, Any]]] = None,
         event_rows: Optional[List[Dict[str, object]]] = None,
+        group_mat: Optional[np.ndarray] = None,
+        group_tvec: Optional[np.ndarray] = None,
+        group_labels: Optional[List[str]] = None,
+        visual_mode: int = 0,
+        group_mode: bool = False,
     ):
         """Push data from the host panel into this widget."""
         self._processed_trials = processed_trials or []
@@ -1252,6 +1262,11 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._per_file_mats = per_file_mats or {}
         self._behavior_sources = dict(behavior_sources or {})
         self._event_rows = list(event_rows or [])
+        self._group_mat = np.asarray(group_mat, float) if group_mat is not None else None
+        self._group_tvec = np.asarray(group_tvec, float) if group_tvec is not None else None
+        self._group_labels = list(group_labels or [])
+        self._visual_mode = int(visual_mode) if isinstance(visual_mode, (int, np.integer)) else 0
+        self._group_mode = bool(group_mode)
         self._refresh_predictor_catalog()
 
         n_trials = len(self._processed_trials)
@@ -1263,6 +1278,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             bits.append(f"Events: {len(event_times)}")
         if self._behavior_sources:
             bits.append(f"Behavior files: {len(self._behavior_sources)}")
+        if self._group_mat is not None and self._group_labels:
+            bits.append(f"Group animals: {len(self._group_labels)}")
         if self._predictor_catalog:
             bits.append(f"Available predictors: {len(self._predictor_catalog)}")
         self.lbl_data_status.setText("\n".join(bits))
@@ -1691,6 +1708,119 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             "valid_samples": int(np.sum(valid_signal)),
         }
 
+    def _proc_for_file_id(self, file_id: str) -> Optional[Any]:
+        for proc in self._processed_trials:
+            if self._ids_match(self._proc_file_id(proc), file_id):
+                return proc
+        try:
+            idx = self._group_labels.index(file_id)
+        except ValueError:
+            idx = -1
+        if 0 <= idx < len(self._processed_trials):
+            return self._processed_trials[idx]
+        return None
+
+    @staticmethod
+    def _safe_design_name(label: str, used: set[str]) -> str:
+        base = re.sub(r"[^0-9A-Za-z_]+", "_", str(label or "").strip())
+        base = re.sub(r"_+", "_", base).strip("_") or "predictor"
+        if base[0].isdigit():
+            base = f"pred_{base}"
+        name = base
+        i = 2
+        while name in used:
+            name = f"{base}_{i}"
+            i += 1
+        used.add(name)
+        return name
+
+    def _flmm_matrix_and_labels(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[str], str]:
+        group_mat = np.asarray(self._group_mat, float) if self._group_mat is not None else None
+        group_tvec = np.asarray(self._group_tvec, float) if self._group_tvec is not None else None
+        if (
+            group_mat is not None
+            and group_tvec is not None
+            and group_mat.ndim == 2
+            and group_mat.shape[0] >= 2
+            and len(self._group_labels) == group_mat.shape[0]
+        ):
+            return group_mat, group_tvec, list(self._group_labels), "animal"
+
+        mat = np.asarray(self._psth_mat, float) if self._psth_mat is not None else None
+        tvec = np.asarray(self._psth_tvec, float) if self._psth_tvec is not None else None
+        if mat is None or tvec is None or mat.ndim != 2:
+            return None, None, [], "none"
+        if len(self._file_ids) == mat.shape[0]:
+            labels = list(self._file_ids)
+            scope = "animal"
+        else:
+            labels = [f"trial_{i + 1}" for i in range(mat.shape[0])]
+            scope = "trial"
+        return mat, tvec, labels, scope
+
+    def _animal_covariate_value(self, key: str, file_id: str) -> float:
+        proc = self._proc_for_file_id(file_id)
+        if proc is None:
+            return np.nan
+        t = np.asarray(getattr(proc, "time", np.array([], float)), float)
+        if t.size < 2:
+            return np.nan
+
+        if key in {"events", "dio"} or key.startswith("trigger::") or key.startswith("behavior_event::"):
+            vec, _ = self._predictor_vector_for_proc(key, proc, t)
+            return float(np.nansum(np.asarray(vec, float)))
+
+        entry = self._predictor_catalog.get(key, {})
+        name = str(entry.get("name", "") or key.split("::")[-1])
+        info = self._behavior_source_for_proc(proc)
+        if not isinstance(info, dict):
+            return np.nan
+        if key.startswith("behavior_state::"):
+            behaviors = info.get("behaviors") or {}
+            values = np.asarray(behaviors.get(name, np.array([], float)), float)
+            finite = values[np.isfinite(values)]
+            if finite.size == 0:
+                return np.nan
+            return float(np.nanmean(finite > 0.5))
+        if key.startswith("behavior_cont::"):
+            trajectory = info.get("trajectory") or {}
+            values = np.asarray(trajectory.get(name, np.array([], float)), float)
+            finite = values[np.isfinite(values)]
+            if finite.size == 0:
+                return np.nan
+            return float(np.nanmean(finite))
+        return np.nan
+
+    def _build_flmm_design(
+        self,
+        labels: List[str],
+        group_var: str,
+    ) -> Tuple[Dict[str, np.ndarray], List[str], List[str], Dict[str, str]]:
+        design: Dict[str, np.ndarray] = {group_var: np.asarray(labels, dtype=object)}
+        terms: List[str] = []
+        dropped: List[str] = []
+        term_labels: Dict[str, str] = {}
+        used_names = {group_var, "Y.obs", ".index", ".obs"}
+
+        for key in self._selected_predictor_keys():
+            values = np.asarray([self._animal_covariate_value(key, label) for label in labels], float)
+            finite = np.isfinite(values)
+            if np.sum(finite) < 2:
+                dropped.append(self._predictor_label(key))
+                continue
+            mean = float(np.nanmean(values[finite]))
+            std = float(np.nanstd(values[finite]))
+            if not np.isfinite(std) or std <= 1e-12:
+                dropped.append(self._predictor_label(key))
+                continue
+            values[~finite] = mean
+            values = (values - mean) / std
+            term = self._safe_design_name(self._predictor_label(key), used_names)
+            design[term] = values
+            terms.append(term)
+            term_labels[term] = self._predictor_label(key)
+        return design, terms, dropped, term_labels
+
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
@@ -1916,7 +2046,81 @@ class TemporalModelingWidget(QtWidgets.QWidget):
     # FLMM fit
     # ------------------------------------------------------------------
 
+    def _fit_flmm_group(self) -> None:
+        if not self._flmm.available:
+            self.statusMessage.emit(
+                "R + fastFMM not available. Please install R, rpy2, and the fastFMM R package.", 8000
+            )
+            return
+
+        mat, tvec, row_labels, scope = self._flmm_matrix_and_labels()
+        if mat is None or tvec is None:
+            self.statusMessage.emit("No PSTH matrix - compute PSTH first.", 5000)
+            return
+        if mat.ndim != 2 or mat.shape[0] < 2:
+            self.statusMessage.emit("Need at least 2 animals/trials for FLMM.", 5000)
+            return
+
+        n_rows = int(mat.shape[0])
+        group_var = self.edit_group_var.text().strip() or "subject"
+        if not re.match(r"^[A-Za-z_][0-9A-Za-z_]*$", group_var):
+            group_var = "subject"
+            self.edit_group_var.setText(group_var)
+        if len(row_labels) != n_rows:
+            row_labels = [f"{scope}_{i + 1}" for i in range(n_rows)]
+
+        if scope == "animal":
+            design, auto_terms, dropped_terms, term_labels = self._build_flmm_design(row_labels, group_var)
+        else:
+            design = {group_var: np.asarray(row_labels, dtype=object)}
+            auto_terms = []
+            dropped_terms = []
+            term_labels = {}
+
+        requested_formula = self.edit_formula.text().strip()
+        if requested_formula in {"", "Y.obs ~ 1", "Y.obs ~ group"}:
+            formula = "Y.obs ~ " + " + ".join(auto_terms) if auto_terms else "Y.obs ~ 1"
+            if requested_formula != formula:
+                self.edit_formula.setText(formula)
+        else:
+            formula = requested_formula
+        random_eff = self.edit_random.text().strip() or "~1"
+        nknots = self.spin_nknots.value() if self.spin_nknots.value() > 0 else None
+        num_boots = self.spin_boots.value()
+
+        self.statusMessage.emit("Fitting FLMM via fastFMM - this may take a while...", 0)
+        QtWidgets.QApplication.processEvents()
+
+        result = self._flmm.fit(
+            mat, tvec, design,
+            formula_fixed=formula,
+            random_effects=random_eff,
+            group_var=group_var,
+            nknots_min=nknots,
+            num_boots=num_boots,
+        )
+        self._flmm_result = result
+
+        summary_lines = [
+            result.summary_text,
+            "",
+            f"Scope: {'animal/group rows' if scope == 'animal' else 'trial rows'}",
+            f"Rows: {n_rows}",
+            f"ID variable: {group_var}",
+            f"Formula: {formula}",
+        ]
+        if auto_terms:
+            readable = [f"{term} = {term_labels.get(term, term)}" for term in auto_terms]
+            summary_lines.append("Animal covariates: " + "; ".join(readable))
+        if dropped_terms:
+            summary_lines.append("Dropped covariates: " + ", ".join(dropped_terms))
+        self.txt_summary.setPlainText("\n".join(summary_lines))
+        self._plot_flmm_coefficients(result)
+        self.statusMessage.emit("FLMM fit complete.", 5000)
+
     def _fit_flmm(self):
+        self._fit_flmm_group()
+        return
         if not self._flmm.available:
             self.statusMessage.emit(
                 "R + fastFMM not available. Please install R, rpy2, and the fastFMM R package.", 8000
