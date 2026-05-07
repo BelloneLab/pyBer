@@ -74,6 +74,12 @@ _OUTPUT_DEFINITIONS: Dict[str, str] = {
     "Raw signal (465)": "output = filtered/resampled 465 signal",
 }
 
+_DFF_OUTPUT_MODES = {
+    "dFF (non motion corrected)",
+    "dFF (motion corrected via subtraction)",
+    "dFF (motion corrected with fitted ref)",
+}
+
 
 def _system_locale() -> QtCore.QLocale:
     return QtCore.QLocale.system()
@@ -1458,6 +1464,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 "Choose one or more DIO channels to export.\n"
                 "If none are checked, export uses the current overlay trigger."
             ),
+            "auto_export": (
+                "When enabled, the Export button writes selected files directly beside their source raw data.\n"
+                "All available analog channels are exported with the current analysis parameters."
+            ),
         }
 
     def _show_help(self, key: str, title: str) -> None:
@@ -1725,6 +1735,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.btn_advanced = QtWidgets.QPushButton("Cutting / Sectioning")
         self.btn_save_config = QtWidgets.QPushButton("Save config")
         self.btn_load_config = QtWidgets.QPushButton("Load config")
+        self.btn_reset_defaults = QtWidgets.QPushButton("Reset defaults")
         for b in (
             self.btn_artifacts_panel,
             self.btn_qc,
@@ -1734,12 +1745,14 @@ class ParameterPanel(QtWidgets.QGroupBox):
             self.btn_advanced,
             self.btn_save_config,
             self.btn_load_config,
+            self.btn_reset_defaults,
         ):
             b.setProperty("class", "compactSmall")
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_export.setProperty("class", "compactPrimarySmall")
         self.btn_save_config.clicked.connect(self._save_config)
         self.btn_load_config.clicked.connect(self._load_config)
+        self.btn_reset_defaults.clicked.connect(self._reset_defaults)
         self.btn_artifacts_panel.clicked.connect(self.artifactsRequested.emit)
         self.btn_qc.clicked.connect(self.qcRequested.emit)
         self.btn_qc_batch.clicked.connect(self.batchQcRequested.emit)
@@ -1747,6 +1760,11 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.btn_metadata.clicked.connect(self.metadataRequested.emit)
         self.btn_advanced.clicked.connect(self.advancedOptionsRequested.emit)
 
+        self.chk_auto_export = QtWidgets.QCheckBox("Use source folder + all channels")
+        self.chk_auto_export.setChecked(False)
+        self.chk_auto_export.setToolTip(
+            "Skip the folder picker and export all analog channels beside each source file."
+        )
         self.chk_export_raw = QtWidgets.QCheckBox("Raw 465")
         self.chk_export_raw.setChecked(True)
         self.chk_export_iso = QtWidgets.QCheckBox("Isobestic 405")
@@ -1765,9 +1783,20 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.list_export_dio = CheckableListWidget()
         self.list_export_dio.setMaximumHeight(84)
         self.list_export_dio.setMinimumHeight(54)
+        self.list_export_outputs = CheckableListWidget()
+        self.list_export_outputs.setMaximumHeight(116)
+        self.list_export_outputs.setMinimumHeight(72)
+        self.list_export_outputs.setToolTip("Select one or more processed output traces to write during export.")
         self._pending_export_channel_names: List[str] = []
         self._pending_export_trigger_names: List[str] = []
+        self._pending_export_output_modes: List[str] = [self.combo_output.currentText()]
+        self._export_outputs_follow_current_mode = True
+        self.list_export_outputs.set_items(
+            [(mode, mode) for mode in OUTPUT_MODES],
+            checked_values=self._pending_export_output_modes,
+        )
         self.list_export_dio.setEnabled(self.chk_export_dio.isChecked())
+        self.list_export_outputs.setEnabled(self.chk_export_output.isChecked())
 
         self.export_options_group = QtWidgets.QGroupBox("Export fields")
         export_form = QtWidgets.QFormLayout(self.export_options_group)
@@ -1784,6 +1813,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         export_checks.addWidget(self.chk_export_baseline_sig, 2, 0)
         export_checks.addWidget(self.chk_export_baseline_ref, 2, 1)
         export_form.addRow(export_checks)
+        export_form.addRow(self._label_with_help("Auto export", "auto_export"), self.chk_auto_export)
+        export_form.addRow(self._label_with_help("Output traces", "output_mode"), self.list_export_outputs)
         export_form.addRow(self._label_with_help("AN channels", "export_analog_channels"), self.list_export_channels)
         export_form.addRow(self._label_with_help("DIO channels", "export_dio_channels"), self.list_export_dio)
 
@@ -1799,6 +1830,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         qc_grid.addWidget(self.btn_qc_batch, 2, 1)
         qc_grid.addWidget(self.btn_metadata, 3, 0)
         qc_grid.addWidget(self.btn_save_config, 3, 1)
+        qc_grid.addWidget(self.btn_reset_defaults, 4, 0)
         qc_grid.addWidget(self.btn_load_config, 4, 1)
         qc_grid.setColumnStretch(0, 1)
         qc_grid.setColumnStretch(1, 1)
@@ -1837,6 +1869,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._update_output_definition()
         self._update_output_controls()
         self._update_smoothing_controls(emit_signal=False)
+        self._update_auto_export_controls()
         self._update_section_summaries()
 
     def _update_artifact_enabled(self) -> None:
@@ -2016,6 +2049,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_lam_y.valueChanged.connect(lambda *_: self._update_lambda_preview())
         self.combo_output.currentIndexChanged.connect(lambda *_: self._update_output_definition())
         self.combo_output.currentIndexChanged.connect(lambda *_: self._update_output_controls())
+        self.combo_output.currentIndexChanged.connect(lambda *_: self._sync_export_outputs_to_current_mode())
         self.combo_ref_fit.currentIndexChanged.connect(lambda *_: self._update_output_controls())
 
         # Keep collapsed card summaries synchronized with current values.
@@ -2031,11 +2065,16 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.combo_smoothing.currentIndexChanged.connect(lambda *_: self._update_smoothing_controls())
         self.cb_invert.stateChanged.connect(emit_noargs)
         self.cb_show_artifact_overlay.toggled.connect(lambda v: self.artifactOverlayToggled.emit(bool(v)))
+        self.chk_auto_export.toggled.connect(self._update_auto_export_controls)
+        self.chk_auto_export.toggled.connect(emit_noargs)
         self.chk_export_dio.toggled.connect(self.list_export_dio.setEnabled)
+        self.chk_export_output.toggled.connect(self.list_export_outputs.setEnabled)
         self.list_export_channels.changed.connect(self._on_export_channel_selection_changed)
         self.list_export_channels.changed.connect(emit_noargs)
         self.list_export_dio.changed.connect(self._on_export_trigger_selection_changed)
         self.list_export_dio.changed.connect(emit_noargs)
+        self.list_export_outputs.changed.connect(self._on_export_output_selection_changed)
+        self.list_export_outputs.changed.connect(emit_noargs)
         for cb in (
             self.chk_export_raw,
             self.chk_export_iso,
@@ -2054,6 +2093,9 @@ class ParameterPanel(QtWidgets.QGroupBox):
             "Hide advanced baseline options" if not is_visible else "Show advanced baseline options"
         )
 
+    def _update_auto_export_controls(self, *_args) -> None:
+        self.list_export_channels.setEnabled(not self.auto_export_enabled())
+
     def set_config_state_hooks(
         self,
         exporter: Optional[Callable[[], Dict[str, object]]],
@@ -2070,16 +2112,23 @@ class ParameterPanel(QtWidgets.QGroupBox):
             dio=self.chk_export_dio.isChecked(),
             baseline_sig=self.chk_export_baseline_sig.isChecked(),
             baseline_ref=self.chk_export_baseline_ref.isChecked(),
+            output_modes=self.export_output_modes(),
         )
 
     def export_selection_summary(self) -> str:
         selection = self.export_selection()
         parts: List[str] = []
-        chans = self.export_channel_names()
-        if chans:
-            parts.append(f"ANx{len(chans)}")
+        if self.auto_export_enabled():
+            n_channels = self.list_export_channels.count()
+            parts.append(f"ANx{n_channels}" if n_channels else "all AN")
+            parts.append("source folder")
+        else:
+            chans = self.export_channel_names()
+            if chans:
+                parts.append(f"ANx{len(chans)}")
         if selection.output:
-            parts.append("output")
+            modes = self.export_output_modes()
+            parts.append(f"outputsx{len(modes)}" if len(modes) > 1 else "output")
         if selection.dio:
             dio_names = self.export_trigger_names()
             parts.append(f"DIOx{len(dio_names)}" if dio_names else "DIO")
@@ -2106,6 +2155,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.chk_export_dio.setChecked(bool(selection.dio))
         self.chk_export_baseline_sig.setChecked(bool(selection.baseline_sig))
         self.chk_export_baseline_ref.setChecked(bool(selection.baseline_ref))
+        if selection.output_modes:
+            self.set_export_output_modes(selection.output_modes, follow_current=False)
+        else:
+            self.set_export_output_modes([self.combo_output.currentText()], follow_current=True)
 
     def export_channel_names(self) -> List[str]:
         checked = self.list_export_channels.checked_values()
@@ -2115,11 +2168,27 @@ class ParameterPanel(QtWidgets.QGroupBox):
         checked = self.list_export_dio.checked_values()
         return checked or list(self._pending_export_trigger_names)
 
+    def export_output_modes(self) -> List[str]:
+        checked = self.list_export_outputs.checked_values()
+        modes = checked or list(self._pending_export_output_modes)
+        modes = [mode for mode in modes if mode in OUTPUT_MODES]
+        return modes or [self.combo_output.currentText()]
+
     def _on_export_channel_selection_changed(self) -> None:
         self._pending_export_channel_names = self.list_export_channels.checked_values()
 
     def _on_export_trigger_selection_changed(self) -> None:
         self._pending_export_trigger_names = self.list_export_dio.checked_values()
+
+    def _on_export_output_selection_changed(self) -> None:
+        self._pending_export_output_modes = self.list_export_outputs.checked_values()
+        self._export_outputs_follow_current_mode = False
+        self._update_section_summaries()
+
+    def _sync_export_outputs_to_current_mode(self) -> None:
+        if not getattr(self, "_export_outputs_follow_current_mode", True):
+            return
+        self.set_export_output_modes([self.combo_output.currentText()], follow_current=True)
 
     def set_available_export_channels(self, channels: List[str], preferred: Optional[List[str]] = None) -> None:
         current = list(preferred if preferred is not None else self.export_channel_names())
@@ -2142,6 +2211,20 @@ class ParameterPanel(QtWidgets.QGroupBox):
         names = [str(name or "").strip() for name in trigger_names or [] if str(name or "").strip()]
         self._pending_export_trigger_names = names
         self.list_export_dio.set_checked_values(names)
+
+    def set_export_output_modes(self, output_modes: List[str], follow_current: bool = False) -> None:
+        modes = [str(mode or "").strip() for mode in output_modes or [] if str(mode or "").strip() in OUTPUT_MODES]
+        if not modes:
+            modes = [self.combo_output.currentText()]
+        self._pending_export_output_modes = modes
+        self._export_outputs_follow_current_mode = bool(follow_current)
+        self.list_export_outputs.set_checked_values(modes)
+
+    def auto_export_enabled(self) -> bool:
+        return bool(self.chk_auto_export.isChecked())
+
+    def set_auto_export_enabled(self, enabled: bool) -> None:
+        self.chk_auto_export.setChecked(bool(enabled))
 
     def _save_config(self) -> None:
         """Save current preprocessing parameters to a JSON file."""
@@ -2218,6 +2301,19 @@ class ParameterPanel(QtWidgets.QGroupBox):
             QtWidgets.QMessageBox.information(self, "Success", "Configuration loaded successfully.")
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Error", f"Failed to load config: {e}")
+
+    def _reset_defaults(self) -> None:
+        """Restore processing parameters and export toggles to application defaults."""
+        self.set_params(ProcessingParams())
+        self.cb_artifact.setChecked(True)
+        self.cb_filtering.setChecked(True)
+        self.cb_show_artifact_overlay.setChecked(True)
+        self.set_export_selection(ExportSelection())
+        self.set_export_output_modes([self.combo_output.currentText()], follow_current=True)
+        self.chk_auto_export.setChecked(False)
+        self._update_auto_export_controls()
+        self._update_section_summaries()
+        self.paramsChanged.emit()
 
     def _lambda_value(self) -> float:
         x = float(self.spin_lam_x.value())
@@ -2406,6 +2502,8 @@ class PlotDashboard(QtWidgets.QWidget):
     manualRegionFromSelectorRequested = QtCore.Signal()
     manualRegionFromDragRequested = QtCore.Signal(float, float)
     clearManualRegionsRequested = QtCore.Signal()
+    undoRequested = QtCore.Signal()
+    redoRequested = QtCore.Signal()
     showArtifactsRequested = QtCore.Signal()
     boxSelectionCleared = QtCore.Signal()
     boxSelectionContextRequested = QtCore.Signal()
@@ -2416,8 +2514,10 @@ class PlotDashboard(QtWidgets.QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._sync_guard = False
+        self._last_xrange: Optional[Tuple[float, float]] = None
         self._artifact_overlay_visible = True
         self._artifact_thresholds_visible = True
+        self._dio_overlay_visible = False
         self._plot_background_mode = "dark"
         self._plot_grid_visible = True
         self._artifact_regions: List[pg.LinearRegionItem] = []
@@ -2450,6 +2550,8 @@ class PlotDashboard(QtWidgets.QWidget):
         tools = QtWidgets.QHBoxLayout()
         self.btn_add_region = QtWidgets.QPushButton("Add from selector")
         self.btn_clear_regions = QtWidgets.QPushButton("Clear manual")
+        self.btn_undo = QtWidgets.QPushButton("Undo")
+        self.btn_redo = QtWidgets.QPushButton("Redo")
         self.btn_artifacts = QtWidgets.QPushButton("Artifacts")
         self.btn_box_select = QtWidgets.QPushButton("Box select")
         self.btn_box_select.setCheckable(True)
@@ -2459,6 +2561,8 @@ class PlotDashboard(QtWidgets.QWidget):
         for b in (
             self.btn_add_region,
             self.btn_clear_regions,
+            self.btn_undo,
+            self.btn_redo,
             self.btn_artifacts,
             self.btn_box_select,
             self.btn_thresholds,
@@ -2466,6 +2570,8 @@ class PlotDashboard(QtWidgets.QWidget):
             b.setProperty("class", "compactSmall")
         tools.addWidget(self.btn_add_region)
         tools.addWidget(self.btn_clear_regions)
+        tools.addWidget(self.btn_undo)
+        tools.addWidget(self.btn_redo)
         tools.addWidget(self.btn_artifacts)
         tools.addWidget(self.btn_box_select)
         tools.addWidget(self.btn_thresholds)
@@ -2479,17 +2585,9 @@ class PlotDashboard(QtWidgets.QWidget):
         for w in (self.plot_raw, self.plot_proc, self.plot_out):
             _optimize_plot(w)
 
-        # Primary axis for 465 signal
+        # Raw traces share the same primary y-axis.
         self.curve_465 = self.plot_raw.plot(pen=pg.mkPen((80, 250, 160), width=1.3))
-
-        # Twin axis for 405 (isobestic) signal - share Y axis with 465
-        self.plot_raw_pi = self.plot_raw.getPlotItem()
-        self.plot_raw_pi.showAxis("right")
-        self.plot_raw_pi.getAxis("right").setLabel("405 (isobestic)", color=(160, 120, 255))
-
-        # For true twin axis, we plot both curves on the same plot area
-        # The 405 curve will use the same Y axis scaling as 465
-        self.curve_405 = self.plot_raw.plot(pen=pg.mkPen((160, 120, 255, 128), width=1.2))  # Alpha for isobestic
+        self.curve_405 = self.plot_raw.plot(pen=pg.mkPen((160, 120, 255, 128), width=1.2))
 
         pen_env = pg.mkPen((240, 200, 90), width=1.0, style=QtCore.Qt.PenStyle.DashLine)
         self.curve_thr_hi = self.plot_raw.plot(pen=pen_env)
@@ -2524,6 +2622,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.vb_dio_raw, self.curve_dio_raw = self._add_dio_axis(self.plot_raw, "A/D")
         self.vb_dio_proc, self.curve_dio_proc = self._add_dio_axis(self.plot_proc, "A/D")
         self.vb_dio_out, self.curve_dio_out = self._add_dio_axis(self.plot_out, "A/D")
+        self._set_dio_overlay_visible(False)
         self._align_plot_axis_layouts()
 
         self.lbl_log = QtWidgets.QLabel("")
@@ -2540,6 +2639,8 @@ class PlotDashboard(QtWidgets.QWidget):
 
         self.btn_add_region.clicked.connect(self.manualRegionFromSelectorRequested.emit)
         self.btn_clear_regions.clicked.connect(self.clearManualRegionsRequested.emit)
+        self.btn_undo.clicked.connect(self.undoRequested.emit)
+        self.btn_redo.clicked.connect(self.redoRequested.emit)
         self.btn_artifacts.clicked.connect(self.showArtifactsRequested.emit)
         self.btn_box_select.toggled.connect(self._toggle_box_select)
         self.btn_thresholds.toggled.connect(self._on_thresholds_toggled)
@@ -2555,7 +2656,12 @@ class PlotDashboard(QtWidgets.QWidget):
 
         self._sync_artifact_threshold_curves_visibility()
         self._toggle_box_select(False)
+        self.set_history_available(False, False)
         self.set_plot_appearance(self._plot_background_mode, self._plot_grid_visible)
+
+    def set_history_available(self, can_undo: bool, can_redo: bool) -> None:
+        self.btn_undo.setEnabled(bool(can_undo))
+        self.btn_redo.setEnabled(bool(can_redo))
 
     def _normalize_plot_background_mode(self, value: object) -> str:
         mode = str(value or "").strip().lower()
@@ -2605,7 +2711,7 @@ class PlotDashboard(QtWidgets.QWidget):
         # Fixed side gutters keep the three view boxes the same width, so shared x ranges
         # produce vertically aligned ticks and grid lines across the stacked plots.
         left_width = 64
-        right_width = 56
+        right_width = 56 if self._dio_overlay_visible else 0
         bottom_height = 24
         for plot in (self.plot_raw, self.plot_proc, self.plot_out):
             pi = plot.getPlotItem()
@@ -2623,6 +2729,34 @@ class PlotDashboard(QtWidgets.QWidget):
                     bottom.setHeight(bottom_height)
                 except Exception:
                     pass
+
+    def _set_dio_overlay_visible(self, visible: bool, label: str = "A/D") -> None:
+        self._dio_overlay_visible = bool(visible)
+        for plot, vb, curve in (
+            (self.plot_raw, self.vb_dio_raw, self.curve_dio_raw),
+            (self.plot_proc, self.vb_dio_proc, self.curve_dio_proc),
+            (self.plot_out, self.vb_dio_out, self.curve_dio_out),
+        ):
+            pi = plot.getPlotItem()
+            axis = pi.getAxis("right")
+            if axis is not None:
+                try:
+                    axis.setLabel(label if self._dio_overlay_visible else "")
+                except Exception:
+                    pass
+            try:
+                pi.showAxis("right", self._dio_overlay_visible)
+            except Exception:
+                pass
+            try:
+                vb.setVisible(self._dio_overlay_visible)
+            except Exception:
+                pass
+            try:
+                curve.setVisible(self._dio_overlay_visible)
+            except Exception:
+                pass
+        self._align_plot_axis_layouts()
 
     def _add_dio_axis(self, plot: pg.PlotWidget, label: str):
         pi = plot.getPlotItem()
@@ -2651,6 +2785,7 @@ class PlotDashboard(QtWidgets.QWidget):
             return
         try:
             x0, x1 = x_range
+            self._last_xrange = (float(x0), float(x1))
             self.xRangeChanged.emit(float(x0), float(x1))
         except Exception:
             pass
@@ -2684,6 +2819,9 @@ class PlotDashboard(QtWidgets.QWidget):
         self.artifactThresholdsToggled.emit(bool(checked))
 
     def set_xrange_all(self, x0: float, x1: float) -> None:
+        if not np.isfinite(x0) or not np.isfinite(x1) or float(x1) <= float(x0):
+            return
+        self._last_xrange = (float(x0), float(x1))
         self._sync_guard = True
         try:
             self.plot_raw.setXRange(x0, x1, padding=0)
@@ -2691,6 +2829,20 @@ class PlotDashboard(QtWidgets.QWidget):
             self.plot_out.setXRange(x0, x1, padding=0)
         finally:
             self._sync_guard = False
+
+    def current_xrange(self) -> Optional[Tuple[float, float]]:
+        try:
+            (x0, x1), _ = self.plot_raw.getViewBox().viewRange()
+            if np.isfinite(x0) and np.isfinite(x1) and x1 > x0:
+                return (float(x0), float(x1))
+        except Exception:
+            pass
+        if self._last_xrange is None:
+            return None
+        x0, x1 = self._last_xrange
+        if np.isfinite(x0) and np.isfinite(x1) and x1 > x0:
+            return (float(x0), float(x1))
+        return None
 
     def set_full_xrange(self, t: np.ndarray) -> None:
         if t is None or np.asarray(t).size < 2:
@@ -2915,6 +3067,7 @@ class PlotDashboard(QtWidgets.QWidget):
             self.curve_dio_raw.setData([], [])
             self.curve_dio_proc.setData([], [])
             self.curve_dio_out.setData([], [])
+            self._set_dio_overlay_visible(False)
             return
 
         tt = np.asarray(t, float)
@@ -2925,16 +3078,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.curve_dio_raw.setData(tt, yy, connect="finite", skipFiniteCheck=True)
         self.curve_dio_proc.setData(tt, yy, connect="finite", skipFiniteCheck=True)
         self.curve_dio_out.setData(tt, yy, connect="finite", skipFiniteCheck=True)
-
-        if name:
-            self.plot_raw.getPlotItem().getAxis("right").setLabel(f"A/D ({name})")
-            self.plot_proc.getPlotItem().getAxis("right").setLabel(f"A/D ({name})")
-            self.plot_out.getPlotItem().getAxis("right").setLabel(f"A/D ({name})")
-        else:
-            self.plot_raw.getPlotItem().getAxis("right").setLabel("A/D")
-            self.plot_proc.getPlotItem().getAxis("right").setLabel("A/D")
-            self.plot_out.getPlotItem().getAxis("right").setLabel("A/D")
-        self._align_plot_axis_layouts()
+        self._set_dio_overlay_visible(True, label=(f"A/D ({name})" if name else "A/D"))
 
     # -------------------- Compatibility API expected by main.py --------------------
 
@@ -3123,11 +3267,12 @@ class PlotDashboard(QtWidgets.QWidget):
         n = min(t.size, y.size)
         t, y = t[:n], y[:n]
 
+        label = _first_not_none(kwargs, "label", "output_label", default="Output")
+
         self.curve_out.setData(t, y, connect="finite", skipFiniteCheck=True)
         if not preserve_view:
             self.set_full_xrange(t)
 
-        label = _first_not_none(kwargs, "label", "output_label", default="Output")
         context = _first_not_none(kwargs, "output_context", "label_context", default="")
         title = f"Output: {label}" if not context else f"Output: {label} | {context}"
         self.plot_out.setTitle(title)
@@ -3140,6 +3285,7 @@ class PlotDashboard(QtWidgets.QWidget):
 
     def update_plots(self, processed: ProcessedTrial, preserve_view: bool = False) -> None:
         t = np.asarray(processed.time, float)
+        kept_xrange = self.current_xrange() if preserve_view else None
         self.show_raw(
             t, processed.raw_signal, processed.raw_reference,
             dio=processed.dio, dio_name=processed.dio_name,
@@ -3161,4 +3307,6 @@ class PlotDashboard(QtWidgets.QWidget):
             preserve_view=preserve_view,
         )
         self._update_artifact_overlays(t, processed.raw_signal, processed.artifact_regions_sec)
+        if kept_xrange is not None:
+            self.set_xrange_all(*kept_xrange)
 

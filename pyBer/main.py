@@ -15,7 +15,70 @@ import os
 import json
 import logging
 import sys
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+
+_DLL_DIR_HANDLES = []
+
+
+def _bootstrap_windows_conda_runtime() -> None:
+    if os.name != "nt":
+        return
+
+    os.environ.setdefault("PYTHONNOUSERSITE", "1")
+
+    try:
+        import site
+        user_site = os.path.normcase(os.path.abspath(site.getusersitepackages()))
+    except Exception:
+        user_site = ""
+
+    appdata_python = ""
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        appdata_python = os.path.normcase(os.path.abspath(os.path.join(appdata, "Python")))
+
+    def _is_user_site_path(path: str) -> bool:
+        if not path:
+            return False
+        try:
+            norm = os.path.normcase(os.path.abspath(path))
+        except Exception:
+            return False
+        if user_site and (norm == user_site or norm.startswith(user_site + os.sep)):
+            return True
+        return bool(appdata_python and (norm == appdata_python or norm.startswith(appdata_python + os.sep)))
+
+    sys.path[:] = [path for path in sys.path if not _is_user_site_path(path)]
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir and script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+
+    prefix = os.environ.get("CONDA_PREFIX") or sys.prefix
+    dll_dirs = [
+        prefix,
+        os.path.join(prefix, "Library", "mingw-w64", "bin"),
+        os.path.join(prefix, "Library", "usr", "bin"),
+        os.path.join(prefix, "Library", "bin"),
+        os.path.join(prefix, "Scripts"),
+    ]
+    existing = [path for path in dll_dirs if path and os.path.isdir(path)]
+
+    if hasattr(os, "add_dll_directory"):
+        for path in existing:
+            try:
+                _DLL_DIR_HANDLES.append(os.add_dll_directory(path))
+            except Exception:
+                pass
+
+    old_path = os.environ.get("PATH", "")
+    old_parts = [os.path.normcase(os.path.abspath(p)) for p in old_path.split(os.pathsep) if p]
+    prepend = [p for p in existing if os.path.normcase(os.path.abspath(p)) not in old_parts]
+    if prepend:
+        os.environ["PATH"] = os.pathsep.join(prepend + [old_path])
+
+
+_bootstrap_windows_conda_runtime()
 
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
@@ -24,6 +87,7 @@ import h5py
 
 from analysis_core import (
     ExportSelection,
+    OUTPUT_MODES,
     PhotometryProcessor,
     ProcessingParams,
     LoadedDoricFile,
@@ -37,6 +101,7 @@ from analysis_core import (
     zscore_median_std,
     safe_divide,
     _lowpass_sos,
+    coerce_time_value,
 )
 from gui_preprocessing import (
     FileQueuePanel,
@@ -47,7 +112,9 @@ from gui_preprocessing import (
     AdvancedOptionsDialog,
 )
 from gui_postprocessing import PostProcessingPanel
+from numeric_controls import install_spinbox_scrubbers
 from styles import (
+    apply_app_palette,
     app_qss,
     _make_icon,
     _paint_database,
@@ -487,6 +554,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pending_main_tab_index: Optional[int] = None
         self._force_fixed_dock_layouts: bool = bool(_FORCE_FIXED_DOCK_LAYOUTS)
         self._app_theme_mode: str = "dark"
+        self._pre_history_undo: List[Dict[str, Any]] = []
+        self._pre_history_redo: List[Dict[str, Any]] = []
+        self._pre_history_current: Optional[Dict[str, Any]] = None
+        self._pre_history_key: str = ""
+        self._pre_history_restoring: bool = False
+        self._pre_history_limit: int = 60
 
         # Worker infra (stable)
         self._pool = QtCore.QThreadPool.globalInstance()
@@ -510,6 +583,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._restore_settings()
         self._panel_layout_persistence_ready = True
+        self._reset_pre_history_snapshot()
         # Enforce: preprocessing drawer is hidden until the user
         # explicitly clicks a rail section button (overrides any saved state).
         self._force_hide_pre_drawer_initially()
@@ -866,6 +940,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plots.manualRegionFromSelectorRequested.connect(self._add_manual_region_from_selector)
         self.plots.manualRegionFromDragRequested.connect(self._add_manual_region_from_drag)
         self.plots.clearManualRegionsRequested.connect(self._clear_manual_regions_current)
+        self.plots.undoRequested.connect(self._undo_pre_action)
+        self.plots.redoRequested.connect(self._redo_pre_action)
         self.plots.showArtifactsRequested.connect(self._toggle_artifacts_panel)
         self.plots.boxSelectionCleared.connect(self._cancel_box_select_request)
         self.plots.boxSelectionContextRequested.connect(self._show_box_selection_context_menu)
@@ -1294,10 +1370,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.param_panel.btn_metadata.setProperty("class", "blueSecondarySmall")
         self.param_panel.btn_save_config.setProperty("class", "blueSecondarySmall")
         self.param_panel.btn_load_config.setProperty("class", "blueSecondarySmall")
+        self.param_panel.btn_reset_defaults.setProperty("class", "blueSecondarySmall")
         for btn in (
             self.param_panel.btn_metadata,
             self.param_panel.btn_save_config,
             self.param_panel.btn_load_config,
+            self.param_panel.btn_reset_defaults,
         ):
             btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
             btn.setMinimumWidth(90)
@@ -2257,6 +2335,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "export_selection": self.param_panel.export_selection().to_dict(),
             "export_channel_names": self.param_panel.export_channel_names(),
             "export_trigger_names": self.param_panel.export_trigger_names(),
+            "auto_export_to_source_dir": bool(self.param_panel.auto_export_enabled()),
             "panel_layout": self._collect_panel_layout_payload(),
         }
 
@@ -2311,6 +2390,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.param_panel.set_export_channel_names(list(ui_state.get("export_channel_names") or []))
         if "export_trigger_names" in ui_state:
             self.param_panel.set_export_trigger_names(list(ui_state.get("export_trigger_names") or []))
+        if "auto_export_to_source_dir" in ui_state:
+            self.param_panel.set_auto_export_enabled(_to_bool(ui_state.get("auto_export_to_source_dir"), False))
         self._update_export_summary_label()
         panel_layout = ui_state.get("panel_layout")
         if isinstance(panel_layout, dict):
@@ -2318,6 +2399,166 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_panel_layout_from_settings()
             self._save_panel_config_json()
         self._save_settings()
+
+    def _pre_history_clone(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            return json.loads(json.dumps(state))
+        except Exception:
+            return dict(state)
+
+    def _pre_history_state_key(self, state: Dict[str, Any]) -> str:
+        try:
+            return json.dumps(state, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            return repr(state)
+
+    def _pre_history_snapshot(self) -> Dict[str, Any]:
+        try:
+            params = self.param_panel.get_params().to_dict()
+        except Exception:
+            params = {}
+        start_s, end_s = self._time_window_bounds()
+        return {
+            "params": params,
+            "artifact_overlay_visible": bool(self.param_panel.artifact_overlay_visible()),
+            "artifact_thresholds_visible": bool(self.plots.artifact_thresholds_visible()),
+            "plot_background": self.plots.plot_background_mode(),
+            "plot_grid": bool(self.plots.plot_grid_visible()),
+            "export_selection": self.param_panel.export_selection().to_dict(),
+            "export_channel_names": self.param_panel.export_channel_names(),
+            "export_trigger_names": self.param_panel.export_trigger_names(),
+            "export_output_modes": self.param_panel.export_output_modes(),
+            "auto_export_to_source_dir": bool(self.param_panel.auto_export_enabled()),
+            "time_window": {"start_s": start_s, "end_s": end_s},
+            "manual_regions": self._keyed_regions_to_project(self._manual_regions_by_key),
+            "manual_exclude_regions": self._keyed_regions_to_project(self._manual_exclude_by_key),
+            "cutout_regions": self._keyed_regions_to_project(self._cutout_regions_by_key),
+            "sections": self._sections_to_project(),
+        }
+
+    def _update_pre_history_buttons(self) -> None:
+        try:
+            self.plots.set_history_available(bool(self._pre_history_undo), bool(self._pre_history_redo))
+        except Exception:
+            pass
+
+    def _reset_pre_history_snapshot(self) -> None:
+        self._pre_history_undo.clear()
+        self._pre_history_redo.clear()
+        self._pre_history_current = self._pre_history_snapshot()
+        self._pre_history_key = self._pre_history_state_key(self._pre_history_current)
+        self._update_pre_history_buttons()
+
+    def _record_pre_history_change(self) -> None:
+        if self._pre_history_restoring:
+            return
+        state = self._pre_history_snapshot()
+        key = self._pre_history_state_key(state)
+        if self._pre_history_current is None:
+            self._pre_history_current = self._pre_history_clone(state)
+            self._pre_history_key = key
+            self._update_pre_history_buttons()
+            return
+        if key == self._pre_history_key:
+            return
+        self._pre_history_undo.append(self._pre_history_clone(self._pre_history_current))
+        if len(self._pre_history_undo) > self._pre_history_limit:
+            self._pre_history_undo = self._pre_history_undo[-self._pre_history_limit:]
+        self._pre_history_redo.clear()
+        self._pre_history_current = self._pre_history_clone(state)
+        self._pre_history_key = key
+        self._update_pre_history_buttons()
+
+    def _refresh_artifact_panel_for_current(self) -> None:
+        key = self._current_key()
+        if not key:
+            self.artifact_panel.set_auto_regions([])
+            self.artifact_panel.set_regions([])
+            return
+        start_s, end_s = self._time_window_bounds()
+        manual_win = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
+        ignore_win = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
+        auto_win = self._clip_regions_to_window(self._auto_regions_by_key.get(key, []), start_s, end_s)
+        checked_auto = [r for r in auto_win if not any(self._regions_match(r, ig) for ig in ignore_win)]
+        self.artifact_panel.set_auto_regions(auto_win, checked_regions=checked_auto)
+        self.artifact_panel.set_regions(manual_win)
+
+    def _restore_pre_history_state(self, state: Dict[str, Any]) -> None:
+        self._pre_history_restoring = True
+        try:
+            params = state.get("params")
+            if isinstance(params, dict):
+                self.param_panel.set_params(ProcessingParams.from_dict(params))
+            if "artifact_overlay_visible" in state:
+                visible = bool(state.get("artifact_overlay_visible"))
+                self.param_panel.set_artifact_overlay_visible(visible)
+                self.plots.set_artifact_overlay_visible(visible)
+            if "artifact_thresholds_visible" in state:
+                self.plots.set_artifact_thresholds_visible(bool(state.get("artifact_thresholds_visible")))
+            if "export_selection" in state:
+                self.param_panel.set_export_selection(ExportSelection.from_dict(state.get("export_selection")))
+            if "export_output_modes" in state:
+                self.param_panel.set_export_output_modes(list(state.get("export_output_modes") or []), follow_current=False)
+            if "export_channel_names" in state:
+                self.param_panel.set_export_channel_names(list(state.get("export_channel_names") or []))
+            if "export_trigger_names" in state:
+                self.param_panel.set_export_trigger_names(list(state.get("export_trigger_names") or []))
+            if "auto_export_to_source_dir" in state:
+                self.param_panel.set_auto_export_enabled(_to_bool(state.get("auto_export_to_source_dir"), False))
+            self._apply_pre_plot_style(
+                state.get("plot_background", self.plots.plot_background_mode()),
+                state.get("plot_grid", self.plots.plot_grid_visible()),
+                persist=False,
+            )
+            self._manual_regions_by_key = self._project_to_keyed_regions(state.get("manual_regions"))
+            self._manual_exclude_by_key = self._project_to_keyed_regions(state.get("manual_exclude_regions"))
+            self._cutout_regions_by_key = self._project_to_keyed_regions(state.get("cutout_regions"))
+            self._sections_by_key = self._project_to_sections(state.get("sections"))
+            self._pending_box_region_by_key.clear()
+            tw = state.get("time_window") if isinstance(state.get("time_window"), dict) else {}
+            for ed, value in (
+                (self.file_panel.edit_time_start, tw.get("start_s")),
+                (self.file_panel.edit_time_end, tw.get("end_s")),
+            ):
+                ed.blockSignals(True)
+                try:
+                    ed.setText("" if value is None else f"{float(value):.6g}")
+                except Exception:
+                    ed.setText("")
+                finally:
+                    ed.blockSignals(False)
+            self._last_processed.clear()
+            self._refresh_artifact_panel_for_current()
+            self._update_export_summary_label()
+            self._update_raw_plot(preserve_view=True)
+            self._trigger_preview(preserve_view=True)
+            self._save_settings()
+        finally:
+            self._pre_history_restoring = False
+
+    def _undo_pre_action(self) -> None:
+        if not self._pre_history_undo:
+            return
+        current = self._pre_history_snapshot()
+        previous = self._pre_history_undo.pop()
+        self._pre_history_redo.append(self._pre_history_clone(current))
+        self._restore_pre_history_state(previous)
+        self._pre_history_current = self._pre_history_clone(previous)
+        self._pre_history_key = self._pre_history_state_key(previous)
+        self._update_pre_history_buttons()
+        self._show_status_message("Undid preprocessing action.", 2500)
+
+    def _redo_pre_action(self) -> None:
+        if not self._pre_history_redo:
+            return
+        current = self._pre_history_snapshot()
+        next_state = self._pre_history_redo.pop()
+        self._pre_history_undo.append(self._pre_history_clone(current))
+        self._restore_pre_history_state(next_state)
+        self._pre_history_current = self._pre_history_clone(next_state)
+        self._pre_history_key = self._pre_history_state_key(next_state)
+        self._update_pre_history_buttons()
+        self._show_status_message("Redid preprocessing action.", 2500)
 
     def _sync_section_button_states_from_docks(self) -> None:
         if self._use_pg_dockarea_pre_layout:
@@ -2586,6 +2827,12 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         try:
+            auto_export = _to_bool(self.settings.value("auto_export_to_source_dir", False), False)
+            self.param_panel.set_auto_export_enabled(auto_export)
+            self._update_export_summary_label()
+        except Exception:
+            pass
+        try:
             default_bg = "white" if self._app_theme_mode == "light" else "dark"
             plot_bg = self.settings.value("pre_plot_background", default_bg, type=str)
         except Exception:
@@ -2702,6 +2949,10 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         try:
             self.settings.setValue("artifact_thresholds_visible", bool(self.plots.artifact_thresholds_visible()))
+        except Exception:
+            pass
+        try:
+            self.settings.setValue("auto_export_to_source_dir", bool(self.param_panel.auto_export_enabled()))
         except Exception:
             pass
         try:
@@ -2882,6 +3133,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._clear_preprocessing_project_state()
         self._pre_project_path = None
+        try:
+            self.post_tab.reset_for_new_preprocessing_project()
+        except Exception:
+            pass
+        self._reset_pre_history_snapshot()
         self._show_status_message("Started a new preprocessing project.", 5000)
 
     def _keyed_regions_to_project(
@@ -3083,6 +3339,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._clear_preprocessing_project_state()
         self._pre_project_path = path
+        try:
+            self.post_tab.reset_for_new_preprocessing_project()
+        except Exception:
+            pass
         self._apply_preprocessing_config_payload(payload.get("preprocessing_config"))
 
         session_mapping = payload.get("csv_mapping_session")
@@ -3136,6 +3396,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Open project",
                 "Some linked input files are missing and were skipped:\n" + "\n".join(missing_paths[:12]),
             )
+        self._reset_pre_history_snapshot()
         self._show_status_message(f"Preprocessing project loaded: {os.path.basename(path)}", 5000)
 
     def _restore_file_selection(self, selected_paths: List[str], current_path: Optional[str]) -> None:
@@ -3174,7 +3435,6 @@ class MainWindow(QtWidgets.QMainWindow):
         return norm in {"time", "t", "timestamp", "times", "timesec", "times", "timems"} or "timestamp" in norm
 
     def _parse_csv_float(self, value: object) -> float:
-        from pyBer.analysis_core import coerce_time_value
         text = str(value or "").strip()
         if not text or text.lower() in {"nan", "none", "null", "na"}:
             return np.nan
@@ -4209,10 +4469,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_artifact_overlay_toggled(self, visible: bool) -> None:
         self.plots.set_artifact_overlay_visible(bool(visible))
+        self._record_pre_history_change()
         self._save_settings()
 
     def _on_artifact_thresholds_toggled(self, visible: bool) -> None:
         self.plots.set_artifact_thresholds_visible(bool(visible))
+        self._record_pre_history_change()
         self._save_settings()
 
     def _normalize_app_theme_mode(self, value: object) -> str:
@@ -4240,6 +4502,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.act_app_theme_light.blockSignals(False)
 
         try:
+            apply_app_palette(QtWidgets.QApplication.instance(), mode)
             self.setStyleSheet(app_qss(mode))
         except Exception:
             pass
@@ -4299,6 +4562,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.act_plot_grid.isChecked() if hasattr(self, "act_plot_grid") else True,
             persist=True,
         )
+        self._record_pre_history_change()
 
     def _auto_range_for_processed(self, processed: ProcessedTrial) -> None:
         try:
@@ -4471,6 +4735,7 @@ class MainWindow(QtWidgets.QMainWindow):
             checked_auto = [r for r in auto_win if not any(self._regions_match(r, ig) for ig in ignore_win)]
             self.artifact_panel.set_auto_regions(auto_win, checked_regions=checked_auto)
             self.artifact_panel.set_regions(manual_win)
+        self._record_pre_history_change()
         self._update_raw_plot()
         self._trigger_preview()
         self._update_plot_status()
@@ -4761,6 +5026,13 @@ class MainWindow(QtWidgets.QMainWindow):
         processed.baseline_sig = _mask_arr(processed.baseline_sig)
         processed.baseline_ref = _mask_arr(processed.baseline_ref)
         processed.output = _mask_arr(processed.output)
+        if hasattr(processed, "outputs") and processed.outputs:
+            masked_outputs = {}
+            for label, values in processed.outputs.items():
+                masked = _mask_arr(values)
+                if masked is not None:
+                    masked_outputs[str(label)] = masked
+            processed.outputs = masked_outputs
         
         # Mask triggers too if requested by convention, but here we keep them as-is or NaN them
         if hasattr(processed, "triggers") and processed.triggers:
@@ -4866,6 +5138,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _on_params_changed(self) -> None:
+        if self._pre_history_restoring:
+            return
         try:
             params = self.param_panel.get_params()
         except Exception:
@@ -4889,6 +5163,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_raw_plot(preserve_view=True)
         except Exception:
             pass
+        self._record_pre_history_change()
         self._trigger_preview(preserve_view=True)
 
     def _trigger_preview(self, preserve_view: bool = False) -> None:
@@ -5046,7 +5321,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_regions_by_key[key] = regs
         start_s, end_s = self._time_window_bounds()
         self.artifact_panel.set_regions(self._clip_regions_to_window(regs, start_s, end_s))
-        self._trigger_preview()
+        self._record_pre_history_change()
+        self._trigger_preview(preserve_view=True)
 
     def _add_manual_region_from_drag(self, t0: float, t1: float) -> None:
         if self._box_select_callback:
@@ -5073,7 +5349,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_exclude_by_key[key] = []
         self._pending_box_region_by_key.pop(key, None)
         self.artifact_panel.set_regions([])
-        self._trigger_preview()
+        self._record_pre_history_change()
+        self._trigger_preview(preserve_view=True)
 
     def _request_box_select(self, callback: Callable[[float, float], None]) -> None:
         self._box_select_callback = callback
@@ -5132,7 +5409,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_regions_by_key[key] = regs
         start_s, end_s = self._time_window_bounds()
         self.artifact_panel.set_regions(self._clip_regions_to_window(regs, start_s, end_s))
-        self._trigger_preview()
+        self._record_pre_history_change()
+        self._trigger_preview(preserve_view=True)
 
     def _assign_pending_box_to_cut(self) -> None:
         region = self._consume_pending_box_region()
@@ -5144,6 +5422,7 @@ class MainWindow(QtWidgets.QMainWindow):
         regs.sort(key=lambda x: x[0])
         self._cutout_regions_by_key[key] = regs
         self._last_processed.clear()
+        self._record_pre_history_change()
         self._update_raw_plot()
         self._trigger_preview()
 
@@ -5160,6 +5439,7 @@ class MainWindow(QtWidgets.QMainWindow):
         })
         sections.sort(key=lambda sec: float(sec.get("start", 0.0)))
         self._sections_by_key[key] = sections
+        self._record_pre_history_change()
         self._show_status_message(f"Section added: {region[0]:.3f}s to {region[1]:.3f}s")
 
     def _show_box_selection_context_menu(self) -> None:
@@ -5200,7 +5480,8 @@ class MainWindow(QtWidgets.QMainWindow):
         prev_ignore = self._manual_exclude_by_key.get(key, [])
         self._manual_regions_by_key[key] = self._merge_regions_with_window(prev_manual, manual_add, start_s, end_s)
         self._manual_exclude_by_key[key] = self._merge_regions_with_window(prev_ignore, manual_ignore, start_s, end_s)
-        self._trigger_preview()
+        self._record_pre_history_change()
+        self._trigger_preview(preserve_view=True)
 
     def _toggle_artifacts_panel(self) -> None:
         if self._use_pg_dockarea_pre_layout:
@@ -5310,6 +5591,56 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _process_trial_for_export(
+        self,
+        trial: LoadedTrial,
+        params: ProcessingParams,
+        export_selection: ExportSelection,
+        manual_regions_sec: List[Tuple[float, float]],
+        manual_exclude_regions_sec: List[Tuple[float, float]],
+    ) -> ProcessedTrial:
+        modes: List[str] = []
+        if export_selection.output:
+            for mode in export_selection.output_modes or [params.output_mode]:
+                mode = str(mode or "").strip()
+                if mode in OUTPUT_MODES and mode not in modes:
+                    modes.append(mode)
+        if not modes:
+            modes = [params.output_mode if params.output_mode in OUTPUT_MODES else OUTPUT_MODES[0]]
+
+        primary = params.output_mode if params.output_mode in modes else modes[0]
+        ordered_modes = [primary] + [mode for mode in modes if mode != primary]
+        base_processed: Optional[ProcessedTrial] = None
+        outputs: Dict[str, np.ndarray] = {}
+
+        for mode in ordered_modes:
+            mode_params = ProcessingParams.from_dict(params.to_dict())
+            mode_params.output_mode = mode
+            processed = self.processor.process_trial(
+                trial=trial,
+                params=mode_params,
+                manual_regions_sec=manual_regions_sec,
+                manual_exclude_regions_sec=manual_exclude_regions_sec,
+                preview_mode=False,
+            )
+            if base_processed is None:
+                base_processed = processed
+            if processed.output is not None:
+                outputs[str(processed.output_label or mode)] = np.asarray(processed.output, float)
+
+        if base_processed is None:
+            fallback_params = ProcessingParams.from_dict(params.to_dict())
+            base_processed = self.processor.process_trial(
+                trial=trial,
+                params=fallback_params,
+                manual_regions_sec=manual_regions_sec,
+                manual_exclude_regions_sec=manual_exclude_regions_sec,
+                preview_mode=False,
+            )
+        if export_selection.output:
+            base_processed.outputs = outputs
+        return base_processed
+
     def _export_selected_or_all(self) -> None:
         selected = self._selected_paths()
         if not selected:
@@ -5317,28 +5648,41 @@ class MainWindow(QtWidgets.QMainWindow):
         if not selected:
             return
 
+        auto_export = bool(self.param_panel.auto_export_enabled())
         origin_dir = self._export_origin_dir(selected)
-        start_dir = self._export_start_dir(selected)
-        out_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Select export folder", start_dir)
-        if not out_dir:
-            return
-        self._remember_export_dir(out_dir, origin_dir)
+        out_dir = ""
+        if not auto_export:
+            start_dir = self._export_start_dir(selected)
+            out_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Select export folder", start_dir)
+            if not out_dir:
+                return
+            self._remember_export_dir(out_dir, origin_dir)
 
         params = self.param_panel.get_params()
         export_selection = self.param_panel.export_selection()
-        export_channel_names = self.param_panel.export_channel_names()
+        export_channel_names = [] if auto_export else self.param_panel.export_channel_names()
         export_trigger_names = self.param_panel.export_trigger_names()
 
-        # Process/export each selected file, for the currently selected channel.
+        # Process/export each selected file. Auto export writes beside each source
+        # file and intentionally exports every analog channel with the same params.
         n_total = 0
+        exported_dirs = set()
         for path in selected:
             doric = self._loaded_files.get(path)
             if not doric:
                 continue
-            channels = [name for name in export_channel_names if name in doric.channels]
-            if not channels:
-                fallback = self._current_channel if (self._current_channel in doric.channels) else (doric.channels[0] if doric.channels else None)
-                channels = [fallback] if fallback else []
+            if auto_export:
+                channels = list(doric.channels)
+            else:
+                channels = [name for name in export_channel_names if name in doric.channels]
+                if not channels:
+                    fallback = self._current_channel if (self._current_channel in doric.channels) else (doric.channels[0] if doric.channels else None)
+                    channels = [fallback] if fallback else []
+            path_out_dir = out_dir
+            if auto_export:
+                path_out_dir = os.path.dirname(path)
+                if not path_out_dir or not os.path.isdir(path_out_dir):
+                    path_out_dir = origin_dir if origin_dir and os.path.isdir(origin_dir) else os.getcwd()
             dio_names = [name for name in export_trigger_names if name in doric.trigger_by_name]
             if not export_selection.dio:
                 dio_names = [None]
@@ -5373,10 +5717,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     stem = safe_stem_from_metadata(path, ch, meta)
                     if suffix:
                         stem = f"{stem}_{suffix}"
-                    csv_path = os.path.join(out_dir, f"{stem}.csv")
-                    h5_path = os.path.join(out_dir, f"{stem}.h5")
+                    csv_path = os.path.join(path_out_dir, f"{stem}.csv")
+                    h5_path = os.path.join(path_out_dir, f"{stem}.h5")
                     export_processed_csv(csv_path, proc, metadata=meta, selection=export_selection)
                     export_processed_h5(h5_path, proc, metadata=meta, selection=export_selection)
+                    exported_dirs.add(path_out_dir)
                     n_total += 1
 
                 try:
@@ -5388,21 +5733,21 @@ class MainWindow(QtWidgets.QMainWindow):
                             if sec_trial is None:
                                 continue
                             sec_params = ProcessingParams.from_dict(sec.get("params", {})) if isinstance(sec.get("params"), dict) else params
-                            processed = self.processor.process_trial(
+                            processed = self._process_trial_for_export(
                                 trial=sec_trial,
                                 params=sec_params,
+                                export_selection=export_selection,
                                 manual_regions_sec=manual,
                                 manual_exclude_regions_sec=manual_exclude,
-                                preview_mode=False,
                             )
                             _export_one(processed, suffix=f"sec{i}_{s0:.2f}_{s1:.2f}")
                     else:
-                        processed = self.processor.process_trial(
+                        processed = self._process_trial_for_export(
                             trial=trial,
                             params=params,
+                            export_selection=export_selection,
                             manual_regions_sec=manual,
                             manual_exclude_regions_sec=manual_exclude,
-                            preview_mode=False,
                         )
                         _export_one(processed)
                 except Exception as e:
@@ -5411,7 +5756,16 @@ class MainWindow(QtWidgets.QMainWindow):
                         "Export error",
                         f"Failed export:\n{path} [{ch}] [{primary_trigger or 'no DIO'}]\n\n{e}",
                     )
-        self._show_status_message(f"Export complete: {n_total} recording(s) written to {out_dir}")
+        if auto_export:
+            if len(exported_dirs) == 1:
+                target = next(iter(exported_dirs))
+            elif exported_dirs:
+                target = f"{len(exported_dirs)} source folders"
+            else:
+                target = "source folders"
+        else:
+            target = out_dir
+        self._show_status_message(f"Export complete: {n_total} recording(s) written to {target}")
 
         # optional: update post tab list by loading exported results? (user can load later)
 
@@ -5897,6 +6251,8 @@ def main() -> None:
     pg.setConfigOptions(antialias=False)
     smoke_test = str(os.environ.get("PYBER_SMOKE_TEST", "")).strip().lower() in {"1", "true", "yes", "on"}
     app = QtWidgets.QApplication([])
+    apply_app_palette(app, "dark")
+    spinbox_scrubber = install_spinbox_scrubbers(app)
     icon_path = _pyber_icon_path()
     try:
         if os.path.isfile(icon_path):
@@ -5917,6 +6273,7 @@ def main() -> None:
         except Exception:
             splash = None
     w = MainWindow()
+    spinbox_scrubber.scan(w)
 
     if smoke_test:
         try:
