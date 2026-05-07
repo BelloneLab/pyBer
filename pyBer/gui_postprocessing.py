@@ -2452,6 +2452,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
             dock = QtWidgets.QDockWidget(title, host)
             dock.setObjectName(f"post.{key}.dock")
+            dock.setWindowModality(QtCore.Qt.WindowModality.NonModal)
             dock.setAllowedAreas(QtCore.Qt.DockWidgetArea.AllDockWidgetAreas)
             dock.setMinimumWidth(320)
             dock.setFeatures(
@@ -2649,7 +2650,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     self._section_popup_initialized.add(key)
             dock.show()
             dock.raise_()
-            dock.activateWindow()
+            if key != "temporal":
+                dock.activateWindow()
             self._last_opened_section = key
         else:
             dock.hide()
@@ -3283,6 +3285,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._project_dirty = True
         self._update_data_availability()
         self._update_status_strip()
+        self._sync_temporal_modeling_context()
+
+    def _sync_temporal_modeling_context(self) -> None:
+        if not hasattr(self, "section_temporal"):
+            return
+        try:
+            self.section_temporal.set_data(
+                processed_trials=self._processed,
+                psth_mat=self._last_mat,
+                psth_tvec=self._last_tvec,
+                event_times=self._last_events,
+                file_ids=self._all_file_ids,
+                per_file_mats=self._per_file_mats,
+                behavior_sources=self._behavior_sources,
+                event_rows=self._last_event_rows,
+            )
+        except Exception:
+            _LOG.debug("Could not sync temporal modeling context", exc_info=True)
 
     def _load_processed_paths(self, paths: List[str], replace: bool) -> None:
         loaded: List[ProcessedTrial] = []
@@ -4191,6 +4211,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._refresh_spatial_columns()
             self._compute_spatial_heatmap()
             self._update_data_availability()
+            self._sync_temporal_modeling_context()
             return
         behavior_names: set[str] = set()
         for info in self._behavior_sources.values():
@@ -4213,6 +4234,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
+        self._sync_temporal_modeling_context()
 
     def _guess_spatial_column(self, columns: List[str], axis: str) -> Optional[str]:
         if not columns:
@@ -6386,6 +6408,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if hasattr(self, "lbl_global_metrics"):
                 self.lbl_global_metrics.setText("Global metrics: -")
             self._update_status_strip()
+            self._sync_temporal_modeling_context()
             return
 
         # Update trace preview each time (also updates event lines)
@@ -6474,6 +6497,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._last_event_rows = []
                 self._last_durations = np.array([], float)
                 self._update_status_strip()
+                self._sync_temporal_modeling_context()
                 return
 
             mat_events = np.vstack(mats)
@@ -6487,6 +6511,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     self._last_event_rows = []
                     self._last_durations = np.array([], float)
                     self._update_status_strip()
+                    self._sync_temporal_modeling_context()
                     return
                 mat_display = self._group_mat
                 display_labels = self._group_labels
@@ -6534,18 +6559,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._update_metric_regions()
             self._update_status_strip()
             self._save_settings()
-            # Feed data to temporal modeling widget
-            try:
-                self.section_temporal.set_data(
-                    processed_trials=self._processed,
-                    psth_mat=mat_display,
-                    psth_tvec=tvec,
-                    event_times=self._last_events,
-                    file_ids=self._all_file_ids,
-                    per_file_mats=self._per_file_mats,
-                )
-            except Exception:
-                pass
+            self._sync_temporal_modeling_context()
         except Exception as e:
             self.statusUpdate.emit(f"Postprocessing error: {e}", 5000)
             self._update_status_strip()

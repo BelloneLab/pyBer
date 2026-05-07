@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -87,6 +88,8 @@ def _init_r():
 
 
 _R_READY = False
+_BEHAVIOR_PARSE_BINARY = "binary_columns"
+_BEHAVIOR_PARSE_TIMESTAMPS = "timestamp_columns"
 
 
 # ============================================================================
@@ -141,6 +144,7 @@ class GLMResult:
     predictor_names: List[str]
     kernels: Dict[str, np.ndarray]        # predictor -> (n_kernel_samples,)
     kernel_tvec: np.ndarray               # time vector for kernel x-axis
+    time: np.ndarray                      # time vector used for the fitted trace
     y_pred: np.ndarray                    # predicted trace
     y_actual: np.ndarray                  # actual trace
     residuals: np.ndarray
@@ -159,13 +163,78 @@ class ContinuousGLM:
         self._result: Optional[GLMResult] = None
 
     @staticmethod
+    def _predictor_vector(time: np.ndarray, predictor: Any) -> np.ndarray:
+        """Convert an event or continuous predictor spec into a model-time vector."""
+        t = np.asarray(time, float)
+        T = int(t.size)
+        vec = np.zeros(T, float)
+        if T == 0:
+            return vec
+
+        if isinstance(predictor, dict):
+            kind = str(predictor.get("kind", "events")).strip().lower()
+            if kind in {"vector", "sampled"}:
+                values = np.asarray(predictor.get("values", []), float)
+                if values.size != T:
+                    return vec
+                vec = values.astype(float, copy=True)
+                vec[~np.isfinite(vec)] = 0.0
+                return vec
+            if kind == "continuous":
+                pt = np.asarray(predictor.get("time", []), float)
+                values = np.asarray(predictor.get("values", []), float)
+                if pt.size != values.size:
+                    n = min(pt.size, values.size)
+                    pt = pt[:n]
+                    values = values[:n]
+                m = np.isfinite(pt) & np.isfinite(values)
+                pt = pt[m]
+                values = values[m]
+                if pt.size < 2 or values.size < 2:
+                    return vec
+                order = np.argsort(pt)
+                pt = pt[order]
+                values = values[order]
+                keep = np.concatenate([[True], np.diff(pt) > 0])
+                pt = pt[keep]
+                values = values[keep]
+                if pt.size < 2:
+                    return vec
+                interp = np.interp(t, pt, values, left=np.nan, right=np.nan)
+                finite = np.isfinite(interp)
+                if not np.any(finite):
+                    return vec
+                centered = interp.astype(float)
+                mean = float(np.nanmean(centered[finite]))
+                std = float(np.nanstd(centered[finite]))
+                if np.isfinite(std) and std > 1e-12:
+                    centered = (centered - mean) / std
+                else:
+                    centered = centered - mean
+                centered[~np.isfinite(centered)] = 0.0
+                return centered
+            ev_times = predictor.get("events", predictor.get("times", []))
+        else:
+            ev_times = predictor
+
+        ev_times = np.asarray(ev_times, float)
+        ev_times = ev_times[np.isfinite(ev_times)]
+        if ev_times.size == 0:
+            return vec
+        ev_idx = np.searchsorted(t, ev_times)
+        ev_idx = ev_idx[(ev_idx >= 0) & (ev_idx < T)]
+        for idx in ev_idx:
+            vec[int(idx)] += 1.0
+        return vec
+
+    @staticmethod
     def build_design_matrix(
         time: np.ndarray,
-        predictors: Dict[str, np.ndarray],
+        predictors: Dict[str, Any],
         kernel_window: Tuple[float, float],
         n_basis: int = 8,
         basis_type: str = "raised_cosine",
-    ) -> Tuple[np.ndarray, List[str], int]:
+    ) -> Tuple[np.ndarray, List[str], int, List[str]]:
         """
         Build a (T x P) design matrix from event times.
 
@@ -183,10 +252,15 @@ class ContinuousGLM:
         col_names : column labels
         n_basis : basis count (for later kernel extraction)
         """
-        dt = np.median(np.diff(time))
+        time = np.asarray(time, float)
+        if time.size < 3:
+            raise ValueError("Need at least 3 time samples for GLM fitting.")
+        dt = float(np.nanmedian(np.diff(time)))
+        if not np.isfinite(dt) or dt <= 0:
+            raise ValueError("GLM time vector must be strictly increasing.")
         pre_samp = int(round(abs(kernel_window[0]) / dt))
         post_samp = int(round(abs(kernel_window[1]) / dt))
-        kernel_len = pre_samp + post_samp
+        kernel_len = max(2, pre_samp + post_samp)
 
         if basis_type == "bspline":
             B = _bspline_basis(n_basis, kernel_len)
@@ -198,19 +272,16 @@ class ContinuousGLM:
         T = len(time)
         col_names: List[str] = []
         X_parts: List[np.ndarray] = []
+        used_predictors: List[str] = []
 
-        for pred_name, ev_times in predictors.items():
-            ev_times = np.asarray(ev_times, float)
-            ev_times = ev_times[np.isfinite(ev_times)]
-
-            # Convert event times to sample indices
-            ev_idx = np.searchsorted(time, ev_times)
-            ev_idx = ev_idx[(ev_idx >= 0) & (ev_idx < T)]
-
-            # Build impulse vector
-            impulse = np.zeros(T, float)
-            for idx in ev_idx:
-                impulse[idx] = 1.0
+        for pred_name, pred_spec in predictors.items():
+            input_vec = ContinuousGLM._predictor_vector(time, pred_spec)
+            if input_vec.size != T or not np.any(np.isfinite(input_vec)):
+                continue
+            input_vec = np.asarray(input_vec, float)
+            input_vec[~np.isfinite(input_vec)] = 0.0
+            if not np.any(np.abs(input_vec) > 1e-12):
+                continue
 
             # Convolve impulse with each basis function
             part = np.zeros((T, n_basis), float)
@@ -218,7 +289,7 @@ class ContinuousGLM:
                 # Pad the basis to align with pre_samp offset
                 kernel = np.zeros(kernel_len)
                 kernel[:] = B[:, b]
-                conv = np.convolve(impulse, kernel, mode="full")[:T]
+                conv = np.convolve(input_vec, kernel, mode="full")[:T]
                 # Shift so that the kernel starts at -pre_samp
                 if pre_samp > 0:
                     part[:, b] = np.roll(conv, -pre_samp)
@@ -227,6 +298,7 @@ class ContinuousGLM:
                     part[:, b] = conv
 
             X_parts.append(part)
+            used_predictors.append(pred_name)
             for b in range(n_basis):
                 col_names.append(f"{pred_name}_b{b}")
 
@@ -234,13 +306,13 @@ class ContinuousGLM:
         # Add intercept
         X = np.column_stack([np.ones(T), X])
         col_names.insert(0, "intercept")
-        return X, col_names, n_basis
+        return X, col_names, n_basis, used_predictors
 
     def fit(
         self,
         time: np.ndarray,
         signal: np.ndarray,
-        predictors: Dict[str, np.ndarray],
+        predictors: Dict[str, Any],
         kernel_window: Tuple[float, float] = (-1.0, 3.0),
         n_basis: int = 8,
         basis_type: str = "raised_cosine",
@@ -251,9 +323,11 @@ class ContinuousGLM:
         time = np.asarray(time, float)
         signal = np.asarray(signal, float)
 
-        X, col_names, n_b = self.build_design_matrix(
+        X, col_names, n_b, used_predictors = self.build_design_matrix(
             time, predictors, kernel_window, n_basis, basis_type,
         )
+        if not used_predictors:
+            raise ValueError("No usable predictors after alignment to the fitted trace.")
 
         # Mask NaN samples
         valid = np.isfinite(signal)
@@ -285,7 +359,7 @@ class ContinuousGLM:
         dt = np.median(np.diff(time))
         pre_samp = int(round(abs(kernel_window[0]) / dt))
         post_samp = int(round(abs(kernel_window[1]) / dt))
-        kernel_len = pre_samp + post_samp
+        kernel_len = max(2, pre_samp + post_samp)
 
         if basis_type == "bspline":
             B = _bspline_basis(n_b, kernel_len)
@@ -297,15 +371,16 @@ class ContinuousGLM:
         kernel_tvec = np.linspace(kernel_window[0], kernel_window[1], kernel_len)
         kernels: Dict[str, np.ndarray] = {}
         idx = 1  # skip intercept
-        for pred_name in predictors:
+        for pred_name in used_predictors:
             w = beta[idx:idx + n_b]
             kernels[pred_name] = B @ w
             idx += n_b
 
         self._result = GLMResult(
-            predictor_names=list(predictors.keys()),
+            predictor_names=list(used_predictors),
             kernels=kernels,
             kernel_tvec=kernel_tvec,
+            time=time,
             y_pred=y_pred,
             y_actual=signal,
             residuals=residuals,
@@ -658,6 +733,10 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._psth_tvec: Optional[np.ndarray] = None
         self._event_times: Optional[np.ndarray] = None
         self._file_ids: List[str] = []
+        self._per_file_mats: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+        self._behavior_sources: Dict[str, Dict[str, Any]] = {}
+        self._event_rows: List[Dict[str, object]] = []
+        self._predictor_catalog: Dict[str, Dict[str, Any]] = {}
 
         self._build_compact_ui()
         self._connect_signals()
@@ -768,6 +847,10 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         pl = QtWidgets.QVBoxLayout(self.grp_predictors)
         pl.setSpacing(4)
 
+        self.combo_available_predictors = QtWidgets.QComboBox()
+        self.combo_available_predictors.setToolTip("Choose from loaded event, behavior, and numeric behavior columns.")
+        pl.addWidget(self.combo_available_predictors)
+
         self.list_predictors = QtWidgets.QListWidget()
         self.list_predictors.setMaximumHeight(100)
         pl.addWidget(self.list_predictors)
@@ -783,7 +866,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         pl.addLayout(pred_btn_row)
 
         self.lbl_predictor_hint = QtWidgets.QLabel(
-            "Predictors are auto-populated from DIO / behavior events when PSTH is computed."
+            "Choose predictors from loaded DIO events, behavior states, behavior onsets, or numeric behavior columns."
         )
         self.lbl_predictor_hint.setProperty("class", "hint")
         self.lbl_predictor_hint.setWordWrap(True)
@@ -1021,6 +1104,10 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         pl.setContentsMargins(12, 18, 12, 12)
         pl.setSpacing(8)
 
+        self.combo_available_predictors = QtWidgets.QComboBox()
+        self.combo_available_predictors.setToolTip("Choose from loaded event, behavior, and numeric behavior columns.")
+        pl.addWidget(self.combo_available_predictors)
+
         self.list_predictors = QtWidgets.QListWidget()
         self.list_predictors.setMinimumHeight(220)
         pl.addWidget(self.list_predictors)
@@ -1034,7 +1121,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         pl.addLayout(row)
 
         self.lbl_predictor_hint = QtWidgets.QLabel(
-            "Predictors are populated from DIO or behavior events when PSTH is computed."
+            "Predictors are populated from loaded DIO events, behavior states, behavior onsets, and numeric behavior columns."
         )
         self.lbl_predictor_hint.setProperty("class", "muted")
         self.lbl_predictor_hint.setWordWrap(True)
@@ -1153,6 +1240,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         event_times: Optional[np.ndarray] = None,
         file_ids: Optional[List[str]] = None,
         per_file_mats: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None,
+        behavior_sources: Optional[Dict[str, Dict[str, Any]]] = None,
+        event_rows: Optional[List[Dict[str, object]]] = None,
     ):
         """Push data from the host panel into this widget."""
         self._processed_trials = processed_trials or []
@@ -1161,10 +1250,10 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._event_times = event_times
         self._file_ids = file_ids or []
         self._per_file_mats = per_file_mats or {}
+        self._behavior_sources = dict(behavior_sources or {})
+        self._event_rows = list(event_rows or [])
+        self._refresh_predictor_catalog()
 
-        # Auto-populate predictors for GLM
-        if self.list_predictors.count() == 0 and event_times is not None and len(event_times):
-            self.list_predictors.addItem("events")
         n_trials = len(self._processed_trials)
         psth_shape = tuple(np.shape(psth_mat)) if psth_mat is not None else None
         bits = [f"Processed recordings: {n_trials}"]
@@ -1172,7 +1261,435 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             bits.append(f"PSTH matrix: {psth_shape[0]} x {psth_shape[1]}")
         if event_times is not None:
             bits.append(f"Events: {len(event_times)}")
+        if self._behavior_sources:
+            bits.append(f"Behavior files: {len(self._behavior_sources)}")
+        if self._predictor_catalog:
+            bits.append(f"Available predictors: {len(self._predictor_catalog)}")
         self.lbl_data_status.setText("\n".join(bits))
+
+    # ------------------------------------------------------------------
+    # Predictor catalog and extraction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _proc_file_id(proc: Any, fallback: str = "import") -> str:
+        path = str(getattr(proc, "path", "") or "").strip()
+        if not path:
+            return fallback
+        stem = os.path.splitext(os.path.basename(path))[0]
+        return stem or fallback
+
+    @staticmethod
+    def _clean_id(value: object) -> str:
+        text = str(value or "").strip().lower()
+        text = re.sub(r"_ain0*[0-9]+$", "", text)
+        text = re.sub(r"[^a-z0-9]+", "", text)
+        return text
+
+    def _ids_match(self, a: object, b: object) -> bool:
+        aa = self._clean_id(a)
+        bb = self._clean_id(b)
+        return bool(aa and bb and aa == bb)
+
+    def _predictor_label(self, key: str) -> str:
+        entry = self._predictor_catalog.get(str(key), {})
+        label = str(entry.get("label", "") or "").strip()
+        if label:
+            return label
+        if key == "events":
+            return "PSTH alignment events"
+        if key == "dio":
+            return "DIO rising edges"
+        if key.startswith("trigger::"):
+            return f"Trigger: {key.split('::', 1)[1]}"
+        if key.startswith("behavior_event::"):
+            return f"Behavior onset: {key.split('::', 1)[1]}"
+        if key.startswith("behavior_state::"):
+            return f"Behavior state: {key.split('::', 1)[1]}"
+        if key.startswith("behavior_cont::"):
+            return f"Numeric column: {key.split('::', 1)[1]}"
+        return str(key)
+
+    def _selected_predictor_keys(self) -> List[str]:
+        keys: List[str] = []
+        for i in range(self.list_predictors.count()):
+            item = self.list_predictors.item(i)
+            key = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if not isinstance(key, str) or not key.strip():
+                key = item.text().strip()
+                for cat_key, entry in self._predictor_catalog.items():
+                    if key == cat_key or key == str(entry.get("label", "")):
+                        key = cat_key
+                        break
+            key = str(key).strip()
+            if key and key not in keys:
+                keys.append(key)
+        return keys
+
+    def _add_predictor_item(self, key: str) -> bool:
+        key = str(key or "").strip()
+        if not key:
+            return False
+        for existing in self._selected_predictor_keys():
+            if existing == key:
+                return False
+        item = QtWidgets.QListWidgetItem(self._predictor_label(key))
+        item.setData(QtCore.Qt.ItemDataRole.UserRole, key)
+        self.list_predictors.addItem(item)
+        return True
+
+    def _refresh_predictor_combo(self) -> None:
+        if not hasattr(self, "combo_available_predictors"):
+            return
+        selected = self.combo_available_predictors.currentData(QtCore.Qt.ItemDataRole.UserRole)
+        self.combo_available_predictors.blockSignals(True)
+        self.combo_available_predictors.clear()
+        for key, entry in self._predictor_catalog.items():
+            self.combo_available_predictors.addItem(str(entry.get("label", key)), key)
+        if not self._predictor_catalog:
+            self.combo_available_predictors.addItem("No predictors available yet", "")
+        if isinstance(selected, str) and selected:
+            idx = self.combo_available_predictors.findData(selected, QtCore.Qt.ItemDataRole.UserRole)
+            if idx >= 0:
+                self.combo_available_predictors.setCurrentIndex(idx)
+        self.combo_available_predictors.blockSignals(False)
+
+    def _refresh_predictor_catalog(self) -> None:
+        catalog: Dict[str, Dict[str, Any]] = {}
+        if self._event_times is not None and len(np.asarray(self._event_times, float)):
+            catalog["events"] = {"kind": "event", "label": "PSTH alignment events"}
+        if self._event_rows:
+            catalog["events"] = {"kind": "event", "label": "PSTH alignment events"}
+
+        trigger_names: set[str] = set()
+        has_dio = False
+        for proc in self._processed_trials:
+            if getattr(proc, "dio", None) is not None:
+                has_dio = True
+            triggers = getattr(proc, "triggers", None) or {}
+            if isinstance(triggers, dict):
+                trigger_names.update(str(k) for k in triggers.keys() if str(k).strip())
+        if has_dio:
+            catalog["dio"] = {"kind": "event", "label": "DIO rising edges"}
+        for name in sorted(trigger_names):
+            catalog[f"trigger::{name}"] = {"kind": "event", "name": name, "label": f"Trigger: {name}"}
+
+        behavior_names: set[str] = set()
+        state_names: set[str] = set()
+        continuous_names: set[str] = set()
+        for info in self._behavior_sources.values():
+            if not isinstance(info, dict):
+                continue
+            kind = str(info.get("kind", _BEHAVIOR_PARSE_BINARY))
+            behaviors = info.get("behaviors") or {}
+            for name in behaviors.keys():
+                clean = str(name).strip()
+                if not clean:
+                    continue
+                behavior_names.add(clean)
+                if kind != _BEHAVIOR_PARSE_TIMESTAMPS:
+                    state_names.add(clean)
+            trajectory = info.get("trajectory") or {}
+            for name in trajectory.keys():
+                clean = str(name).strip()
+                if clean:
+                    continuous_names.add(clean)
+        for name in sorted(behavior_names):
+            catalog[f"behavior_event::{name}"] = {
+                "kind": "behavior_event",
+                "name": name,
+                "label": f"Behavior onset: {name}",
+            }
+        for name in sorted(state_names):
+            catalog[f"behavior_state::{name}"] = {
+                "kind": "continuous",
+                "name": name,
+                "label": f"Behavior state: {name}",
+            }
+        for name in sorted(continuous_names):
+            catalog[f"behavior_cont::{name}"] = {
+                "kind": "continuous",
+                "name": name,
+                "label": f"Numeric column: {name}",
+            }
+
+        previous_keys = self._selected_predictor_keys() if hasattr(self, "list_predictors") else []
+        self._predictor_catalog = catalog
+        self._refresh_predictor_combo()
+        if hasattr(self, "list_predictors"):
+            self.list_predictors.clear()
+            for key in previous_keys:
+                if key in catalog:
+                    self._add_predictor_item(key)
+            if self.list_predictors.count() == 0 and "events" in catalog:
+                self._add_predictor_item("events")
+
+    def _behavior_source_for_proc(self, proc: Any) -> Optional[Dict[str, Any]]:
+        if not self._behavior_sources:
+            return None
+        file_id = self._proc_file_id(proc)
+        info = self._behavior_sources.get(file_id)
+        if info is not None:
+            return info
+        for key, val in self._behavior_sources.items():
+            if self._ids_match(key, file_id):
+                return val
+        try:
+            idx = next(i for i, p in enumerate(self._processed_trials) if (p is proc) or (getattr(p, "path", "") == getattr(proc, "path", "")))
+        except StopIteration:
+            idx = None
+        if idx is not None:
+            keys = list(self._behavior_sources.keys())
+            if 0 <= idx < len(keys):
+                return self._behavior_sources.get(keys[idx])
+        if len(self._behavior_sources) == 1:
+            return next(iter(self._behavior_sources.values()))
+        return None
+
+    @staticmethod
+    def _event_vector(time: np.ndarray, events: np.ndarray) -> np.ndarray:
+        t = np.asarray(time, float)
+        out = np.zeros(t.size, float)
+        ev = np.asarray(events, float)
+        ev = ev[np.isfinite(ev)]
+        if t.size == 0 or ev.size == 0:
+            return out
+        idx = np.searchsorted(t, ev)
+        idx = idx[(idx >= 0) & (idx < t.size)]
+        for i in idx:
+            out[int(i)] += 1.0
+        return out
+
+    def _events_for_proc(self, proc: Any, time: np.ndarray) -> np.ndarray:
+        file_id = self._proc_file_id(proc)
+        if self._event_rows:
+            vals = []
+            for row in self._event_rows:
+                if self._ids_match(row.get("file_id", ""), file_id):
+                    try:
+                        vals.append(float(row.get("event_time_sec", np.nan)))
+                    except Exception:
+                        pass
+            return np.asarray(vals, float)
+        if len(self._processed_trials) == 1 and self._event_times is not None:
+            return np.asarray(self._event_times, float)
+        return np.array([], float)
+
+    @staticmethod
+    def _rising_edges_from_signal(time: np.ndarray, signal: np.ndarray) -> np.ndarray:
+        t = np.asarray(time, float)
+        x = np.asarray(signal, float)
+        if t.size < 2 or x.size != t.size:
+            return np.array([], float)
+        b = x > 0.5
+        idx = np.where((~b[:-1]) & (b[1:]))[0] + 1
+        return t[idx]
+
+    @staticmethod
+    def _behavior_onsets(info: Dict[str, Any], name: str) -> np.ndarray:
+        behaviors = info.get("behaviors") or {}
+        if name not in behaviors:
+            return np.array([], float)
+        kind = str(info.get("kind", _BEHAVIOR_PARSE_BINARY))
+        if kind == _BEHAVIOR_PARSE_TIMESTAMPS:
+            ev = np.asarray(behaviors[name], float)
+            ev = ev[np.isfinite(ev)]
+            return np.sort(np.unique(ev))
+        t = np.asarray(info.get("time", np.array([], float)), float)
+        x = np.asarray(behaviors[name], float)
+        if t.size < 1 or x.size != t.size:
+            return np.array([], float)
+        b = x > 0.5
+        on = np.where((~b[:-1]) & (b[1:]))[0] + 1 if b.size > 1 else np.array([], int)
+        if b.size and bool(b[0]):
+            on = np.concatenate([[0], on])
+        return t[on]
+
+    @staticmethod
+    def _interp_to_time(target_time: np.ndarray, source_time: np.ndarray, values: np.ndarray) -> np.ndarray:
+        target_time = np.asarray(target_time, float)
+        source_time = np.asarray(source_time, float)
+        values = np.asarray(values, float)
+        out = np.zeros(target_time.size, float)
+        if source_time.size != values.size:
+            n = min(source_time.size, values.size)
+            source_time = source_time[:n]
+            values = values[:n]
+        m = np.isfinite(source_time) & np.isfinite(values)
+        source_time = source_time[m]
+        values = values[m]
+        if source_time.size == target_time.size and np.allclose(source_time, target_time, equal_nan=False):
+            out = values.astype(float, copy=True)
+            out[~np.isfinite(out)] = 0.0
+            return out
+        if source_time.size < 2:
+            if values.size == target_time.size:
+                out = values.astype(float, copy=True)
+                out[~np.isfinite(out)] = 0.0
+            return out
+        order = np.argsort(source_time)
+        source_time = source_time[order]
+        values = values[order]
+        keep = np.concatenate([[True], np.diff(source_time) > 0])
+        source_time = source_time[keep]
+        values = values[keep]
+        if source_time.size < 2:
+            return out
+        interp = np.interp(target_time, source_time, values, left=np.nan, right=np.nan)
+        interp[~np.isfinite(interp)] = 0.0
+        return interp
+
+    def _predictor_vector_for_proc(self, key: str, proc: Any, time: np.ndarray) -> Tuple[np.ndarray, str]:
+        entry = self._predictor_catalog.get(key, {})
+        if key == "events":
+            return self._event_vector(time, self._events_for_proc(proc, time)), "event"
+        if key == "dio":
+            dio = getattr(proc, "dio", None)
+            if dio is None:
+                return np.zeros(time.size, float), "event"
+            return self._event_vector(time, self._rising_edges_from_signal(time, dio)), "event"
+        if key.startswith("trigger::"):
+            name = key.split("::", 1)[1]
+            triggers = getattr(proc, "triggers", None) or {}
+            sig = triggers.get(name) if isinstance(triggers, dict) else None
+            if sig is None:
+                return np.zeros(time.size, float), "event"
+            return self._event_vector(time, self._rising_edges_from_signal(time, sig)), "event"
+
+        info = self._behavior_source_for_proc(proc)
+        if not isinstance(info, dict):
+            return np.zeros(time.size, float), str(entry.get("kind", "event"))
+        name = str(entry.get("name", "") or key.split("::")[-1])
+        if key.startswith("behavior_event::"):
+            return self._event_vector(time, self._behavior_onsets(info, name)), "event"
+        if key.startswith("behavior_state::"):
+            behaviors = info.get("behaviors") or {}
+            values = behaviors.get(name)
+            source_time = np.asarray(info.get("time", np.array([], float)), float)
+            if values is None or source_time.size == 0:
+                return np.zeros(time.size, float), "continuous"
+            return self._interp_to_time(time, source_time, values), "continuous"
+        if key.startswith("behavior_cont::"):
+            trajectory = info.get("trajectory") or {}
+            values = trajectory.get(name)
+            source_time = np.asarray(info.get("trajectory_time", np.array([], float)), float)
+            if values is None or source_time.size == 0:
+                return np.zeros(time.size, float), "continuous"
+            return self._interp_to_time(time, source_time, values), "continuous"
+        return np.zeros(time.size, float), str(entry.get("kind", "event"))
+
+    def _build_glm_dataset_from_selected_predictors(self) -> Dict[str, Any]:
+        selected = self._selected_predictor_keys()
+        if not selected:
+            return {"error": "Choose at least one predictor before fitting."}
+        if not self._processed_trials:
+            return {"error": "No processed recordings are loaded."}
+
+        kernel_span = abs(float(self.spin_kernel_pre.value())) + abs(float(self.spin_kernel_post.value()))
+        segments: List[Tuple[str, np.ndarray, np.ndarray, Any]] = []
+        dropped_records: List[str] = []
+        for idx, proc in enumerate(self._processed_trials):
+            t = np.asarray(getattr(proc, "time", np.array([], float)), float)
+            y_raw = getattr(proc, "output", None)
+            y = np.asarray(y_raw, float) if y_raw is not None else np.array([], float)
+            file_id = self._proc_file_id(proc, fallback=f"file_{idx + 1}")
+            if t.size < 3 or y.size != t.size:
+                dropped_records.append(file_id)
+                continue
+            m = np.isfinite(t)
+            t = t[m]
+            y = y[m]
+            if t.size < 3:
+                dropped_records.append(file_id)
+                continue
+            order = np.argsort(t)
+            t = t[order]
+            y = y[order]
+            keep = np.concatenate([[True], np.diff(t) > 0])
+            t = t[keep]
+            y = y[keep]
+            if t.size < 3:
+                dropped_records.append(file_id)
+                continue
+            segments.append((file_id, t, y, proc))
+
+        if not segments:
+            return {"error": "No recordings have usable time and output traces."}
+
+        time_parts: List[np.ndarray] = []
+        signal_parts: List[np.ndarray] = []
+        vec_parts: Dict[str, List[np.ndarray]] = {key: [] for key in selected}
+        pred_types: Dict[str, str] = {}
+        used_records: List[str] = []
+        offset = 0.0
+        for seg_idx, (file_id, t, y, proc) in enumerate(segments):
+            dt = float(np.nanmedian(np.diff(t)))
+            if not np.isfinite(dt) or dt <= 0:
+                dropped_records.append(file_id)
+                continue
+            t_shift = (t - float(t[0])) + offset
+            time_parts.append(t_shift)
+            signal_parts.append(y.astype(float, copy=True))
+            used_records.append(file_id)
+            for key in selected:
+                vec, ptype = self._predictor_vector_for_proc(key, proc, t)
+                vec = np.asarray(vec, float)
+                if vec.size != t.size:
+                    vec = np.zeros(t.size, float)
+                vec[~np.isfinite(vec)] = 0.0
+                vec_parts[key].append(vec)
+                pred_types[key] = ptype
+
+            if seg_idx < len(segments) - 1:
+                pad_n = max(2, int(np.ceil((kernel_span + dt) / dt)))
+                pad_t = t_shift[-1] + dt * np.arange(1, pad_n + 1, dtype=float)
+                time_parts.append(pad_t)
+                signal_parts.append(np.full(pad_n, np.nan, float))
+                for key in selected:
+                    vec_parts[key].append(np.zeros(pad_n, float))
+                offset = float(pad_t[-1] + dt)
+
+        if not time_parts:
+            return {"error": "No recordings could be aligned for GLM fitting."}
+        time = np.concatenate(time_parts)
+        signal = np.concatenate(signal_parts)
+        valid_signal = np.isfinite(signal)
+        predictors: Dict[str, Dict[str, Any]] = {}
+        dropped_predictors: List[str] = []
+        for key in selected:
+            vec = np.concatenate(vec_parts.get(key, [np.zeros(time.size, float)]))
+            vec = vec.astype(float, copy=True)
+            vec[~np.isfinite(vec)] = 0.0
+            if pred_types.get(key) == "continuous":
+                finite = valid_signal & np.isfinite(vec)
+                vals = vec[finite]
+                if vals.size:
+                    mean = float(np.nanmean(vals))
+                    std = float(np.nanstd(vals))
+                    if np.isfinite(std) and std > 1e-12:
+                        vec[finite] = (vec[finite] - mean) / std
+                    else:
+                        vec[finite] = vec[finite] - mean
+                vec[~valid_signal] = 0.0
+            if not np.any(np.abs(vec[valid_signal]) > 1e-12):
+                dropped_predictors.append(self._predictor_label(key))
+                continue
+            predictors[key] = {"kind": "vector", "values": vec}
+
+        if not predictors:
+            return {
+                "error": "The selected predictors contain no usable events or variation for the loaded recordings.",
+                "dropped_predictors": dropped_predictors,
+            }
+        return {
+            "time": time,
+            "signal": signal,
+            "predictors": predictors,
+            "used_records": used_records,
+            "dropped_records": dropped_records,
+            "dropped_predictors": dropped_predictors,
+            "valid_samples": int(np.sum(valid_signal)),
+        }
 
     # ------------------------------------------------------------------
     # Slots
@@ -1204,11 +1721,15 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 self.lbl_flmm_status.setStyleSheet("color: #f5a97f;")
 
     def _on_add_predictor(self):
-        name, ok = QtWidgets.QInputDialog.getText(
-            self, "Add predictor", "Predictor name (must match a column in design):"
-        )
-        if ok and name.strip():
-            self.list_predictors.addItem(name.strip())
+        key = ""
+        if hasattr(self, "combo_available_predictors"):
+            data = self.combo_available_predictors.currentData(QtCore.Qt.ItemDataRole.UserRole)
+            key = str(data or "").strip()
+        if not key:
+            self.statusMessage.emit("No predictor is available yet. Load or compute behavior/events first.", 5000)
+            return
+        if self._add_predictor_item(key):
+            self.statusMessage.emit(f"Added predictor: {self._predictor_label(key)}", 3000)
 
     def _on_remove_predictor(self):
         sel = self.list_predictors.currentRow()
@@ -1231,7 +1752,63 @@ class TemporalModelingWidget(QtWidgets.QWidget):
     # GLM fit
     # ------------------------------------------------------------------
 
+    def _fit_glm_catalog(self) -> None:
+        dataset = self._build_glm_dataset_from_selected_predictors()
+        if "error" in dataset:
+            msg = str(dataset.get("error", "Could not build GLM dataset."))
+            dropped = dataset.get("dropped_predictors", []) or []
+            if dropped:
+                msg = f"{msg}\nDropped: {', '.join(str(v) for v in dropped)}"
+            self.txt_summary.setPlainText(msg)
+            self.statusMessage.emit(msg.splitlines()[0], 7000)
+            self._select_control_page(1)
+            return
+
+        basis_map = {"Raised cosine": "raised_cosine", "B-spline": "bspline", "FIR": "fir"}
+        reg_map = {"Ridge": "ridge", "Lasso": "lasso", "OLS": "ols"}
+        kernel_win = (self.spin_kernel_pre.value(), self.spin_kernel_post.value())
+        result = self._glm.fit(
+            np.asarray(dataset["time"], float),
+            np.asarray(dataset["signal"], float),
+            dataset["predictors"],
+            kernel_window=kernel_win,
+            n_basis=self.spin_n_basis.value(),
+            basis_type=basis_map.get(self.combo_basis.currentText(), "raised_cosine"),
+            regularization=reg_map.get(self.combo_reg.currentText(), "ridge"),
+            alpha=self.spin_alpha.value(),
+        )
+        self._glm_result = result
+
+        used_labels = [self._predictor_label(k) for k in result.predictor_names]
+        dropped_predictors = dataset.get("dropped_predictors", []) or []
+        used_records = dataset.get("used_records", []) or []
+        dropped_records = dataset.get("dropped_records", []) or []
+        record_preview = ", ".join(str(v) for v in used_records[:6])
+        if len(used_records) > 6:
+            record_preview += "..."
+        lines = [
+            f"Continuous GLM - R^2 = {result.r2:.4f}",
+            f"Recordings used: {len(used_records)} ({record_preview})",
+            f"Samples fit: {int(dataset.get('valid_samples', 0))}",
+            f"Predictors: {', '.join(used_labels)}",
+            f"Basis: {self.combo_basis.currentText()}, n={self.spin_n_basis.value()}",
+            f"Regularization: {self.combo_reg.currentText()}, alpha={self.spin_alpha.value():.3f}",
+        ]
+        if dropped_predictors:
+            lines.append(f"Dropped predictors: {', '.join(str(v) for v in dropped_predictors)}")
+        if dropped_records:
+            lines.append(f"Dropped recordings: {', '.join(str(v) for v in dropped_records)}")
+        self.txt_summary.setPlainText("\n".join(lines))
+
+        self._plot_glm_kernels(result)
+        self._plot_glm_fit(result)
+        if hasattr(self, "tabs_workspace"):
+            self.tabs_workspace.setCurrentWidget(self.plot_kernel.parentWidget())
+        self.statusMessage.emit(f"GLM fit complete - R^2 = {result.r2:.4f}", 5000)
+
     def _fit_glm(self):
+        self._fit_glm_catalog()
+        return
         if not self._processed_trials:
             self.statusMessage.emit("No processed data — run preprocessing first.", 5000)
             return
@@ -1308,7 +1885,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                   "#f5e0dc", "#89dceb", "#fab387"]
         for i, (name, kernel) in enumerate(result.kernels.items()):
             color = colors[i % len(colors)]
-            pw.plot(result.kernel_tvec, kernel, pen=pg.mkPen(color, width=2), name=name)
+            pw.plot(result.kernel_tvec, kernel, pen=pg.mkPen(color, width=2), name=self._predictor_label(name))
         pw.setLabel("bottom", "Time", units="s")
         pw.setLabel("left", "Kernel weight")
         # Zero line
@@ -1322,17 +1899,17 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             pw.getPlotItem().legend.clear()
         except Exception:
             pass
-        x = np.arange(result.y_actual.size)
+        x = np.asarray(result.time, float) if result.time is not None else np.arange(result.y_actual.size)
         pw.plot(x, result.y_actual, pen=pg.mkPen("#4b9df8", width=1.2), name="actual")
         pw.plot(x, result.y_pred, pen=pg.mkPen("#f5a97f", width=1.4), name="predicted")
-        pw.setLabel("bottom", "Sample")
+        pw.setLabel("bottom", "Time", units="s")
         pw.setLabel("left", "Signal")
 
         rw = self.plot_residuals
         rw.clear()
         rw.plot(x, result.residuals, pen=pg.mkPen("#ee99a0", width=1.1), name="residual")
         rw.addLine(y=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
-        rw.setLabel("bottom", "Sample")
+        rw.setLabel("bottom", "Time", units="s")
         rw.setLabel("left", "Residual")
 
     # ------------------------------------------------------------------
