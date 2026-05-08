@@ -188,7 +188,7 @@ class GLMResult:
     r2: float
     coefficients: np.ndarray              # raw beta vector
     design_matrix: np.ndarray
-    stats: Dict[str, float] = field(default_factory=dict)
+    stats: Dict[str, Any] = field(default_factory=dict)
     feature_importance: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -539,7 +539,32 @@ class TrialFLMM:
         if group_var not in design:
             raise ValueError(f"FLMM design is missing group variable '{group_var}'.")
 
+        design = dict(design)
         r_df_vars = {}
+        group_var_model = group_var
+        fallback_grouping = ""
+        group_vals = np.asarray(design[group_var]).astype(str)
+        unique_groups = np.unique(group_vals)
+        has_repeated_groups = 1 < unique_groups.size < n_trials
+        if not has_repeated_groups:
+            if n_trials < 4:
+                raise ValueError(
+                    "FLMM needs at least 4 rows when the selected grouping variable has fewer than two repeated levels. "
+                    "Compute per-file/per-trial PSTH rows or choose a grouping variable with repeated samples."
+                )
+            block_name = "pyber_block"
+            i = 2
+            while block_name in design:
+                block_name = f"pyber_block_{i}"
+                i += 1
+            n_blocks = min(4, max(2, n_trials // 2))
+            design[block_name] = np.asarray([f"block_{(idx % n_blocks) + 1}" for idx in range(n_trials)], dtype=object)
+            group_var_model = block_name
+            fallback_grouping = (
+                f"Grouping variable '{group_var}' had {unique_groups.size} level(s) across {n_trials} rows. "
+                f"Used exploratory block grouping '{group_var_model}' with {n_blocks} levels so fastFMM can fit."
+            )
+
         for col_name, col_vals in design.items():
             col_vals = np.asarray(col_vals)
             if col_vals.size != n_trials:
@@ -558,20 +583,19 @@ class TrialFLMM:
         r_df = R(".__pyber_flmm_df$Y.obs <- I(.__pyber_flmm_y); .__pyber_flmm_df")
 
         formula_text = str(formula_fixed or "Y.obs ~ 1").strip() or "Y.obs ~ 1"
-        group_vals = np.asarray(design[group_var]).astype(str)
-        has_repeated_groups = np.unique(group_vals).size < group_vals.size
+        if group_var_model != group_var:
+            formula_text = re.sub(
+                rf"\|\s*`?{re.escape(group_var)}`?\s*\)",
+                f"| {group_var_model})",
+                formula_text,
+            )
         if "|" not in formula_text:
             rand = str(random_effects or "~1").strip()
             rand_rhs = rand.split("~", 1)[1].strip() if "~" in rand else rand
             if rand_rhs.lower() in {"", "0", "none", "fixed"}:
                 rand_rhs = ""
-            if not has_repeated_groups:
-                raise ValueError(
-                    "FLMM requires repeated rows per subject for random effects. "
-                    "Compute PSTH from per-file trials instead of animal-averaged rows."
-                )
             if rand_rhs:
-                formula_text = f"{formula_text} + ({rand_rhs} | {group_var})"
+                formula_text = f"{formula_text} + ({rand_rhs} | {group_var_model})"
 
         # Call fui()
         fastFMM = importr("fastFMM")
@@ -580,7 +604,7 @@ class TrialFLMM:
             "data": r_df,
             "parallel": ro.BoolVector([parallel]),
             "silent": ro.BoolVector([True]),
-            "subj_id": ro.StrVector([group_var]),
+            "subj_id": ro.StrVector([group_var_model]),
             "override_zero_var": ro.BoolVector([True]),
         }
         if nknots_min is not None:
@@ -691,6 +715,8 @@ class TrialFLMM:
                     continue
 
             summary_parts = [f"FLMM fit: {len(term_names)} terms, {n_trials} trials, {n_time} timepoints"]
+            if fallback_grouping:
+                summary_parts.append(f"Note: {fallback_grouping}")
             if aic_val is not None:
                 summary_parts.append(f"AIC = {aic_val:.1f}")
             coeff_abs_peaks: List[float] = []
@@ -711,6 +737,10 @@ class TrialFLMM:
                 "aic": float(aic_val) if aic_val is not None else float("nan"),
                 "mean_abs_coefficient": float(np.nanmean(coeff_abs_means)) if coeff_abs_means else float("nan"),
                 "peak_abs_coefficient": float(np.nanmax(coeff_abs_peaks)) if coeff_abs_peaks else float("nan"),
+                "formula": formula_text,
+                "group_var": group_var_model,
+                "requested_group_var": group_var,
+                "fallback_grouping": fallback_grouping,
             }
 
         except Exception as exc:
@@ -799,6 +829,18 @@ QComboBox::drop-down {
     border: 0;
     width: 24px;
 }
+QProgressBar {
+    color: #e9f0fb;
+    background: #0f1724;
+    border: 1px solid #314963;
+    border-radius: 6px;
+    min-height: 18px;
+    text-align: center;
+}
+QProgressBar::chunk {
+    background: #2d8cff;
+    border-radius: 5px;
+}
 QListWidget, QTextEdit {
     color: #e6edf8;
     background: #0d1420;
@@ -866,6 +908,9 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
+        self._settings = QtCore.QSettings("BelloneLab", "pyBer")
+        self._loading_settings = True
+        self._saved_predictor_keys: List[str] = []
         self._glm = ContinuousGLM()
         self._flmm = TrialFLMM()
         self._glm_result: Optional[GLMResult] = None
@@ -889,7 +934,9 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._group_mode: bool = False
 
         self._build_compact_ui()
+        self._load_temporal_settings()
         self._connect_signals()
+        self._on_model_type_changed(self.combo_model_type.currentIndex())
 
     # ------------------------------------------------------------------
     # UI construction
@@ -957,6 +1004,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.spin_kernel_post.setDecimals(1)
         self.spin_kernel_post.setSuffix(" s")
         gl.addRow("Kernel post:", self.spin_kernel_post)
+
+        self.spin_glm_bootstrap = QtWidgets.QSpinBox()
+        self.spin_glm_bootstrap.setRange(0, 2000)
+        self.spin_glm_bootstrap.setValue(100)
+        self.spin_glm_bootstrap.setSpecialValueText("off")
+        self.spin_glm_bootstrap.setToolTip("Circular-shift bootstraps for leave-one-out contribution p-values.")
+        gl.addRow("Shift bootstraps:", self.spin_glm_bootstrap)
 
         root.addWidget(self.grp_glm)
 
@@ -1109,6 +1163,12 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.btn_fit.setProperty("class", "primary")
         self.btn_fit.setMinimumWidth(120)
         h.addWidget(self.btn_fit)
+
+        self.progress_model = QtWidgets.QProgressBar()
+        self.progress_model.setMinimumWidth(260)
+        self.progress_model.setMaximumWidth(360)
+        self.progress_model.setVisible(False)
+        h.addWidget(self.progress_model)
         root.addWidget(header)
 
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
@@ -1208,6 +1268,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.spin_kernel_post.setDecimals(1)
         self.spin_kernel_post.setSuffix(" s")
         gl.addRow("Kernel post", self.spin_kernel_post)
+
+        self.spin_glm_bootstrap = QtWidgets.QSpinBox()
+        self.spin_glm_bootstrap.setRange(0, 2000)
+        self.spin_glm_bootstrap.setValue(100)
+        self.spin_glm_bootstrap.setSpecialValueText("off")
+        self.spin_glm_bootstrap.setToolTip("Circular-shift bootstraps for leave-one-out contribution p-values.")
+        gl.addRow("Shift bootstraps", self.spin_glm_bootstrap)
         lay.addWidget(self.grp_glm)
 
         self.grp_flmm = QtWidgets.QGroupBox("FLMM Settings")
@@ -1376,6 +1443,42 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         pi.getAxis("left").setTextPen(pg.mkPen("#c5d2e3"))
         pi.titleLabel.item.setDefaultTextColor(QtGui.QColor("#d7e0ee"))
 
+    def _progress_start(self, label: str, maximum: int = 0) -> None:
+        if not hasattr(self, "progress_model"):
+            return
+        self.progress_model.setVisible(True)
+        if maximum <= 0:
+            self.progress_model.setRange(0, 0)
+            self.progress_model.setFormat(label)
+        else:
+            self.progress_model.setRange(0, maximum)
+            self.progress_model.setValue(0)
+            self.progress_model.setFormat(f"{label} %p%")
+        QtWidgets.QApplication.processEvents()
+
+    def _progress_update(self, value: int, label: Optional[str] = None) -> None:
+        if not hasattr(self, "progress_model") or not self.progress_model.isVisible():
+            return
+        if label:
+            self.progress_model.setFormat(f"{label} %p%" if self.progress_model.maximum() > 0 else label)
+        if self.progress_model.maximum() > 0:
+            self.progress_model.setValue(max(0, min(int(value), self.progress_model.maximum())))
+        QtWidgets.QApplication.processEvents()
+
+    def _progress_finish(self) -> None:
+        if not hasattr(self, "progress_model"):
+            return
+        self.progress_model.setVisible(False)
+        self.progress_model.setRange(0, 100)
+        self.progress_model.setValue(0)
+        QtWidgets.QApplication.processEvents()
+
+    def _set_fit_enabled(self, enabled: bool) -> None:
+        for attr in ("btn_fit", "btn_fit_side"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setEnabled(enabled)
+
     # ------------------------------------------------------------------
     # Signal wiring
     # ------------------------------------------------------------------
@@ -1385,6 +1488,71 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.btn_fit.clicked.connect(self._on_fit_clicked)
         self.btn_add_predictor.clicked.connect(self._on_add_predictor)
         self.btn_remove_predictor.clicked.connect(self._on_remove_predictor)
+        for widget in (
+            self.combo_basis,
+            self.combo_reg,
+            self.spin_n_basis,
+            self.spin_alpha,
+            self.spin_kernel_pre,
+            self.spin_kernel_post,
+            self.spin_glm_bootstrap,
+            self.spin_nknots,
+            self.spin_boots,
+        ):
+            signal = getattr(widget, "currentIndexChanged", None) or getattr(widget, "valueChanged", None)
+            if signal is not None:
+                signal.connect(lambda *_: self._save_temporal_settings())
+        for edit in (self.edit_formula, self.edit_random, self.edit_group_var):
+            edit.editingFinished.connect(self._save_temporal_settings)
+
+    def _load_temporal_settings(self) -> None:
+        self._loading_settings = True
+        try:
+            prefix = "temporal_modeling/"
+            self.combo_model_type.setCurrentIndex(int(self._settings.value(prefix + "model_type", 0)))
+            for combo, key in ((self.combo_basis, "basis"), (self.combo_reg, "regularization")):
+                text = str(self._settings.value(prefix + key, "") or "")
+                idx = combo.findText(text)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            self.spin_n_basis.setValue(int(self._settings.value(prefix + "n_basis", self.spin_n_basis.value())))
+            self.spin_alpha.setValue(float(self._settings.value(prefix + "alpha", self.spin_alpha.value())))
+            self.spin_kernel_pre.setValue(float(self._settings.value(prefix + "kernel_pre", self.spin_kernel_pre.value())))
+            self.spin_kernel_post.setValue(float(self._settings.value(prefix + "kernel_post", self.spin_kernel_post.value())))
+            self.spin_glm_bootstrap.setValue(int(self._settings.value(prefix + "glm_shift_bootstraps", self.spin_glm_bootstrap.value())))
+            self.edit_formula.setText(str(self._settings.value(prefix + "flmm_formula", self.edit_formula.text()) or "Y.obs ~ 1"))
+            self.edit_random.setText(str(self._settings.value(prefix + "flmm_random", self.edit_random.text()) or "~1"))
+            self.edit_group_var.setText(str(self._settings.value(prefix + "flmm_group_var", self.edit_group_var.text()) or "subject"))
+            self.spin_nknots.setValue(int(self._settings.value(prefix + "flmm_nknots", self.spin_nknots.value())))
+            self.spin_boots.setValue(int(self._settings.value(prefix + "flmm_boots", self.spin_boots.value())))
+            raw_predictors = str(self._settings.value(prefix + "predictor_keys", "") or "")
+            self._saved_predictor_keys = [key for key in raw_predictors.split("\n") if key.strip()]
+        finally:
+            self._loading_settings = False
+
+    def _save_temporal_settings(self) -> None:
+        if getattr(self, "_loading_settings", False):
+            return
+        prefix = "temporal_modeling/"
+        self._settings.setValue(prefix + "model_type", self.combo_model_type.currentIndex())
+        self._settings.setValue(prefix + "basis", self.combo_basis.currentText())
+        self._settings.setValue(prefix + "regularization", self.combo_reg.currentText())
+        self._settings.setValue(prefix + "n_basis", self.spin_n_basis.value())
+        self._settings.setValue(prefix + "alpha", self.spin_alpha.value())
+        self._settings.setValue(prefix + "kernel_pre", self.spin_kernel_pre.value())
+        self._settings.setValue(prefix + "kernel_post", self.spin_kernel_post.value())
+        self._settings.setValue(prefix + "glm_shift_bootstraps", self.spin_glm_bootstrap.value())
+        self._settings.setValue(prefix + "flmm_formula", self.edit_formula.text().strip())
+        self._settings.setValue(prefix + "flmm_random", self.edit_random.text().strip())
+        self._settings.setValue(prefix + "flmm_group_var", self.edit_group_var.text().strip())
+        self._settings.setValue(prefix + "flmm_nknots", self.spin_nknots.value())
+        self._settings.setValue(prefix + "flmm_boots", self.spin_boots.value())
+        predictors = self._selected_predictor_keys() if hasattr(self, "list_predictors") else self._saved_predictor_keys
+        if predictors or getattr(self, "_predictor_catalog", None):
+            self._saved_predictor_keys = list(predictors)
+        else:
+            predictors = list(self._saved_predictor_keys)
+        self._settings.setValue(prefix + "predictor_keys", "\n".join(predictors))
 
     # ------------------------------------------------------------------
     # Public API — called by PostProcessingPanel
@@ -1465,6 +1633,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         entry = self._predictor_catalog.get(str(key), {})
         label = str(entry.get("label", "") or "").strip()
         if label:
+            if label.startswith("Numeric column:"):
+                return label.split(":", 1)[1].strip()
             return label
         if key == "events":
             return "PSTH alignment events"
@@ -1477,8 +1647,18 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         if key.startswith("behavior_state::"):
             return f"Behavior state: {key.split('::', 1)[1]}"
         if key.startswith("behavior_cont::"):
-            return f"Numeric column: {key.split('::', 1)[1]}"
+            return key.split("::", 1)[1]
         return str(key)
+
+    @staticmethod
+    def _compact_feature_label(label: object, max_len: int = 42) -> str:
+        text = str(label or "").strip()
+        if text.startswith("Numeric column:"):
+            text = text.split(":", 1)[1].strip()
+        text = re.sub(r"\s+", " ", text)
+        if len(text) > max_len:
+            return text[:max_len - 3] + "..."
+        return text
 
     def _selected_predictor_keys(self) -> List[str]:
         keys: List[str] = []
@@ -1580,19 +1760,22 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             catalog[f"behavior_cont::{name}"] = {
                 "kind": "continuous",
                 "name": name,
-                "label": f"Numeric column: {name}",
+                "label": name,
             }
 
         previous_keys = self._selected_predictor_keys() if hasattr(self, "list_predictors") else []
+        restore_keys = previous_keys or [key for key in self._saved_predictor_keys if key in catalog]
         self._predictor_catalog = catalog
         self._refresh_predictor_combo()
         if hasattr(self, "list_predictors"):
             self.list_predictors.clear()
-            for key in previous_keys:
+            for key in restore_keys:
                 if key in catalog:
                     self._add_predictor_item(key)
             if self.list_predictors.count() == 0 and "events" in catalog:
                 self._add_predictor_item("events")
+            if self.list_predictors.count() > 0 or previous_keys:
+                self._save_temporal_settings()
 
     def _behavior_source_for_proc(self, proc: Any) -> Optional[Dict[str, Any]]:
         if not self._behavior_sources:
@@ -1791,16 +1974,21 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         vec_parts: Dict[str, List[np.ndarray]] = {key: [] for key in selected}
         pred_types: Dict[str, str] = {}
         used_records: List[str] = []
+        segment_slices: List[Tuple[int, int]] = []
         offset = 0.0
+        cursor = 0
         for seg_idx, (file_id, t, y, proc) in enumerate(segments):
             dt = float(np.nanmedian(np.diff(t)))
             if not np.isfinite(dt) or dt <= 0:
                 dropped_records.append(file_id)
                 continue
             t_shift = (t - float(t[0])) + offset
+            start = cursor
             time_parts.append(t_shift)
             signal_parts.append(y.astype(float, copy=True))
             used_records.append(file_id)
+            cursor += int(t.size)
+            segment_slices.append((start, cursor))
             for key in selected:
                 vec, ptype = self._predictor_vector_for_proc(key, proc, t)
                 vec = np.asarray(vec, float)
@@ -1817,6 +2005,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 signal_parts.append(np.full(pad_n, np.nan, float))
                 for key in selected:
                     vec_parts[key].append(np.zeros(pad_n, float))
+                cursor += int(pad_n)
                 offset = float(pad_t[-1] + dt)
 
         if not time_parts:
@@ -1859,6 +2048,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             "dropped_records": dropped_records,
             "dropped_predictors": dropped_predictors,
             "valid_samples": int(np.sum(valid_signal)),
+            "segment_slices": segment_slices,
         }
 
     def _proc_for_file_id(self, file_id: str) -> Optional[Any]:
@@ -2081,6 +2271,116 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         mse = float(np.nanmean(residuals ** 2)) if y.size else float("nan")
         return {"r2": 1.0 - ss_res / max(ss_tot, 1e-12), "mse": mse}
 
+    @staticmethod
+    def _shift_vector_by_segment(
+        values: np.ndarray,
+        segment_slices: List[Tuple[int, int]],
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        vec = np.asarray(values, float)
+        shifted = np.zeros_like(vec)
+        slices = segment_slices or [(0, int(vec.size))]
+        for lo, hi in slices:
+            lo = max(0, int(lo))
+            hi = min(int(hi), int(vec.size))
+            n = hi - lo
+            if n <= 1:
+                continue
+            shift = int(rng.integers(1, n))
+            shifted[lo:hi] = np.roll(vec[lo:hi], shift)
+        shifted[~np.isfinite(shifted)] = 0.0
+        return shifted
+
+    def _compute_glm_shift_bootstrap_significance(
+        self,
+        dataset: Dict[str, Any],
+        rows: List[Dict[str, Any]],
+        kernel_window: Tuple[float, float],
+        basis_type: str,
+        regularization: str,
+        alpha: float,
+        n_boot: int,
+    ) -> None:
+        if n_boot <= 0 or not rows:
+            for row in rows:
+                row["p_value"] = float("nan")
+                row["significant"] = False
+                row["bootstrap_n"] = 0
+            return
+
+        predictors = dict(dataset.get("predictors", {}) or {})
+        time = np.asarray(dataset["time"], float)
+        signal = np.asarray(dataset["signal"], float)
+        segment_slices = list(dataset.get("segment_slices", []) or [])
+        rng = np.random.default_rng()
+        total = max(1, int(n_boot) * len(rows))
+        self._progress_start("GLM circular-shift test", total)
+        step = 0
+        for row in rows:
+            feature = str(row.get("feature", ""))
+            obs_delta = float(row.get("delta_r2", float("nan")))
+            reduced_r2 = float(row.get("reduced_r2", float("nan")))
+            spec = predictors.get(feature)
+            if (
+                not feature
+                or spec is None
+                or not np.isfinite(obs_delta)
+                or obs_delta <= 0
+                or not np.isfinite(reduced_r2)
+            ):
+                row["p_value"] = 1.0
+                row["significant"] = False
+                row["bootstrap_n"] = 0
+                step += int(n_boot)
+                self._progress_update(step, "GLM circular-shift test")
+                continue
+
+            base_vec = ContinuousGLM._predictor_vector(time, spec)
+            null_deltas: List[float] = []
+            for _ in range(int(n_boot)):
+                shifted_predictors = dict(predictors)
+                shifted_predictors[feature] = {
+                    "kind": "vector",
+                    "values": self._shift_vector_by_segment(base_vec, segment_slices, rng),
+                }
+                try:
+                    shifted = ContinuousGLM().fit(
+                        time,
+                        signal,
+                        shifted_predictors,
+                        kernel_window=kernel_window,
+                        n_basis=self.spin_n_basis.value(),
+                        basis_type=basis_type,
+                        regularization=regularization,
+                        alpha=alpha,
+                    )
+                    null_delta = float(shifted.r2 - reduced_r2)
+                    if np.isfinite(null_delta):
+                        null_deltas.append(null_delta)
+                except Exception as exc:
+                    _LOG.debug("Circular-shift GLM bootstrap failed for %s: %s", feature, exc)
+                step += 1
+                if step == total or step % 5 == 0:
+                    self._progress_update(step, "GLM circular-shift test")
+
+            null_arr = np.asarray(null_deltas, float)
+            if null_arr.size:
+                p_value = float((1 + np.sum(null_arr >= obs_delta)) / (null_arr.size + 1))
+                row["p_value"] = p_value
+                row["significant"] = bool(p_value < 0.05 and obs_delta > 0)
+                row["bootstrap_n"] = int(null_arr.size)
+                row["null_delta_mean"] = float(np.nanmean(null_arr))
+                row["null_delta_q95"] = float(np.nanpercentile(null_arr, 95))
+            else:
+                row["p_value"] = float("nan")
+                row["significant"] = False
+                row["bootstrap_n"] = 0
+        rows.sort(key=lambda item: (
+            bool(item.get("significant", False)),
+            np.isfinite(item.get("delta_r2", np.nan)),
+            float(item.get("delta_r2", -np.inf)) if np.isfinite(item.get("delta_r2", np.nan)) else -np.inf,
+        ), reverse=True)
+
     def _compute_glm_leave_one_out(
         self,
         dataset: Dict[str, Any],
@@ -2097,6 +2397,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         rows: List[Dict[str, Any]] = []
         time = np.asarray(dataset["time"], float)
         signal = np.asarray(dataset["signal"], float)
+        self._progress_start("GLM leave-one-out", len(result.predictor_names))
         for pred_name in result.predictor_names:
             row: Dict[str, Any] = {
                 "feature": pred_name,
@@ -2142,7 +2443,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             except Exception as exc:
                 row["status"] = f"failed: {exc}"
             rows.append(row)
-            QtWidgets.QApplication.processEvents()
+            self._progress_update(len(rows), "GLM leave-one-out")
         rows.sort(key=lambda item: (
             np.isfinite(item.get("delta_r2", np.nan)),
             float(item.get("delta_r2", -np.inf)) if np.isfinite(item.get("delta_r2", np.nan)) else -np.inf,
@@ -2195,6 +2496,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             return []
         full_aic = float(full_result.aic) if full_result.aic is not None else float("nan")
         rows: List[Dict[str, Any]] = []
+        self._progress_start("FLMM leave-one-out", len(terms))
         for term in terms:
             reduced_terms = [name for name in terms if name != term]
             reduced_formula = "Y.obs ~ " + " + ".join(reduced_terms) if reduced_terms else "Y.obs ~ 1"
@@ -2225,7 +2527,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             except Exception as exc:
                 row["status"] = f"failed: {exc}"
             rows.append(row)
-            QtWidgets.QApplication.processEvents()
+            self._progress_update(len(rows), "FLMM leave-one-out")
         rows.sort(key=lambda item: (
             np.isfinite(item.get("delta_aic", np.nan)),
             float(item.get("delta_aic", -np.inf)) if np.isfinite(item.get("delta_aic", np.nan)) else -np.inf,
@@ -2261,6 +2563,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                     "then install rpy2 (pip install rpy2)."
                 )
                 self.lbl_flmm_status.setStyleSheet("color: #f5a97f;")
+        self._save_temporal_settings()
 
     def _on_add_predictor(self):
         key = ""
@@ -2271,15 +2574,18 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.statusMessage.emit("No predictor is available yet. Load or compute behavior/events first.", 5000)
             return
         if self._add_predictor_item(key):
+            self._save_temporal_settings()
             self.statusMessage.emit(f"Added predictor: {self._predictor_label(key)}", 3000)
 
     def _on_remove_predictor(self):
         sel = self.list_predictors.currentRow()
         if sel >= 0:
             self.list_predictors.takeItem(sel)
+            self._save_temporal_settings()
 
     def _on_fit_clicked(self):
         model_idx = self.combo_model_type.currentIndex()
+        self._set_fit_enabled(False)
         try:
             if model_idx == 0:
                 self._fit_glm()
@@ -2289,12 +2595,16 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             _LOG.error("Temporal modeling fit failed: %s\n%s", exc, traceback.format_exc())
             self.txt_summary.setPlainText(f"Error: {exc}")
             self.statusMessage.emit(f"Temporal model fit failed: {exc}", 8000)
+        finally:
+            self._set_fit_enabled(True)
+            self._progress_finish()
 
     # ------------------------------------------------------------------
     # GLM fit
     # ------------------------------------------------------------------
 
     def _fit_glm_catalog(self) -> None:
+        self._save_temporal_settings()
         dataset = self._build_glm_dataset_from_selected_predictors()
         if "error" in dataset:
             msg = str(dataset.get("error", "Could not build GLM dataset."))
@@ -2311,6 +2621,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         kernel_win = (self.spin_kernel_pre.value(), self.spin_kernel_post.value())
         basis_type = basis_map.get(self.combo_basis.currentText(), "raised_cosine")
         regularization = reg_map.get(self.combo_reg.currentText(), "ridge")
+        self._progress_start("Fitting GLM", 0)
         result = self._glm.fit(
             np.asarray(dataset["time"], float),
             np.asarray(dataset["signal"], float),
@@ -2333,6 +2644,16 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             regularization,
             self.spin_alpha.value(),
         )
+        n_boot = int(self.spin_glm_bootstrap.value())
+        self._compute_glm_shift_bootstrap_significance(
+            dataset,
+            importance_rows,
+            kernel_win,
+            basis_type,
+            regularization,
+            self.spin_alpha.value(),
+            n_boot,
+        )
         result.feature_importance = importance_rows
 
         used_labels = [self._predictor_label(k) for k in result.predictor_names]
@@ -2349,6 +2670,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             f"Predictors: {', '.join(used_labels)}",
             f"Basis: {self.combo_basis.currentText()}, n={self.spin_n_basis.value()}",
             f"Regularization: {self.combo_reg.currentText()}, alpha={self.spin_alpha.value():.3f}",
+            f"Circular-shift bootstraps: {n_boot if n_boot > 0 else 'off'}",
         ]
         stats = result.stats or {}
         lines.extend([
@@ -2363,10 +2685,17 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         if importance_rows:
             lines.extend(["", "Leave-one-predictor-out contribution (full - reduced):"])
             for row in importance_rows[:10]:
+                p_value = float(row.get("p_value", float("nan")))
+                p_text = f", p = {p_value:.4g}" if np.isfinite(p_value) else ""
+                sig_text = " [significant]" if row.get("significant", False) else ""
                 lines.append(
                     f"  {row['label']}: delta R^2 = {row['delta_r2']:.5g}, "
                     f"delta MSE = {row['delta_mse']:.5g}, reduced R^2 = {row['reduced_r2']:.5g}"
+                    f"{p_text}{sig_text}"
                 )
+            if n_boot > 0:
+                significant = [row for row in importance_rows if row.get("significant", False)]
+                lines.append(f"  Significant predictors at p < 0.05: {len(significant)}")
             failed = [row for row in importance_rows if row.get("status") != "ok"]
             if failed:
                 lines.append(f"  {len(failed)} reduced fits failed; see log for details.")
@@ -2518,32 +2847,49 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             txt = pg.TextItem("No leave-one-out feature contribution is available.", color="#c5d2e3")
             pw.addItem(txt)
             txt.setPos(0, 0)
-            pw.setLabel("bottom", "Feature")
-            pw.setLabel("left", y_label)
+            pw.setLabel("bottom", y_label)
+            pw.setLabel("left", "Feature")
             return
 
-        x = np.arange(len(usable), dtype=float)
+        usable = usable[:25]
         vals = np.asarray([float(row.get(value_key, 0.0)) for row in usable], float)
-        brushes = [pg.mkBrush("#4b9df8" if val >= 0 else "#ee99a0") for val in vals]
-        bar = pg.BarGraphItem(x=x, height=vals, width=0.64, brushes=brushes)
+        y_pos = np.arange(len(usable), dtype=float)[::-1]
+        brushes = []
+        for row, val in zip(usable, vals):
+            if row.get("significant", False):
+                brushes.append(pg.mkBrush("#f5c542"))
+            else:
+                brushes.append(pg.mkBrush("#4b9df8" if val >= 0 else "#ee99a0"))
+        bar = pg.BarGraphItem(x0=np.zeros_like(vals), x1=vals, y=y_pos, height=0.62, brushes=brushes)
         pw.addItem(bar)
-        pw.addLine(y=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        pw.addLine(x=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
         labels = []
-        for idx, row in enumerate(usable):
-            label = str(row.get("label", row.get("feature", idx)))
-            if len(label) > 18:
-                label = label[:15] + "..."
-            labels.append((idx, label))
-        pw.getAxis("bottom").setTicks([labels])
-        pw.setLabel("bottom", "Feature")
-        pw.setLabel("left", y_label)
-        pw.enableAutoRange()
+        max_abs = max(float(np.nanmax(np.abs(vals))) if vals.size else 1.0, 1e-9)
+        label_offset = max_abs * 0.025
+        for pos, row, val in zip(y_pos, usable, vals):
+            label = self._compact_feature_label(row.get("label", row.get("feature", "")), 46)
+            labels.append((float(pos), label))
+            p_value = float(row.get("p_value", float("nan")))
+            if row.get("significant", False) and np.isfinite(p_value):
+                p_txt = pg.TextItem(f"p={p_value:.3g}", color="#f5c542", anchor=(0.0, 0.5))
+                pw.addItem(p_txt)
+                p_txt.setPos(float(val) + label_offset, float(pos))
+        pw.getAxis("left").setTicks([labels])
+        pw.getAxis("bottom").setTicks(None)
+        pw.setLabel("bottom", y_label)
+        pw.setLabel("left", "Feature")
+        lo = min(0.0, float(np.nanmin(vals)) if vals.size else 0.0)
+        hi = max(0.0, float(np.nanmax(vals)) if vals.size else 1.0)
+        pad = max((hi - lo) * 0.15, max_abs * 0.12, 1e-6)
+        pw.setXRange(lo - pad, hi + pad, padding=0.0)
+        pw.setYRange(-1, len(usable), padding=0.02)
 
     # ------------------------------------------------------------------
     # FLMM fit
     # ------------------------------------------------------------------
 
     def _fit_flmm_group(self) -> None:
+        self._save_temporal_settings()
         if not self._flmm.available:
             self.statusMessage.emit(
                 "R + fastFMM not available. Please install R, rpy2, and the fastFMM R package.", 8000
@@ -2569,17 +2915,27 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         design, auto_terms, dropped_terms, term_labels = self._build_flmm_design(row_labels, group_var)
 
         requested_formula = self.edit_formula.text().strip()
-        if requested_formula in {"", "Y.obs ~ 1", "Y.obs ~ group"}:
-            formula = "Y.obs ~ " + " + ".join(auto_terms) if auto_terms else "Y.obs ~ 1"
-            if requested_formula != formula:
-                self.edit_formula.setText(formula)
-        else:
-            formula = requested_formula
+        auto_formula = "Y.obs ~ " + " + ".join(auto_terms) if auto_terms else "Y.obs ~ 1"
+        requested_terms = [
+            term for term in self._simple_formula_terms(requested_formula)
+            if "|" not in term and "(" not in term and ")" not in term
+        ]
+        missing_terms = [term for term in requested_terms if term not in design]
+        use_auto = (
+            requested_formula in {"", "Y.obs ~ 1", "Y.obs ~ group"}
+            or "~" not in requested_formula
+            or not requested_formula.lstrip().startswith("Y.obs")
+            or bool(missing_terms)
+        )
+        formula = auto_formula if use_auto else requested_formula
+        if requested_formula != formula:
+            self.edit_formula.setText(formula)
         random_eff = self.edit_random.text().strip() or "~1"
         nknots = self.spin_nknots.value() if self.spin_nknots.value() > 0 else None
         num_boots = self.spin_boots.value()
 
         self.statusMessage.emit("Fitting FLMM via fastFMM - this may take a while...", 0)
+        self._progress_start("Fitting FLMM via fastFMM", 0)
         QtWidgets.QApplication.processEvents()
 
         result = self._flmm.fit(
@@ -2612,14 +2968,21 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             else "mean_abs_coefficient"
         )
 
+        effective_group_var = str(result.stats.get("group_var", group_var)) if result.stats else group_var
+        effective_formula = str(result.stats.get("formula", formula)) if result.stats else formula
+        fallback_grouping = str(result.stats.get("fallback_grouping", "")) if result.stats else ""
         summary_lines = [
             result.summary_text,
             "",
             f"Scope: {'animal/group rows' if scope == 'animal' else 'trial rows'}",
             f"Rows: {n_rows}",
-            f"ID variable: {group_var}",
-            f"Formula: {formula}",
+            f"ID variable: {effective_group_var}",
+            f"Formula: {effective_formula}",
         ]
+        if missing_terms:
+            summary_lines.append(f"Auto formula used because saved terms were unavailable: {', '.join(missing_terms)}")
+        if fallback_grouping:
+            summary_lines.append(f"Grouping note: {fallback_grouping}")
         if result.stats:
             summary_lines.extend([
                 "",
@@ -2649,7 +3012,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 summary_lines.append("  Leave-one-out comparison uses analytic fits; bootstrap CIs are not repeated.")
         if auto_terms:
             readable = [f"{term} = {term_labels.get(term, term)}" for term in auto_terms]
-            summary_lines.append("Animal covariates: " + "; ".join(readable))
+            summary_lines.append("Covariates: " + "; ".join(readable))
         if dropped_terms:
             summary_lines.append("Dropped covariates: " + ", ".join(dropped_terms))
         self.txt_summary.setPlainText("\n".join(summary_lines))
