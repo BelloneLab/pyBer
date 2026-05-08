@@ -7499,6 +7499,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.last_behavior_analysis = behavior_analysis
             self._render_behavior_analysis_outputs()
 
+        temporal_state = payload.get("temporal_modeling")
+        if isinstance(temporal_state, dict) and temporal_state and hasattr(self, "section_temporal"):
+            try:
+                self.section_temporal.deserialize_state(temporal_state)
+            except Exception:
+                _LOG.debug("Could not restore temporal modeling state", exc_info=True)
+
     def _save_project_h5(self, path: str) -> None:
         with h5py.File(path, "w") as f:
             f.attrs["project_type"] = "pyber_postprocessing_project"
@@ -7610,6 +7617,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             analysis_group = f.create_group("analysis")
             self._save_signal_events_h5(analysis_group)
             self._save_behavior_analysis_h5(analysis_group)
+            try:
+                if hasattr(self, "section_temporal") and self.section_temporal is not None:
+                    state = self.section_temporal.serialize_state()
+                    if state:
+                        self._write_h5_json_any(analysis_group, "temporal_modeling_json", state)
+            except Exception:
+                _LOG.debug("Could not save temporal modeling state to project", exc_info=True)
 
     def _load_project_h5(self, path: str) -> Dict[str, object]:
         payload: Dict[str, object] = {
@@ -7768,6 +7782,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if isinstance(analysis_group, h5py.Group):
                 payload["signal_events"] = self._load_signal_events_h5(analysis_group)
                 payload["behavior_analysis"] = self._load_behavior_analysis_h5(analysis_group)
+                try:
+                    payload["temporal_modeling"] = self._read_h5_json_any(analysis_group, "temporal_modeling_json", {})
+                except Exception:
+                    payload["temporal_modeling"] = {}
 
             payload["processed"] = loaded_processed
             payload["behavior_sources"] = loaded_behavior

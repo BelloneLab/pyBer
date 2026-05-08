@@ -954,6 +954,16 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._glm_result: Optional[GLMResult] = None
         self._flmm_result: Optional[FLMMResult] = None
 
+        # Per-file fits (filled by batch / group runs).
+        self._glm_results_by_file: Dict[str, GLMResult] = {}
+        self._flmm_results_by_file: Dict[str, FLMMResult] = {}
+        self._fit_summary_by_file: Dict[str, str] = {}
+        self._group_glm_summary: Dict[str, Any] = {}
+        # Batch state
+        self._batch_cancel_requested: bool = False
+        self._fit_mode: str = "all"  # one of "active" | "all" | "batch"
+        self._active_file_id: str = ""
+
         # Data references (set by host panel)
         self._processed_trials = []
         self._psth_mat: Optional[np.ndarray] = None
@@ -1209,20 +1219,73 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         self.combo_model_type = QtWidgets.QComboBox()
         self.combo_model_type.addItems(["Continuous GLM", "Trial-level FLMM (fastFMM)"])
-        self.combo_model_type.setMinimumWidth(230)
+        self.combo_model_type.setMinimumWidth(220)
         h.addWidget(self.combo_model_type)
 
-        self.btn_fit = QtWidgets.QPushButton("Fit model")
+        self.btn_fit = QtWidgets.QPushButton("Fit")
         self.btn_fit.setProperty("class", "primary")
-        self.btn_fit.setMinimumWidth(120)
+        self.btn_fit.setMinimumWidth(86)
+        self.btn_fit.setToolTip("Fit the model using the current scope (Active file / All / Per-file batch).")
         h.addWidget(self.btn_fit)
 
+        self.btn_cancel = QtWidgets.QPushButton("Cancel")
+        self.btn_cancel.setMinimumWidth(78)
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setToolTip("Stop the current batch fit (single fits run synchronously).")
+        h.addWidget(self.btn_cancel)
+
         self.progress_model = QtWidgets.QProgressBar()
-        self.progress_model.setMinimumWidth(260)
-        self.progress_model.setMaximumWidth(360)
+        self.progress_model.setMinimumWidth(220)
+        self.progress_model.setMaximumWidth(320)
         self.progress_model.setVisible(False)
         h.addWidget(self.progress_model)
         root.addWidget(header)
+
+        # ---- Scope strip: Active / All / Per-file (batch) + file selector ----
+        scope_bar = QtWidgets.QFrame()
+        scope_bar.setObjectName("temporalScopeBar")
+        sb = QtWidgets.QHBoxLayout(scope_bar)
+        sb.setContentsMargins(14, 4, 14, 6)
+        sb.setSpacing(10)
+
+        scope_lbl = QtWidgets.QLabel("Scope")
+        scope_lbl.setProperty("class", "muted")
+        sb.addWidget(scope_lbl)
+
+        self.combo_fit_scope = QtWidgets.QComboBox()
+        self.combo_fit_scope.addItem("Active file (single)", "active")
+        self.combo_fit_scope.addItem("All loaded (concatenated)", "all")
+        self.combo_fit_scope.addItem("Per-file batch + group", "batch")
+        self.combo_fit_scope.setMinimumWidth(220)
+        self.combo_fit_scope.setToolTip(
+            "Active: fit the selected animal only.\n"
+            "All: concatenate every loaded recording into one GLM.\n"
+            "Per-file batch: fit each animal independently, then aggregate for the Group tab."
+        )
+        sb.addWidget(self.combo_fit_scope)
+
+        file_lbl = QtWidgets.QLabel("File")
+        file_lbl.setProperty("class", "muted")
+        sb.addWidget(file_lbl)
+
+        self.combo_active_file = QtWidgets.QComboBox()
+        self.combo_active_file.setMinimumWidth(280)
+        self.combo_active_file.setToolTip("Active animal/recording (used when Scope = Active file).")
+        sb.addWidget(self.combo_active_file, 1)
+
+        self.btn_prev_file = QtWidgets.QToolButton()
+        self.btn_prev_file.setText("◀")
+        self.btn_prev_file.setToolTip("Previous file")
+        self.btn_next_file = QtWidgets.QToolButton()
+        self.btn_next_file.setText("▶")
+        self.btn_next_file.setToolTip("Next file")
+        sb.addWidget(self.btn_prev_file)
+        sb.addWidget(self.btn_next_file)
+
+        self.lbl_fit_state = QtWidgets.QLabel("No fit yet")
+        self.lbl_fit_state.setProperty("class", "muted")
+        sb.addWidget(self.lbl_fit_state)
+        root.addWidget(scope_bar)
 
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         split.setChildrenCollapsible(False)
@@ -1242,8 +1305,9 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         nav_lay.setSpacing(8)
         self.btn_nav_model = self._make_nav_button("Model")
         self.btn_nav_predictors = self._make_nav_button("Predictors")
+        self.btn_nav_files = self._make_nav_button("Files\n& Group")
         self.btn_nav_fit = self._make_nav_button("Fit")
-        for btn in (self.btn_nav_model, self.btn_nav_predictors, self.btn_nav_fit):
+        for btn in (self.btn_nav_model, self.btn_nav_predictors, self.btn_nav_files, self.btn_nav_fit):
             nav_lay.addWidget(btn)
         nav_lay.addStretch(1)
         left_lay.addWidget(nav)
@@ -1267,14 +1331,22 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         self._build_model_page()
         self._build_predictor_page()
+        self._build_files_page()
         self._build_fit_page()
         self._build_workspace_pages()
 
         self.btn_nav_model.setChecked(True)
         self.btn_nav_model.clicked.connect(lambda: self._select_control_page(0))
         self.btn_nav_predictors.clicked.connect(lambda: self._select_control_page(1))
-        self.btn_nav_fit.clicked.connect(lambda: self._select_control_page(2))
+        self.btn_nav_files.clicked.connect(lambda: self._select_control_page(2))
+        self.btn_nav_fit.clicked.connect(lambda: self._select_control_page(3))
         self.btn_fit_side.clicked.connect(self._on_fit_clicked)
+        self.btn_fit_all_files.clicked.connect(self._on_fit_all_files_clicked)
+        self.btn_cancel.clicked.connect(self._on_cancel_clicked)
+        self.combo_fit_scope.currentIndexChanged.connect(self._on_fit_scope_changed)
+        self.combo_active_file.currentIndexChanged.connect(self._on_active_file_changed)
+        self.btn_prev_file.clicked.connect(lambda: self._step_active_file(-1))
+        self.btn_next_file.clicked.connect(lambda: self._step_active_file(1))
         self._on_model_type_changed(0)
 
     def _build_model_page(self):
@@ -1414,13 +1486,57 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         lay.addWidget(self.grp_predictors, 1)
         self.stack_controls.addWidget(page)
 
+    def _build_files_page(self):
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+
+        grp = QtWidgets.QGroupBox("Loaded recordings")
+        gl = QtWidgets.QVBoxLayout(grp)
+        gl.setContentsMargins(12, 18, 12, 12)
+        gl.setSpacing(8)
+
+        hint = QtWidgets.QLabel(
+            "Select an animal to make it the active recording. The Group tab aggregates "
+            "per-file fits once you run a Per-file batch."
+        )
+        hint.setProperty("class", "muted")
+        hint.setWordWrap(True)
+        gl.addWidget(hint)
+
+        self.list_files = QtWidgets.QListWidget()
+        self.list_files.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.list_files.setMinimumHeight(220)
+        gl.addWidget(self.list_files, 1)
+
+        self.btn_fit_all_files = QtWidgets.QPushButton("Fit each file (per-file batch)")
+        self.btn_fit_all_files.setProperty("class", "primary")
+        gl.addWidget(self.btn_fit_all_files)
+
+        self.lbl_batch_status = QtWidgets.QLabel("")
+        self.lbl_batch_status.setProperty("class", "muted")
+        self.lbl_batch_status.setWordWrap(True)
+        gl.addWidget(self.lbl_batch_status)
+
+        self.btn_clear_fits = QtWidgets.QPushButton("Clear cached fits")
+        self.btn_clear_fits.setToolTip("Discard all cached per-file results and group aggregates.")
+        gl.addWidget(self.btn_clear_fits)
+        try:
+            self.btn_clear_fits.clicked.connect(self._on_clear_cached_fits)
+        except Exception:
+            pass
+        lay.addWidget(grp, 1)
+        self.stack_controls.addWidget(page)
+        self.list_files.itemSelectionChanged.connect(self._on_file_list_selection_changed)
+
     def _build_fit_page(self):
         page = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
 
-        grp = QtWidgets.QGroupBox("Fit Control")
+        grp = QtWidgets.QGroupBox("Fit control")
         gl = QtWidgets.QVBoxLayout(grp)
         gl.setContentsMargins(12, 18, 12, 12)
         gl.setSpacing(10)
@@ -1428,9 +1544,25 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.lbl_data_status.setProperty("class", "muted")
         self.lbl_data_status.setWordWrap(True)
         gl.addWidget(self.lbl_data_status)
-        self.btn_fit_side = QtWidgets.QPushButton("Fit model")
+
+        # Mode-aware Fit button (the same handler as the top-bar button).
+        self.btn_fit_side = QtWidgets.QPushButton("Fit current scope")
         self.btn_fit_side.setProperty("class", "primary")
+        self.btn_fit_side.setToolTip(
+            "Run the model on the current scope. Equivalent to the Fit button in the top bar."
+        )
         gl.addWidget(self.btn_fit_side)
+
+        contrib_lay = QtWidgets.QHBoxLayout()
+        self.chk_run_contrib = QtWidgets.QCheckBox("Run leave-one-predictor-out contribution")
+        self.chk_run_contrib.setChecked(True)
+        self.chk_run_contrib.setToolTip(
+            "Disable to skip the per-predictor reduced-fit comparison (saves time on large designs)."
+        )
+        contrib_lay.addWidget(self.chk_run_contrib)
+        contrib_lay.addStretch(1)
+        gl.addLayout(contrib_lay)
+
         gl.addStretch(1)
         lay.addWidget(grp, 1)
         self.stack_controls.addWidget(page)
@@ -1487,8 +1619,25 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         lbl_feature.setProperty("class", "muted")
         controls.addWidget(lbl_feature)
         self.combo_illustration_feature = QtWidgets.QComboBox()
-        self.combo_illustration_feature.setMinimumWidth(260)
+        self.combo_illustration_feature.setMinimumWidth(220)
         controls.addWidget(self.combo_illustration_feature)
+
+        self.chk_show_signal = QtWidgets.QCheckBox("Signal")
+        self.chk_show_signal.setChecked(True)
+        self.chk_show_predicted = QtWidgets.QCheckBox("Predicted")
+        self.chk_show_predicted.setChecked(False)
+        self.chk_show_contribution = QtWidgets.QCheckBox("Contribution")
+        self.chk_show_contribution.setChecked(True)
+        self.chk_show_raw_predictor = QtWidgets.QCheckBox("Raw predictor")
+        self.chk_show_raw_predictor.setChecked(False)
+        for chk in (
+            self.chk_show_signal,
+            self.chk_show_predicted,
+            self.chk_show_contribution,
+            self.chk_show_raw_predictor,
+        ):
+            controls.addWidget(chk)
+            chk.toggled.connect(self._on_illustration_overlay_toggled)
         self.lbl_illustration_stats = QtWidgets.QLabel("")
         self.lbl_illustration_stats.setProperty("class", "muted")
         controls.addWidget(self.lbl_illustration_stats, 1)
@@ -1529,6 +1678,27 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         flmm_lay.addWidget(self.plot_coeff, 1)
         self.tabs_workspace.addTab(flmm_page, "FLMM")
 
+        # Group tab — aggregates per-file fits.
+        group_page = QtWidgets.QWidget()
+        group_lay = QtWidgets.QVBoxLayout(group_page)
+        group_lay.setContentsMargins(10, 10, 10, 10)
+        group_top = QtWidgets.QHBoxLayout()
+        group_top.setSpacing(8)
+        self.lbl_group_summary = QtWidgets.QLabel(
+            "Run a Per-file batch fit to populate the Group view."
+        )
+        self.lbl_group_summary.setProperty("class", "muted")
+        self.lbl_group_summary.setWordWrap(True)
+        group_top.addWidget(self.lbl_group_summary, 1)
+        group_lay.addLayout(group_top)
+        self.plot_group_kernels = pg.PlotWidget(title="Group kernels (mean +/- SEM across animals)")
+        self._style_plot(self.plot_group_kernels)
+        group_lay.addWidget(self.plot_group_kernels, 1)
+        self.plot_group_importance = pg.PlotWidget(title="Group leave-one-out contribution (mean across animals)")
+        self._style_plot(self.plot_group_importance)
+        group_lay.addWidget(self.plot_group_importance, 1)
+        self.tabs_workspace.addTab(group_page, "Group")
+
     def _make_nav_button(self, text: str) -> QtWidgets.QToolButton:
         btn = QtWidgets.QToolButton()
         btn.setText(text)
@@ -1540,7 +1710,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
     def _select_control_page(self, index: int) -> None:
         self.stack_controls.setCurrentIndex(index)
-        buttons = (self.btn_nav_model, self.btn_nav_predictors, self.btn_nav_fit)
+        buttons = (self.btn_nav_model, self.btn_nav_predictors, self.btn_nav_files, self.btn_nav_fit)
         for i, btn in enumerate(buttons):
             btn.setChecked(i == index)
 
@@ -1719,6 +1889,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._visual_mode = int(visual_mode) if isinstance(visual_mode, (int, np.integer)) else 0
         self._group_mode = bool(group_mode)
         self._refresh_predictor_catalog()
+        self._refresh_file_widgets()
+        # Drop cached fits for files that disappeared.
+        live_ids = {self._proc_file_id(p, fallback=f"file_{i + 1}") for i, p in enumerate(self._processed_trials)}
+        for fid in list(self._glm_results_by_file):
+            if fid not in live_ids:
+                self._glm_results_by_file.pop(fid, None)
+                self._fit_summary_by_file.pop(fid, None)
 
         n_trials = len(self._processed_trials)
         psth_shape = tuple(np.shape(psth_mat)) if psth_mat is not None else None
@@ -1734,6 +1911,128 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         if self._predictor_catalog:
             bits.append(f"Available predictors: {len(self._predictor_catalog)}")
         self.lbl_data_status.setText("\n".join(bits))
+
+    # ------------------------------------------------------------------
+    # State serialization (used by project save/load)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _serialize_glm_result(r: GLMResult) -> Dict[str, Any]:
+        return {
+            "predictor_names": list(r.predictor_names or []),
+            "kernels": {k: np.asarray(v, float).tolist() for k, v in (r.kernels or {}).items()},
+            "kernel_tvec": np.asarray(r.kernel_tvec, float).tolist(),
+            "time": np.asarray(r.time, float).tolist() if r.time is not None else [],
+            "y_pred": np.asarray(r.y_pred, float).tolist() if r.y_pred is not None else [],
+            "y_actual": np.asarray(r.y_actual, float).tolist() if r.y_actual is not None else [],
+            "residuals": np.asarray(r.residuals, float).tolist() if r.residuals is not None else [],
+            "r2": float(r.r2),
+            "coefficients": np.asarray(r.coefficients, float).tolist() if r.coefficients is not None else [],
+            "stats": {k: (float(v) if isinstance(v, (int, float, np.floating, np.integer)) else v) for k, v in (r.stats or {}).items()},
+            "feature_importance": [
+                {k: (float(v) if isinstance(v, (int, float, np.floating, np.integer)) else v)
+                 for k, v in (row or {}).items()}
+                for row in (r.feature_importance or [])
+            ],
+        }
+
+    @staticmethod
+    def _deserialize_glm_result(payload: Dict[str, Any]) -> Optional[GLMResult]:
+        if not isinstance(payload, dict):
+            return None
+        try:
+            kernels = {k: np.asarray(v, float) for k, v in (payload.get("kernels", {}) or {}).items()}
+            return GLMResult(
+                predictor_names=list(payload.get("predictor_names", []) or []),
+                kernels=kernels,
+                kernel_tvec=np.asarray(payload.get("kernel_tvec", []), float),
+                time=np.asarray(payload.get("time", []), float),
+                y_pred=np.asarray(payload.get("y_pred", []), float),
+                y_actual=np.asarray(payload.get("y_actual", []), float),
+                residuals=np.asarray(payload.get("residuals", []), float),
+                r2=float(payload.get("r2", 0.0)),
+                coefficients=np.asarray(payload.get("coefficients", []), float),
+                # design_matrix is intentionally not persisted (large, redundant);
+                # contribution overlays will simply be unavailable until refit.
+                design_matrix=np.zeros((0, 0), float),
+                stats=dict(payload.get("stats", {}) or {}),
+                feature_importance=list(payload.get("feature_importance", []) or []),
+            )
+        except Exception as exc:
+            _LOG.warning("Could not deserialize GLM result: %s", exc)
+            return None
+
+    def serialize_state(self) -> Dict[str, Any]:
+        """Return a JSON-serializable snapshot of the latest GLM/FLMM fits."""
+        state: Dict[str, Any] = {
+            "version": 1,
+            "fit_mode": self._fit_mode,
+            "active_file_id": self._active_file_id,
+            "selected_predictors": self._selected_predictor_keys() if hasattr(self, "list_predictors") else [],
+            "settings": {
+                "model_type": int(self.combo_model_type.currentIndex()) if hasattr(self, "combo_model_type") else 0,
+                "basis": self.combo_basis.currentText() if hasattr(self, "combo_basis") else "",
+                "n_basis": int(self.spin_n_basis.value()) if hasattr(self, "spin_n_basis") else 8,
+                "regularization": self.combo_reg.currentText() if hasattr(self, "combo_reg") else "",
+                "alpha": float(self.spin_alpha.value()) if hasattr(self, "spin_alpha") else 1.0,
+                "kernel_pre": float(self.spin_kernel_pre.value()) if hasattr(self, "spin_kernel_pre") else -1.0,
+                "kernel_post": float(self.spin_kernel_post.value()) if hasattr(self, "spin_kernel_post") else 3.0,
+            },
+            "glm_results_by_file": {
+                fid: self._serialize_glm_result(res)
+                for fid, res in self._glm_results_by_file.items()
+            },
+            "fit_summary_by_file": dict(self._fit_summary_by_file),
+            "group_summary": dict(self._group_glm_summary or {}),
+        }
+        if self._glm_result is not None:
+            state["glm_result_active"] = self._serialize_glm_result(self._glm_result)
+        return state
+
+    def deserialize_state(self, state: Dict[str, Any]) -> None:
+        """Restore a snapshot produced by serialize_state()."""
+        if not isinstance(state, dict):
+            return
+        try:
+            self._fit_mode = str(state.get("fit_mode", "all"))
+            if hasattr(self, "combo_fit_scope"):
+                idx = self.combo_fit_scope.findData(self._fit_mode)
+                if idx >= 0:
+                    self.combo_fit_scope.blockSignals(True)
+                    self.combo_fit_scope.setCurrentIndex(idx)
+                    self.combo_fit_scope.blockSignals(False)
+            self._active_file_id = str(state.get("active_file_id", "") or "")
+
+            by_file = state.get("glm_results_by_file", {}) or {}
+            self._glm_results_by_file = {}
+            for fid, payload in by_file.items():
+                res = self._deserialize_glm_result(payload)
+                if res is not None:
+                    self._glm_results_by_file[str(fid)] = res
+            self._fit_summary_by_file = dict(state.get("fit_summary_by_file", {}) or {})
+            self._group_glm_summary = dict(state.get("group_summary", {}) or {})
+
+            active_payload = state.get("glm_result_active")
+            if active_payload:
+                res = self._deserialize_glm_result(active_payload)
+                if res is not None:
+                    self._glm_result = res
+                    self.txt_summary.setPlainText(self._fit_summary_by_file.get(self._active_file_id, ""))
+                    self._plot_glm_kernels(res)
+                    self._plot_glm_fit(res)
+                    self._plot_glm_illustration(res)
+                    self._plot_feature_importance(
+                        res.feature_importance or [],
+                        value_key="delta_r2",
+                        title="GLM leave-one-predictor-out contribution",
+                        y_label="Drop in R^2",
+                    )
+            if self._glm_results_by_file:
+                self._aggregate_group_results()
+            self._refresh_file_widgets()
+            self._update_fit_state_label()
+        except Exception as exc:
+            _LOG.warning("Could not restore temporal modeling state: %s", exc)
 
     # ------------------------------------------------------------------
     # Predictor catalog and extraction
@@ -2209,7 +2508,9 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             return self._interp_to_time(time, source_time, values), "continuous"
         return np.zeros(time.size, float), str(entry.get("kind", "event"))
 
-    def _build_glm_dataset_from_selected_predictors(self) -> Dict[str, Any]:
+    def _build_glm_dataset_from_selected_predictors(
+        self, file_filter: Optional[str] = None
+    ) -> Dict[str, Any]:
         selected = self._selected_predictor_keys()
         if not selected:
             return {"error": "Choose at least one predictor before fitting."}
@@ -2224,6 +2525,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             y_raw = getattr(proc, "output", None)
             y = np.asarray(y_raw, float) if y_raw is not None else np.array([], float)
             file_id = self._proc_file_id(proc, fallback=f"file_{idx + 1}")
+            if file_filter is not None and not self._ids_match(file_id, file_filter) and file_id != file_filter:
+                continue
             if t.size < 3 or y.size != t.size:
                 dropped_records.append(file_id)
                 continue
@@ -2647,6 +2950,60 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._progress_start(label, total)
         step = 0
         work_items: List[Tuple[int, str, np.ndarray, float, int]] = []
+
+        # Pre-compute the basis matrix and per-predictor design columns ONCE,
+        # so each bootstrap only rebuilds the columns of the shifted predictor.
+        try:
+            dt = float(np.nanmedian(np.diff(time)))
+        except Exception:
+            dt = 0.0
+        if not np.isfinite(dt) or dt <= 0:
+            dt = 1.0
+        pre_samp = int(round(abs(kernel_window[0]) / dt))
+        post_samp = int(round(abs(kernel_window[1]) / dt))
+        kernel_len = max(2, pre_samp + post_samp)
+        if basis_type == "bspline":
+            basis_mat = _bspline_basis(n_basis, kernel_len)
+        elif basis_type == "fir":
+            basis_mat = _fir_basis(n_basis, kernel_len)
+        else:
+            basis_mat = _raised_cosine_basis(n_basis, kernel_len)
+
+        T_full = int(time.size)
+
+        def _columns_for_vector(input_vec: np.ndarray) -> Optional[np.ndarray]:
+            v = np.asarray(input_vec, float)
+            if v.size != T_full or not np.any(np.abs(v) > 1e-12):
+                return None
+            cols = np.zeros((T_full, n_basis), float)
+            for b in range(n_basis):
+                kernel = basis_mat[:, b]
+                conv = np.convolve(v, kernel, mode="full")[:T_full]
+                if pre_samp > 0:
+                    conv = np.roll(conv, -pre_samp)
+                    conv[-pre_samp:] = 0.0
+                cols[:, b] = conv
+            return cols
+
+        # Cache columns for every predictor in its un-shifted form.
+        static_cols_cache: Dict[str, np.ndarray] = {}
+        for name, spec in predictors.items():
+            v = ContinuousGLM._predictor_vector(time, spec)
+            cols = _columns_for_vector(v)
+            if cols is not None:
+                static_cols_cache[name] = cols
+        used_predictors = list(static_cols_cache.keys())
+        intercept_col = np.ones((T_full, 1), float)
+        valid_mask = np.isfinite(signal)
+        signal_v = signal[valid_mask]
+        ss_tot_full = float(np.nansum((signal - np.nanmean(signal)) ** 2))
+        alpha_val = float(alpha)
+
+        def _ridge_solve(X: np.ndarray, y: np.ndarray) -> np.ndarray:
+            n_cols = X.shape[1]
+            I = np.eye(n_cols)
+            I[0, 0] = 0.0
+            return np.linalg.solve(X.T @ X + alpha_val * I, X.T @ y)
         row_meta: Dict[int, Tuple[Dict[str, Any], float]] = {}
         for row in rows:
             feature = str(row.get("feature", ""))
@@ -2674,24 +3031,49 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 work_items.append((row_idx, feature, base_vec, reduced_r2, int(seed)))
 
         def _one_shift_fit(job: Tuple[int, str, np.ndarray, float, int]) -> Tuple[int, float]:
+            """
+            Fast circular-shift refit. Only the shifted predictor's columns
+            are recomputed; columns for the other predictors come from the
+            shared static cache. Falls back to the full GLM path if the cache
+            for this feature is unavailable.
+            """
             row_idx, feature, base_vec, reduced_r2, seed = job
             local_rng = np.random.default_rng(seed)
-            shifted_predictors = dict(predictors)
-            shifted_predictors[feature] = {
-                "kind": "vector",
-                "values": self._shift_vector_by_segment(base_vec, segment_slices, local_rng),
-            }
-            shifted = ContinuousGLM().fit(
-                time,
-                signal,
-                shifted_predictors,
-                kernel_window=kernel_window,
-                n_basis=n_basis,
-                basis_type=basis_type,
-                regularization=regularization,
-                alpha=alpha,
-            )
-            return row_idx, float(shifted.r2 - reduced_r2)
+            shifted_vec = self._shift_vector_by_segment(base_vec, segment_slices, local_rng)
+            if feature not in static_cols_cache or regularization not in ("ridge", "ols"):
+                shifted_predictors = dict(predictors)
+                shifted_predictors[feature] = {"kind": "vector", "values": shifted_vec}
+                shifted = ContinuousGLM().fit(
+                    time, signal, shifted_predictors,
+                    kernel_window=kernel_window, n_basis=n_basis,
+                    basis_type=basis_type, regularization=regularization,
+                    alpha=alpha,
+                )
+                return row_idx, float(shifted.r2 - reduced_r2)
+
+            shifted_cols = _columns_for_vector(shifted_vec)
+            if shifted_cols is None:
+                return row_idx, float("nan")
+            blocks = [intercept_col]
+            for name in used_predictors:
+                if name == feature:
+                    blocks.append(shifted_cols)
+                else:
+                    blocks.append(static_cols_cache[name])
+            X = np.hstack(blocks)
+            Xv = X[valid_mask]
+            try:
+                if regularization == "ols":
+                    beta, *_ = np.linalg.lstsq(Xv, signal_v, rcond=None)
+                else:
+                    beta = _ridge_solve(Xv, signal_v)
+            except np.linalg.LinAlgError:
+                return row_idx, float("nan")
+            y_pred = X @ beta
+            residuals = signal - y_pred
+            ss_res = float(np.nansum(residuals ** 2))
+            r2 = 1.0 - ss_res / max(ss_tot_full, 1e-12)
+            return row_idx, float(r2 - reduced_r2)
 
         null_by_row: Dict[int, List[float]] = {row_idx: [] for row_idx in row_meta}
         if work_items:
@@ -2975,12 +3357,190 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.list_predictors.takeItem(sel)
             self._save_temporal_settings()
 
+    # ------------------------------------------------------------------
+    # Scope (Active / All / Per-file batch) handling
+    # ------------------------------------------------------------------
+
+    def _refresh_file_widgets(self) -> None:
+        """Populate combo_active_file and list_files from currently-loaded recordings."""
+        if not hasattr(self, "combo_active_file"):
+            return
+        ids: List[Tuple[str, str]] = []
+        for idx, proc in enumerate(self._processed_trials):
+            file_id = self._proc_file_id(proc, fallback=f"file_{idx + 1}")
+            label = file_id
+            ids.append((file_id, label))
+
+        # Combo
+        self.combo_active_file.blockSignals(True)
+        try:
+            self.combo_active_file.clear()
+            for fid, label in ids:
+                self.combo_active_file.addItem(label, fid)
+            if not ids:
+                self.combo_active_file.addItem("No files loaded", "")
+            target = self._active_file_id
+            if target:
+                idx = self.combo_active_file.findData(target)
+                if idx >= 0:
+                    self.combo_active_file.setCurrentIndex(idx)
+                elif ids:
+                    self.combo_active_file.setCurrentIndex(0)
+                    self._active_file_id = ids[0][0]
+            elif ids:
+                self.combo_active_file.setCurrentIndex(0)
+                self._active_file_id = ids[0][0]
+        finally:
+            self.combo_active_file.blockSignals(False)
+
+        # List
+        if hasattr(self, "list_files"):
+            self.list_files.blockSignals(True)
+            try:
+                self.list_files.clear()
+                for fid, label in ids:
+                    item = QtWidgets.QListWidgetItem(label)
+                    item.setData(QtCore.Qt.ItemDataRole.UserRole, fid)
+                    if fid in self._glm_results_by_file:
+                        item.setText(f"{label}    [fit cached]")
+                        item.setForeground(QtGui.QColor("#6bdb74"))
+                    self.list_files.addItem(item)
+                # Sync selection
+                for i in range(self.list_files.count()):
+                    if self.list_files.item(i).data(QtCore.Qt.ItemDataRole.UserRole) == self._active_file_id:
+                        self.list_files.setCurrentRow(i)
+                        break
+            finally:
+                self.list_files.blockSignals(False)
+        self._update_fit_state_label()
+
+    def _step_active_file(self, delta: int) -> None:
+        if not hasattr(self, "combo_active_file"):
+            return
+        n = self.combo_active_file.count()
+        if n == 0:
+            return
+        idx = max(0, min(n - 1, self.combo_active_file.currentIndex() + int(delta)))
+        self.combo_active_file.setCurrentIndex(idx)
+
+    def _on_active_file_changed(self, *_):
+        if not hasattr(self, "combo_active_file"):
+            return
+        data = self.combo_active_file.currentData()
+        if isinstance(data, str) and data:
+            self._active_file_id = data
+            # Mirror selection in the list
+            if hasattr(self, "list_files"):
+                for i in range(self.list_files.count()):
+                    if self.list_files.item(i).data(QtCore.Qt.ItemDataRole.UserRole) == data:
+                        if self.list_files.currentRow() != i:
+                            self.list_files.blockSignals(True)
+                            self.list_files.setCurrentRow(i)
+                            self.list_files.blockSignals(False)
+                        break
+            # If we are in Active scope and a fit is cached for this file, render it.
+            if self._fit_mode == "active":
+                cached = self._glm_results_by_file.get(self._active_file_id)
+                if cached is not None:
+                    self._glm_result = cached
+                    self.txt_summary.setPlainText(self._fit_summary_by_file.get(self._active_file_id, ""))
+                    self._plot_glm_kernels(cached)
+                    self._plot_glm_fit(cached)
+                    self._plot_glm_illustration(cached)
+                    self._plot_feature_importance(
+                        cached.feature_importance or [],
+                        value_key="delta_r2",
+                        title=f"GLM contribution - {self._active_file_id}",
+                        y_label="Drop in R^2",
+                    )
+        self._update_fit_state_label()
+
+    def _on_file_list_selection_changed(self) -> None:
+        if not hasattr(self, "list_files"):
+            return
+        item = self.list_files.currentItem()
+        if item is None:
+            return
+        fid = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(fid, str) and fid and fid != self._active_file_id:
+            idx = self.combo_active_file.findData(fid)
+            if idx >= 0:
+                self.combo_active_file.setCurrentIndex(idx)
+
+    def _on_fit_scope_changed(self, *_):
+        data = self.combo_fit_scope.currentData()
+        if isinstance(data, str):
+            self._fit_mode = data
+        self._update_fit_state_label()
+
+    def _update_fit_state_label(self) -> None:
+        if not hasattr(self, "lbl_fit_state"):
+            return
+        n_cached = len(self._glm_results_by_file)
+        n_files = len(self._processed_trials)
+        bits = []
+        if self._glm_result is not None:
+            bits.append(f"R^2 = {self._glm_result.r2:.3f}")
+        if n_cached > 0:
+            bits.append(f"{n_cached}/{n_files} files fit")
+        if not bits:
+            bits.append("No fit yet")
+        self.lbl_fit_state.setText(" | ".join(bits))
+
+    def _on_clear_cached_fits(self) -> None:
+        self._glm_results_by_file.clear()
+        self._flmm_results_by_file.clear()
+        self._fit_summary_by_file.clear()
+        self._group_glm_summary = {}
+        self._refresh_file_widgets()
+        if hasattr(self, "lbl_batch_status"):
+            self.lbl_batch_status.setText("Cleared cached per-file fits.")
+        if hasattr(self, "lbl_group_summary"):
+            self.lbl_group_summary.setText(
+                "Run a Per-file batch fit to populate the Group view."
+            )
+        if hasattr(self, "plot_group_kernels"):
+            self.plot_group_kernels.clear()
+        if hasattr(self, "plot_group_importance"):
+            self.plot_group_importance.clear()
+
+    def _on_cancel_clicked(self):
+        self._batch_cancel_requested = True
+        self.btn_cancel.setEnabled(False)
+        self.statusMessage.emit("Cancelling current batch...", 3000)
+
+    def _on_fit_all_files_clicked(self):
+        if not self._processed_trials:
+            self.statusMessage.emit("No recordings loaded.", 5000)
+            return
+        # Force scope to per-file batch and run.
+        idx = self.combo_fit_scope.findData("batch")
+        if idx >= 0:
+            self.combo_fit_scope.setCurrentIndex(idx)
+        self._fit_mode = "batch"
+        self._on_fit_clicked()
+
+    def _on_illustration_overlay_toggled(self, *_):
+        if self._glm_result is not None:
+            self._plot_glm_illustration(self._glm_result)
+
     def _on_fit_clicked(self):
         model_idx = self.combo_model_type.currentIndex()
+        self._batch_cancel_requested = False
         self._set_fit_enabled(False)
+        if hasattr(self, "btn_cancel"):
+            self.btn_cancel.setEnabled(self._fit_mode == "batch")
         try:
             if model_idx == 0:
-                self._fit_glm()
+                if self._fit_mode == "active":
+                    if not self._active_file_id:
+                        self.statusMessage.emit("No active file selected.", 5000)
+                        return
+                    self._fit_glm_catalog(file_filter=self._active_file_id)
+                elif self._fit_mode == "batch":
+                    self._fit_glm_per_file_batch()
+                else:
+                    self._fit_glm_catalog(file_filter=None)
             else:
                 self._fit_flmm()
         except Exception as exc:
@@ -2989,15 +3549,18 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.statusMessage.emit(f"Temporal model fit failed: {exc}", 8000)
         finally:
             self._set_fit_enabled(True)
+            if hasattr(self, "btn_cancel"):
+                self.btn_cancel.setEnabled(False)
             self._progress_finish()
+            self._update_fit_state_label()
 
     # ------------------------------------------------------------------
     # GLM fit
     # ------------------------------------------------------------------
 
-    def _fit_glm_catalog(self) -> None:
+    def _fit_glm_catalog(self, file_filter: Optional[str] = None) -> Optional[GLMResult]:
         self._save_temporal_settings()
-        dataset = self._build_glm_dataset_from_selected_predictors()
+        dataset = self._build_glm_dataset_from_selected_predictors(file_filter=file_filter)
         if "error" in dataset:
             msg = str(dataset.get("error", "Could not build GLM dataset."))
             dropped = dataset.get("dropped_predictors", []) or []
@@ -3006,14 +3569,15 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.txt_summary.setPlainText(msg)
             self.statusMessage.emit(msg.splitlines()[0], 7000)
             self._select_control_page(1)
-            return
+            return None
 
         basis_map = {"Raised cosine": "raised_cosine", "B-spline": "bspline", "FIR": "fir"}
         reg_map = {"Ridge": "ridge", "Lasso": "lasso", "OLS": "ols"}
         kernel_win = (self.spin_kernel_pre.value(), self.spin_kernel_post.value())
         basis_type = basis_map.get(self.combo_basis.currentText(), "raised_cosine")
         regularization = reg_map.get(self.combo_reg.currentText(), "ridge")
-        self._progress_start("Fitting GLM", 0)
+        scope_label = file_filter if file_filter else "all files"
+        self._progress_start(f"Fitting GLM ({scope_label})", 0)
         result = self._glm.fit(
             np.asarray(dataset["time"], float),
             np.asarray(dataset["signal"], float),
@@ -3026,26 +3590,31 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         )
         self._glm_result = result
 
-        self.statusMessage.emit("Calculating GLM leave-one-predictor-out contribution...", 0)
-        QtWidgets.QApplication.processEvents()
-        importance_rows = self._compute_glm_leave_one_out(
-            dataset,
-            result,
-            kernel_win,
-            basis_type,
-            regularization,
-            self.spin_alpha.value(),
-        )
-        n_boot = int(self.spin_glm_bootstrap.value())
-        self._compute_glm_shift_bootstrap_significance(
-            dataset,
-            importance_rows,
-            kernel_win,
-            basis_type,
-            regularization,
-            self.spin_alpha.value(),
-            n_boot,
-        )
+        run_contrib = bool(getattr(self, "chk_run_contrib", None) is None or self.chk_run_contrib.isChecked())
+        if run_contrib:
+            self.statusMessage.emit("Calculating GLM leave-one-predictor-out contribution...", 0)
+            QtWidgets.QApplication.processEvents()
+            importance_rows = self._compute_glm_leave_one_out(
+                dataset,
+                result,
+                kernel_win,
+                basis_type,
+                regularization,
+                self.spin_alpha.value(),
+            )
+            n_boot = int(self.spin_glm_bootstrap.value())
+            self._compute_glm_shift_bootstrap_significance(
+                dataset,
+                importance_rows,
+                kernel_win,
+                basis_type,
+                regularization,
+                self.spin_alpha.value(),
+                n_boot,
+            )
+        else:
+            importance_rows = []
+            n_boot = 0
         result.feature_importance = importance_rows
 
         used_labels = [self._predictor_label(k) for k in result.predictor_names]
@@ -3096,7 +3665,14 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             lines.append(f"Dropped predictors: {', '.join(str(v) for v in dropped_predictors)}")
         if dropped_records:
             lines.append(f"Dropped recordings: {', '.join(str(v) for v in dropped_records)}")
-        self.txt_summary.setPlainText("\n".join(lines))
+        summary_text = "\n".join(lines)
+        self.txt_summary.setPlainText(summary_text)
+
+        # Cache per-file fit if scope was a single file.
+        if file_filter:
+            self._glm_results_by_file[file_filter] = result
+            self._fit_summary_by_file[file_filter] = summary_text
+            self._refresh_file_widgets()
 
         self._plot_glm_kernels(result)
         self._plot_glm_fit(result)
@@ -3110,10 +3686,200 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         if hasattr(self, "tabs_workspace"):
             self.tabs_workspace.setCurrentWidget(self.plot_importance.parentWidget() if importance_rows else self.plot_kernel.parentWidget())
         self.statusMessage.emit(f"GLM fit complete - R^2 = {result.r2:.4f}", 5000)
+        return result
+
+    def _fit_glm_per_file_batch(self) -> None:
+        """Fit each loaded file independently and populate the Group tab."""
+        if not self._processed_trials:
+            self.statusMessage.emit("No recordings loaded.", 5000)
+            return
+        file_ids = [
+            self._proc_file_id(p, fallback=f"file_{i + 1}")
+            for i, p in enumerate(self._processed_trials)
+        ]
+        n = len(file_ids)
+        self._progress_start(f"Per-file batch ({n} files)", n)
+        ok_results: Dict[str, GLMResult] = {}
+        ok_summaries: Dict[str, str] = {}
+        for idx, fid in enumerate(file_ids, 1):
+            if self._batch_cancel_requested:
+                self.statusMessage.emit(f"Batch cancelled after {idx - 1}/{n}.", 6000)
+                break
+            self._progress_update(idx - 1, f"Per-file batch ({idx}/{n})")
+            if hasattr(self, "lbl_batch_status"):
+                self.lbl_batch_status.setText(f"Fitting {idx}/{n}: {fid}")
+                QtWidgets.QApplication.processEvents()
+            try:
+                result = self._fit_glm_catalog(file_filter=fid)
+            except Exception as exc:
+                _LOG.warning("Per-file fit failed for %s: %s", fid, exc)
+                result = None
+            if result is not None:
+                ok_results[fid] = result
+                ok_summaries[fid] = self._fit_summary_by_file.get(fid, "")
+            self._progress_update(idx, f"Per-file batch ({idx}/{n})")
+        if hasattr(self, "lbl_batch_status"):
+            self.lbl_batch_status.setText(
+                f"Batch complete: {len(ok_results)}/{n} files fit successfully."
+            )
+        self._aggregate_group_results()
+        if hasattr(self, "tabs_workspace") and ok_results:
+            self.tabs_workspace.setCurrentWidget(self.plot_group_kernels.parentWidget())
+
+    def _aggregate_group_results(self) -> None:
+        """Average per-file kernels and importance for the Group tab."""
+        if not hasattr(self, "plot_group_kernels"):
+            return
+        results = self._glm_results_by_file
+        self.plot_group_kernels.clear()
+        self.plot_group_importance.clear()
+        try:
+            self.plot_group_kernels.getPlotItem().legend.clear()
+        except Exception:
+            pass
+        try:
+            self.plot_group_importance.getPlotItem().legend.clear()
+        except Exception:
+            pass
+        if not results:
+            self.lbl_group_summary.setText(
+                "Run a Per-file batch fit to populate the Group view."
+            )
+            return
+
+        # Find common predictors and a shared kernel time vector.
+        predictor_lists = [list(r.predictor_names) for r in results.values()]
+        common_keys = set(predictor_lists[0])
+        for lst in predictor_lists[1:]:
+            common_keys &= set(lst)
+        if not common_keys:
+            self.lbl_group_summary.setText(
+                "Per-file fits do not share any common predictor; cannot aggregate."
+            )
+            return
+
+        # Use the first result's kernel_tvec; resample others to it if shapes differ.
+        ref = next(iter(results.values()))
+        ref_t = np.asarray(ref.kernel_tvec, float)
+        kernel_stack: Dict[str, List[np.ndarray]] = {k: [] for k in common_keys}
+        for fid, r in results.items():
+            t = np.asarray(r.kernel_tvec, float)
+            for key in common_keys:
+                kern = r.kernels.get(key)
+                if kern is None:
+                    continue
+                kern = np.asarray(kern, float)
+                if kern.size != ref_t.size:
+                    if t.size and kern.size == t.size:
+                        kern = np.interp(ref_t, t, kern, left=np.nan, right=np.nan)
+                    else:
+                        continue
+                kernel_stack[key].append(kern)
+
+        # Plot mean +/- SEM per predictor.
+        plotted = 0
+        for key, stack in kernel_stack.items():
+            if not stack:
+                continue
+            arr = np.vstack(stack)
+            mean = np.nanmean(arr, axis=0)
+            sem = np.nanstd(arr, axis=0, ddof=1) / np.sqrt(max(arr.shape[0], 1))
+            color = self._kernel_color(key)
+            qcol = QtGui.QColor(color)
+            qcol.setAlpha(60)
+            lo = mean - sem
+            hi = mean + sem
+            self.plot_group_kernels.plot(
+                ref_t, mean, pen=pg.mkPen(color, width=2),
+                name=f"{self._predictor_label(key)} (n={arr.shape[0]})",
+            )
+            fill = pg.FillBetweenItem(
+                pg.PlotDataItem(ref_t, lo),
+                pg.PlotDataItem(ref_t, hi),
+                brush=qcol,
+            )
+            self.plot_group_kernels.addItem(fill)
+            plotted += 1
+        self.plot_group_kernels.setLabel("bottom", "Time", units="s")
+        self.plot_group_kernels.setLabel("left", "Kernel weight")
+        self.plot_group_kernels.addLine(y=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        self.plot_group_kernels.addLine(x=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
+
+        # Aggregate leave-one-out importance: mean delta_r2 across animals.
+        importance_acc: Dict[str, List[float]] = {}
+        importance_labels: Dict[str, str] = {}
+        for r in results.values():
+            for row in r.feature_importance or []:
+                feat = str(row.get("feature", ""))
+                if not feat:
+                    continue
+                val = float(row.get("delta_r2", float("nan")))
+                if not np.isfinite(val):
+                    continue
+                importance_acc.setdefault(feat, []).append(val)
+                importance_labels[feat] = str(row.get("label", feat) or feat)
+        agg_rows: List[Dict[str, Any]] = []
+        for feat, vals in importance_acc.items():
+            arr = np.asarray(vals, float)
+            agg_rows.append({
+                "feature": feat,
+                "label": importance_labels.get(feat, feat),
+                "delta_r2": float(np.nanmean(arr)),
+                "delta_r2_sem": float(np.nanstd(arr, ddof=1) / np.sqrt(max(arr.size, 1))) if arr.size > 1 else 0.0,
+                "n_animals": int(arr.size),
+                "significant": False,
+            })
+        agg_rows.sort(key=lambda r: r.get("delta_r2", -np.inf), reverse=True)
+        self._group_glm_summary = {
+            "n_files": len(results),
+            "common_predictors": len(common_keys),
+            "importance": agg_rows,
+            "kernel_tvec": ref_t.tolist(),
+        }
+        self._render_group_importance(agg_rows)
+        self.lbl_group_summary.setText(
+            f"Group GLM aggregate: {len(results)} animals, {len(common_keys)} common predictors. "
+            f"Kernels show mean +/- SEM across animals."
+        )
+
+    def _render_group_importance(self, rows: List[Dict[str, Any]]) -> None:
+        if not hasattr(self, "plot_group_importance"):
+            return
+        pw = self.plot_group_importance
+        pw.clear()
+        try:
+            pw.getPlotItem().legend.clear()
+        except Exception:
+            pass
+        usable = [r for r in rows if np.isfinite(float(r.get("delta_r2", float("nan"))))]
+        if not usable:
+            txt = pg.TextItem("No group importance available.", color="#c5d2e3")
+            pw.addItem(txt)
+            txt.setPos(0, 0)
+            return
+        usable = usable[:25]
+        vals = np.asarray([float(r.get("delta_r2", 0.0)) for r in usable], float)
+        sems = np.asarray([float(r.get("delta_r2_sem", 0.0)) for r in usable], float)
+        y_pos = np.arange(len(usable), dtype=float)[::-1]
+        brushes = [pg.mkBrush("#4b9df8" if v >= 0 else "#ee99a0") for v in vals]
+        bar = pg.BarGraphItem(x0=np.zeros_like(vals), x1=vals, y=y_pos, height=0.62, brushes=brushes)
+        pw.addItem(bar)
+        # Error bars
+        err = pg.ErrorBarItem(x=vals, y=y_pos, left=sems, right=sems, beam=0.18, pen=pg.mkPen("#c5d2e3"))
+        pw.addItem(err)
+        pw.addLine(x=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        labels = []
+        for pos, row in zip(y_pos, usable):
+            label = self._compact_feature_label(row.get("label", row.get("feature", "")), 46)
+            n_an = int(row.get("n_animals", 0))
+            labels.append((float(pos), f"{label}  (n={n_an})"))
+        pw.getAxis("left").setTicks([labels])
+        pw.setLabel("bottom", "Mean drop in R^2 +/- SEM")
+        pw.setLabel("left", "Feature")
 
     def _fit_glm(self):
         self._fit_glm_catalog()
-        return
+        return  # legacy path below kept for reference
         if not self._processed_trials:
             self.statusMessage.emit("No processed data — run preprocessing first.", 5000)
             return
@@ -3238,6 +4004,11 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             ordered = self._glm_feature_order(result)
             key = ordered[0] if ordered else ""
 
+        show_signal = bool(getattr(self, "chk_show_signal", None) is None or self.chk_show_signal.isChecked())
+        show_pred = bool(getattr(self, "chk_show_predicted", None) is not None and self.chk_show_predicted.isChecked())
+        show_contrib = bool(getattr(self, "chk_show_contribution", None) is None or self.chk_show_contribution.isChecked())
+        show_raw = bool(getattr(self, "chk_show_raw_predictor", None) is not None and self.chk_show_raw_predictor.isChecked())
+
         pw = self.plot_illustration
         vb = self._illustration_vb
         pw.clear()
@@ -3253,15 +4024,41 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         x = np.asarray(result.time, float)
         signal = np.asarray(result.y_actual, float)
+        predicted = np.asarray(result.y_pred, float) if result.y_pred is not None else None
         contribution = self._glm_feature_contribution(result, key)
         if contribution is None:
             self.lbl_illustration_stats.setText("No contribution trace is available for the selected feature.")
             return
         contribution = np.asarray(contribution, float)
-        n = min(x.size, signal.size, contribution.size)
+
+        # Raw predictor input (model-time vector) if requested.
+        raw_predictor: Optional[np.ndarray] = None
+        if show_raw and result.design_matrix is not None and result.predictor_names:
+            try:
+                pred_idx = result.predictor_names.index(key)
+                n_pred = len(result.predictor_names)
+                n_basis = max(1, (int(np.asarray(result.coefficients).size) - 1) // n_pred)
+                lo = 1 + pred_idx * n_basis
+                # Best proxy for the raw input: the un-convolved indicator (sum across basis cols).
+                raw_predictor = np.asarray(result.design_matrix[:, lo:lo + n_basis], float).sum(axis=1)
+            except Exception:
+                raw_predictor = None
+
+        n = min(
+            int(x.size),
+            int(signal.size),
+            int(contribution.size),
+            int(predicted.size) if predicted is not None else int(signal.size),
+            int(raw_predictor.size) if raw_predictor is not None else int(signal.size),
+        )
         x = x[:n]
         signal = signal[:n]
         contribution = contribution[:n]
+        if predicted is not None:
+            predicted = predicted[:n]
+        if raw_predictor is not None:
+            raw_predictor = raw_predictor[:n]
+
         valid = np.isfinite(x) & np.isfinite(signal) & np.isfinite(contribution)
         r_value, p_value, n_corr = self._pearson_stats(signal[valid], contribution[valid])
         p_text = self._p_label(p_value)
@@ -3272,10 +4069,26 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.lbl_illustration_stats.setText(stats_text)
 
         signal_color = "#4b9df8"
+        predicted_color = "#f5a97f"
         feature_color = self._kernel_color(key)
-        pw.plot(x, signal, pen=pg.mkPen(signal_color, width=1.25), name="signal")
-        feat_curve = pg.PlotDataItem(x, contribution, pen=pg.mkPen(feature_color, width=1.8), name=self._predictor_label(key))
-        vb.addItem(feat_curve)
+        raw_color = "#94e2d5"
+
+        if show_signal:
+            pw.plot(x, signal, pen=pg.mkPen(signal_color, width=1.25), name="signal")
+        if show_pred and predicted is not None:
+            pw.plot(x, predicted, pen=pg.mkPen(predicted_color, width=1.0, style=QtCore.Qt.PenStyle.DashLine), name="predicted")
+        if show_contrib:
+            feat_curve = pg.PlotDataItem(
+                x, contribution, pen=pg.mkPen(feature_color, width=1.8),
+                name=self._predictor_label(key),
+            )
+            vb.addItem(feat_curve)
+        if show_raw and raw_predictor is not None:
+            raw_curve = pg.PlotDataItem(
+                x, raw_predictor, pen=pg.mkPen(raw_color, width=1.0, style=QtCore.Qt.PenStyle.DotLine),
+                name=f"{self._predictor_label(key)} (raw)",
+            )
+            vb.addItem(raw_curve)
 
         plot_item = pw.getPlotItem()
         plot_item.getAxis("right").setPen(pg.mkPen(feature_color))
@@ -3283,22 +4096,29 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         plot_item.getAxis("left").setPen(pg.mkPen(signal_color))
         plot_item.getAxis("left").setTextPen(pg.mkPen(signal_color))
         plot_item.setLabel("left", "Signal")
-        plot_item.setLabel("right", "Feature contribution")
+        plot_item.setLabel("right", "Feature contribution / raw")
         plot_item.setLabel("bottom", "Time", units="s")
         pw.addLine(y=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
 
         finite_signal = signal[np.isfinite(signal)]
-        finite_feature = contribution[np.isfinite(contribution)]
-        if finite_signal.size:
+        if finite_signal.size and (show_signal or show_pred):
             y0 = float(np.nanmin(finite_signal))
             y1 = float(np.nanmax(finite_signal))
             pad = max((y1 - y0) * 0.08, 1e-9)
             pw.setYRange(y0 - pad, y1 + pad, padding=0.0)
-        if finite_feature.size:
-            f0 = float(np.nanmin(finite_feature))
-            f1 = float(np.nanmax(finite_feature))
-            pad = max((f1 - f0) * 0.08, 1e-9)
-            vb.setYRange(f0 - pad, f1 + pad, padding=0.0)
+        # Right viewbox range from whichever overlay is shown there.
+        right_arrays: List[np.ndarray] = []
+        if show_contrib:
+            right_arrays.append(contribution[np.isfinite(contribution)])
+        if show_raw and raw_predictor is not None:
+            right_arrays.append(raw_predictor[np.isfinite(raw_predictor)])
+        if right_arrays:
+            stacked = np.concatenate([np.asarray(a, float) for a in right_arrays if a.size])
+            if stacked.size:
+                f0 = float(np.nanmin(stacked))
+                f1 = float(np.nanmax(stacked))
+                pad = max((f1 - f0) * 0.08, 1e-9)
+                vb.setYRange(f0 - pad, f1 + pad, padding=0.0)
         self._update_illustration_view()
 
         finite_x = x[np.isfinite(x)]
