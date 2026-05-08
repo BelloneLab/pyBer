@@ -17,6 +17,7 @@ from analysis_core import (
     BASELINE_METHODS,
     REFERENCE_FIT_METHODS,
     SMOOTHING_METHODS,
+    ARTIFACT_HANDLING_MODES,
 )
 
 
@@ -1345,6 +1346,13 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 "- Global MAD: single threshold for the full trace (fast, stable).\n"
                 "- Adaptive MAD: threshold computed in sliding windows (handles drift)."
             ),
+            "artifact_handling": (
+                "How detected/manual artifact windows affect processing:\n"
+                "- Interpolate: replace windows by linear interpolation before filtering.\n"
+                "- Cut: remove artifact samples from the final processed trace.\n"
+                "- Strong local low-pass: replace only artifact-window samples with a strongly smoothed trace.\n"
+                "- Do nothing: keep the samples unchanged; overlays still show detected artifacts."
+            ),
             "mad_k": (
                 "MAD threshold (k) scales the derivative threshold.\n"
                 "Higher k = fewer artifacts flagged; lower k = more sensitive."
@@ -1521,6 +1529,9 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.combo_artifact = QtWidgets.QComboBox()
         self.combo_artifact.addItems(["Global MAD (dx)", "Adaptive MAD (windowed)"])
         _compact_combo(self.combo_artifact, min_chars=6)
+        self.combo_artifact_handling = QtWidgets.QComboBox()
+        self.combo_artifact_handling.addItems(ARTIFACT_HANDLING_MODES)
+        _compact_combo(self.combo_artifact_handling, min_chars=8)
         self.spin_mad = mk_dspin()
         self.spin_mad.setRange(1.0, 50.0)
         self.spin_mad.setValue(8.0)
@@ -1537,6 +1548,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         art_form.addRow(self.cb_artifact)
         art_form.addRow(self.cb_show_artifact_overlay)
         art_form.addRow(self._label_with_help("Method", "artifact_mode"), self.combo_artifact)
+        art_form.addRow(self._label_with_help("Handling", "artifact_handling"), self.combo_artifact_handling)
         art_form.addRow(self._label_with_help("MAD threshold (k)", "mad_k"), self.spin_mad)
         art_form.addRow(self._label_with_help("Adaptive window (s)", "adaptive_window_s"), self.spin_adapt_win)
         art_form.addRow(self._label_with_help("Artifact pad (s)", "artifact_pad_s"), self.spin_pad)
@@ -1955,6 +1967,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         return text if text else "0"
 
     def _update_section_summaries(self) -> None:
+        handling = self.combo_artifact_handling.currentText()
         if self.cb_artifact.isChecked():
             mode = self.combo_artifact.currentText()
             method = "Adaptive MAD" if mode.startswith("Adaptive") else "Global MAD"
@@ -1962,15 +1975,15 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 summary = (
                     f"{method}, k={self._fmt_num(self.spin_mad.value(), 2)}, "
                     f"window={self._fmt_num(self.spin_adapt_win.value(), 2)}s, "
-                    f"pad={self._fmt_num(self.spin_pad.value(), 2)}s"
+                    f"pad={self._fmt_num(self.spin_pad.value(), 2)}s, {handling}"
                 )
             else:
                 summary = (
                     f"{method}, k={self._fmt_num(self.spin_mad.value(), 2)}, "
-                    f"pad={self._fmt_num(self.spin_pad.value(), 2)}s"
+                    f"pad={self._fmt_num(self.spin_pad.value(), 2)}s, {handling}"
                 )
         else:
-            summary = "Off"
+            summary = f"Detection off, {handling}"
         self.card_artifacts.set_summary(summary)
 
         if self.cb_filtering.isChecked():
@@ -2012,6 +2025,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
 
         widgets = (
             self.combo_artifact,
+            self.combo_artifact_handling,
             self.spin_mad,
             self.spin_adapt_win,
             self.spin_pad,
@@ -2324,6 +2338,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         return ProcessingParams(
             artifact_detection_enabled=self.cb_artifact.isChecked(),
             artifact_mode=self.combo_artifact.currentText(),
+            artifact_handling=self.combo_artifact_handling.currentText(),
             mad_k=float(self.spin_mad.value()),
             adaptive_window_s=float(self.spin_adapt_win.value()),
             artifact_pad_s=float(self.spin_pad.value()),
@@ -2359,6 +2374,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
             return
         self.cb_artifact.setChecked(bool(getattr(params, "artifact_detection_enabled", True)))
         self.combo_artifact.setCurrentText(str(params.artifact_mode))
+        self.combo_artifact_handling.setCurrentText(str(getattr(params, "artifact_handling", "Interpolate")))
         self.spin_mad.setValue(float(params.mad_k))
         self.spin_adapt_win.setValue(float(params.adaptive_window_s))
         self.spin_pad.setValue(float(params.artifact_pad_s))

@@ -50,6 +50,13 @@ SMOOTHING_METHODS = [
     "Moving median",
 ]
 
+ARTIFACT_HANDLING_MODES = [
+    "Interpolate",
+    "Cut",
+    "Strong local low-pass",
+    "Do nothing",
+]
+
 # Output modes
 OUTPUT_MODES = [
     # 1) dFF (non motion corrected)
@@ -80,6 +87,7 @@ class ProcessingParams:
     # -------------------------
     artifact_detection_enabled: bool = True
     artifact_mode: str = "Global MAD (dx)"  # or "Adaptive MAD (windowed)"
+    artifact_handling: str = "Interpolate"
     mad_k: float = 8.0
     adaptive_window_s: float = 5.0
     artifact_pad_s: float = 0.25
@@ -668,6 +676,82 @@ def _lowpass_sos(x: np.ndarray, fs: float, cutoff: float, order: int) -> np.ndar
     wn = min(0.999, max(1e-6, cutoff / nyq))
     sos = butter(order, wn, btype="low", output="sos")
     return np.asarray(sosfiltfilt(sos, y), float)
+
+
+def _normalize_artifact_handling(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("cut"):
+        return "Cut"
+    if "low" in text and "pass" in text:
+        return "Strong local low-pass"
+    if text.startswith("do") or text in {"none", "nothing", "off", "ignore"}:
+        return "Do nothing"
+    return "Interpolate"
+
+
+def _strong_local_lowpass_artifacts(
+    x: np.ndarray,
+    mask: np.ndarray,
+    fs: float,
+    base_cutoff_hz: float,
+    filter_order: int,
+) -> np.ndarray:
+    y = np.asarray(x, float).copy()
+    m = np.asarray(mask, bool)
+    if y.size == 0 or m.size != y.size or not np.any(m):
+        return y
+    bridged = y.copy()
+    bridged[m] = np.nan
+    bridged = interpolate_nans(bridged)
+    if np.any(~np.isfinite(bridged)):
+        return y
+
+    # Use a clearly stronger local cutoff than the main anti-aliasing filter.
+    try:
+        base_cutoff = float(base_cutoff_hz)
+    except Exception:
+        base_cutoff = 12.0
+    if not np.isfinite(base_cutoff) or base_cutoff <= 0:
+        base_cutoff = 12.0
+    cutoff = min(2.0, max(0.05, 0.25 * base_cutoff))
+    order = int(max(3, min(6, int(filter_order) + 1)))
+    try:
+        replacement = _lowpass_sos(bridged, fs, cutoff, order)
+    except Exception:
+        replacement = bridged
+    y[m] = replacement[m]
+    return y
+
+
+def _apply_artifact_handling(
+    sig: np.ndarray,
+    ref: np.ndarray,
+    mask: np.ndarray,
+    fs: float,
+    params: ProcessingParams,
+) -> Tuple[np.ndarray, np.ndarray, str]:
+    handling = _normalize_artifact_handling(getattr(params, "artifact_handling", "Interpolate"))
+    sig_corr = np.asarray(sig, float).copy()
+    ref_corr = np.asarray(ref, float).copy()
+    m = np.asarray(mask, bool)
+    if sig_corr.size == 0 or ref_corr.size == 0 or m.size != sig_corr.size or not np.any(m):
+        return sig_corr, ref_corr, handling
+
+    if handling == "Do nothing" or handling == "Cut":
+        return sig_corr, ref_corr, handling
+
+    if handling == "Strong local low-pass":
+        cutoff = float(getattr(params, "lowpass_hz", 12.0))
+        order = int(getattr(params, "filter_order", 3))
+        return (
+            _strong_local_lowpass_artifacts(sig_corr, m, fs, cutoff, order),
+            _strong_local_lowpass_artifacts(ref_corr, m, fs, cutoff, order),
+            handling,
+        )
+
+    sig_corr[m] = np.nan
+    ref_corr[m] = np.nan
+    return interpolate_nans(sig_corr), interpolate_nans(ref_corr), handling
 
 
 def _window_samples_from_seconds(
@@ -1480,14 +1564,11 @@ class PhotometryProcessor:
         mask = apply_manual_regions(t, mask, manual_regions_sec or [])
 
         # ---------------------------------------------------------------------
-        # 4) Mask artifacts (set NaN) then interpolate (keeps timebase intact)
+        # 4) Apply selected artifact handling.
+        #    Interpolate is the historical default and keeps the timebase intact.
+        #    Cut is applied after resampling so all processed arrays stay aligned.
         # ---------------------------------------------------------------------
-        sig_corr = sig.copy()
-        ref_corr = ref.copy()
-        sig_corr[mask] = np.nan
-        ref_corr[mask] = np.nan
-        sig_corr = interpolate_nans(sig_corr)
-        ref_corr = interpolate_nans(ref_corr)
+        sig_corr, ref_corr, artifact_handling = _apply_artifact_handling(sig, ref, mask, fs, params)
 
         # ---------------------------------------------------------------------
         # 5) Low-pass filter before decimation (anti-aliasing)
@@ -1509,6 +1590,16 @@ class PhotometryProcessor:
 
         # Resample the envelope for display (same timebase as processed)
         _, hi2, lo2, _ = _resample_pair_to_target_fs(t, hi_raw, lo_raw, fs, target_fs)
+
+        if artifact_handling == "Cut" and np.any(mask):
+            mask2 = np.interp(t2, t, mask.astype(float), left=0.0, right=0.0) > 0.5
+            keep = ~mask2
+            if np.sum(keep) >= 3:
+                t2 = t2[keep]
+                sig2 = sig2[keep]
+                ref2 = ref2[keep]
+                hi2 = hi2[keep]
+                lo2 = lo2[keep]
 
         # ---------------------------------------------------------------------
         # 7) A/D overlay (if present): interpolate and binarize
@@ -1612,8 +1703,10 @@ class PhotometryProcessor:
             out = dff_sig
 
         context_parts = []
+        if np.any(mask):
+            context_parts.append(f"Artifacts: {artifact_handling}")
         if mode == "Raw signal (465)":
-            context_parts.append("Raw 465 after artifact interpolation, filtering, and resampling")
+            context_parts.append("Raw 465 after artifact handling, filtering, and resampling")
         else:
             baseline_desc = f"Baseline: {params.baseline_method} (lambda={float(params.baseline_lambda):.2e})"
             if mode in (

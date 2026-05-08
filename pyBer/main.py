@@ -5132,6 +5132,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return (
             bool(getattr(params, "artifact_detection_enabled", True)),
             str(params.artifact_mode),
+            str(getattr(params, "artifact_handling", "Interpolate")),
             float(params.mad_k),
             float(params.adaptive_window_s),
             float(params.artifact_pad_s),
