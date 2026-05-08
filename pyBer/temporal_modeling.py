@@ -915,6 +915,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._saved_predictor_keys: List[str] = []
         self._kernel_visible: Dict[str, bool] = {}
         self._kernel_filter_guard = False
+        self._illustration_vb: Optional[pg.ViewBox] = None
         self._glm = ContinuousGLM()
         self._flmm = TrialFLMM()
         self._glm_result: Optional[GLMResult] = None
@@ -1428,6 +1429,33 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         prediction_lay.addWidget(self.plot_prediction, 1)
         self.tabs_workspace.addTab(prediction_page, "Prediction")
 
+        illustration_page = QtWidgets.QWidget()
+        illustration_lay = QtWidgets.QVBoxLayout(illustration_page)
+        illustration_lay.setContentsMargins(10, 10, 10, 10)
+        controls = QtWidgets.QHBoxLayout()
+        controls.setSpacing(8)
+        lbl_feature = QtWidgets.QLabel("Overlay feature")
+        lbl_feature.setProperty("class", "muted")
+        controls.addWidget(lbl_feature)
+        self.combo_illustration_feature = QtWidgets.QComboBox()
+        self.combo_illustration_feature.setMinimumWidth(260)
+        controls.addWidget(self.combo_illustration_feature)
+        self.lbl_illustration_stats = QtWidgets.QLabel("")
+        self.lbl_illustration_stats.setProperty("class", "muted")
+        controls.addWidget(self.lbl_illustration_stats, 1)
+        illustration_lay.addLayout(controls)
+        self.plot_illustration = pg.PlotWidget(title="Signal and selected feature contribution")
+        self._style_plot(self.plot_illustration)
+        pi = self.plot_illustration.getPlotItem()
+        pi.showAxis("right")
+        self._illustration_vb = pg.ViewBox()
+        pi.scene().addItem(self._illustration_vb)
+        pi.getAxis("right").linkToView(self._illustration_vb)
+        self._illustration_vb.setXLink(pi)
+        pi.vb.sigResized.connect(self._update_illustration_view)
+        illustration_lay.addWidget(self.plot_illustration, 1)
+        self.tabs_workspace.addTab(illustration_page, "Illustration")
+
         residual_page = QtWidgets.QWidget()
         residual_lay = QtWidgets.QVBoxLayout(residual_page)
         residual_lay.setContentsMargins(10, 10, 10, 10)
@@ -1545,6 +1573,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.list_kernel_filter.itemChanged.connect(self._on_kernel_filter_changed)
             self.btn_kernel_all.clicked.connect(lambda: self._set_all_kernels_visible(True))
             self.btn_kernel_none.clicked.connect(lambda: self._set_all_kernels_visible(False))
+        if hasattr(self, "combo_illustration_feature"):
+            self.combo_illustration_feature.currentIndexChanged.connect(self._on_illustration_feature_changed)
 
     def _load_temporal_settings(self) -> None:
         self._loading_settings = True
@@ -1758,6 +1788,98 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self._kernel_filter_guard = False
         if self._glm_result is not None:
             self._plot_glm_kernels(self._glm_result, refresh_filter=False)
+
+    def _update_illustration_view(self) -> None:
+        if not hasattr(self, "plot_illustration") or self._illustration_vb is None:
+            return
+        plot_item = self.plot_illustration.getPlotItem()
+        self._illustration_vb.setGeometry(plot_item.vb.sceneBoundingRect())
+        self._illustration_vb.linkedViewChanged(plot_item.vb, self._illustration_vb.XAxis)
+
+    def _glm_feature_order(self, result: GLMResult) -> List[str]:
+        ordered: List[str] = []
+        for row in result.feature_importance or []:
+            key = str(row.get("feature", "") or "")
+            if key in result.predictor_names and key not in ordered:
+                ordered.append(key)
+        for key in result.predictor_names:
+            if key not in ordered:
+                ordered.append(key)
+        return ordered
+
+    def _sync_illustration_features(self, result: GLMResult) -> None:
+        if not hasattr(self, "combo_illustration_feature"):
+            return
+        current = self.combo_illustration_feature.currentData(QtCore.Qt.ItemDataRole.UserRole)
+        self.combo_illustration_feature.blockSignals(True)
+        try:
+            self.combo_illustration_feature.clear()
+            for key in self._glm_feature_order(result):
+                self.combo_illustration_feature.addItem(self._predictor_label(key), key)
+            if isinstance(current, str) and current:
+                idx = self.combo_illustration_feature.findData(current, QtCore.Qt.ItemDataRole.UserRole)
+                if idx >= 0:
+                    self.combo_illustration_feature.setCurrentIndex(idx)
+        finally:
+            self.combo_illustration_feature.blockSignals(False)
+
+    @staticmethod
+    def _pearson_stats(x: np.ndarray, y: np.ndarray) -> Tuple[float, float, int]:
+        xv = np.asarray(x, float)
+        yv = np.asarray(y, float)
+        m = np.isfinite(xv) & np.isfinite(yv)
+        xv = xv[m]
+        yv = yv[m]
+        if xv.size < 3 or np.nanstd(xv) <= 1e-12 or np.nanstd(yv) <= 1e-12:
+            return float("nan"), float("nan"), int(xv.size)
+        try:
+            from scipy import stats as _stats
+            res = _stats.pearsonr(xv, yv)
+            return float(res.statistic), float(res.pvalue), int(xv.size)
+        except Exception:
+            return float(np.corrcoef(xv, yv)[0, 1]), float("nan"), int(xv.size)
+
+    @staticmethod
+    def _p_label(p_value: float) -> str:
+        if not np.isfinite(p_value):
+            return "p = n/a"
+        if p_value < 1e-4:
+            return "p < 1e-4"
+        return f"p = {p_value:.3g}"
+
+    @staticmethod
+    def _p_stars(p_value: float) -> str:
+        if not np.isfinite(p_value):
+            return ""
+        if p_value < 0.001:
+            return "***"
+        if p_value < 0.01:
+            return "**"
+        if p_value < 0.05:
+            return "*"
+        return "n.s."
+
+    def _glm_feature_contribution(self, result: GLMResult, key: str) -> Optional[np.ndarray]:
+        if key not in result.predictor_names:
+            return None
+        n_pred = len(result.predictor_names)
+        if n_pred <= 0 or result.design_matrix is None or result.coefficients is None:
+            return None
+        n_basis = (int(np.asarray(result.coefficients).size) - 1) // n_pred
+        if n_basis <= 0:
+            return None
+        pred_idx = result.predictor_names.index(key)
+        lo = 1 + pred_idx * n_basis
+        hi = lo + n_basis
+        X = np.asarray(result.design_matrix, float)
+        beta = np.asarray(result.coefficients, float)
+        if X.ndim != 2 or hi > X.shape[1] or hi > beta.size:
+            return None
+        return X[:, lo:hi] @ beta[lo:hi]
+
+    def _on_illustration_feature_changed(self, *_args) -> None:
+        if self._glm_result is not None:
+            self._plot_glm_illustration(self._glm_result)
 
     def _selected_predictor_keys(self) -> List[str]:
         keys: List[str] = []
@@ -2176,6 +2298,17 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         used.add(name)
         return name
 
+    @staticmethod
+    def _flmm_term_name(index: int, used: set[str]) -> str:
+        base = f"pyber_x{max(1, int(index)):06d}z"
+        name = base
+        i = 2
+        while name in used:
+            name = f"{base}_{i}"
+            i += 1
+        used.add(name)
+        return name
+
     def _flmm_matrix_and_labels(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[str], str]:
         self._flmm_row_meta = []
         if self._per_file_mats:
@@ -2350,7 +2483,10 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 continue
             values[~finite] = mean
             values = (values - mean) / std
-            term = self._safe_design_name(self._predictor_label(key), used_names)
+            # fastFMM detects functional covariates by shared name prefixes.
+            # Human labels such as "Distance" and "Distance to point" collide,
+            # so use neutral non-prefixing IDs and keep labels separately.
+            term = self._flmm_term_name(len(terms) + 1, used_names)
             design[term] = values
             terms.append(term)
             term_labels[term] = self._predictor_label(key)
@@ -2838,6 +2974,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         self._plot_glm_kernels(result)
         self._plot_glm_fit(result)
+        self._plot_glm_illustration(result)
         self._plot_feature_importance(
             importance_rows,
             value_key="delta_r2",
@@ -2912,6 +3049,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         # Plot kernels
         self._plot_glm_kernels(result)
         self._plot_glm_fit(result)
+        self._plot_glm_illustration(result)
         if hasattr(self, "tabs_workspace"):
             self.tabs_workspace.setCurrentWidget(self.plot_kernel.parentWidget())
         self.statusMessage.emit(f"GLM fit complete — R² = {result.r2:.4f}", 5000)
@@ -2964,6 +3102,88 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         rw.addLine(y=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
         rw.setLabel("bottom", "Time", units="s")
         rw.setLabel("left", "Residual")
+
+    def _plot_glm_illustration(self, result: GLMResult) -> None:
+        if not hasattr(self, "plot_illustration") or self._illustration_vb is None:
+            return
+        self._sync_illustration_features(result)
+        key = self.combo_illustration_feature.currentData(QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(key, str) or not key:
+            ordered = self._glm_feature_order(result)
+            key = ordered[0] if ordered else ""
+
+        pw = self.plot_illustration
+        vb = self._illustration_vb
+        pw.clear()
+        vb.clear()
+        try:
+            pw.getPlotItem().legend.clear()
+        except Exception:
+            pass
+        pw.setTitle("Signal and selected feature contribution")
+        if not key:
+            self.lbl_illustration_stats.setText("No fitted GLM feature is available.")
+            return
+
+        x = np.asarray(result.time, float)
+        signal = np.asarray(result.y_actual, float)
+        contribution = self._glm_feature_contribution(result, key)
+        if contribution is None:
+            self.lbl_illustration_stats.setText("No contribution trace is available for the selected feature.")
+            return
+        contribution = np.asarray(contribution, float)
+        n = min(x.size, signal.size, contribution.size)
+        x = x[:n]
+        signal = signal[:n]
+        contribution = contribution[:n]
+        valid = np.isfinite(x) & np.isfinite(signal) & np.isfinite(contribution)
+        r_value, p_value, n_corr = self._pearson_stats(signal[valid], contribution[valid])
+        p_text = self._p_label(p_value)
+        stars = self._p_stars(p_value)
+        stats_text = f"Pearson r = {r_value:.3f}, {p_text}, n = {n_corr}"
+        if stars:
+            stats_text += f" ({stars})"
+        self.lbl_illustration_stats.setText(stats_text)
+
+        signal_color = "#4b9df8"
+        feature_color = self._kernel_color(key)
+        pw.plot(x, signal, pen=pg.mkPen(signal_color, width=1.25), name="signal")
+        feat_curve = pg.PlotDataItem(x, contribution, pen=pg.mkPen(feature_color, width=1.8), name=self._predictor_label(key))
+        vb.addItem(feat_curve)
+
+        plot_item = pw.getPlotItem()
+        plot_item.getAxis("right").setPen(pg.mkPen(feature_color))
+        plot_item.getAxis("right").setTextPen(pg.mkPen(feature_color))
+        plot_item.getAxis("left").setPen(pg.mkPen(signal_color))
+        plot_item.getAxis("left").setTextPen(pg.mkPen(signal_color))
+        plot_item.setLabel("left", "Signal")
+        plot_item.setLabel("right", "Feature contribution")
+        plot_item.setLabel("bottom", "Time", units="s")
+        pw.addLine(y=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
+
+        finite_signal = signal[np.isfinite(signal)]
+        finite_feature = contribution[np.isfinite(contribution)]
+        if finite_signal.size:
+            y0 = float(np.nanmin(finite_signal))
+            y1 = float(np.nanmax(finite_signal))
+            pad = max((y1 - y0) * 0.08, 1e-9)
+            pw.setYRange(y0 - pad, y1 + pad, padding=0.0)
+        if finite_feature.size:
+            f0 = float(np.nanmin(finite_feature))
+            f1 = float(np.nanmax(finite_feature))
+            pad = max((f1 - f0) * 0.08, 1e-9)
+            vb.setYRange(f0 - pad, f1 + pad, padding=0.0)
+        self._update_illustration_view()
+
+        finite_x = x[np.isfinite(x)]
+        if finite_x.size and finite_signal.size:
+            xr0 = float(np.nanmin(finite_x))
+            xr1 = float(np.nanmax(finite_x))
+            yr0 = float(np.nanmin(finite_signal))
+            yr1 = float(np.nanmax(finite_signal))
+            txt = pg.TextItem(stats_text, color="#e9f0fb", anchor=(0.0, 0.0))
+            pw.addItem(txt)
+            txt.setPos(xr0 + 0.02 * max(xr1 - xr0, 1e-9), yr1 - 0.08 * max(yr1 - yr0, 1e-9))
 
     def _plot_feature_importance(
         self,
