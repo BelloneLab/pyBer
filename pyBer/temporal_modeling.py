@@ -13,6 +13,8 @@ PostProcessingPanel side-rail/dock system.
 """
 from __future__ import annotations
 
+import concurrent.futures
+import hashlib
 import logging
 import os
 import re
@@ -911,6 +913,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._settings = QtCore.QSettings("BelloneLab", "pyBer")
         self._loading_settings = True
         self._saved_predictor_keys: List[str] = []
+        self._kernel_visible: Dict[str, bool] = {}
+        self._kernel_filter_guard = False
         self._glm = ContinuousGLM()
         self._flmm = TrialFLMM()
         self._glm_result: Optional[GLMResult] = None
@@ -1011,6 +1015,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.spin_glm_bootstrap.setSpecialValueText("off")
         self.spin_glm_bootstrap.setToolTip("Circular-shift bootstraps for leave-one-out contribution p-values.")
         gl.addRow("Shift bootstraps:", self.spin_glm_bootstrap)
+
+        self.spin_glm_jobs = QtWidgets.QSpinBox()
+        max_jobs = max(1, os.cpu_count() or 1)
+        self.spin_glm_jobs.setRange(1, max_jobs)
+        self.spin_glm_jobs.setValue(min(4, max_jobs))
+        self.spin_glm_jobs.setToolTip("Parallel jobs used for circular-shift bootstrap fits.")
+        gl.addRow("Bootstrap jobs:", self.spin_glm_jobs)
 
         root.addWidget(self.grp_glm)
 
@@ -1275,6 +1286,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.spin_glm_bootstrap.setSpecialValueText("off")
         self.spin_glm_bootstrap.setToolTip("Circular-shift bootstraps for leave-one-out contribution p-values.")
         gl.addRow("Shift bootstraps", self.spin_glm_bootstrap)
+
+        self.spin_glm_jobs = QtWidgets.QSpinBox()
+        max_jobs = max(1, os.cpu_count() or 1)
+        self.spin_glm_jobs.setRange(1, max_jobs)
+        self.spin_glm_jobs.setValue(min(4, max_jobs))
+        self.spin_glm_jobs.setToolTip("Parallel jobs used for circular-shift bootstrap fits.")
+        gl.addRow("Bootstrap jobs", self.spin_glm_jobs)
         lay.addWidget(self.grp_glm)
 
         self.grp_flmm = QtWidgets.QGroupBox("FLMM Settings")
@@ -1379,6 +1397,24 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         kernel_page = QtWidgets.QWidget()
         kernel_lay = QtWidgets.QVBoxLayout(kernel_page)
         kernel_lay.setContentsMargins(10, 10, 10, 10)
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.setSpacing(8)
+        lbl_filter = QtWidgets.QLabel("Show kernels")
+        lbl_filter.setProperty("class", "muted")
+        filter_row.addWidget(lbl_filter)
+        self.btn_kernel_all = QtWidgets.QPushButton("All")
+        self.btn_kernel_none = QtWidgets.QPushButton("None")
+        filter_row.addWidget(self.btn_kernel_all)
+        filter_row.addWidget(self.btn_kernel_none)
+        self.list_kernel_filter = QtWidgets.QListWidget()
+        self.list_kernel_filter.setMaximumHeight(86)
+        self.list_kernel_filter.setFlow(QtWidgets.QListView.Flow.LeftToRight)
+        self.list_kernel_filter.setWrapping(True)
+        self.list_kernel_filter.setResizeMode(QtWidgets.QListView.ResizeMode.Adjust)
+        self.list_kernel_filter.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list_kernel_filter.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        filter_row.addWidget(self.list_kernel_filter, 1)
+        kernel_lay.addLayout(filter_row)
         self.plot_kernel = pg.PlotWidget(title="Estimated kernels")
         self._style_plot(self.plot_kernel)
         kernel_lay.addWidget(self.plot_kernel, 1)
@@ -1496,6 +1532,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.spin_kernel_pre,
             self.spin_kernel_post,
             self.spin_glm_bootstrap,
+            self.spin_glm_jobs,
             self.spin_nknots,
             self.spin_boots,
         ):
@@ -1504,6 +1541,10 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 signal.connect(lambda *_: self._save_temporal_settings())
         for edit in (self.edit_formula, self.edit_random, self.edit_group_var):
             edit.editingFinished.connect(self._save_temporal_settings)
+        if hasattr(self, "list_kernel_filter"):
+            self.list_kernel_filter.itemChanged.connect(self._on_kernel_filter_changed)
+            self.btn_kernel_all.clicked.connect(lambda: self._set_all_kernels_visible(True))
+            self.btn_kernel_none.clicked.connect(lambda: self._set_all_kernels_visible(False))
 
     def _load_temporal_settings(self) -> None:
         self._loading_settings = True
@@ -1520,6 +1561,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.spin_kernel_pre.setValue(float(self._settings.value(prefix + "kernel_pre", self.spin_kernel_pre.value())))
             self.spin_kernel_post.setValue(float(self._settings.value(prefix + "kernel_post", self.spin_kernel_post.value())))
             self.spin_glm_bootstrap.setValue(int(self._settings.value(prefix + "glm_shift_bootstraps", self.spin_glm_bootstrap.value())))
+            self.spin_glm_jobs.setValue(int(self._settings.value(prefix + "glm_bootstrap_jobs", self.spin_glm_jobs.value())))
             self.edit_formula.setText(str(self._settings.value(prefix + "flmm_formula", self.edit_formula.text()) or "Y.obs ~ 1"))
             self.edit_random.setText(str(self._settings.value(prefix + "flmm_random", self.edit_random.text()) or "~1"))
             self.edit_group_var.setText(str(self._settings.value(prefix + "flmm_group_var", self.edit_group_var.text()) or "subject"))
@@ -1542,6 +1584,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._settings.setValue(prefix + "kernel_pre", self.spin_kernel_pre.value())
         self._settings.setValue(prefix + "kernel_post", self.spin_kernel_post.value())
         self._settings.setValue(prefix + "glm_shift_bootstraps", self.spin_glm_bootstrap.value())
+        self._settings.setValue(prefix + "glm_bootstrap_jobs", self.spin_glm_jobs.value())
         self._settings.setValue(prefix + "flmm_formula", self.edit_formula.text().strip())
         self._settings.setValue(prefix + "flmm_random", self.edit_random.text().strip())
         self._settings.setValue(prefix + "flmm_group_var", self.edit_group_var.text().strip())
@@ -1659,6 +1702,62 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         if len(text) > max_len:
             return text[:max_len - 3] + "..."
         return text
+
+    @staticmethod
+    def _kernel_color(key: object) -> str:
+        palette = [
+            "#4b9df8", "#f5a97f", "#6bdb74", "#ee99a0", "#c6a0f6",
+            "#89dceb", "#f5c542", "#5fd0c5", "#ff7ab2", "#a6e3a1",
+            "#fab387", "#74c7ec", "#b4befe", "#f38ba8", "#94e2d5",
+            "#eba0ac", "#8bd5ca", "#eed49f", "#91d7e3", "#f5bde6",
+        ]
+        digest = hashlib.blake2s(str(key).encode("utf-8", errors="replace"), digest_size=2).digest()
+        return palette[int.from_bytes(digest, "little") % len(palette)]
+
+    def _sync_kernel_filter(self, result: GLMResult) -> None:
+        if not hasattr(self, "list_kernel_filter"):
+            return
+        names = list(result.predictor_names or result.kernels.keys())
+        self._kernel_filter_guard = True
+        try:
+            self.list_kernel_filter.clear()
+            for name in names:
+                visible = bool(self._kernel_visible.get(name, True))
+                self._kernel_visible[name] = visible
+                label = self._compact_feature_label(self._predictor_label(name), 34)
+                item = QtWidgets.QListWidgetItem(label)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, name)
+                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(QtCore.Qt.CheckState.Checked if visible else QtCore.Qt.CheckState.Unchecked)
+                item.setForeground(QtGui.QColor(self._kernel_color(name)))
+                self.list_kernel_filter.addItem(item)
+        finally:
+            self._kernel_filter_guard = False
+
+    def _on_kernel_filter_changed(self, item: QtWidgets.QListWidgetItem) -> None:
+        if self._kernel_filter_guard:
+            return
+        key = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(key, str) and key:
+            self._kernel_visible[key] = item.checkState() == QtCore.Qt.CheckState.Checked
+        if self._glm_result is not None:
+            self._plot_glm_kernels(self._glm_result, refresh_filter=False)
+
+    def _set_all_kernels_visible(self, visible: bool) -> None:
+        if not hasattr(self, "list_kernel_filter"):
+            return
+        self._kernel_filter_guard = True
+        try:
+            for i in range(self.list_kernel_filter.count()):
+                item = self.list_kernel_filter.item(i)
+                key = item.data(QtCore.Qt.ItemDataRole.UserRole)
+                if isinstance(key, str) and key:
+                    self._kernel_visible[key] = bool(visible)
+                item.setCheckState(QtCore.Qt.CheckState.Checked if visible else QtCore.Qt.CheckState.Unchecked)
+        finally:
+            self._kernel_filter_guard = False
+        if self._glm_result is not None:
+            self._plot_glm_kernels(self._glm_result, refresh_filter=False)
 
     def _selected_predictor_keys(self) -> List[str]:
         keys: List[str] = []
@@ -2314,8 +2413,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         segment_slices = list(dataset.get("segment_slices", []) or [])
         rng = np.random.default_rng()
         total = max(1, int(n_boot) * len(rows))
-        self._progress_start("GLM circular-shift test", total)
+        max_jobs = max(1, min(int(getattr(self, "spin_glm_jobs", None).value() if hasattr(self, "spin_glm_jobs") else 1), os.cpu_count() or 1))
+        n_basis = int(self.spin_n_basis.value())
+        label = f"GLM circular-shift test ({max_jobs} job{'s' if max_jobs != 1 else ''})"
+        self._progress_start(label, total)
         step = 0
+        work_items: List[Tuple[int, str, np.ndarray, float, int]] = []
+        row_meta: Dict[int, Tuple[Dict[str, Any], float]] = {}
         for row in rows:
             feature = str(row.get("feature", ""))
             obs_delta = float(row.get("delta_r2", float("nan")))
@@ -2332,38 +2436,64 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 row["significant"] = False
                 row["bootstrap_n"] = 0
                 step += int(n_boot)
-                self._progress_update(step, "GLM circular-shift test")
+                self._progress_update(step, label)
                 continue
 
             base_vec = ContinuousGLM._predictor_vector(time, spec)
-            null_deltas: List[float] = []
-            for _ in range(int(n_boot)):
-                shifted_predictors = dict(predictors)
-                shifted_predictors[feature] = {
-                    "kind": "vector",
-                    "values": self._shift_vector_by_segment(base_vec, segment_slices, rng),
-                }
-                try:
-                    shifted = ContinuousGLM().fit(
-                        time,
-                        signal,
-                        shifted_predictors,
-                        kernel_window=kernel_window,
-                        n_basis=self.spin_n_basis.value(),
-                        basis_type=basis_type,
-                        regularization=regularization,
-                        alpha=alpha,
-                    )
-                    null_delta = float(shifted.r2 - reduced_r2)
-                    if np.isfinite(null_delta):
-                        null_deltas.append(null_delta)
-                except Exception as exc:
-                    _LOG.debug("Circular-shift GLM bootstrap failed for %s: %s", feature, exc)
-                step += 1
-                if step == total or step % 5 == 0:
-                    self._progress_update(step, "GLM circular-shift test")
+            row_idx = id(row)
+            row_meta[row_idx] = (row, obs_delta)
+            for seed in rng.integers(0, np.iinfo(np.uint32).max, size=int(n_boot), dtype=np.uint32):
+                work_items.append((row_idx, feature, base_vec, reduced_r2, int(seed)))
 
-            null_arr = np.asarray(null_deltas, float)
+        def _one_shift_fit(job: Tuple[int, str, np.ndarray, float, int]) -> Tuple[int, float]:
+            row_idx, feature, base_vec, reduced_r2, seed = job
+            local_rng = np.random.default_rng(seed)
+            shifted_predictors = dict(predictors)
+            shifted_predictors[feature] = {
+                "kind": "vector",
+                "values": self._shift_vector_by_segment(base_vec, segment_slices, local_rng),
+            }
+            shifted = ContinuousGLM().fit(
+                time,
+                signal,
+                shifted_predictors,
+                kernel_window=kernel_window,
+                n_basis=n_basis,
+                basis_type=basis_type,
+                regularization=regularization,
+                alpha=alpha,
+            )
+            return row_idx, float(shifted.r2 - reduced_r2)
+
+        null_by_row: Dict[int, List[float]] = {row_idx: [] for row_idx in row_meta}
+        if work_items:
+            if max_jobs == 1:
+                for job in work_items:
+                    try:
+                        row_idx, null_delta = _one_shift_fit(job)
+                        if np.isfinite(null_delta):
+                            null_by_row[row_idx].append(null_delta)
+                    except Exception as exc:
+                        _LOG.debug("Circular-shift GLM bootstrap failed: %s", exc)
+                    step += 1
+                    if step == total or step % 5 == 0:
+                        self._progress_update(step, label)
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_jobs) as executor:
+                    futures = [executor.submit(_one_shift_fit, job) for job in work_items]
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            row_idx, null_delta = future.result()
+                            if np.isfinite(null_delta):
+                                null_by_row[row_idx].append(null_delta)
+                        except Exception as exc:
+                            _LOG.debug("Circular-shift GLM bootstrap failed: %s", exc)
+                        step += 1
+                        if step == total or step % 5 == 0:
+                            self._progress_update(step, label)
+
+        for row_idx, (row, obs_delta) in row_meta.items():
+            null_arr = np.asarray(null_by_row.get(row_idx, []), float)
             if null_arr.size:
                 p_value = float((1 + np.sum(null_arr >= obs_delta)) / (null_arr.size + 1))
                 row["p_value"] = p_value
@@ -2657,6 +2787,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         result.feature_importance = importance_rows
 
         used_labels = [self._predictor_label(k) for k in result.predictor_names]
+        n_jobs = int(self.spin_glm_jobs.value()) if hasattr(self, "spin_glm_jobs") else 1
         dropped_predictors = dataset.get("dropped_predictors", []) or []
         used_records = dataset.get("used_records", []) or []
         dropped_records = dataset.get("dropped_records", []) or []
@@ -2670,7 +2801,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             f"Predictors: {', '.join(used_labels)}",
             f"Basis: {self.combo_basis.currentText()}, n={self.spin_n_basis.value()}",
             f"Regularization: {self.combo_reg.currentText()}, alpha={self.spin_alpha.value():.3f}",
-            f"Circular-shift bootstraps: {n_boot if n_boot > 0 else 'off'}",
+            f"Circular-shift bootstraps: {n_boot if n_boot > 0 else 'off'} ({n_jobs} job{'s' if n_jobs != 1 else ''})",
         ]
         stats = result.stats or {}
         lines.extend([
@@ -2785,18 +2916,29 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.tabs_workspace.setCurrentWidget(self.plot_kernel.parentWidget())
         self.statusMessage.emit(f"GLM fit complete — R² = {result.r2:.4f}", 5000)
 
-    def _plot_glm_kernels(self, result: GLMResult):
+    def _plot_glm_kernels(self, result: GLMResult, refresh_filter: bool = True):
         pw = self.plot_kernel
+        if refresh_filter:
+            self._sync_kernel_filter(result)
         pw.clear()
         try:
             pw.getPlotItem().legend.clear()
         except Exception:
             pass
-        colors = ["#4b9df8", "#f5a97f", "#6bdb74", "#ee99a0", "#c6a0f6",
-                  "#f5e0dc", "#89dceb", "#fab387"]
-        for i, (name, kernel) in enumerate(result.kernels.items()):
-            color = colors[i % len(colors)]
+        plotted = 0
+        for name in result.predictor_names:
+            if not self._kernel_visible.get(name, True):
+                continue
+            kernel = result.kernels.get(name)
+            if kernel is None:
+                continue
+            color = self._kernel_color(name)
             pw.plot(result.kernel_tvec, kernel, pen=pg.mkPen(color, width=2), name=self._predictor_label(name))
+            plotted += 1
+        if plotted == 0:
+            txt = pg.TextItem("No kernels selected.", color="#c5d2e3")
+            pw.addItem(txt)
+            txt.setPos(0, 0)
         pw.setLabel("bottom", "Time", units="s")
         pw.setLabel("left", "Kernel weight")
         # Zero line
