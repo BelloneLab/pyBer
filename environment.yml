@@ -26,6 +26,12 @@ dependencies:
   - pyqtgraph>=0.13
   - matplotlib>=3.8
 
+  # FLMM backend via R fastFMM/rpy2
+  - rpy2>=3.6
+  # Windows R/rpy2 startup uses sh/make when validating R's config.
+  - m2-base
+  - m2-make
+
   # Quality-of-life / packaging
   - pip
   - setuptools

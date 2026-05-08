@@ -39,7 +39,12 @@ a = Analysis(
         'freetype.dll',
     ]),
     datas=[('assets/pyBer_logo_big.png', 'assets'), ('assets/pyBer.ico', 'assets')],
-    hiddenimports=[],
+    hiddenimports=[
+        'rpy2.rinterface',
+        'rpy2.rinterface_lib',
+        'rpy2.robjects',
+        'rpy2.robjects.packages',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

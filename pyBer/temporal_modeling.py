@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,34 +45,70 @@ def _init_r():
     global _R_READY
     if _R_READY:
         return
-    # On Windows, R is often not on PATH.  Try the standard install location.
-    r_home = os.environ.get("R_HOME", "")
-    if not r_home:
-        candidate = "C:/Program Files/R"
-        if os.path.isdir(candidate):
-            subs = sorted(os.listdir(candidate), reverse=True)
-            if subs:
-                r_home = os.path.join(candidate, subs[0])
+
+    def _candidate_r_homes() -> List[str]:
+        roots: List[str] = []
+        for prefix in (os.environ.get("CONDA_PREFIX", ""), sys.prefix, os.path.dirname(sys.executable)):
+            if not prefix:
+                continue
+            roots.extend([
+                os.path.join(prefix, "Lib", "R"),
+                os.path.join(prefix, "lib", "R"),
+                os.path.join(prefix, "R"),
+            ])
+        program_files = "C:/Program Files/R"
+        if os.path.isdir(program_files):
+            subs = sorted(os.listdir(program_files), reverse=True)
+            roots.extend(os.path.join(program_files, sub) for sub in subs)
+        return roots
+
+    # On Windows, R is often not on PATH. Try active envs first, then Program Files.
+    r_home = os.environ.get("R_HOME", "").strip()
+    if not r_home or not os.path.isdir(r_home):
+        for candidate in _candidate_r_homes():
+            if os.path.isdir(candidate):
+                r_home = candidate
                 os.environ["R_HOME"] = r_home
+                break
     if r_home:
-        bin_x64 = os.path.join(r_home, "bin", "x64")
-        if os.path.isdir(bin_x64):
+        r_bins = [os.path.join(r_home, "bin", "x64"), os.path.join(r_home, "bin")]
+        for bin_dir in r_bins:
+            if not os.path.isdir(bin_dir):
+                continue
             try:
-                os.add_dll_directory(bin_x64)
+                os.add_dll_directory(bin_dir)
             except (OSError, AttributeError):
                 pass
-        # Ensure PATH includes R so child processes find R.dll
+        # Ensure PATH includes R so child processes find R.dll.
         cur_path = os.environ.get("PATH", "")
-        if bin_x64 not in cur_path:
-            os.environ["PATH"] = bin_x64 + os.pathsep + cur_path
+        for bin_dir in reversed(r_bins):
+            if os.path.isdir(bin_dir) and bin_dir not in cur_path:
+                cur_path = bin_dir + os.pathsep + cur_path
+        os.environ["PATH"] = cur_path
+
+    # rpy2 may call R's config.sh on Windows; make sh/make visible if the env has them.
+    tool_bins: List[str] = []
+    for prefix in (os.environ.get("CONDA_PREFIX", ""), sys.prefix):
+        if prefix:
+            tool_bins.append(os.path.join(prefix, "Library", "usr", "bin"))
+    cur_path = os.environ.get("PATH", "")
+    for tool_bin in reversed(tool_bins):
+        if os.path.isdir(tool_bin) and tool_bin not in cur_path:
+            cur_path = tool_bin + os.pathsep + cur_path
+    os.environ["PATH"] = cur_path
 
     r_libs_user = os.environ.get("R_LIBS_USER", "")
     if not r_libs_user:
-        candidate_lib = os.path.expanduser("~/R/win-library")
-        if os.path.isdir(candidate_lib):
-            subs = sorted(os.listdir(candidate_lib), reverse=True)
-            if subs:
-                os.environ["R_LIBS_USER"] = os.path.join(candidate_lib, subs[0])
+        candidate_roots = [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "R", "win-library"),
+            os.path.expanduser("~/R/win-library"),
+        ]
+        for candidate_lib in candidate_roots:
+            if os.path.isdir(candidate_lib):
+                subs = sorted(os.listdir(candidate_lib), reverse=True)
+                if subs:
+                    os.environ["R_LIBS_USER"] = os.path.join(candidate_lib, subs[0])
+                    break
 
     import rpy2.robjects as ro  # noqa: F811
     from rpy2.robjects import r as R  # noqa: F811
@@ -151,6 +188,8 @@ class GLMResult:
     r2: float
     coefficients: np.ndarray              # raw beta vector
     design_matrix: np.ndarray
+    stats: Dict[str, float] = field(default_factory=dict)
+    feature_importance: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class ContinuousGLM:
@@ -354,6 +393,25 @@ class ContinuousGLM:
         ss_res = np.nansum(residuals ** 2)
         ss_tot = np.nansum((signal - np.nanmean(signal)) ** 2)
         r2 = 1.0 - ss_res / max(ss_tot, 1e-12)
+        valid_fit = np.isfinite(signal) & np.isfinite(y_pred)
+        res_fit = residuals[valid_fit]
+        y_fit = signal[valid_fit]
+        pred_fit = y_pred[valid_fit]
+        mse = float(np.nanmean(res_fit ** 2)) if res_fit.size else float("nan")
+        rmse = float(np.sqrt(mse)) if np.isfinite(mse) else float("nan")
+        mae = float(np.nanmean(np.abs(res_fit))) if res_fit.size else float("nan")
+        resid_std = float(np.nanstd(res_fit)) if res_fit.size else float("nan")
+        corr = float("nan")
+        if y_fit.size > 2 and np.nanstd(y_fit) > 1e-12 and np.nanstd(pred_fit) > 1e-12:
+            corr = float(np.corrcoef(y_fit, pred_fit)[0, 1])
+        stats = {
+            "n_samples": float(np.sum(valid_fit)),
+            "mse": mse,
+            "rmse": rmse,
+            "mae": mae,
+            "residual_std": resid_std,
+            "corr": corr,
+        }
 
         # Extract kernels
         dt = np.median(np.diff(time))
@@ -387,6 +445,7 @@ class ContinuousGLM:
             r2=r2,
             coefficients=beta,
             design_matrix=X,
+            stats=stats,
         )
         return self._result
 
@@ -414,6 +473,8 @@ class FLMMResult:
     residuals: Optional[np.ndarray] = None
     aic: Optional[float] = None
     summary_text: str = ""
+    stats: Dict[str, float] = field(default_factory=dict)
+    feature_importance: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class TrialFLMM:
@@ -422,8 +483,8 @@ class TrialFLMM:
 
     Wraps fastFMM::fui() via rpy2.  The user provides a trial-level data
     matrix (n_trials x n_timepoints) plus a design dataframe (n_trials rows)
-    with fixed/random predictors.  The backend constructs the long-form
-    data and calls fui().
+    with fixed/random predictors.  The backend passes the trace matrix as the
+    functional response expected by fastFMM.
     """
 
     def __init__(self):
@@ -470,51 +531,72 @@ class TrialFLMM:
         """
         _init_r()
         import rpy2.robjects as ro
-        from rpy2.robjects import r as R, pandas2ri, numpy2ri
+        from rpy2.robjects import r as R
         from rpy2.robjects.packages import importr
 
         n_trials, n_time = mat.shape
 
-        # Build long-form dataframe in R
-        # Columns: Y.obs, .index (timepoint), .obs (trial id), + design vars
-        Y_long = mat.ravel(order="C")  # trial-major
-        index_long = np.tile(np.arange(n_time), n_trials)
-        obs_long = np.repeat(np.arange(n_trials), n_time)
+        if group_var not in design:
+            raise ValueError(f"FLMM design is missing group variable '{group_var}'.")
 
-        r_df_vars = {
-            "Y.obs": ro.FloatVector(Y_long),
-            ".index": ro.IntVector(index_long.astype(int)),
-            ".obs": ro.IntVector(obs_long.astype(int)),
-        }
-
+        r_df_vars = {}
         for col_name, col_vals in design.items():
             col_vals = np.asarray(col_vals)
-            repeated = np.repeat(col_vals, n_time)
+            if col_vals.size != n_trials:
+                raise ValueError(f"FLMM design column '{col_name}' has {col_vals.size} values for {n_trials} rows.")
             if np.issubdtype(col_vals.dtype, np.floating):
-                r_df_vars[col_name] = ro.FloatVector(repeated)
+                r_df_vars[col_name] = ro.FloatVector(col_vals.astype(float))
             elif np.issubdtype(col_vals.dtype, np.integer):
-                r_df_vars[col_name] = ro.IntVector(repeated.astype(int))
+                r_df_vars[col_name] = ro.IntVector(col_vals.astype(int))
             else:
-                r_df_vars[col_name] = ro.StrVector(repeated.astype(str))
+                r_df_vars[col_name] = ro.FactorVector(ro.StrVector(col_vals.astype(str)))
 
         r_df = ro.DataFrame(r_df_vars)
+        y_matrix = R.matrix(ro.FloatVector(np.asarray(mat, float).ravel(order="F")), nrow=n_trials, ncol=n_time)
+        ro.globalenv[".__pyber_flmm_df"] = r_df
+        ro.globalenv[".__pyber_flmm_y"] = y_matrix
+        r_df = R(".__pyber_flmm_df$Y.obs <- I(.__pyber_flmm_y); .__pyber_flmm_df")
+
+        formula_text = str(formula_fixed or "Y.obs ~ 1").strip() or "Y.obs ~ 1"
+        group_vals = np.asarray(design[group_var]).astype(str)
+        has_repeated_groups = np.unique(group_vals).size < group_vals.size
+        if "|" not in formula_text:
+            rand = str(random_effects or "~1").strip()
+            rand_rhs = rand.split("~", 1)[1].strip() if "~" in rand else rand
+            if rand_rhs.lower() in {"", "0", "none", "fixed"}:
+                rand_rhs = ""
+            if not has_repeated_groups:
+                raise ValueError(
+                    "FLMM requires repeated rows per subject for random effects. "
+                    "Compute PSTH from per-file trials instead of animal-averaged rows."
+                )
+            if rand_rhs:
+                formula_text = f"{formula_text} + ({rand_rhs} | {group_var})"
 
         # Call fui()
         fastFMM = importr("fastFMM")
         kwargs = {
-            "formula": ro.Formula(formula_fixed),
+            "formula": ro.Formula(formula_text),
             "data": r_df,
-            "id": ro.StrVector([group_var]),
-            "G": ro.Formula(random_effects),
             "parallel": ro.BoolVector([parallel]),
+            "silent": ro.BoolVector([True]),
+            "subj_id": ro.StrVector([group_var]),
+            "override_zero_var": ro.BoolVector([True]),
         }
         if nknots_min is not None:
             kwargs["nknots_min"] = ro.IntVector([nknots_min])
+        if n_time < 35:
+            kwargs["nknots_min_cov"] = ro.IntVector([max(4, min(35, max(4, n_time // 2)))])
         if num_boots > 0:
-            kwargs["num_boots"] = ro.IntVector([num_boots])
+            kwargs["analytic"] = ro.BoolVector([False])
+            kwargs["n_boots"] = ro.IntVector([num_boots])
+            kwargs["argvals"] = ro.FloatVector(np.asarray(tvec, float))
+        else:
+            kwargs["analytic"] = ro.BoolVector([True])
+            kwargs["n_boots"] = ro.IntVector([0])
 
         _LOG.info("Calling fastFMM::fui() with formula=%s, %d trials, %d timepoints",
-                  formula_fixed, n_trials, n_time)
+                  formula_text, n_trials, n_time)
 
         fui_result = fastFMM.fui(**kwargs)
 
@@ -531,15 +613,45 @@ class TrialFLMM:
         joint_ci_upper: Dict[str, np.ndarray] = {}
 
         try:
-            beta_hat = np.array(R('as.matrix')(fui_result.rx2("betaHat")))
-            beta_lb = np.array(R('as.matrix')(fui_result.rx2("betaHat.LB")))
-            beta_ub = np.array(R('as.matrix')(fui_result.rx2("betaHat.UB")))
+            try:
+                result_names = set(str(name) for name in R('names')(fui_result))
+            except Exception:
+                result_names = set()
+            beta_hat = np.atleast_2d(np.array(R('as.matrix')(fui_result.rx2("betaHat")), dtype=float))
 
             # Term names from rownames
             try:
                 term_names = list(R('rownames')(fui_result.rx2("betaHat")))
             except Exception:
                 term_names = [f"term_{i}" for i in range(beta_hat.shape[0])]
+
+            se_mat = None
+            try:
+                if result_names and "se_mat" not in result_names:
+                    raise KeyError("se_mat")
+                se_mat = np.atleast_2d(np.array(R('as.matrix')(fui_result.rx2("se_mat")), dtype=float))
+                if se_mat.shape != beta_hat.shape:
+                    se_mat = None
+            except Exception:
+                se_mat = None
+
+            if se_mat is not None:
+                beta_lb = beta_hat - 1.96 * se_mat
+                beta_ub = beta_hat + 1.96 * se_mat
+            else:
+                try:
+                    if result_names and ("betaHat.LB" not in result_names or "betaHat.UB" not in result_names):
+                        raise KeyError("betaHat CI")
+                    beta_lb = np.atleast_2d(np.array(R('as.matrix')(fui_result.rx2("betaHat.LB")), dtype=float))
+                    beta_ub = np.atleast_2d(np.array(R('as.matrix')(fui_result.rx2("betaHat.UB")), dtype=float))
+                except Exception:
+                    beta_lb = beta_hat.copy()
+                    beta_ub = beta_hat.copy()
+
+            try:
+                qn = np.asarray(fui_result.rx2("qn"), float).ravel()
+            except Exception:
+                qn = np.array([], float)
 
             for i, name in enumerate(term_names):
                 coefficients[name] = beta_hat[i, :]
@@ -548,27 +660,58 @@ class TrialFLMM:
 
             # Joint CIs (may not always be present)
             try:
+                if result_names and ("betaHat.LB.joint" not in result_names or "betaHat.UB.joint" not in result_names):
+                    raise KeyError("joint CI")
                 jlb = np.array(R('as.matrix')(fui_result.rx2("betaHat.LB.joint")))
                 jub = np.array(R('as.matrix')(fui_result.rx2("betaHat.UB.joint")))
                 for i, name in enumerate(term_names):
                     joint_ci_lower[name] = jlb[i, :]
                     joint_ci_upper[name] = jub[i, :]
             except Exception:
-                joint_ci_lower = {k: v.copy() for k, v in ci_lower.items()}
-                joint_ci_upper = {k: v.copy() for k, v in ci_upper.items()}
+                if se_mat is not None and qn.size:
+                    for i, name in enumerate(term_names):
+                        qcrit = float(qn[min(i, qn.size - 1)])
+                        joint_ci_lower[name] = beta_hat[i, :] - qcrit * se_mat[i, :]
+                        joint_ci_upper[name] = beta_hat[i, :] + qcrit * se_mat[i, :]
+                else:
+                    joint_ci_lower = {k: v.copy() for k, v in ci_lower.items()}
+                    joint_ci_upper = {k: v.copy() for k, v in ci_upper.items()}
 
             aic_val = None
-            try:
-                aic_val = float(np.array(fui_result.rx2("AIC"))[0])
-            except Exception:
-                pass
+            for key in ("aic", "AIC"):
+                try:
+                    aic_arr = np.array(R('as.matrix')(fui_result.rx2(key)), dtype=float)
+                    if aic_arr.size:
+                        if aic_arr.ndim == 2 and aic_arr.shape[1] >= 1:
+                            aic_val = float(np.nanmean(aic_arr[:, 0]))
+                        else:
+                            aic_val = float(np.nanmean(aic_arr))
+                        break
+                except Exception:
+                    continue
 
             summary_parts = [f"FLMM fit: {len(term_names)} terms, {n_trials} trials, {n_time} timepoints"]
             if aic_val is not None:
                 summary_parts.append(f"AIC = {aic_val:.1f}")
+            coeff_abs_peaks: List[float] = []
+            coeff_abs_means: List[float] = []
             for name in term_names:
-                summary_parts.append(f"  {name}: mean coef = {np.nanmean(coefficients[name]):.4f}")
+                coeff = np.asarray(coefficients[name], float)
+                coeff_abs_peaks.append(float(np.nanmax(np.abs(coeff))) if coeff.size else float("nan"))
+                coeff_abs_means.append(float(np.nanmean(np.abs(coeff))) if coeff.size else float("nan"))
+                summary_parts.append(
+                    f"  {name}: mean coef = {np.nanmean(coeff):.4f}, "
+                    f"mean abs = {np.nanmean(np.abs(coeff)):.4f}, peak abs = {np.nanmax(np.abs(coeff)):.4f}"
+                )
             summary_text = "\n".join(summary_parts)
+            stats = {
+                "n_trials": float(n_trials),
+                "n_timepoints": float(n_time),
+                "n_terms": float(len(term_names)),
+                "aic": float(aic_val) if aic_val is not None else float("nan"),
+                "mean_abs_coefficient": float(np.nanmean(coeff_abs_means)) if coeff_abs_means else float("nan"),
+                "peak_abs_coefficient": float(np.nanmax(coeff_abs_peaks)) if coeff_abs_peaks else float("nan"),
+            }
 
         except Exception as exc:
             _LOG.error("Failed to parse fui() result: %s", exc)
@@ -583,6 +726,7 @@ class TrialFLMM:
             joint_ci_upper=joint_ci_upper,
             aic=aic_val,
             summary_text=summary_text,
+            stats=stats,
         )
         return self._result
 
@@ -740,6 +884,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._group_mat: Optional[np.ndarray] = None
         self._group_tvec: Optional[np.ndarray] = None
         self._group_labels: List[str] = []
+        self._flmm_row_meta: List[Dict[str, Any]] = []
         self._visual_mode: int = 0
         self._group_mode: bool = False
 
@@ -1187,6 +1332,14 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._style_plot(self.plot_residuals)
         residual_lay.addWidget(self.plot_residuals, 1)
         self.tabs_workspace.addTab(residual_page, "Residuals")
+
+        importance_page = QtWidgets.QWidget()
+        importance_lay = QtWidgets.QVBoxLayout(importance_page)
+        importance_lay.setContentsMargins(10, 10, 10, 10)
+        self.plot_importance = pg.PlotWidget(title="Feature contribution")
+        self._style_plot(self.plot_importance)
+        importance_lay.addWidget(self.plot_importance, 1)
+        self.tabs_workspace.addTab(importance_page, "Importance")
 
         flmm_page = QtWidgets.QWidget()
         flmm_lay = QtWidgets.QVBoxLayout(flmm_page)
@@ -1735,6 +1888,47 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         return name
 
     def _flmm_matrix_and_labels(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[str], str]:
+        self._flmm_row_meta = []
+        if self._per_file_mats:
+            mats: List[np.ndarray] = []
+            labels: List[str] = []
+            meta_rows: List[Dict[str, Any]] = []
+            ref_tvec: Optional[np.ndarray] = None
+            event_by_file: Dict[str, List[Dict[str, object]]] = {}
+            for row in self._event_rows:
+                fid = str(row.get("file_id", "") or "")
+                if fid:
+                    event_by_file.setdefault(fid, []).append(row)
+            ordered_ids = list(self._file_ids) if self._file_ids else list(self._per_file_mats.keys())
+            for file_id in ordered_ids:
+                if file_id not in self._per_file_mats:
+                    continue
+                tvec_f, mat_f = self._per_file_mats[file_id]
+                tvec_f = np.asarray(tvec_f, float)
+                mat_f = np.asarray(mat_f, float)
+                if mat_f.ndim != 2 or mat_f.shape[0] == 0 or tvec_f.size != mat_f.shape[1]:
+                    continue
+                if ref_tvec is None:
+                    ref_tvec = tvec_f
+                elif ref_tvec.size != tvec_f.size or not np.allclose(ref_tvec, tvec_f, equal_nan=True):
+                    continue
+                mats.append(mat_f)
+                rows = event_by_file.get(file_id, [])
+                for row_idx in range(mat_f.shape[0]):
+                    labels.append(file_id)
+                    ev_row = rows[row_idx] if row_idx < len(rows) else {}
+                    meta_rows.append({
+                        "file_id": file_id,
+                        "trial_index": row_idx,
+                        "event_time_sec": ev_row.get("event_time_sec", np.nan),
+                        "duration_sec": ev_row.get("duration_sec", np.nan),
+                    })
+            if mats and ref_tvec is not None:
+                mat = np.vstack(mats)
+                if mat.shape[0] >= 2 and len(labels) == mat.shape[0]:
+                    self._flmm_row_meta = meta_rows
+                    return mat, ref_tvec, labels, "trial"
+
         group_mat = np.asarray(self._group_mat, float) if self._group_mat is not None else None
         group_tvec = np.asarray(self._group_tvec, float) if self._group_tvec is not None else None
         if (
@@ -1744,6 +1938,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             and group_mat.shape[0] >= 2
             and len(self._group_labels) == group_mat.shape[0]
         ):
+            self._flmm_row_meta = [{"file_id": label, "trial_index": i} for i, label in enumerate(self._group_labels)]
             return group_mat, group_tvec, list(self._group_labels), "animal"
 
         mat = np.asarray(self._psth_mat, float) if self._psth_mat is not None else None
@@ -1752,10 +1947,11 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             return None, None, [], "none"
         if len(self._file_ids) == mat.shape[0]:
             labels = list(self._file_ids)
-            scope = "animal"
+            scope = "trial"
         else:
             labels = [f"trial_{i + 1}" for i in range(mat.shape[0])]
             scope = "trial"
+        self._flmm_row_meta = [{"file_id": labels[i] if i < len(labels) else "", "trial_index": i} for i in range(mat.shape[0])]
         return mat, tvec, labels, scope
 
     def _animal_covariate_value(self, key: str, file_id: str) -> float:
@@ -1791,6 +1987,50 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             return float(np.nanmean(finite))
         return np.nan
 
+    def _trial_covariate_value(self, key: str, meta: Dict[str, Any]) -> float:
+        file_id = str(meta.get("file_id", "") or "")
+        event_time = meta.get("event_time_sec", np.nan)
+        try:
+            event_time = float(event_time)
+        except (TypeError, ValueError):
+            event_time = np.nan
+        proc = self._proc_for_file_id(file_id)
+        if proc is None or not np.isfinite(event_time):
+            return self._animal_covariate_value(key, file_id)
+        t = np.asarray(getattr(proc, "time", np.array([], float)), float)
+        if t.size < 2:
+            return self._animal_covariate_value(key, file_id)
+
+        if key in {"events", "dio"} or key.startswith("trigger::") or key.startswith("behavior_event::"):
+            vec, _ = self._predictor_vector_for_proc(key, proc, t)
+            edges = t[np.asarray(vec, float) > 0.5]
+            if edges.size == 0:
+                return 0.0
+            dt = float(np.nanmedian(np.diff(np.sort(t))))
+            tol = max(dt if np.isfinite(dt) and dt > 0 else 1e-3, 1e-3)
+            return float(np.any(np.abs(edges - event_time) <= tol))
+
+        entry = self._predictor_catalog.get(key, {})
+        name = str(entry.get("name", "") or key.split("::")[-1])
+        info = self._behavior_source_for_proc(proc)
+        if not isinstance(info, dict):
+            return self._animal_covariate_value(key, file_id)
+        if key.startswith("behavior_state::"):
+            behaviors = info.get("behaviors") or {}
+            values = behaviors.get(name)
+            source_time = np.asarray(info.get("time", np.array([], float)), float)
+            if values is None or source_time.size == 0:
+                return np.nan
+            return float(self._interp_to_time(np.array([event_time], float), source_time, values)[0])
+        if key.startswith("behavior_cont::"):
+            trajectory = info.get("trajectory") or {}
+            values = trajectory.get(name)
+            source_time = np.asarray(info.get("trajectory_time", np.array([], float)), float)
+            if values is None or source_time.size == 0:
+                return np.nan
+            return float(self._interp_to_time(np.array([event_time], float), source_time, values)[0])
+        return self._animal_covariate_value(key, file_id)
+
     def _build_flmm_design(
         self,
         labels: List[str],
@@ -1803,7 +2043,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         used_names = {group_var, "Y.obs", ".index", ".obs"}
 
         for key in self._selected_predictor_keys():
-            values = np.asarray([self._animal_covariate_value(key, label) for label in labels], float)
+            if len(self._flmm_row_meta) == len(labels):
+                values = np.asarray([
+                    self._trial_covariate_value(key, self._flmm_row_meta[i])
+                    for i, _label in enumerate(labels)
+                ], float)
+            else:
+                values = np.asarray([self._animal_covariate_value(key, label) for label in labels], float)
             finite = np.isfinite(values)
             if np.sum(finite) < 2:
                 dropped.append(self._predictor_label(key))
@@ -1820,6 +2066,172 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             terms.append(term)
             term_labels[term] = self._predictor_label(key)
         return design, terms, dropped, term_labels
+
+    @staticmethod
+    def _intercept_only_fit_stats(signal: np.ndarray) -> Dict[str, float]:
+        signal = np.asarray(signal, float)
+        valid = np.isfinite(signal)
+        if not np.any(valid):
+            return {"r2": float("nan"), "mse": float("nan")}
+        y = signal[valid]
+        mean = float(np.nanmean(y))
+        residuals = y - mean
+        ss_res = float(np.nansum(residuals ** 2))
+        ss_tot = float(np.nansum((y - np.nanmean(y)) ** 2))
+        mse = float(np.nanmean(residuals ** 2)) if y.size else float("nan")
+        return {"r2": 1.0 - ss_res / max(ss_tot, 1e-12), "mse": mse}
+
+    def _compute_glm_leave_one_out(
+        self,
+        dataset: Dict[str, Any],
+        result: GLMResult,
+        kernel_window: Tuple[float, float],
+        basis_type: str,
+        regularization: str,
+        alpha: float,
+    ) -> List[Dict[str, Any]]:
+        predictors = dict(dataset.get("predictors", {}) or {})
+        if not predictors or not result.predictor_names:
+            return []
+        full_mse = float(result.stats.get("mse", float("nan")))
+        rows: List[Dict[str, Any]] = []
+        time = np.asarray(dataset["time"], float)
+        signal = np.asarray(dataset["signal"], float)
+        for pred_name in result.predictor_names:
+            row: Dict[str, Any] = {
+                "feature": pred_name,
+                "label": self._predictor_label(pred_name),
+                "full_r2": float(result.r2),
+                "full_mse": full_mse,
+                "reduced_r2": float("nan"),
+                "reduced_mse": float("nan"),
+                "delta_r2": float("nan"),
+                "delta_mse": float("nan"),
+                "contribution_pct": float("nan"),
+                "status": "ok",
+            }
+            try:
+                reduced_predictors = {k: v for k, v in predictors.items() if k != pred_name}
+                if reduced_predictors:
+                    reduced = ContinuousGLM().fit(
+                        time,
+                        signal,
+                        reduced_predictors,
+                        kernel_window=kernel_window,
+                        n_basis=self.spin_n_basis.value(),
+                        basis_type=basis_type,
+                        regularization=regularization,
+                        alpha=alpha,
+                    )
+                    reduced_r2 = float(reduced.r2)
+                    reduced_mse = float(reduced.stats.get("mse", float("nan")))
+                else:
+                    stats = self._intercept_only_fit_stats(signal)
+                    reduced_r2 = float(stats["r2"])
+                    reduced_mse = float(stats["mse"])
+                delta_r2 = float(result.r2 - reduced_r2)
+                delta_mse = float(reduced_mse - full_mse) if np.isfinite(reduced_mse) and np.isfinite(full_mse) else float("nan")
+                denom = float(result.r2) if np.isfinite(result.r2) and abs(result.r2) > 1e-12 else float("nan")
+                row.update({
+                    "reduced_r2": reduced_r2,
+                    "reduced_mse": reduced_mse,
+                    "delta_r2": delta_r2,
+                    "delta_mse": delta_mse,
+                    "contribution_pct": 100.0 * delta_r2 / denom if np.isfinite(denom) else float("nan"),
+                })
+            except Exception as exc:
+                row["status"] = f"failed: {exc}"
+            rows.append(row)
+            QtWidgets.QApplication.processEvents()
+        rows.sort(key=lambda item: (
+            np.isfinite(item.get("delta_r2", np.nan)),
+            float(item.get("delta_r2", -np.inf)) if np.isfinite(item.get("delta_r2", np.nan)) else -np.inf,
+        ), reverse=True)
+        return rows
+
+    @staticmethod
+    def _simple_formula_terms(formula: str) -> List[str]:
+        if "~" not in str(formula):
+            return []
+        rhs = str(formula).split("~", 1)[1].replace("\n", " ")
+        terms: List[str] = []
+        for raw in rhs.split("+"):
+            term = raw.strip().strip("`")
+            if not term or term in {"0", "1", "-1"}:
+                continue
+            terms.append(term)
+        return terms
+
+    @staticmethod
+    def _term_mean_abs_coefficient(result: FLMMResult, term: str) -> float:
+        if not result.coefficients:
+            return float("nan")
+        clean = re.sub(r"[^0-9A-Za-z_]+", "", str(term).lower())
+        for name, coeff in result.coefficients.items():
+            if str(name) == str(term):
+                vals = np.asarray(coeff, float)
+                return float(np.nanmean(np.abs(vals))) if vals.size else float("nan")
+        for name, coeff in result.coefficients.items():
+            name_clean = re.sub(r"[^0-9A-Za-z_]+", "", str(name).lower())
+            if clean and (clean in name_clean or name_clean in clean):
+                vals = np.asarray(coeff, float)
+                return float(np.nanmean(np.abs(vals))) if vals.size else float("nan")
+        return float("nan")
+
+    def _compute_flmm_leave_one_out(
+        self,
+        mat: np.ndarray,
+        tvec: np.ndarray,
+        design: Dict[str, np.ndarray],
+        formula: str,
+        random_eff: str,
+        group_var: str,
+        nknots: Optional[int],
+        full_result: FLMMResult,
+        term_labels: Dict[str, str],
+    ) -> List[Dict[str, Any]]:
+        terms = [term for term in self._simple_formula_terms(formula) if term in design and term != group_var]
+        if not terms:
+            return []
+        full_aic = float(full_result.aic) if full_result.aic is not None else float("nan")
+        rows: List[Dict[str, Any]] = []
+        for term in terms:
+            reduced_terms = [name for name in terms if name != term]
+            reduced_formula = "Y.obs ~ " + " + ".join(reduced_terms) if reduced_terms else "Y.obs ~ 1"
+            row: Dict[str, Any] = {
+                "feature": term,
+                "label": term_labels.get(term, term),
+                "full_aic": full_aic,
+                "reduced_aic": float("nan"),
+                "delta_aic": float("nan"),
+                "mean_abs_coefficient": self._term_mean_abs_coefficient(full_result, term),
+                "status": "ok",
+            }
+            try:
+                reduced = TrialFLMM().fit(
+                    mat,
+                    tvec,
+                    design,
+                    formula_fixed=reduced_formula,
+                    random_effects=random_eff,
+                    group_var=group_var,
+                    nknots_min=nknots,
+                    num_boots=0,
+                )
+                reduced_aic = float(reduced.aic) if reduced.aic is not None else float("nan")
+                row["reduced_aic"] = reduced_aic
+                if np.isfinite(full_aic) and np.isfinite(reduced_aic):
+                    row["delta_aic"] = reduced_aic - full_aic
+            except Exception as exc:
+                row["status"] = f"failed: {exc}"
+            rows.append(row)
+            QtWidgets.QApplication.processEvents()
+        rows.sort(key=lambda item: (
+            np.isfinite(item.get("delta_aic", np.nan)),
+            float(item.get("delta_aic", -np.inf)) if np.isfinite(item.get("delta_aic", np.nan)) else -np.inf,
+            float(item.get("mean_abs_coefficient", -np.inf)) if np.isfinite(item.get("mean_abs_coefficient", np.nan)) else -np.inf,
+        ), reverse=True)
+        return rows
 
     # ------------------------------------------------------------------
     # Slots
@@ -1897,17 +2309,31 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         basis_map = {"Raised cosine": "raised_cosine", "B-spline": "bspline", "FIR": "fir"}
         reg_map = {"Ridge": "ridge", "Lasso": "lasso", "OLS": "ols"}
         kernel_win = (self.spin_kernel_pre.value(), self.spin_kernel_post.value())
+        basis_type = basis_map.get(self.combo_basis.currentText(), "raised_cosine")
+        regularization = reg_map.get(self.combo_reg.currentText(), "ridge")
         result = self._glm.fit(
             np.asarray(dataset["time"], float),
             np.asarray(dataset["signal"], float),
             dataset["predictors"],
             kernel_window=kernel_win,
             n_basis=self.spin_n_basis.value(),
-            basis_type=basis_map.get(self.combo_basis.currentText(), "raised_cosine"),
-            regularization=reg_map.get(self.combo_reg.currentText(), "ridge"),
+            basis_type=basis_type,
+            regularization=regularization,
             alpha=self.spin_alpha.value(),
         )
         self._glm_result = result
+
+        self.statusMessage.emit("Calculating GLM leave-one-predictor-out contribution...", 0)
+        QtWidgets.QApplication.processEvents()
+        importance_rows = self._compute_glm_leave_one_out(
+            dataset,
+            result,
+            kernel_win,
+            basis_type,
+            regularization,
+            self.spin_alpha.value(),
+        )
+        result.feature_importance = importance_rows
 
         used_labels = [self._predictor_label(k) for k in result.predictor_names]
         dropped_predictors = dataset.get("dropped_predictors", []) or []
@@ -1924,6 +2350,26 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             f"Basis: {self.combo_basis.currentText()}, n={self.spin_n_basis.value()}",
             f"Regularization: {self.combo_reg.currentText()}, alpha={self.spin_alpha.value():.3f}",
         ]
+        stats = result.stats or {}
+        lines.extend([
+            "",
+            "Fit statistics:",
+            f"  RMSE = {stats.get('rmse', float('nan')):.5g}",
+            f"  MAE = {stats.get('mae', float('nan')):.5g}",
+            f"  MSE = {stats.get('mse', float('nan')):.5g}",
+            f"  residual SD = {stats.get('residual_std', float('nan')):.5g}",
+            f"  actual/predicted corr = {stats.get('corr', float('nan')):.5g}",
+        ])
+        if importance_rows:
+            lines.extend(["", "Leave-one-predictor-out contribution (full - reduced):"])
+            for row in importance_rows[:10]:
+                lines.append(
+                    f"  {row['label']}: delta R^2 = {row['delta_r2']:.5g}, "
+                    f"delta MSE = {row['delta_mse']:.5g}, reduced R^2 = {row['reduced_r2']:.5g}"
+                )
+            failed = [row for row in importance_rows if row.get("status") != "ok"]
+            if failed:
+                lines.append(f"  {len(failed)} reduced fits failed; see log for details.")
         if dropped_predictors:
             lines.append(f"Dropped predictors: {', '.join(str(v) for v in dropped_predictors)}")
         if dropped_records:
@@ -1932,8 +2378,14 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         self._plot_glm_kernels(result)
         self._plot_glm_fit(result)
+        self._plot_feature_importance(
+            importance_rows,
+            value_key="delta_r2",
+            title="GLM leave-one-predictor-out contribution",
+            y_label="Drop in R^2",
+        )
         if hasattr(self, "tabs_workspace"):
-            self.tabs_workspace.setCurrentWidget(self.plot_kernel.parentWidget())
+            self.tabs_workspace.setCurrentWidget(self.plot_importance.parentWidget() if importance_rows else self.plot_kernel.parentWidget())
         self.statusMessage.emit(f"GLM fit complete - R^2 = {result.r2:.4f}", 5000)
 
     def _fit_glm(self):
@@ -2042,6 +2494,51 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         rw.setLabel("bottom", "Time", units="s")
         rw.setLabel("left", "Residual")
 
+    def _plot_feature_importance(
+        self,
+        rows: List[Dict[str, Any]],
+        value_key: str,
+        title: str,
+        y_label: str,
+    ) -> None:
+        if not hasattr(self, "plot_importance"):
+            return
+        pw = self.plot_importance
+        pw.clear()
+        try:
+            pw.getPlotItem().legend.clear()
+        except Exception:
+            pass
+        pw.setTitle(title)
+        usable = [
+            row for row in rows
+            if np.isfinite(float(row.get(value_key, float("nan"))))
+        ]
+        if not usable:
+            txt = pg.TextItem("No leave-one-out feature contribution is available.", color="#c5d2e3")
+            pw.addItem(txt)
+            txt.setPos(0, 0)
+            pw.setLabel("bottom", "Feature")
+            pw.setLabel("left", y_label)
+            return
+
+        x = np.arange(len(usable), dtype=float)
+        vals = np.asarray([float(row.get(value_key, 0.0)) for row in usable], float)
+        brushes = [pg.mkBrush("#4b9df8" if val >= 0 else "#ee99a0") for val in vals]
+        bar = pg.BarGraphItem(x=x, height=vals, width=0.64, brushes=brushes)
+        pw.addItem(bar)
+        pw.addLine(y=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        labels = []
+        for idx, row in enumerate(usable):
+            label = str(row.get("label", row.get("feature", idx)))
+            if len(label) > 18:
+                label = label[:15] + "..."
+            labels.append((idx, label))
+        pw.getAxis("bottom").setTicks([labels])
+        pw.setLabel("bottom", "Feature")
+        pw.setLabel("left", y_label)
+        pw.enableAutoRange()
+
     # ------------------------------------------------------------------
     # FLMM fit
     # ------------------------------------------------------------------
@@ -2069,13 +2566,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         if len(row_labels) != n_rows:
             row_labels = [f"{scope}_{i + 1}" for i in range(n_rows)]
 
-        if scope == "animal":
-            design, auto_terms, dropped_terms, term_labels = self._build_flmm_design(row_labels, group_var)
-        else:
-            design = {group_var: np.asarray(row_labels, dtype=object)}
-            auto_terms = []
-            dropped_terms = []
-            term_labels = {}
+        design, auto_terms, dropped_terms, term_labels = self._build_flmm_design(row_labels, group_var)
 
         requested_formula = self.edit_formula.text().strip()
         if requested_formula in {"", "Y.obs ~ 1", "Y.obs ~ group"}:
@@ -2101,6 +2592,26 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         )
         self._flmm_result = result
 
+        self.statusMessage.emit("Calculating FLMM leave-one-feature-out AIC contribution...", 0)
+        QtWidgets.QApplication.processEvents()
+        importance_rows = self._compute_flmm_leave_one_out(
+            mat,
+            tvec,
+            design,
+            formula,
+            random_eff,
+            group_var,
+            nknots,
+            result,
+            term_labels,
+        )
+        result.feature_importance = importance_rows
+        importance_value_key = (
+            "delta_aic"
+            if any(np.isfinite(float(row.get("delta_aic", float("nan")))) for row in importance_rows)
+            else "mean_abs_coefficient"
+        )
+
         summary_lines = [
             result.summary_text,
             "",
@@ -2109,6 +2620,33 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             f"ID variable: {group_var}",
             f"Formula: {formula}",
         ]
+        if result.stats:
+            summary_lines.extend([
+                "",
+                "Fit statistics:",
+                f"  AIC = {result.stats.get('aic', float('nan')):.5g}",
+                f"  mean abs coefficient = {result.stats.get('mean_abs_coefficient', float('nan')):.5g}",
+                f"  peak abs coefficient = {result.stats.get('peak_abs_coefficient', float('nan')):.5g}",
+            ])
+        if importance_rows:
+            summary_lines.extend([
+                "",
+                "Leave-one-feature-out contribution (reduced AIC - full AIC):",
+            ])
+            for row in importance_rows[:10]:
+                delta = float(row.get("delta_aic", float("nan")))
+                delta_text = f"{delta:.5g}" if np.isfinite(delta) else "n/a"
+                reduced = float(row.get("reduced_aic", float("nan")))
+                reduced_text = f"{reduced:.5g}" if np.isfinite(reduced) else "n/a"
+                summary_lines.append(
+                    f"  {row['label']}: delta AIC = {delta_text}, "
+                    f"reduced AIC = {reduced_text}, mean abs coef = {row['mean_abs_coefficient']:.5g}"
+                )
+            failed = [row for row in importance_rows if row.get("status") != "ok"]
+            if failed:
+                summary_lines.append(f"  {len(failed)} reduced FLMM fits failed; see log for details.")
+            if num_boots > 0:
+                summary_lines.append("  Leave-one-out comparison uses analytic fits; bootstrap CIs are not repeated.")
         if auto_terms:
             readable = [f"{term} = {term_labels.get(term, term)}" for term in auto_terms]
             summary_lines.append("Animal covariates: " + "; ".join(readable))
@@ -2116,6 +2654,14 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             summary_lines.append("Dropped covariates: " + ", ".join(dropped_terms))
         self.txt_summary.setPlainText("\n".join(summary_lines))
         self._plot_flmm_coefficients(result)
+        self._plot_feature_importance(
+            importance_rows,
+            value_key=importance_value_key,
+            title="FLMM leave-one-feature-out contribution" if importance_value_key == "delta_aic" else "FLMM coefficient contribution",
+            y_label="Delta AIC" if importance_value_key == "delta_aic" else "Mean abs coefficient",
+        )
+        if hasattr(self, "tabs_workspace") and importance_rows:
+            self.tabs_workspace.setCurrentWidget(self.plot_importance.parentWidget())
         self.statusMessage.emit("FLMM fit complete.", 5000)
 
     def _fit_flmm(self):
