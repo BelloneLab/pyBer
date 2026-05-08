@@ -600,6 +600,7 @@ class TrialFLMM:
                 formula_text = f"{formula_text} + ({rand_rhs} | {group_var_model})"
 
         # Call fui()
+        base = importr("base")
         fastFMM = importr("fastFMM")
         kwargs = {
             "formula": ro.Formula(formula_text),
@@ -626,26 +627,34 @@ class TrialFLMM:
                   formula_text, n_trials, n_time)
 
         fit_notes: List[str] = []
+        old_warn = R("getOption('warn')")
+        base.options(warn=ro.IntVector([-1]))
         try:
-            fui_result = fastFMM.fui(**kwargs)
-        except Exception as exc:
-            msg = str(exc)
-            recoverable = any(
-                token in msg.lower()
-                for token in ("downdated vtv", "not positive definite", "singular", "rank deficient")
-            )
-            if not recoverable:
-                raise
-            retry_kwargs = dict(kwargs)
-            retry_kwargs["var"] = ro.BoolVector([False])
-            retry_kwargs["analytic"] = ro.BoolVector([True])
-            retry_kwargs["n_boots"] = ro.IntVector([0])
-            fit_notes.append(
-                "fastFMM variance inference failed because the mixed-model design was near-singular; "
-                "refit with variance/CIs disabled."
-            )
-            _LOG.warning("Retrying fastFMM without variance inference after: %s", msg)
-            fui_result = fastFMM.fui(**retry_kwargs)
+            try:
+                fui_result = fastFMM.fui(**kwargs)
+            except Exception as exc:
+                msg = str(exc)
+                recoverable = any(
+                    token in msg.lower()
+                    for token in ("downdated vtv", "not positive definite", "singular", "rank deficient")
+                )
+                if not recoverable:
+                    raise
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["var"] = ro.BoolVector([False])
+                retry_kwargs["analytic"] = ro.BoolVector([True])
+                retry_kwargs["n_boots"] = ro.IntVector([0])
+                fit_notes.append(
+                    "fastFMM variance inference failed because the mixed-model design was near-singular; "
+                    "refit with variance/CIs disabled."
+                )
+                _LOG.warning("Retrying fastFMM without variance inference after: %s", msg)
+                fui_result = fastFMM.fui(**retry_kwargs)
+        finally:
+            try:
+                base.options(warn=old_warn)
+            except Exception:
+                base.options(warn=ro.IntVector([0]))
 
         # Parse the result.
         # fui() returns a list with elements:
@@ -1078,6 +1087,14 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.spin_boots.setValue(0)
         self.spin_boots.setSpecialValueText("analytic")
         fl.addRow("Bootstrap iter:", self.spin_boots)
+        self.combo_flmm_importance = QtWidgets.QComboBox()
+        self.combo_flmm_importance.addItem("Fast coefficient ranking", "fast")
+        self.combo_flmm_importance.addItem("Leave-one-out AIC (slow)", "loo")
+        self.combo_flmm_importance.addItem("Off", "off")
+        self.combo_flmm_importance.setToolTip(
+            "Leave-one-out refits fastFMM once per predictor and can be very slow."
+        )
+        fl.addRow("Contribution:", self.combo_flmm_importance)
 
         root.addWidget(self.grp_flmm)
 
@@ -1349,6 +1366,14 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.spin_boots.setValue(0)
         self.spin_boots.setSpecialValueText("analytic")
         fl.addRow("Bootstrap iter", self.spin_boots)
+        self.combo_flmm_importance = QtWidgets.QComboBox()
+        self.combo_flmm_importance.addItem("Fast coefficient ranking", "fast")
+        self.combo_flmm_importance.addItem("Leave-one-out AIC (slow)", "loo")
+        self.combo_flmm_importance.addItem("Off", "off")
+        self.combo_flmm_importance.setToolTip(
+            "Leave-one-out refits fastFMM once per predictor and can be very slow."
+        )
+        fl.addRow("Contribution", self.combo_flmm_importance)
         lay.addWidget(self.grp_flmm)
         lay.addStretch(1)
         self.stack_controls.addWidget(page)
@@ -1579,6 +1604,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         for widget in (
             self.combo_basis,
             self.combo_reg,
+            self.combo_flmm_importance,
             self.spin_n_basis,
             self.spin_alpha,
             self.spin_kernel_pre,
@@ -1621,6 +1647,12 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.edit_group_var.setText(str(self._settings.value(prefix + "flmm_group_var", self.edit_group_var.text()) or "subject"))
             self.spin_nknots.setValue(int(self._settings.value(prefix + "flmm_nknots", self.spin_nknots.value())))
             self.spin_boots.setValue(int(self._settings.value(prefix + "flmm_boots", self.spin_boots.value())))
+            mode = str(self._settings.value(prefix + "flmm_importance_mode", "fast") or "fast")
+            idx = self.combo_flmm_importance.findData(mode, QtCore.Qt.ItemDataRole.UserRole)
+            if idx < 0:
+                idx = self.combo_flmm_importance.findText(mode)
+            if idx >= 0:
+                self.combo_flmm_importance.setCurrentIndex(idx)
             raw_predictors = str(self._settings.value(prefix + "predictor_keys", "") or "")
             self._saved_predictor_keys = [key for key in raw_predictors.split("\n") if key.strip()]
         finally:
@@ -1644,6 +1676,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._settings.setValue(prefix + "flmm_group_var", self.edit_group_var.text().strip())
         self._settings.setValue(prefix + "flmm_nknots", self.spin_nknots.value())
         self._settings.setValue(prefix + "flmm_boots", self.spin_boots.value())
+        self._settings.setValue(prefix + "flmm_importance_mode", self.combo_flmm_importance.currentData(QtCore.Qt.ItemDataRole.UserRole) or "fast")
         predictors = self._selected_predictor_keys() if hasattr(self, "list_predictors") else self._saved_predictor_keys
         if predictors or getattr(self, "_predictor_catalog", None):
             self._saved_predictor_keys = list(predictors)
@@ -2790,19 +2823,53 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
     @staticmethod
     def _term_mean_abs_coefficient(result: FLMMResult, term: str) -> float:
-        if not result.coefficients:
+        coeff = TemporalModelingWidget._term_coefficient_curve(result, term)
+        if coeff is None:
             return float("nan")
+        vals = np.asarray(coeff, float)
+        return float(np.nanmean(np.abs(vals))) if vals.size else float("nan")
+
+    @staticmethod
+    def _term_coefficient_curve(result: FLMMResult, term: str) -> Optional[np.ndarray]:
+        if not result.coefficients:
+            return None
         clean = re.sub(r"[^0-9A-Za-z_]+", "", str(term).lower())
         for name, coeff in result.coefficients.items():
             if str(name) == str(term):
-                vals = np.asarray(coeff, float)
-                return float(np.nanmean(np.abs(vals))) if vals.size else float("nan")
+                return np.asarray(coeff, float)
         for name, coeff in result.coefficients.items():
             name_clean = re.sub(r"[^0-9A-Za-z_]+", "", str(name).lower())
             if clean and (clean in name_clean or name_clean in clean):
-                vals = np.asarray(coeff, float)
-                return float(np.nanmean(np.abs(vals))) if vals.size else float("nan")
-        return float("nan")
+                return np.asarray(coeff, float)
+        return None
+
+    def _compute_flmm_coefficient_importance(
+        self,
+        result: FLMMResult,
+        terms: List[str],
+        term_labels: Dict[str, str],
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for term in terms:
+            coeff = self._term_coefficient_curve(result, term)
+            if coeff is None:
+                continue
+            vals = np.asarray(coeff, float)
+            if vals.size == 0:
+                continue
+            rows.append({
+                "feature": term,
+                "label": term_labels.get(term, term),
+                "mean_abs_coefficient": float(np.nanmean(np.abs(vals))),
+                "peak_abs_coefficient": float(np.nanmax(np.abs(vals))),
+                "delta_aic": float("nan"),
+                "status": "ok",
+            })
+        rows.sort(key=lambda item: (
+            np.isfinite(item.get("mean_abs_coefficient", np.nan)),
+            float(item.get("mean_abs_coefficient", -np.inf)) if np.isfinite(item.get("mean_abs_coefficient", np.nan)) else -np.inf,
+        ), reverse=True)
+        return rows
 
     def _compute_flmm_leave_one_out(
         self,
@@ -3265,7 +3332,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             if np.isfinite(float(row.get(value_key, float("nan"))))
         ]
         if not usable:
-            txt = pg.TextItem("No leave-one-out feature contribution is available.", color="#c5d2e3")
+            txt = pg.TextItem("No feature contribution is available.", color="#c5d2e3")
             pw.addItem(txt)
             txt.setPos(0, 0)
             pw.setLabel("bottom", y_label)
@@ -3378,23 +3445,29 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         )
         self._flmm_result = result
 
-        self.statusMessage.emit("Calculating FLMM leave-one-feature-out AIC contribution...", 0)
-        QtWidgets.QApplication.processEvents()
-        importance_rows = self._compute_flmm_leave_one_out(
-            mat,
-            tvec,
-            design,
-            formula,
-            random_eff,
-            group_var,
-            nknots,
-            result,
-            term_labels,
-        )
+        importance_mode = str(self.combo_flmm_importance.currentData(QtCore.Qt.ItemDataRole.UserRole) or "fast")
+        if importance_mode == "loo":
+            self.statusMessage.emit("Calculating FLMM leave-one-feature-out AIC contribution...", 0)
+            QtWidgets.QApplication.processEvents()
+            importance_rows = self._compute_flmm_leave_one_out(
+                mat,
+                tvec,
+                design,
+                formula,
+                random_eff,
+                group_var,
+                nknots,
+                result,
+                term_labels,
+            )
+        elif importance_mode == "fast":
+            importance_rows = self._compute_flmm_coefficient_importance(result, formula_terms, term_labels)
+        else:
+            importance_rows = []
         result.feature_importance = importance_rows
         importance_value_key = (
             "delta_aic"
-            if any(np.isfinite(float(row.get("delta_aic", float("nan")))) for row in importance_rows)
+            if importance_mode == "loo" and any(np.isfinite(float(row.get("delta_aic", float("nan")))) for row in importance_rows)
             else "mean_abs_coefficient"
         )
 
@@ -3421,7 +3494,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 f"  mean abs coefficient = {result.stats.get('mean_abs_coefficient', float('nan')):.5g}",
                 f"  peak abs coefficient = {result.stats.get('peak_abs_coefficient', float('nan')):.5g}",
             ])
-        if importance_rows:
+        if importance_rows and importance_mode == "loo":
             summary_lines.extend([
                 "",
                 "Leave-one-feature-out contribution (reduced AIC - full AIC):",
@@ -3440,6 +3513,19 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 summary_lines.append(f"  {len(failed)} reduced FLMM fits failed; see log for details.")
             if num_boots > 0:
                 summary_lines.append("  Leave-one-out comparison uses analytic fits; bootstrap CIs are not repeated.")
+        elif importance_rows and importance_mode == "fast":
+            summary_lines.extend([
+                "",
+                "Fast coefficient contribution (single FLMM fit):",
+            ])
+            for row in importance_rows[:10]:
+                summary_lines.append(
+                    f"  {row['label']}: mean abs coef = {row['mean_abs_coefficient']:.5g}, "
+                    f"peak abs coef = {row['peak_abs_coefficient']:.5g}"
+                )
+            summary_lines.append("  Leave-one-out AIC is disabled by default because it refits fastFMM once per predictor.")
+        elif importance_mode == "off":
+            summary_lines.extend(["", "Feature contribution: off."])
         if fit_terms:
             readable = [f"{term} = {term_labels.get(term, term)}" for term in fit_terms]
             summary_lines.append("Covariates: " + "; ".join(readable))
@@ -3450,7 +3536,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._plot_feature_importance(
             importance_rows,
             value_key=importance_value_key,
-            title="FLMM leave-one-feature-out contribution" if importance_value_key == "delta_aic" else "FLMM coefficient contribution",
+            title="FLMM leave-one-feature-out contribution" if importance_mode == "loo" else "FLMM coefficient contribution",
             y_label="Delta AIC" if importance_value_key == "delta_aic" else "Mean abs coefficient",
         )
         if hasattr(self, "tabs_workspace") and importance_rows:
