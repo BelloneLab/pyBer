@@ -604,6 +604,7 @@ class TrialFLMM:
         kwargs = {
             "formula": ro.Formula(formula_text),
             "data": r_df,
+            "var": ro.BoolVector([True]),
             "parallel": ro.BoolVector([parallel]),
             "silent": ro.BoolVector([True]),
             "subj_id": ro.StrVector([group_var_model]),
@@ -624,7 +625,27 @@ class TrialFLMM:
         _LOG.info("Calling fastFMM::fui() with formula=%s, %d trials, %d timepoints",
                   formula_text, n_trials, n_time)
 
-        fui_result = fastFMM.fui(**kwargs)
+        fit_notes: List[str] = []
+        try:
+            fui_result = fastFMM.fui(**kwargs)
+        except Exception as exc:
+            msg = str(exc)
+            recoverable = any(
+                token in msg.lower()
+                for token in ("downdated vtv", "not positive definite", "singular", "rank deficient")
+            )
+            if not recoverable:
+                raise
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["var"] = ro.BoolVector([False])
+            retry_kwargs["analytic"] = ro.BoolVector([True])
+            retry_kwargs["n_boots"] = ro.IntVector([0])
+            fit_notes.append(
+                "fastFMM variance inference failed because the mixed-model design was near-singular; "
+                "refit with variance/CIs disabled."
+            )
+            _LOG.warning("Retrying fastFMM without variance inference after: %s", msg)
+            fui_result = fastFMM.fui(**retry_kwargs)
 
         # Parse the result.
         # fui() returns a list with elements:
@@ -719,6 +740,8 @@ class TrialFLMM:
             summary_parts = [f"FLMM fit: {len(term_names)} terms, {n_trials} trials, {n_time} timepoints"]
             if fallback_grouping:
                 summary_parts.append(f"Note: {fallback_grouping}")
+            for note in fit_notes:
+                summary_parts.append(f"Note: {note}")
             if aic_val is not None:
                 summary_parts.append(f"AIC = {aic_val:.1f}")
             coeff_abs_peaks: List[float] = []
@@ -743,6 +766,7 @@ class TrialFLMM:
                 "group_var": group_var_model,
                 "requested_group_var": group_var,
                 "fallback_grouping": fallback_grouping,
+                "fit_notes": list(fit_notes),
             }
 
         except Exception as exc:
@@ -2492,6 +2516,41 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             term_labels[term] = self._predictor_label(key)
         return design, terms, dropped, term_labels
 
+    def _prune_flmm_terms(
+        self,
+        design: Dict[str, np.ndarray],
+        terms: List[str],
+        term_labels: Dict[str, str],
+        n_rows: int,
+    ) -> Tuple[List[str], List[str]]:
+        if not terms:
+            return [], []
+        max_terms = max(0, min(len(terms), int(n_rows) - 2))
+        if max_terms <= 0:
+            return [], [f"{term_labels.get(term, term)} (not enough rows)" for term in terms]
+
+        X = np.ones((int(n_rows), 1), float)
+        rank = int(np.linalg.matrix_rank(X))
+        kept: List[str] = []
+        dropped: List[str] = []
+        for term in terms:
+            if len(kept) >= max_terms:
+                dropped.append(f"{term_labels.get(term, term)} (too many predictors for {n_rows} rows)")
+                continue
+            col = np.asarray(design.get(term, np.array([], float)), float).reshape(-1)
+            if col.size != n_rows or not np.all(np.isfinite(col)):
+                dropped.append(f"{term_labels.get(term, term)} (invalid values)")
+                continue
+            candidate = np.column_stack([X, col])
+            new_rank = int(np.linalg.matrix_rank(candidate))
+            if new_rank > rank:
+                kept.append(term)
+                X = candidate
+                rank = new_rank
+            else:
+                dropped.append(f"{term_labels.get(term, term)} (collinear with existing predictors)")
+        return kept, dropped
+
     @staticmethod
     def _intercept_only_fit_stats(signal: np.ndarray) -> Dict[str, float]:
         signal = np.asarray(signal, float)
@@ -3275,9 +3334,11 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             row_labels = [f"{scope}_{i + 1}" for i in range(n_rows)]
 
         design, auto_terms, dropped_terms, term_labels = self._build_flmm_design(row_labels, group_var)
+        fit_terms, pruned_terms = self._prune_flmm_terms(design, auto_terms, term_labels, n_rows)
+        if pruned_terms:
+            dropped_terms.extend(pruned_terms)
 
         requested_formula = self.edit_formula.text().strip()
-        auto_formula = "Y.obs ~ " + " + ".join(auto_terms) if auto_terms else "Y.obs ~ 1"
         requested_terms = [
             term for term in self._simple_formula_terms(requested_formula)
             if "|" not in term and "(" not in term and ")" not in term
@@ -3289,7 +3350,14 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             or not requested_formula.lstrip().startswith("Y.obs")
             or bool(missing_terms)
         )
-        formula = auto_formula if use_auto else requested_formula
+        if use_auto:
+            formula_terms = list(fit_terms)
+        else:
+            formula_terms = [term for term in requested_terms if term in fit_terms]
+            removed_manual = [term for term in requested_terms if term in design and term not in fit_terms]
+            if removed_manual:
+                missing_terms.extend(removed_manual)
+        formula = "Y.obs ~ " + " + ".join(formula_terms) if formula_terms else "Y.obs ~ 1"
         if requested_formula != formula:
             self.edit_formula.setText(formula)
         random_eff = self.edit_random.text().strip() or "~1"
@@ -3372,8 +3440,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 summary_lines.append(f"  {len(failed)} reduced FLMM fits failed; see log for details.")
             if num_boots > 0:
                 summary_lines.append("  Leave-one-out comparison uses analytic fits; bootstrap CIs are not repeated.")
-        if auto_terms:
-            readable = [f"{term} = {term_labels.get(term, term)}" for term in auto_terms]
+        if fit_terms:
+            readable = [f"{term} = {term_labels.get(term, term)}" for term in fit_terms]
             summary_lines.append("Covariates: " + "; ".join(readable))
         if dropped_terms:
             summary_lines.append("Dropped covariates: " + ", ".join(dropped_terms))
