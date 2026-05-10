@@ -180,6 +180,30 @@ def _paint_paw(p, r, c):
         p.drawEllipse(QtCore.QPoint(cx + dx, cy - rh // 4), max(2, rw // 10), max(2, rh // 8))
 
 
+def _paint_temporal(p, r, c):
+    """Temporal modeling icon — sine wave over a grid with a regression line."""
+    from PySide6 import QtCore, QtGui
+    import math
+    p.setPen(_pen(c, 1.6)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    # Horizontal axis
+    cy = r.top() + int(r.height() * 0.6)
+    p.drawLine(r.left(), cy, r.right(), cy)
+    # Sine-like curve
+    path = QtGui.QPainterPath()
+    path.moveTo(r.left(), cy)
+    w = r.width()
+    for i in range(w + 1):
+        x = r.left() + i
+        y = cy - math.sin(i / w * 2.5 * math.pi) * (r.height() * 0.35)
+        path.lineTo(x, y)
+    p.setPen(_pen(c, 2.0))
+    p.drawPath(path)
+    # Regression trend line (dashed)
+    p.setPen(_pen(QtGui.QColor(c).lighter(140), 1.4))
+    p.drawLine(r.left() + 2, cy + int(r.height() * 0.15),
+               r.right() - 2, cy - int(r.height() * 0.25))
+
+
 
 
 APP_QSS = r"""
@@ -683,3 +707,58 @@ def app_qss(theme_mode: object) -> str:
     if mode in {"light", "white", "l", "w"}:
         return APP_QSS_LIGHT
     return APP_QSS
+
+
+def apply_app_palette(app, theme_mode: object) -> None:
+    """Force a consistent Fusion palette before applying app QSS.
+
+    Some Windows/native Qt styles partially ignore dark QSS for menus, popup
+    views, disabled controls, or newly-created widgets. Fusion plus an explicit
+    palette keeps the app theme independent from the host OS theme.
+    """
+    from PySide6 import QtGui, QtWidgets
+
+    if app is None:
+        return
+
+    mode = str(theme_mode or "").strip().lower()
+    light = mode in {"light", "white", "l", "w"}
+    try:
+        QtWidgets.QApplication.setStyle("Fusion")
+    except Exception:
+        pass
+
+    palette = QtGui.QPalette()
+    if light:
+        colors = {
+            QtGui.QPalette.ColorRole.Window: "#f6f8fc",
+            QtGui.QPalette.ColorRole.WindowText: "#1f2a37",
+            QtGui.QPalette.ColorRole.Base: "#ffffff",
+            QtGui.QPalette.ColorRole.AlternateBase: "#edf1f7",
+            QtGui.QPalette.ColorRole.ToolTipBase: "#ffffff",
+            QtGui.QPalette.ColorRole.ToolTipText: "#1f2a37",
+            QtGui.QPalette.ColorRole.Text: "#1f2a37",
+            QtGui.QPalette.ColorRole.Button: "#e7ecf4",
+            QtGui.QPalette.ColorRole.ButtonText: "#1f2a37",
+            QtGui.QPalette.ColorRole.BrightText: "#ffffff",
+            QtGui.QPalette.ColorRole.Highlight: "#378ef0",
+            QtGui.QPalette.ColorRole.HighlightedText: "#ffffff",
+        }
+    else:
+        colors = {
+            QtGui.QPalette.ColorRole.Window: "#1f2229",
+            QtGui.QPalette.ColorRole.WindowText: "#f3f5f8",
+            QtGui.QPalette.ColorRole.Base: "#1b2029",
+            QtGui.QPalette.ColorRole.AlternateBase: "#262b35",
+            QtGui.QPalette.ColorRole.ToolTipBase: "#262b35",
+            QtGui.QPalette.ColorRole.ToolTipText: "#f3f5f8",
+            QtGui.QPalette.ColorRole.Text: "#f3f5f8",
+            QtGui.QPalette.ColorRole.Button: "#2b303b",
+            QtGui.QPalette.ColorRole.ButtonText: "#f3f5f8",
+            QtGui.QPalette.ColorRole.BrightText: "#ffffff",
+            QtGui.QPalette.ColorRole.Highlight: "#378ef0",
+            QtGui.QPalette.ColorRole.HighlightedText: "#ffffff",
+        }
+    for role, color in colors.items():
+        palette.setColor(role, QtGui.QColor(color))
+    app.setPalette(palette)

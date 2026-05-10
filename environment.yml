@@ -1,3 +1,12 @@
+# Create with:
+#   conda env create -f environment.yml
+#   conda activate pyBer
+#
+# Optional FLMM backend:
+#   Rscript -e "install.packages('fastFMM', repos='https://cloud.r-project.org')"
+#
+# The R package is installed after environment creation because fastFMM is a
+# CRAN package, not a conda package.
 name: pyBer
 channels:
   - conda-forge
@@ -25,6 +34,14 @@ dependencies:
   - pyside6>=6.6
   - pyqtgraph>=0.13
   - matplotlib>=3.8
+
+  # FLMM backend via R fastFMM/rpy2.
+  - r-base>=4.4
+  - rpy2>=3.6
+
+  # Windows R/rpy2 startup uses sh/make when validating R's config.
+  - m2-base
+  - m2-make
 
   # Quality-of-life / packaging
   - pip
