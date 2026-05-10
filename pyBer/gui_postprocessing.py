@@ -3565,10 +3565,44 @@ class PostProcessingPanel(QtWidgets.QWidget):
         is_individual = index == 0
         self.combo_individual_file.setVisible(is_individual)
         self._rerender_visual_from_cache()
+        # Mirror to the Temporal Modeling scope: Individual -> Active file, Group -> Per-file batch.
+        try:
+            section = getattr(self, "section_temporal", None)
+            if section is not None and hasattr(section, "combo_fit_scope"):
+                target = "active" if is_individual else "batch"
+                idx = section.combo_fit_scope.findData(target)
+                if idx >= 0 and section.combo_fit_scope.currentIndex() != idx:
+                    section.combo_fit_scope.blockSignals(True)
+                    section.combo_fit_scope.setCurrentIndex(idx)
+                    section.combo_fit_scope.blockSignals(False)
+                    section._fit_mode = target
+                    section._update_fit_state_label()
+        except Exception:
+            pass
 
     def _on_individual_file_changed(self, _index: int = 0) -> None:
         if self.tab_visual_mode.currentIndex() == 0:
             self._rerender_visual_from_cache()
+        # Push the new active file into the Temporal Modeling section so its
+        # scope strip stays in sync with the global Individual file picker.
+        try:
+            file_id = self.combo_individual_file.currentText().strip()
+            section = getattr(self, "section_temporal", None)
+            if section is None or not file_id:
+                return
+            combo = getattr(section, "combo_active_file", None)
+            if combo is not None:
+                idx = combo.findData(file_id)
+                if idx < 0:
+                    idx = combo.findText(file_id)
+                if idx >= 0 and combo.currentIndex() != idx:
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(idx)
+                    combo.blockSignals(False)
+                    section._active_file_id = file_id
+                    section._on_active_file_changed()
+        except Exception:
+            pass
 
     def _rerender_visual_from_cache(self) -> None:
         visual_mode = self.tab_visual_mode.currentIndex()

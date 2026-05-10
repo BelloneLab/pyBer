@@ -113,6 +113,17 @@ from gui_preprocessing import (
 )
 from gui_postprocessing import PostProcessingPanel
 from numeric_controls import install_spinbox_scrubbers
+from onboarding import (
+    ToastManager,
+    TutorialOverlay,
+    PreferencesDialog,
+    register_global_shortcuts,
+    attach_dirty_title,
+    install_close_confirmation,
+    reset_focused_plot_view,
+    build_default_tutorial,
+    add_empty_state_hint,
+)
 from styles import (
     apply_app_palette,
     app_qss,
@@ -630,6 +641,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self._status_bar.addPermanentWidget(QtWidgets.QLabel("App theme"))
         self._status_bar.addPermanentWidget(self.btn_app_theme)
 
+        # Busy / cancel indicator (left of theme widgets). Hidden until something runs.
+        self._busy_widget = QtWidgets.QFrame()
+        self._busy_widget.setObjectName("pyberBusyWidget")
+        self._busy_widget.setStyleSheet(
+            "QFrame#pyberBusyWidget { background: #2a3045; border: 1px solid #46527a;"
+            " border-radius: 6px; padding: 0 8px; }"
+            "QFrame#pyberBusyWidget QLabel { background: transparent; color: #d7e0ee; }"
+            "QFrame#pyberBusyWidget QPushButton { background: #543035; color: #ffd6dc;"
+            " border: 1px solid #8a3949; border-radius: 4px; padding: 1px 8px; }"
+            "QFrame#pyberBusyWidget QPushButton:hover { background: #6b3a40; }"
+        )
+        bl = QtWidgets.QHBoxLayout(self._busy_widget)
+        bl.setContentsMargins(6, 1, 6, 1)
+        bl.setSpacing(8)
+        self._busy_label = QtWidgets.QLabel("Busy...")
+        bl.addWidget(self._busy_label)
+        self._busy_cancel = QtWidgets.QPushButton("Cancel")
+        self._busy_cancel.setToolTip("Cancel the running batch operation (Esc).")
+        self._busy_cancel.clicked.connect(self._cancel_current_operation)
+        bl.addWidget(self._busy_cancel)
+        self._busy_widget.setVisible(False)
+        self._status_bar.addPermanentWidget(self._busy_widget)
+
+        # Poll the temporal panel's progress bar to surface batch state in status bar.
+        self._busy_poll = QtCore.QTimer(self)
+        self._busy_poll.setInterval(250)
+        self._busy_poll.timeout.connect(self._update_busy_indicator)
+        self._busy_poll.start()
+
         # Preprocessing tab
         self.pre_tab = QtWidgets.QWidget()
         self.tabs.addTab(self.pre_tab, "Preprocessing")
@@ -961,6 +1001,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plots.set_artifact_thresholds_visible(True)
         self._update_plot_status()
         self.setAcceptDrops(True)
+
+        # ----- UX polish: toasts, dirty-title, global shortcuts, tutorial -----
+        try:
+            self._toaster = ToastManager(self, max_visible=4)
+        except Exception:
+            self._toaster = None
+
+        # Mirror status-bar messages to toasts (longer-lived, easier to spot).
+        try:
+            self.post_tab.statusUpdate.connect(self._toast_from_status)
+        except Exception:
+            pass
+
+        # Dirty-title indicator: '*' suffix while postprocessing has unsaved changes.
+        def _is_dirty() -> bool:
+            try:
+                return bool(getattr(self.post_tab, "_project_dirty", False))
+            except Exception:
+                return False
+
+        self._refresh_dirty_title = attach_dirty_title(
+            self, "Pyber - Fiber Photometry", _is_dirty,
+        )
+        self._dirty_poll = QtCore.QTimer(self)
+        self._dirty_poll.setInterval(800)
+        self._dirty_poll.timeout.connect(self._refresh_dirty_title)
+        self._dirty_poll.start()
+
+        install_close_confirmation(self, _is_dirty, save_callback=self._save_post_project_for_close)
+
+        # Register the global shortcut bundle. Methods that don't exist become no-ops.
+        register_global_shortcuts(self)
+
+        # First-run tutorial.
+        QtCore.QTimer.singleShot(450, self._maybe_show_first_run_tutorial)
 
     def _setup_section_popups(self) -> None:
         """Create preprocessing section panels using DockArea or legacy floating docks."""
@@ -2026,6 +2101,232 @@ class MainWindow(QtWidgets.QMainWindow):
         self._bind_shortcut("C", self._assign_pending_box_to_cut, require_non_text_focus=True)
         self._bind_shortcut("S", self._assign_pending_box_to_section, require_non_text_focus=True)
         self._bind_shortcut("Escape", self._close_focused_popup, require_non_text_focus=True)
+
+    # ----------------------------------------------------------------------
+    # UX polish: tutorial / toasts / global shortcut callbacks
+    # ----------------------------------------------------------------------
+
+    def _toast_from_status(self, message: str, timeout_ms: int = 0) -> None:
+        if not getattr(self, "_toaster", None) or not message:
+            return
+        text = str(message)
+        lower = text.lower()
+        sev = "info"
+        if "fail" in lower or "error" in lower or "could not" in lower:
+            sev = "error"
+        elif "warn" in lower or "dropped" in lower or "skipped" in lower:
+            sev = "warn"
+        elif "complete" in lower or "saved" in lower or "loaded" in lower or " ok" in lower:
+            sev = "ok"
+        timeout = int(timeout_ms) if timeout_ms and timeout_ms > 0 else int(self.settings.value("ui/toast_timeout_ms", 5000) or 5000)
+        self._toaster.post(text, sev, timeout)
+
+    def _maybe_show_first_run_tutorial(self) -> None:
+        try:
+            seen = self.settings.value("onboarding/first_run_completed", False)
+            show_pref = self.settings.value("onboarding/show_on_startup", True)
+            from onboarding import _to_bool
+            if _to_bool(seen, False) and not _to_bool(show_pref, True):
+                return
+        except Exception:
+            pass
+        self._show_tutorial_again()
+
+    def _show_tutorial_again(self) -> None:
+        try:
+            steps = build_default_tutorial(self)
+            overlay = TutorialOverlay(self, steps)
+            overlay.finished.connect(lambda: self.settings.setValue("onboarding/first_run_completed", True))
+            overlay.start()
+        except Exception:
+            pass
+
+    def _show_keyboard_cheatsheet(self) -> None:
+        # Open the Preferences dialog directly on the Keyboard tab.
+        try:
+            dlg = PreferencesDialog(self, self.settings)
+            for i in range(dlg.findChild(QtWidgets.QTabWidget).count()):
+                tabs = dlg.findChild(QtWidgets.QTabWidget)
+                if tabs.tabText(i).lower().startswith("keyboard"):
+                    tabs.setCurrentIndex(i)
+                    break
+            dlg.exec()
+        except Exception:
+            pass
+
+    def _open_preferences(self) -> None:
+        try:
+            dlg = PreferencesDialog(self, self.settings)
+            if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                # Apply theme right away if it changed.
+                desired = str(self.settings.value("app/theme", "dark") or "dark").lower()
+                current = getattr(self, "_app_theme_mode", "dark")
+                if desired != current:
+                    if desired == "light":
+                        self.act_app_theme_light.setChecked(True)
+                    else:
+                        self.act_app_theme_dark.setChecked(True)
+                    self._on_app_theme_changed()
+                if getattr(self, "_toaster", None):
+                    self._toaster.ok("Preferences saved.")
+        except Exception:
+            pass
+
+    # --- tab navigation ---
+
+    def _focus_pre_tab(self) -> None:
+        try:
+            self.tabs.setCurrentIndex(0)
+        except Exception:
+            pass
+
+    def _focus_post_tab(self) -> None:
+        try:
+            self.tabs.setCurrentIndex(1)
+        except Exception:
+            pass
+
+    def _cycle_main_tab(self) -> None:
+        try:
+            n = self.tabs.count()
+            if n <= 1:
+                return
+            self.tabs.setCurrentIndex((self.tabs.currentIndex() + 1) % n)
+        except Exception:
+            pass
+
+    # --- file navigation in postprocessing/temporal ---
+
+    def _step_active_file_next(self) -> None:
+        self._step_active_file(+1)
+
+    def _step_active_file_prev(self) -> None:
+        self._step_active_file(-1)
+
+    def _step_active_file(self, delta: int) -> None:
+        # Try the temporal panel's combo (covers the GLM scope strip).
+        try:
+            section = getattr(self.post_tab, "section_temporal", None)
+            if section is not None and hasattr(section, "_step_active_file"):
+                section._step_active_file(delta)
+                return
+        except Exception:
+            pass
+        # Fall back to postprocessing's own file combo, if any.
+        try:
+            combo = getattr(self.post_tab, "combo_individual_file", None)
+            if combo is not None:
+                idx = max(0, min(combo.count() - 1, combo.currentIndex() + int(delta)))
+                combo.setCurrentIndex(idx)
+        except Exception:
+            pass
+
+    def _toggle_individual_group(self) -> None:
+        try:
+            bar = getattr(self.post_tab, "tab_visual_mode", None)
+            if bar is None:
+                return
+            cur = bar.currentIndex()
+            bar.setCurrentIndex((cur + 1) % bar.count())
+        except Exception:
+            pass
+
+    # --- temporal modeling ---
+
+    def _fit_temporal_model(self) -> None:
+        try:
+            section = getattr(self.post_tab, "section_temporal", None)
+            if section is None:
+                return
+            self.tabs.setCurrentIndex(1)
+            section._on_fit_clicked()
+        except Exception:
+            pass
+
+    def _fit_temporal_all_files(self) -> None:
+        try:
+            section = getattr(self.post_tab, "section_temporal", None)
+            if section is None:
+                return
+            self.tabs.setCurrentIndex(1)
+            section._on_fit_all_files_clicked()
+        except Exception:
+            pass
+
+    def _recompute_psth(self) -> None:
+        try:
+            self.tabs.setCurrentIndex(1)
+            fn = getattr(self.post_tab, "_compute_psth", None)
+            if callable(fn):
+                fn()
+        except Exception:
+            pass
+
+    def _run_postprocess_export(self) -> None:
+        try:
+            self.tabs.setCurrentIndex(1)
+            for name in ("_run_export", "_export_current", "_on_run_export_clicked", "run_export"):
+                fn = getattr(self.post_tab, name, None)
+                if callable(fn):
+                    fn()
+                    return
+        except Exception:
+            pass
+
+    def _cancel_current_operation(self) -> None:
+        # Temporal modeling batch
+        try:
+            section = getattr(self.post_tab, "section_temporal", None)
+            if section is not None:
+                section._batch_cancel_requested = True
+        except Exception:
+            pass
+        # Preprocessing has its own Esc handling for popups; let it through too.
+        try:
+            self._close_focused_popup()
+        except Exception:
+            pass
+
+    def _reset_focused_plot_view(self) -> None:
+        try:
+            reset_focused_plot_view(self)
+            if getattr(self, "_toaster", None):
+                self._toaster.info("Reset plot view.", timeout_ms=1800)
+        except Exception:
+            pass
+
+    def _update_busy_indicator(self) -> None:
+        """Reflect any running batch op (currently: Temporal Modeling) in the status bar."""
+        try:
+            section = getattr(self.post_tab, "section_temporal", None)
+            if section is None or not hasattr(section, "progress_model"):
+                self._busy_widget.setVisible(False)
+                return
+            progress = section.progress_model
+            if progress.isVisible():
+                fmt = progress.format() or "Running..."
+                # Strip the trailing "%p%" placeholder for our compact label.
+                label = fmt.replace("%p%", "").strip(" :")
+                self._busy_label.setText(label or "Running...")
+                self._busy_widget.setVisible(True)
+            else:
+                self._busy_widget.setVisible(False)
+        except Exception:
+            self._busy_widget.setVisible(False)
+
+    def _save_post_project_for_close(self) -> bool:
+        """
+        Used by the close-confirmation handler. Returns True on success.
+        """
+        try:
+            fn = getattr(self.post_tab, "_save_project_dialog", None) or getattr(self.post_tab, "_save_project", None)
+            if callable(fn):
+                fn()
+                return not bool(getattr(self.post_tab, "_project_dirty", False))
+        except Exception:
+            pass
+        # No save handler available: let the user decide via Discard/Cancel.
+        return False
 
     def _dock_area_from_settings(
         self,

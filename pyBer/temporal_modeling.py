@@ -1334,6 +1334,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._build_files_page()
         self._build_fit_page()
         self._build_workspace_pages()
+        self._install_empty_state_hints()
 
         self.btn_nav_model.setChecked(True)
         self.btn_nav_model.clicked.connect(lambda: self._select_control_page(0))
@@ -1713,6 +1714,39 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         buttons = (self.btn_nav_model, self.btn_nav_predictors, self.btn_nav_files, self.btn_nav_fit)
         for i, btn in enumerate(buttons):
             btn.setChecked(i == index)
+
+    def _install_empty_state_hints(self) -> None:
+        """Attach hint TextItems to the workspace plots; cleared on first fit."""
+        self._empty_state_items = []
+        plots_and_text = [
+            (getattr(self, "plot_kernel", None), "No GLM fit yet.\nPick predictors and press Fit (Ctrl+Shift+F)."),
+            (getattr(self, "plot_prediction", None), "Predicted vs actual will appear after fitting."),
+            (getattr(self, "plot_residuals", None), "Residuals appear after a successful fit."),
+            (getattr(self, "plot_importance", None), "Leave-one-out feature contribution.\nFit a model first."),
+            (getattr(self, "plot_illustration", None), "Signal + selected feature contribution.\nFit, then pick a feature."),
+            (getattr(self, "plot_coeff", None), "FLMM coefficient curves appear after a trial-level fit."),
+            (getattr(self, "plot_group_kernels", None), "Group view\n\nRun a Per-file batch fit to populate this tab."),
+            (getattr(self, "plot_group_importance", None), "Group leave-one-out contribution\n\nRun a Per-file batch fit to populate this tab."),
+        ]
+        for plot, text in plots_and_text:
+            if plot is None:
+                continue
+            try:
+                item = pg.TextItem(text, color="#6f7d95", anchor=(0.5, 0.5))
+                item.setZValue(100)
+                plot.addItem(item)
+                item.setPos(0, 0)
+                self._empty_state_items.append(item)
+            except Exception:
+                pass
+
+    def _clear_empty_state_hints(self) -> None:
+        for item in getattr(self, "_empty_state_items", []) or []:
+            try:
+                item.setVisible(False)
+            except Exception:
+                pass
+        self._empty_state_items = []
 
     def _style_plot(self, plot: pg.PlotWidget) -> None:
         plot.setMinimumHeight(360)
@@ -3438,6 +3472,23 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                             self.list_files.setCurrentRow(i)
                             self.list_files.blockSignals(False)
                         break
+            # Push selection back into the host postprocessing panel so the
+            # PSTH file picker and the Temporal scope file always agree.
+            try:
+                host = self.parent()
+                while host is not None and not hasattr(host, "combo_individual_file"):
+                    host = host.parent() if hasattr(host, "parent") else None
+                combo = getattr(host, "combo_individual_file", None) if host is not None else None
+                if combo is not None:
+                    idx = combo.findText(data)
+                    if idx >= 0 and combo.currentIndex() != idx:
+                        combo.blockSignals(True)
+                        combo.setCurrentIndex(idx)
+                        combo.blockSignals(False)
+                        if hasattr(host, "_rerender_visual_from_cache"):
+                            host._rerender_visual_from_cache()
+            except Exception:
+                pass
             # If we are in Active scope and a fit is cached for this file, render it.
             if self._fit_mode == "active":
                 cached = self._glm_results_by_file.get(self._active_file_id)
