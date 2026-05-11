@@ -255,11 +255,228 @@ def _rolling_corr(x: np.ndarray, y: np.ndarray, win: int) -> Tuple[np.ndarray, n
     return np.asarray(rs, float), np.asarray(centers, int)
 
 
+# ----------------------------------------------------------------------------
+# Quality-check verdict: tiered overall score + per-metric breakdown.
+# ----------------------------------------------------------------------------
+
+# Tier table: (min_score_inclusive, label, color)
+_QC_TIERS: List[Tuple[float, str, str]] = [
+    (85.0, "EXCELLENT", "#5dd39e"),
+    (70.0, "GOOD",      "#9ce0a3"),
+    (55.0, "FAIR",      "#f5c542"),
+    (40.0, "MARGINAL",  "#f0915e"),
+    (0.0,  "POOR",      "#ee6471"),
+]
+
+
+def _qc_tier_for(score: float) -> Tuple[str, str]:
+    for thr, name, color in _QC_TIERS:
+        if score >= thr:
+            return name, color
+    return _QC_TIERS[-1][1], _QC_TIERS[-1][2]
+
+
+def _evaluate_qc(qc: Dict[str, object]) -> Tuple[float, str, str, List[Tuple[str, float, float, str]]]:
+    """Score the quality of a fiber-photometry recording from its QC metrics.
+
+    Returns ``(overall_score, tier_label, tier_color, sub_metrics)`` where
+    ``sub_metrics`` is a list of ``(name, score, weight, explanation)`` tuples
+    that sum (weight) to 1.0.
+
+    Scoring is heuristic and tuned for GCaMP-style recordings with an
+    isosbestic 405 reference channel. Each sub-score is on [0, 100].
+    """
+    art_frac_pct = float(qc.get("art_frac", 0.0)) * 100.0
+    r_abs = abs(float(qc.get("r", 0.0))) if np.isfinite(float(qc.get("r", 0.0))) else 1.0
+    frac_gt3 = float(qc.get("frac_gt3", 0.0))
+    frac_gt5 = float(qc.get("frac_gt5", 0.0))
+    r_roll_std = float(qc.get("r_roll_std", 0.0))
+    if not np.isfinite(r_roll_std):
+        r_roll_std = 0.0
+    kurt = float(qc.get("kurt", 0.0))
+    if not np.isfinite(kurt):
+        kurt = 0.0
+    bleach_pct = float(qc.get("bleach_pct", 0.0))
+    if not np.isfinite(bleach_pct):
+        bleach_pct = 0.0
+    median = abs(float(qc.get("q50", 0.0)))
+    if not np.isfinite(median):
+        median = 0.0
+
+    metrics: List[Tuple[str, float, float, str]] = []
+
+    # 1) Artifact fraction (weight 0.25)
+    if art_frac_pct < 1.0:
+        s = 100; why = f"{art_frac_pct:.2f}% of samples flagged - very clean recording."
+    elif art_frac_pct < 3.0:
+        s = 85;  why = f"{art_frac_pct:.2f}% artifacts - acceptable noise level."
+    elif art_frac_pct < 7.0:
+        s = 60;  why = f"{art_frac_pct:.2f}% artifacts - re-check detection thresholds."
+    elif art_frac_pct < 15.0:
+        s = 35;  why = f"{art_frac_pct:.2f}% artifacts - the trace is heavily disturbed."
+    else:
+        s = 12;  why = f"{art_frac_pct:.2f}% artifacts - recording is unusable as-is."
+    metrics.append(("Artifact load", float(s), 0.25, why))
+
+    # 2) Reference correlation - motion contamination (weight 0.25)
+    if r_abs < 0.20:
+        s = 100; why = f"|r| = {r_abs:.2f} - signal is independent of the reference."
+    elif r_abs < 0.40:
+        s = 85;  why = f"|r| = {r_abs:.2f} - low motion bleed; standard correction will work."
+    elif r_abs < 0.60:
+        s = 65;  why = f"|r| = {r_abs:.2f} - moderate motion bleed; correct before analysis."
+    elif r_abs < 0.80:
+        s = 35;  why = f"|r| = {r_abs:.2f} - heavy motion contamination."
+    else:
+        s = 12;  why = f"|r| = {r_abs:.2f} - signal dominated by motion artifact."
+    metrics.append(("Motion bleed", float(s), 0.25, why))
+
+    # 3) Transient activity from heavy tails (weight 0.18)
+    if frac_gt5 > 1.0:
+        s = 30; why = f"{frac_gt5:.2f}% |Z|>5 - extreme outliers suggest artifact residue."
+    elif frac_gt3 > 10.0:
+        s = 55; why = f"{frac_gt3:.2f}% |Z|>3 - very heavy tails; re-check artifact masking."
+    elif frac_gt3 > 0.5:
+        s = 95; why = f"{frac_gt3:.2f}% |Z|>3 - healthy transient activity, few outliers."
+    else:
+        s = 65; why = f"{frac_gt3:.2f}% |Z|>3 - very flat distribution; expression may be low."
+    metrics.append(("Transients", float(s), 0.18, why))
+
+    # 4) Rolling-correlation stability (weight 0.15)
+    if r_roll_std < 0.10:
+        s = 95; why = f"rolling-r std = {r_roll_std:.2f} - motion artifact is stationary."
+    elif r_roll_std < 0.20:
+        s = 80; why = f"rolling-r std = {r_roll_std:.2f} - mild variability over time."
+    elif r_roll_std < 0.35:
+        s = 55; why = f"rolling-r std = {r_roll_std:.2f} - motion bursts at specific times."
+    else:
+        s = 30; why = f"rolling-r std = {r_roll_std:.2f} - intermittent disturbances, unstable r."
+    metrics.append(("Temporal stability", float(s), 0.15, why))
+
+    # 5) Distribution shape - median offset + kurtosis (weight 0.10)
+    if median < 0.10 and abs(kurt) < 4.0:
+        s = 95; why = f"median = {median:.2f}, excess kurt = {kurt:+.1f} - well-centered distribution."
+    elif median < 0.30 and abs(kurt) < 10.0:
+        s = 70; why = f"median = {median:.2f}, excess kurt = {kurt:+.1f} - slight bias / heavier tails."
+    else:
+        s = 40; why = f"median = {median:.2f}, excess kurt = {kurt:+.1f} - skewed or very heavy tails."
+    metrics.append(("Distribution shape", float(s), 0.10, why))
+
+    # 6) Photobleach over the recording (weight 0.07)
+    bleach_abs = abs(bleach_pct)
+    if bleach_abs < 5.0:
+        s = 95; why = f"{bleach_pct:+.1f}% baseline drift - sensor stable across the recording."
+    elif bleach_abs < 15.0:
+        s = 75; why = f"{bleach_pct:+.1f}% baseline drift - moderate photobleach."
+    elif bleach_abs < 30.0:
+        s = 50; why = f"{bleach_pct:+.1f}% baseline drift - substantial bleach over time."
+    else:
+        s = 25; why = f"{bleach_pct:+.1f}% baseline drift - severe bleach; signal may be saturating."
+    metrics.append(("Photobleach", float(s), 0.07, why))
+
+    overall = sum(score * weight for _, score, weight, _ in metrics)
+    tier_name, tier_color = _qc_tier_for(overall)
+    return overall, tier_name, tier_color, metrics
+
+
+class QualityVerdictCard(QtWidgets.QFrame):
+    """Big bottom-left card with overall verdict + per-metric breakdown bars."""
+
+    def __init__(
+        self,
+        score: float,
+        tier_name: str,
+        tier_color: str,
+        metrics: List[Tuple[str, float, float, str]],
+        parent: Optional[QtWidgets.QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.setObjectName("qcVerdictCard")
+        self.setStyleSheet(
+            "QFrame#qcVerdictCard { background: #1a1d26; border: 1px solid #2c3240;"
+            " border-radius: 12px; }"
+            "QFrame#qcVerdictCard QLabel { background: transparent; color: #e9ecf3; }"
+        )
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(10)
+
+        # Header strip: big tier + score
+        head = QtWidgets.QFrame()
+        head.setStyleSheet(
+            f"QFrame {{ background: {tier_color}22; border: 1px solid {tier_color};"
+            f" border-radius: 10px; }}"
+        )
+        head_lay = QtWidgets.QHBoxLayout(head)
+        head_lay.setContentsMargins(14, 10, 14, 10)
+        head_lay.setSpacing(10)
+
+        col = QtWidgets.QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        verdict = QtWidgets.QLabel(tier_name)
+        verdict.setStyleSheet(f"color: {tier_color}; font-size: 26pt; font-weight: 800; letter-spacing: 1px;")
+        col.addWidget(verdict)
+        sub = QtWidgets.QLabel("Overall quality")
+        sub.setStyleSheet("color: #aab4c5; font-size: 8.8pt; letter-spacing: 0.5px; text-transform: uppercase;")
+        col.addWidget(sub)
+        head_lay.addLayout(col, 1)
+
+        score_lbl = QtWidgets.QLabel(f"{int(round(score))}<span style='color:#aab4c5; font-size:11pt;'>/100</span>")
+        score_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        score_lbl.setStyleSheet(f"color: {tier_color}; font-size: 22pt; font-weight: 700;")
+        head_lay.addWidget(score_lbl, 0, QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignRight)
+        outer.addWidget(head)
+
+        # Per-metric breakdown
+        breakdown_title = QtWidgets.QLabel("Why")
+        breakdown_title.setStyleSheet("color: #aab4c5; font-size: 8.7pt; letter-spacing: 0.5px; text-transform: uppercase; padding-top: 2px;")
+        outer.addWidget(breakdown_title)
+
+        for name, sub_score, weight, why in metrics:
+            metric_row = QtWidgets.QFrame()
+            metric_row.setStyleSheet("QFrame { background: transparent; border: 0; }")
+            mlay = QtWidgets.QVBoxLayout(metric_row)
+            mlay.setContentsMargins(0, 2, 0, 2)
+            mlay.setSpacing(3)
+            head_row = QtWidgets.QHBoxLayout()
+            head_row.setContentsMargins(0, 0, 0, 0)
+            head_row.setSpacing(6)
+            name_lbl = QtWidgets.QLabel(f"{name}  <span style='color:#6f7a8e; font-size:7.5pt;'>w={weight:.0%}</span>")
+            name_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
+            name_lbl.setStyleSheet("color: #e9ecf3; font-size: 9.2pt; font-weight: 700;")
+            head_row.addWidget(name_lbl, 1)
+            sub_color = _qc_tier_for(sub_score)[1]
+            score_chip = QtWidgets.QLabel(f"{int(round(sub_score))}")
+            score_chip.setStyleSheet(f"color: {sub_color}; font-weight: 700; font-size: 9.5pt;")
+            head_row.addWidget(score_chip, 0, QtCore.Qt.AlignmentFlag.AlignRight)
+            mlay.addLayout(head_row)
+
+            bar = QtWidgets.QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(int(round(sub_score)))
+            bar.setTextVisible(False)
+            bar.setFixedHeight(5)
+            bar.setStyleSheet(
+                "QProgressBar { border: 0; background: #2c3240; border-radius: 2px; margin: 0; }"
+                f"QProgressBar::chunk {{ background: {sub_color}; border-radius: 2px; }}"
+            )
+            mlay.addWidget(bar)
+
+            why_lbl = QtWidgets.QLabel(why)
+            why_lbl.setWordWrap(True)
+            why_lbl.setStyleSheet("color: #aab4c5; font-size: 8.4pt;")
+            mlay.addWidget(why_lbl)
+            outer.addWidget(metric_row)
+
+        outer.addStretch(1)
+
+
 class QcDialog(QtWidgets.QDialog):
     def __init__(self, qc: Dict[str, object], parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Quality Check (z-score)")
-        self.resize(1100, 800)
+        self.resize(1280, 900)
         self._qc = qc
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -324,6 +541,15 @@ class QcDialog(QtWidgets.QDialog):
         stats = qc["stats"]
         self.lbl_stats = QtWidgets.QLabel(stats)
         self.lbl_stats.setProperty("class", "hint")
+        self.lbl_stats.setWordWrap(True)
+
+        # Quality verdict (bottom-left, next to rolling-corr).
+        score, tier_name, tier_color, sub_metrics = _evaluate_qc(qc)
+        self._qc_score = score
+        self._qc_tier = tier_name
+        self._qc_sub_metrics = sub_metrics
+        self.verdict_card = QualityVerdictCard(score, tier_name, tier_color, sub_metrics)
+        self.verdict_card.setFixedWidth(380)
 
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addStretch(1)
@@ -337,7 +563,14 @@ class QcDialog(QtWidgets.QDialog):
         row.addWidget(self.plot_corr, stretch=1)
         row.addWidget(self.plot_zdist, stretch=1)
         layout.addLayout(row, stretch=2)
-        layout.addWidget(self.plot_roll, stretch=1)
+
+        # Bottom row: verdict card (fixed left) + rolling correlation (stretches).
+        bottom = QtWidgets.QHBoxLayout()
+        bottom.setSpacing(8)
+        bottom.addWidget(self.verdict_card)
+        bottom.addWidget(self.plot_roll, stretch=1)
+        layout.addLayout(bottom, stretch=3)
+
         layout.addWidget(self.lbl_stats)
         layout.addLayout(btn_row)
 
@@ -5263,7 +5496,7 @@ class MainWindow(QtWidgets.QMainWindow):
         win = int(max(10, round(fs * 10.0))) if np.isfinite(fs) and fs > 0 else 5000
         r_roll, centers = _rolling_corr(z_ref, z_sig, win)
 
-        # Distribution stats
+        # Distribution stats + new shape / stability metrics
         if Zf.size:
             q25, q50, q75 = np.quantile(Zf, [0.25, 0.5, 0.75])
             frac_gt3 = float(np.mean(np.abs(Zf) > 3.0) * 100.0)
@@ -5272,10 +5505,45 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             q25 = q50 = q75 = frac_gt3 = frac_gt5 = iqr = np.nan
 
+        # Skewness + excess kurtosis of Zf (no scipy dependency).
+        if Zf.size > 10:
+            zmean = float(np.nanmean(Zf))
+            zstd = float(np.nanstd(Zf))
+            if zstd > 1e-9:
+                zn = (Zf - zmean) / zstd
+                skew = float(np.nanmean(zn ** 3))
+                kurt = float(np.nanmean(zn ** 4) - 3.0)
+            else:
+                skew = kurt = 0.0
+        else:
+            skew = kurt = float("nan")
+
+        # Rolling-correlation stability: std of the rolling r series.
+        if r_roll.size:
+            r_roll_finite = r_roll[np.isfinite(r_roll)]
+            r_roll_std = float(np.nanstd(r_roll_finite)) if r_roll_finite.size else float("nan")
+            r_roll_mean = float(np.nanmean(r_roll_finite)) if r_roll_finite.size else float("nan")
+        else:
+            r_roll_std = r_roll_mean = float("nan")
+
+        # Photobleach: percent baseline change from the first ~10 s to the
+        # last ~10 s of the low-passed signal envelope.
+        if np.isfinite(fs) and fs > 0 and sig_base.size > int(fs * 20):
+            n10 = max(1, int(round(fs * 10.0)))
+            first = float(np.nanmedian(sig_base[:n10]))
+            last = float(np.nanmedian(sig_base[-n10:]))
+            if first > 1e-9:
+                bleach_pct = ((first - last) / first) * 100.0
+            else:
+                bleach_pct = float("nan")
+        else:
+            bleach_pct = float("nan")
+
         stats = (
-            f"artifact_frac={art_frac*100:.2f}% | r={r:.3f} | "
+            f"artifact_frac={art_frac*100:.2f}% | r={r:.3f} (avg roll r={r_roll_mean:.2f}, std={r_roll_std:.2f}) | "
             f"Z median={q50:.3g} IQR=({q25:.3g},{q75:.3g}) | "
-            f"|Z|>3: {frac_gt3:.2f}% | |Z|>5: {frac_gt5:.2f}%"
+            f"|Z|>3: {frac_gt3:.2f}% | |Z|>5: {frac_gt5:.2f}% | "
+            f"skew={skew:.2f} kurt={kurt:.2f} | bleach={bleach_pct:.1f}%"
         )
 
         return {
@@ -5293,6 +5561,15 @@ class MainWindow(QtWidgets.QMainWindow):
             "q50": q50,
             "q75": q75,
             "iqr": iqr,
+            "frac_gt3": frac_gt3,
+            "frac_gt5": frac_gt5,
+            "art_frac": art_frac,
+            "r_roll_std": r_roll_std,
+            "r_roll_mean": r_roll_mean,
+            "skew": skew,
+            "kurt": kurt,
+            "bleach_pct": bleach_pct,
+            "fs": fs,
             "stats": stats,
         }
 
