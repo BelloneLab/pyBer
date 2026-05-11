@@ -380,8 +380,15 @@ def _evaluate_qc(qc: Dict[str, object]) -> Tuple[float, str, str, List[Tuple[str
     metrics.append(("Artifact load", score_art, 1.0, why_art, tier_art))
 
     # 2) Motion bleed |r| - FAIL boundary at 0.9 (relaxed for noisy-reference
-    # GRAB sensors; standard ~0.6 elsewhere in the literature).
+    # GRAB sensors; standard ~0.6 elsewhere in the literature). Note: when the
+    # isobestic channel itself is too noisy (FAIL below) the |r| reading
+    # becomes uninterpretable; we add a caveat to the explanation rather than
+    # silently force a tier change, because a clearly motion-dominated trace
+    # should still register that fact.
     if has_reference:
+        ref_unreliable = (
+            np.isfinite(ref_hf_noise_pct) and ref_hf_noise_pct >= 0.90
+        )
         if not np.isfinite(r_abs):
             tier_mot, score_mot = "WARN", _QC_WARN_SCORE
             why_mot = "Reference correlation unavailable - inspect rolling-r plot manually."
@@ -392,6 +399,11 @@ def _evaluate_qc(qc: Dict[str, object]) -> Tuple[float, str, str, List[Tuple[str
                 "WARN": f"|r|={r_abs:.2f} - reference coupling, motion-correctable (WARN 0.45-0.9).",
                 "FAIL": f"|r|={r_abs:.2f} - signal dominated by reference movement (FAIL >= 0.9).",
             }[tier_mot]
+        if ref_unreliable:
+            why_mot = (
+                why_mot + " Reading is unreliable: isobestic noise is too high to "
+                "make |r| meaningful (treat the recording as signal-only)."
+            )
         metrics.append(("Motion bleed", score_mot, 1.0, why_mot, tier_mot))
 
     # 3) Usable SNR - field convention; SNR < 1.5 is unusable.
@@ -423,7 +435,11 @@ def _evaluate_qc(qc: Dict[str, object]) -> Tuple[float, str, str, List[Tuple[str
         }[tier_nse]
     metrics.append(("Signal noise floor", score_nse, 0.5, why_nse, tier_nse))
 
-    # 5) Isobestic HF noise (only when a reference channel exists).
+    # 5) Isobestic HF noise (only when a reference channel exists). This is
+    # CRITICAL: if the 405 reference is itself too noisy, motion correction
+    # cannot recover real signal dynamics and the |r| reading above becomes
+    # meaningless. A failed reference effectively forces the recording to be
+    # treated as signal-only.
     if has_reference:
         if not np.isfinite(ref_hf_noise_pct):
             tier_ref, score_ref = "WARN", _QC_WARN_SCORE
@@ -431,11 +447,15 @@ def _evaluate_qc(qc: Dict[str, object]) -> Tuple[float, str, str, List[Tuple[str
         else:
             tier_ref, score_ref = _qc_decide_tier(ref_hf_noise_pct, warn_thr=0.45, fail_thr=0.90)
             why_ref = {
-                "PASS": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - stable reference (PASS < 0.45%).",
-                "WARN": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - noisy reference (WARN 0.45-0.9%).",
-                "FAIL": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - reference unstable (FAIL >= 0.9%).",
+                "PASS": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - stable reference, "
+                        f"motion correction will work (PASS < 0.45%).",
+                "WARN": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - noisy reference, "
+                        f"motion correction is unreliable (WARN 0.45-0.9%).",
+                "FAIL": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - reference unusable; "
+                        f"drop it from analysis and treat the recording as signal-only "
+                        f"(FAIL >= 0.9%).",
             }[tier_ref]
-        metrics.append(("Isobestic noise", score_ref, 0.5, why_ref, tier_ref))
+        metrics.append(("Isobestic noise", score_ref, 1.0, why_ref, tier_ref))
 
     # 6) Temporal stability of motion coupling.
     if has_reference:
@@ -839,11 +859,13 @@ class QcDialog(QtWidgets.QDialog):
         self.lbl_stats.setWordWrap(True)
         self.lbl_method = QtWidgets.QLabel(
             "Verdict uses tiered veto rules with literature-derived thresholds (no user-chosen weights). "
-            "Three critical metrics gate the verdict: artifact load (FAIL >= 15%), "
+            "Four critical metrics gate the verdict: artifact load (FAIL >= 15%), "
             "motion bleed |r| (FAIL >= 0.9, relaxed for noisy-reference GRAB sensors), "
-            "and usable SNR (FAIL < 1.5). Secondary metrics (noise floors, temporal stability, "
-            "corrected-output distribution, photobleach) refine the verdict only when all critical "
-            "metrics pass. Overall tier = worst critical-metric tier."
+            "usable SNR (FAIL < 1.5), and isobestic noise (FAIL >= 0.9% dF/F - a too-noisy 405 "
+            "reference makes motion correction impossible and |r| meaningless). "
+            "Secondary metrics (signal noise floor, temporal stability, corrected-output distribution, "
+            "photobleach) refine the verdict only when all critical metrics pass. Overall tier = worst "
+            "critical-metric tier."
         )
         self.lbl_method.setProperty("class", "hint")
         self.lbl_method.setWordWrap(True)
