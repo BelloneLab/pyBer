@@ -2886,6 +2886,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.plot_raw.getViewBox().sigXRangeChanged.connect(self._emit_xrange_from_any)
         self.plot_proc.getViewBox().sigXRangeChanged.connect(self._emit_xrange_from_any)
         self.plot_out.getViewBox().sigXRangeChanged.connect(self._emit_xrange_from_any)
+        self._link_stacked_x_axes()
 
         self._raw_vb.dragSelectionFinished.connect(self._on_drag_select_finished)
         self._raw_vb.dragSelectionCleared.connect(self._on_drag_select_cleared)
@@ -2968,6 +2969,15 @@ class PlotDashboard(QtWidgets.QWidget):
                 except Exception:
                     pass
 
+    def _link_stacked_x_axes(self) -> None:
+        # Keep interactive pan/zoom aligned even when a user starts the gesture on
+        # the processing or output plot instead of the raw plot.
+        try:
+            self.plot_proc.setXLink(self.plot_raw)
+            self.plot_out.setXLink(self.plot_raw)
+        except Exception:
+            pass
+
     def _set_dio_overlay_visible(self, visible: bool, label: str = "A/D") -> None:
         self._dio_overlay_visible = bool(visible)
         for plot, vb, curve in (
@@ -3023,8 +3033,12 @@ class PlotDashboard(QtWidgets.QWidget):
             return
         try:
             x0, x1 = x_range
-            self._last_xrange = (float(x0), float(x1))
-            self.xRangeChanged.emit(float(x0), float(x1))
+            x0 = float(x0)
+            x1 = float(x1)
+            if not np.isfinite(x0) or not np.isfinite(x1) or x1 <= x0:
+                return
+            self.set_xrange_all(x0, x1)
+            self.xRangeChanged.emit(x0, x1)
         except Exception:
             pass
 

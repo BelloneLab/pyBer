@@ -297,237 +297,254 @@ def _qc_robust_sigma(values: np.ndarray) -> float:
     return std if np.isfinite(std) else float("nan")
 
 
-def _evaluate_qc(qc: Dict[str, object]) -> Tuple[float, str, str, List[Tuple[str, float, float, str]]]:
-    """Score the quality of a fiber-photometry recording from its QC metrics.
+# Per-metric tiering: PASS / WARN / FAIL. The thresholds below are drawn from
+# the fiber-photometry literature and lab practice (Patel et al. 2020 on motion
+# correction, De Jong et al. 2019 on artifact rates, common SNR conventions).
+# The FAIL boundary on motion bleed is set at 0.9 (not 0.85) because some GRAB
+# sensors carry intrinsically noisier 405 references that can inflate |r|.
+_QC_PASS_SCORE = 88.0
+_QC_WARN_SCORE = 55.0
+_QC_FAIL_SCORE = 22.0
+
+
+def _qc_decide_tier(value: float, warn_thr: float, fail_thr: float,
+                    *, higher_is_worse: bool = True) -> Tuple[str, float]:
+    """Classify a value against two thresholds. Returns (tier_label, score)."""
+    if not np.isfinite(value):
+        # Missing data is treated as WARN, not FAIL: we don't know it's bad,
+        # but we can't confirm it's good either.
+        return "WARN", _QC_WARN_SCORE
+    if higher_is_worse:
+        if value < warn_thr:
+            return "PASS", _QC_PASS_SCORE
+        if value < fail_thr:
+            return "WARN", _QC_WARN_SCORE
+        return "FAIL", _QC_FAIL_SCORE
+    else:
+        if value >= warn_thr:
+            return "PASS", _QC_PASS_SCORE
+        if value >= fail_thr:
+            return "WARN", _QC_WARN_SCORE
+        return "FAIL", _QC_FAIL_SCORE
+
+
+# Map overall verdict tier to a representative score for the headline card.
+_QC_TIER_SCORE = {
+    "EXCELLENT": 92.0,
+    "GOOD": 78.0,
+    "FAIR": 62.0,
+    "MARGINAL": 42.0,
+    "POOR": 22.0,
+}
+
+
+def _evaluate_qc(qc: Dict[str, object]) -> Tuple[float, str, str, List[Tuple[str, float, float, str, str]]]:
+    """Score the quality of a fiber-photometry recording with a tiered veto.
+
+    Each metric is classified PASS / WARN / FAIL against literature-derived
+    absolute thresholds (no user-chosen weights). The overall verdict is
+    determined by the worst critical-metric tier; secondary metrics only
+    refine the verdict when no critical issue is present.
 
     Returns ``(overall_score, tier_label, tier_color, sub_metrics)`` where
-    ``sub_metrics`` is a list of ``(name, score, weight, explanation)`` tuples
-    that sum (weight) to 1.0.
-
-    The verdict is intentionally not dominated by z-scored output statistics:
-    z-scoring normalizes away the absolute noise floor, so a very noisy trace
-    can look deceptively well behaved. The primary gates use raw dF/F noise,
-    sample-to-sample jitter, artifact burden, and usable signal-to-noise.
+    ``sub_metrics`` is a list of ``(name, score, criticality, explanation, tier)``
+    tuples. ``criticality`` is 1.0 for critical, 0.5 for secondary, 0.0 for
+    info-only diagnostic rows.
     """
     art_frac_pct = _qc_float(qc, "art_frac", 0.0) * 100.0
     has_reference = bool(qc.get("has_reference", True))
     hf_noise_pct = _qc_float(qc, "hf_noise_pct", float("nan"))
     ref_hf_noise_pct = _qc_float(qc, "ref_hf_noise_pct", float("nan"))
-    jitter_ratio = _qc_float(qc, "jitter_ratio", float("nan"))
     usable_snr = _qc_float(qc, "usable_snr", float("nan"))
     frac_gt3 = _qc_float(qc, "frac_gt3", 0.0)
     frac_gt5 = _qc_float(qc, "frac_gt5", 0.0)
-    r_abs = abs(_qc_float(qc, "r", 1.0))
+    r_abs = abs(_qc_float(qc, "r", float("nan")))
     r_roll_std = _qc_float(qc, "r_roll_std", 0.0)
     bleach_pct = _qc_float(qc, "bleach_pct", 0.0)
+    bleach_abs = abs(bleach_pct)
     median = abs(_qc_float(qc, "q50", 0.0))
     kurt = _qc_float(qc, "kurt", 0.0)
 
-    metrics: List[Tuple[str, float, float, str]] = []
+    # 5-tuple: (name, score, criticality, why, tier)
+    metrics: List[Tuple[str, float, float, str, str]] = []
 
-    # 1) Artifact fraction. This is a gate, not just a small cosmetic penalty.
-    if art_frac_pct < 1.0:
-        s = 100; why = f"{art_frac_pct:.2f}% flagged samples - very clean recording."
-    elif art_frac_pct < 3.0:
-        s = 82;  why = f"{art_frac_pct:.2f}% artifacts - acceptable but worth checking."
-    elif art_frac_pct < 5.0:
-        s = 65;  why = f"{art_frac_pct:.2f}% artifacts - moderate contamination."
-    elif art_frac_pct < 10.0:
-        s = 42;  why = f"{art_frac_pct:.2f}% artifacts - cannot be called excellent."
-    elif art_frac_pct < 15.0:
-        s = 28;  why = f"{art_frac_pct:.2f}% artifacts - trace is heavily disturbed."
+    # ---- Critical metrics (gate the verdict) -------------------------------
+
+    # 1) Artifact load - hard threshold at 15% (typical literature cutoff).
+    tier_art, score_art = _qc_decide_tier(art_frac_pct, warn_thr=5.0, fail_thr=15.0)
+    why_art = {
+        "PASS": f"{art_frac_pct:.2f}% flagged samples - clean recording (PASS < 5%).",
+        "WARN": f"{art_frac_pct:.2f}% flagged samples - moderate disruption (WARN 5-15%).",
+        "FAIL": f"{art_frac_pct:.2f}% flagged samples - heavily disrupted (FAIL >= 15%).",
+    }[tier_art]
+    metrics.append(("Artifact load", score_art, 1.0, why_art, tier_art))
+
+    # 2) Motion bleed |r| - FAIL boundary at 0.9 (relaxed for noisy-reference
+    # GRAB sensors; standard ~0.6 elsewhere in the literature).
+    if has_reference:
+        if not np.isfinite(r_abs):
+            tier_mot, score_mot = "WARN", _QC_WARN_SCORE
+            why_mot = "Reference correlation unavailable - inspect rolling-r plot manually."
+        else:
+            tier_mot, score_mot = _qc_decide_tier(r_abs, warn_thr=0.45, fail_thr=0.9)
+            why_mot = {
+                "PASS": f"|r|={r_abs:.2f} - signal independent of reference (PASS < 0.45).",
+                "WARN": f"|r|={r_abs:.2f} - reference coupling, motion-correctable (WARN 0.45-0.9).",
+                "FAIL": f"|r|={r_abs:.2f} - signal dominated by reference movement (FAIL >= 0.9).",
+            }[tier_mot]
+        metrics.append(("Motion bleed", score_mot, 1.0, why_mot, tier_mot))
+
+    # 3) Usable SNR - field convention; SNR < 1.5 is unusable.
+    if not np.isfinite(usable_snr):
+        tier_snr, score_snr = "WARN", _QC_WARN_SCORE
+        why_snr = "Usable SNR unavailable - likely too short or invalid trace."
     else:
-        s = 12;  why = f"{art_frac_pct:.2f}% artifacts - recording is unusable as-is."
-    artifact_score = float(s)
-    metrics.append(("Artifact load", artifact_score, 0.18, why))
+        tier_snr, score_snr = _qc_decide_tier(usable_snr, warn_thr=4.0, fail_thr=1.5,
+                                              higher_is_worse=False)
+        why_snr = {
+            "PASS": f"SNR~{usable_snr:.2f} - strong dynamics above noise (PASS >= 4).",
+            "WARN": f"SNR~{usable_snr:.2f} - usable but not robust (WARN 1.5-4).",
+            "FAIL": f"SNR~{usable_snr:.2f} - dynamics near noise floor (FAIL < 1.5).",
+        }[tier_snr]
+    metrics.append(("Usable SNR", score_snr, 1.0, why_snr, tier_snr))
 
-    # 2) Noise floor in raw dF/F after removing the slow biological envelope.
+    # ---- Secondary metrics (advisory only) ---------------------------------
+
+    # 4) Signal HF noise floor.
     if not np.isfinite(hf_noise_pct):
-        s = 35; why = "Signal noise floor unavailable - inspect raw trace manually."
-    elif hf_noise_pct < 0.08:
-        s = 96; why = f"signal HF noise={hf_noise_pct:.3g}% dF/F - very quiet trace."
-    elif hf_noise_pct < 0.20:
-        s = 82; why = f"signal HF noise={hf_noise_pct:.3g}% dF/F - low noise."
-    elif hf_noise_pct < 0.45:
-        s = 62; why = f"signal HF noise={hf_noise_pct:.3g}% dF/F - usable, but noisy."
-    elif hf_noise_pct < 0.90:
-        s = 38; why = f"signal HF noise={hf_noise_pct:.3g}% dF/F - high noise floor."
+        tier_nse, score_nse = "WARN", _QC_WARN_SCORE
+        why_nse = "Signal noise floor unavailable - inspect raw trace manually."
     else:
-        s = 16; why = f"signal HF noise={hf_noise_pct:.3g}% dF/F - signal likely dominated by noise."
-    noise_score = float(s)
-    metrics.append(("Signal noise floor", noise_score, 0.20, why))
+        tier_nse, score_nse = _qc_decide_tier(hf_noise_pct, warn_thr=0.45, fail_thr=0.90)
+        why_nse = {
+            "PASS": f"signal HF noise={hf_noise_pct:.3g}% dF/F - low noise (PASS < 0.45%).",
+            "WARN": f"signal HF noise={hf_noise_pct:.3g}% dF/F - noisy (WARN 0.45-0.9%).",
+            "FAIL": f"signal HF noise={hf_noise_pct:.3g}% dF/F - signal dominated by noise (FAIL >= 0.9%).",
+        }[tier_nse]
+    metrics.append(("Signal noise floor", score_nse, 0.5, why_nse, tier_nse))
 
-    # 3) Isobestic/reference noise. A stable isobestic channel should have low
-    # high-frequency fluctuation; a noisy reference makes motion correction and
-    # quality interpretation less reliable even when the corrected signal looks ok.
+    # 5) Isobestic HF noise (only when a reference channel exists).
     if has_reference:
         if not np.isfinite(ref_hf_noise_pct):
-            s = 35; why = "Isobestic noise floor unavailable - inspect reference trace manually."
-        elif ref_hf_noise_pct < 0.08:
-            s = 96; why = f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - very stable reference."
-        elif ref_hf_noise_pct < 0.20:
-            s = 82; why = f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - low reference noise."
-        elif ref_hf_noise_pct < 0.45:
-            s = 62; why = f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - moderate reference noise."
-        elif ref_hf_noise_pct < 0.90:
-            s = 35; why = f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - noisy reference channel."
+            tier_ref, score_ref = "WARN", _QC_WARN_SCORE
+            why_ref = "Isobestic noise floor unavailable - inspect reference trace manually."
         else:
-            s = 15; why = f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - reference is unstable."
-        ref_noise_score = float(s)
-        metrics.append(("Isobestic noise", ref_noise_score, 0.12, why))
+            tier_ref, score_ref = _qc_decide_tier(ref_hf_noise_pct, warn_thr=0.45, fail_thr=0.90)
+            why_ref = {
+                "PASS": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - stable reference (PASS < 0.45%).",
+                "WARN": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - noisy reference (WARN 0.45-0.9%).",
+                "FAIL": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - reference unstable (FAIL >= 0.9%).",
+            }[tier_ref]
+        metrics.append(("Isobestic noise", score_ref, 0.5, why_ref, tier_ref))
 
-    # 4) Sample-to-sample roughness. This catches traces that z-score well but
-    # are visually dominated by fast jitter and spikes.
-    if not np.isfinite(jitter_ratio):
-        s = 45; why = "Jitter ratio unavailable - check the trace manually."
-    elif jitter_ratio < 0.18:
-        s = 96; why = f"jitter/signal={jitter_ratio:.2f} - smooth recording."
-    elif jitter_ratio < 0.35:
-        s = 82; why = f"jitter/signal={jitter_ratio:.2f} - minor high-frequency roughness."
-    elif jitter_ratio < 0.60:
-        s = 58; why = f"jitter/signal={jitter_ratio:.2f} - visible roughness."
-    elif jitter_ratio < 1.0:
-        s = 35; why = f"jitter/signal={jitter_ratio:.2f} - rough trace, weak confidence."
-    else:
-        s = 15; why = f"jitter/signal={jitter_ratio:.2f} - sample noise overwhelms dynamics."
-    jitter_score = float(s)
-    metrics.append(("Trace roughness", jitter_score, 0.15, why))
-
-    # 5) Usable signal-to-noise from the slow dF/F envelope versus HF residuals.
-    if not np.isfinite(usable_snr):
-        s = 35; why = "Usable SNR unavailable - likely too short or invalid trace."
-    elif usable_snr >= 8.0:
-        s = 96; why = f"SNR~{usable_snr:.2f} - strong dynamics above noise."
-    elif usable_snr >= 4.0:
-        s = 82; why = f"SNR~{usable_snr:.2f} - good separation from noise."
-    elif usable_snr >= 2.0:
-        s = 60; why = f"SNR~{usable_snr:.2f} - usable but not robust."
-    elif usable_snr >= 1.0:
-        s = 38; why = f"SNR~{usable_snr:.2f} - weak biological signal."
-    else:
-        s = 18; why = f"SNR~{usable_snr:.2f} - dynamics are near the noise floor."
-    snr_score = float(s)
-    metrics.append(("Usable SNR", snr_score, 0.17, why))
-
-    # 6) Reference correlation remains useful for motion bleed, but low r alone
-    # does not make a recording good. Skip it for signal-only recordings.
+    # 6) Temporal stability of motion coupling.
     if has_reference:
-        if r_abs < 0.25:
-            s = 90; why = f"|r|={r_abs:.2f} - low reference bleed."
-        elif r_abs < 0.45:
-            s = 78; why = f"|r|={r_abs:.2f} - mild motion/reference coupling."
-        elif r_abs < 0.65:
-            s = 55; why = f"|r|={r_abs:.2f} - moderate motion contamination."
-        elif r_abs < 0.80:
-            s = 32; why = f"|r|={r_abs:.2f} - heavy motion contamination."
-        else:
-            s = 12; why = f"|r|={r_abs:.2f} - signal dominated by reference movement."
-        if r_roll_std > 0.35:
-            s = min(s, 35)
-            why += f" Rolling r is unstable (std={r_roll_std:.2f})."
-        elif r_roll_std > 0.20:
-            s = min(s, 60)
-            why += f" Rolling r varies over time (std={r_roll_std:.2f})."
-        metrics.append(("Motion bleed", float(s), 0.08, why))
+        tier_roll, score_roll = _qc_decide_tier(r_roll_std, warn_thr=0.20, fail_thr=0.35)
+        why_roll = {
+            "PASS": f"rolling-r std={r_roll_std:.2f} - motion coupling is stationary (PASS < 0.20).",
+            "WARN": f"rolling-r std={r_roll_std:.2f} - coupling varies over time (WARN 0.20-0.35).",
+            "FAIL": f"rolling-r std={r_roll_std:.2f} - intermittent disturbances (FAIL >= 0.35).",
+        }[tier_roll]
+        metrics.append(("Temporal stability", score_roll, 0.5, why_roll, tier_roll))
 
-    # 7) Output distribution is now a supporting diagnostic only.
+    # 7) Corrected output distribution (heavy tails / bias).
     if frac_gt5 > 1.0:
-        s = 28; why = f"{frac_gt5:.2f}% |Z|>5 - extreme outliers remain after correction."
-    elif frac_gt3 > 10.0:
-        s = 42; why = f"{frac_gt3:.2f}% |Z|>3 - very heavy corrected tails."
-    elif frac_gt3 > 0.5:
-        s = 78; why = f"{frac_gt3:.2f}% |Z|>3 - corrected trace has transient-like tails."
+        tier_dist, score_dist = "FAIL", _QC_FAIL_SCORE
+        why_dist = f"{frac_gt5:.2f}% |Z|>5 - extreme outliers remain in corrected trace (FAIL)."
+    elif frac_gt3 > 10.0 or median > 0.35 or abs(kurt) > 10.0:
+        tier_dist, score_dist = "WARN", _QC_WARN_SCORE
+        why_dist = (f"{frac_gt3:.2f}% |Z|>3, median={median:.2f}, kurt={kurt:+.1f} - "
+                    f"biased / heavy-tailed corrected distribution (WARN).")
     else:
-        s = 55; why = f"{frac_gt3:.2f}% |Z|>3 - flat corrected distribution; expression may be low."
-    if median > 0.35 or abs(kurt) > 10.0:
-        s = min(s, 45)
-        why += f" Distribution is biased/heavy-tailed (median={median:.2f}, kurt={kurt:+.1f})."
-    metrics.append(("Corrected output", float(s), 0.05, why))
+        tier_dist, score_dist = "PASS", _QC_PASS_SCORE
+        why_dist = f"{frac_gt3:.2f}% |Z|>3 - corrected distribution is well behaved (PASS)."
+    metrics.append(("Corrected output", score_dist, 0.5, why_dist, tier_dist))
 
     # 8) Photobleach over the recording.
-    bleach_abs = abs(bleach_pct)
-    if bleach_abs < 5.0:
-        s = 94; why = f"{bleach_pct:+.1f}% baseline drift - stable fluorescence."
-    elif bleach_abs < 15.0:
-        s = 74; why = f"{bleach_pct:+.1f}% baseline drift - moderate photobleach."
-    elif bleach_abs < 30.0:
-        s = 48; why = f"{bleach_pct:+.1f}% baseline drift - substantial drift."
+    tier_bl, score_bl = _qc_decide_tier(bleach_abs, warn_thr=10.0, fail_thr=30.0)
+    why_bl = {
+        "PASS": f"{bleach_pct:+.1f}% baseline drift - stable fluorescence (PASS < 10%).",
+        "WARN": f"{bleach_pct:+.1f}% baseline drift - moderate drift (WARN 10-30%).",
+        "FAIL": f"{bleach_pct:+.1f}% baseline drift - severe drift / saturation risk (FAIL >= 30%).",
+    }[tier_bl]
+    metrics.append(("Photobleach", score_bl, 0.5, why_bl, tier_bl))
+
+    # ---- Aggregation: worst-critical wins; secondaries refine -------------
+    critical_tiers = [tier for _name, _s, crit, _w, tier in metrics if crit >= 1.0]
+    secondary_tiers = [tier for _name, _s, crit, _w, tier in metrics if 0.0 < crit < 1.0]
+
+    n_crit_fail = critical_tiers.count("FAIL")
+    n_crit_warn = critical_tiers.count("WARN")
+    n_sec_fail = secondary_tiers.count("FAIL")
+    n_sec_warn = secondary_tiers.count("WARN")
+
+    if n_crit_fail >= 2:
+        tier_name = "POOR"
+        rationale = f"{n_crit_fail} critical metrics in FAIL - recording is not usable."
+    elif n_crit_fail == 1:
+        # A single critical FAIL caps at MARGINAL or POOR depending on context.
+        if n_sec_fail >= 2:
+            tier_name = "POOR"
+            rationale = "Critical FAIL plus multiple secondary FAILs - recording is not usable."
+        else:
+            tier_name = "MARGINAL"
+            rationale = "One critical metric in FAIL - results require very cautious interpretation."
+    elif n_crit_warn >= 2:
+        tier_name = "FAIR"
+        rationale = f"{n_crit_warn} critical metrics in WARN - usable with motion correction."
+    elif n_crit_warn == 1:
+        if n_sec_fail >= 2:
+            tier_name = "FAIR"
+            rationale = "One critical WARN plus secondary FAILs - usable but check carefully."
+        else:
+            tier_name = "GOOD"
+            rationale = "One critical metric in WARN, otherwise clean - typical good recording."
     else:
-        s = 22; why = f"{bleach_pct:+.1f}% baseline drift - severe drift/saturation risk."
-    metrics.append(("Photobleach", float(s), 0.05, why))
+        # All critical metrics PASS - secondary tier count refines the verdict.
+        if n_sec_fail >= 2:
+            tier_name = "FAIR"
+            rationale = "All critical metrics pass but multiple secondary FAILs - investigate before reporting."
+        elif n_sec_fail == 1:
+            tier_name = "GOOD"
+            rationale = "Critical metrics pass; one secondary FAIL - solid recording."
+        elif n_sec_warn >= 2:
+            tier_name = "GOOD"
+            rationale = "Critical metrics pass; minor secondary warnings - solid recording."
+        elif n_sec_warn >= 1:
+            tier_name = "EXCELLENT"
+            rationale = "All critical metrics pass; nearly perfect recording."
+        else:
+            tier_name = "EXCELLENT"
+            rationale = "All metrics pass - textbook recording."
 
-    weight_sum = sum(weight for _name, _score, weight, _why in metrics if weight > 0.0)
-    if weight_sum > 0:
-        weighted_score = sum(score * weight for _name, score, weight, _why in metrics if weight > 0.0) / weight_sum
-        metrics = [
-            (name, score, weight / weight_sum if weight > 0.0 else weight, why)
-            for name, score, weight, why in metrics
-        ]
-    else:
-        weighted_score = 0.0
-    overall = weighted_score
+    overall_score = _QC_TIER_SCORE.get(tier_name, 0.0)
+    _tier_name_dbg, tier_color = _qc_tier_for(overall_score)
+    # Insert a top-of-list rationale row so the user sees WHY this verdict.
+    metrics.insert(0, ("Verdict rationale", overall_score, 0.0,
+                       (f"{rationale} "
+                        f"({n_crit_fail} critical FAIL, {n_crit_warn} critical WARN, "
+                        f"{n_sec_fail} secondary FAIL, {n_sec_warn} secondary WARN)"),
+                       ""))
+    return overall_score, tier_name, tier_color, metrics
 
-    caps: List[Tuple[float, str]] = []
-    if art_frac_pct >= 20.0:
-        caps.append((25.0, f"{art_frac_pct:.1f}% artifacts"))
-    elif art_frac_pct >= 10.0:
-        caps.append((38.0, f"{art_frac_pct:.1f}% artifacts"))
-    elif art_frac_pct >= 5.0:
-        caps.append((55.0, f"{art_frac_pct:.1f}% artifacts"))
-    elif art_frac_pct >= 3.0:
-        caps.append((70.0, f"{art_frac_pct:.1f}% artifacts"))
 
-    if np.isfinite(hf_noise_pct):
-        if hf_noise_pct >= 1.25:
-            caps.append((42.0, f"signal HF noise {hf_noise_pct:.2g}% dF/F"))
-        elif hf_noise_pct >= 0.70:
-            caps.append((55.0, f"signal HF noise {hf_noise_pct:.2g}% dF/F"))
-    if has_reference and np.isfinite(ref_hf_noise_pct):
-        if ref_hf_noise_pct >= 1.25:
-            caps.append((42.0, f"isobestic HF noise {ref_hf_noise_pct:.2g}% dF/F"))
-        elif ref_hf_noise_pct >= 0.70:
-            caps.append((55.0, f"isobestic HF noise {ref_hf_noise_pct:.2g}% dF/F"))
-        elif ref_hf_noise_pct >= 0.45:
-            caps.append((70.0, f"isobestic HF noise {ref_hf_noise_pct:.2g}% dF/F"))
-    if np.isfinite(jitter_ratio):
-        if jitter_ratio >= 1.0:
-            caps.append((45.0, f"jitter/signal {jitter_ratio:.2f}"))
-        elif jitter_ratio >= 0.70:
-            caps.append((58.0, f"jitter/signal {jitter_ratio:.2f}"))
-    if np.isfinite(usable_snr):
-        if usable_snr < 1.0:
-            caps.append((50.0, f"SNR {usable_snr:.2f}"))
-        elif usable_snr < 1.5:
-            caps.append((62.0, f"SNR {usable_snr:.2f}"))
-
-    if caps:
-        cap_score = min(score for score, _reason in caps)
-        cap_reasons = [reason for score, reason in caps if abs(score - cap_score) < 1e-9]
-        cap_reason = "; ".join(cap_reasons)
-        if overall > cap_score:
-            metrics.append((
-                "Final score cap",
-                cap_score,
-                0.0,
-                f"Weighted score before cap: {weighted_score:.0f}/100. "
-                f"Final score capped at {cap_score:.0f}/100 by {cap_reason}.",
-            ))
-            overall = cap_score
-
-    overall = float(max(0.0, min(100.0, overall)))
-    tier_name, tier_color = _qc_tier_for(overall)
-    return overall, tier_name, tier_color, metrics
+_QC_TIER_BADGE_COLORS = {
+    "PASS": "#5dd39e",
+    "WARN": "#f5c542",
+    "FAIL": "#ee6471",
+    "": "#6f7a8e",
+}
 
 
 class QualityVerdictCard(QtWidgets.QFrame):
-    """Big bottom-left card with overall verdict + per-metric breakdown bars."""
+    """Big bottom-left card with overall verdict + per-metric tier rows."""
 
     def __init__(
         self,
         score: float,
         tier_name: str,
         tier_color: str,
-        metrics: List[Tuple[str, float, float, str]],
+        metrics: List[Tuple[str, float, float, str, str]],
         parent: Optional[QtWidgets.QWidget] = None,
     ):
         super().__init__(parent)
@@ -561,58 +578,85 @@ class QualityVerdictCard(QtWidgets.QFrame):
         sub.setStyleSheet("color: #aab4c5; font-size: 8.8pt; letter-spacing: 0.5px; text-transform: uppercase;")
         col.addWidget(sub)
         head_lay.addLayout(col, 1)
-
-        score_lbl = QtWidgets.QLabel(f"{int(round(score))}<span style='color:#aab4c5; font-size:11pt;'>/100</span>")
-        score_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
-        score_lbl.setStyleSheet(f"color: {tier_color}; font-size: 22pt; font-weight: 700;")
-        head_lay.addWidget(score_lbl, 0, QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignRight)
         outer.addWidget(head)
 
-        cap_metrics = [m for m in metrics if m[2] <= 0.0]
+        # Diagnostic rows (criticality == 0). The verdict rationale row is the
+        # first such row; render it as a tinted callout so it reads as a
+        # headline explanation rather than a metric.
+        info_metrics = [m for m in metrics if m[2] <= 0.0]
         regular_metrics = [m for m in metrics if m[2] > 0.0]
-        for name, sub_score, _weight, why in cap_metrics:
-            cap_color = _qc_tier_for(sub_score)[1]
+        for entry in info_metrics:
+            name, _sub_score, _crit, why, _ = entry
             note = QtWidgets.QFrame()
             note.setStyleSheet(
-                f"QFrame {{ background: {cap_color}18; border: 1px solid {cap_color};"
+                f"QFrame {{ background: {tier_color}18; border: 1px solid {tier_color};"
                 " border-radius: 8px; }}"
                 "QLabel { background: transparent; }"
             )
             note_lay = QtWidgets.QVBoxLayout(note)
             note_lay.setContentsMargins(10, 8, 10, 8)
             note_lay.setSpacing(3)
-            title = QtWidgets.QLabel(f"{name}: {int(round(sub_score))}/100")
-            title.setStyleSheet(f"color: {cap_color}; font-size: 10pt; font-weight: 800;")
+            title = QtWidgets.QLabel(name)
+            title.setStyleSheet(f"color: {tier_color}; font-size: 9.5pt; font-weight: 800;"
+                                " letter-spacing: 0.4px; text-transform: uppercase;")
             note_lay.addWidget(title)
             detail = QtWidgets.QLabel(why)
             detail.setWordWrap(True)
-            detail.setStyleSheet("color: #d8deea; font-size: 8.4pt;")
+            detail.setStyleSheet("color: #d8deea; font-size: 8.6pt;")
             note_lay.addWidget(detail)
             outer.addWidget(note)
 
-        # Per-metric breakdown
-        breakdown_title = QtWidgets.QLabel("Score drivers")
-        breakdown_title.setStyleSheet("color: #aab4c5; font-size: 8.7pt; letter-spacing: 0.5px; text-transform: uppercase; padding-top: 2px;")
-        outer.addWidget(breakdown_title)
+        # Critical vs secondary header (only if we have any metric rows).
+        if regular_metrics:
+            crit_header = QtWidgets.QLabel("Per-metric tiers")
+            crit_header.setStyleSheet(
+                "color: #aab4c5; font-size: 8.7pt; letter-spacing: 0.5px;"
+                " text-transform: uppercase; padding-top: 2px;"
+            )
+            outer.addWidget(crit_header)
 
-        for name, sub_score, weight, why in regular_metrics:
+        last_was_critical: Optional[bool] = None
+        for name, sub_score, criticality, why, tier in regular_metrics:
+            is_critical = criticality >= 1.0
+            # Insert a subtle divider when switching from critical to secondary.
+            if last_was_critical is True and not is_critical:
+                sep_label = QtWidgets.QLabel("Advisory (does not gate the verdict)")
+                sep_label.setStyleSheet(
+                    "color: #6f7a8e; font-size: 8.0pt; letter-spacing: 0.4px;"
+                    " text-transform: uppercase; padding-top: 6px;"
+                )
+                outer.addWidget(sep_label)
+            last_was_critical = is_critical
+
             metric_row = QtWidgets.QFrame()
             metric_row.setStyleSheet("QFrame { background: transparent; border: 0; }")
             mlay = QtWidgets.QVBoxLayout(metric_row)
             mlay.setContentsMargins(0, 2, 0, 2)
             mlay.setSpacing(3)
+
             head_row = QtWidgets.QHBoxLayout()
             head_row.setContentsMargins(0, 0, 0, 0)
             head_row.setSpacing(6)
-            weight_html = f"  <span style='color:#6f7a8e; font-size:7.5pt;'>w={weight:.0%}</span>" if weight > 0 else ""
-            name_lbl = QtWidgets.QLabel(f"{name}{weight_html}")
+
+            crit_chip_html = (
+                "  <span style='color:#aab4c5; font-size:7.5pt;'>critical</span>"
+                if is_critical else
+                "  <span style='color:#6f7a8e; font-size:7.5pt;'>advisory</span>"
+            )
+            name_lbl = QtWidgets.QLabel(f"{name}{crit_chip_html}")
             name_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
             name_lbl.setStyleSheet("color: #e9ecf3; font-size: 9.2pt; font-weight: 700;")
             head_row.addWidget(name_lbl, 1)
-            sub_color = _qc_tier_for(sub_score)[1]
-            score_chip = QtWidgets.QLabel(f"{int(round(sub_score))}")
-            score_chip.setStyleSheet(f"color: {sub_color}; font-weight: 700; font-size: 9.5pt;")
-            head_row.addWidget(score_chip, 0, QtCore.Qt.AlignmentFlag.AlignRight)
+
+            tier_color_chip = _QC_TIER_BADGE_COLORS.get(tier or "", "#6f7a8e")
+            tier_chip = QtWidgets.QLabel(tier or "-")
+            tier_chip.setStyleSheet(
+                f"color: {tier_color_chip}; background: {tier_color_chip}22;"
+                f" border: 1px solid {tier_color_chip}; border-radius: 6px;"
+                " padding: 1px 8px; font-weight: 800; font-size: 8.4pt;"
+                " letter-spacing: 0.5px;"
+            )
+            head_row.addWidget(tier_chip, 0, QtCore.Qt.AlignmentFlag.AlignRight)
             mlay.addLayout(head_row)
 
             bar = QtWidgets.QProgressBar()
@@ -622,7 +666,7 @@ class QualityVerdictCard(QtWidgets.QFrame):
             bar.setFixedHeight(5)
             bar.setStyleSheet(
                 "QProgressBar { border: 0; background: #2c3240; border-radius: 2px; margin: 0; }"
-                f"QProgressBar::chunk {{ background: {sub_color}; border-radius: 2px; }}"
+                f"QProgressBar::chunk {{ background: {tier_color_chip}; border-radius: 2px; }}"
             )
             mlay.addWidget(bar)
 
@@ -668,7 +712,22 @@ class QcDialog(QtWidgets.QDialog):
         dff_sig = np.asarray(qc.get("dff_sig_pct", qc["z_sig"]), float)
         dff_ref = np.asarray(qc.get("dff_ref_pct", qc["z_ref"]), float)
         dff_env = np.asarray(qc.get("dff_envelope_pct", dff_sig), float)
+        noise_sigma = float(qc.get("hf_noise_pct", np.nan))
+        ref_noise_sigma = float(qc.get("ref_hf_noise_pct", np.nan))
         self.plot_z.addLegend(offset=(8, 8))
+        if np.isfinite(noise_sigma):
+            n = min(t.size, dff_env.size)
+            if n >= 2:
+                center = dff_env[:n]
+                self._add_filled_band(
+                    self.plot_z,
+                    t[:n],
+                    center - noise_sigma,
+                    center + noise_sigma,
+                    fill_rgba=(150, 150, 150, 45),
+                    line_rgba=(175, 175, 175, 80),
+                    z=-8.0,
+                )
         self.plot_z.plot(t, dff_sig, pen=pg.mkPen((90, 190, 255), width=1.0), name="signal")
         if has_reference:
             self.plot_z.plot(t, dff_ref, pen=pg.mkPen((240, 180, 80, 150), width=0.9), name="isobestic")
@@ -678,26 +737,31 @@ class QcDialog(QtWidgets.QDialog):
 
         hf_sig = np.asarray(qc.get("hf_sig_pct", np.zeros_like(t)), float)
         hf_ref = np.asarray(qc.get("hf_ref_pct", np.zeros_like(t)), float)
+        if np.isfinite(noise_sigma):
+            n = min(t.size, hf_sig.size)
+            if n >= 2:
+                self._add_filled_band(
+                    self.plot_noise,
+                    t[:n],
+                    np.full(n, -noise_sigma, dtype=float),
+                    np.full(n, noise_sigma, dtype=float),
+                    fill_rgba=(150, 150, 150, 45),
+                    line_rgba=(190, 190, 190, 90),
+                    z=-8.0,
+                )
         self.plot_noise.plot(t, hf_sig, pen=pg.mkPen((90, 190, 255), width=0.9), name="signal residual")
         if has_reference:
             self.plot_noise.plot(t, hf_ref, pen=pg.mkPen((240, 180, 80, 110), width=0.7), name="isobestic residual")
-        noise_sigma = float(qc.get("hf_noise_pct", np.nan))
-        ref_noise_sigma = float(qc.get("ref_hf_noise_pct", np.nan))
         if np.isfinite(noise_sigma):
-            self.plot_noise.addItem(pg.InfiniteLine(pos=noise_sigma, angle=0, pen=pg.mkPen((220, 220, 220), width=0.8, style=QtCore.Qt.PenStyle.DashLine)))
-            self.plot_noise.addItem(pg.InfiniteLine(pos=-noise_sigma, angle=0, pen=pg.mkPen((220, 220, 220), width=0.8, style=QtCore.Qt.PenStyle.DashLine)))
             if has_reference and np.isfinite(ref_noise_sigma):
                 ref_pen = pg.mkPen((240, 180, 80), width=0.7, style=QtCore.Qt.PenStyle.DotLine)
                 self.plot_noise.addItem(pg.InfiniteLine(pos=ref_noise_sigma, angle=0, pen=ref_pen))
                 self.plot_noise.addItem(pg.InfiniteLine(pos=-ref_noise_sigma, angle=0, pen=ref_pen))
-            jitter_ratio = float(qc.get("jitter_ratio", np.nan))
             note = f"signal noise={noise_sigma:.3g}% dF/F"
             if has_reference and np.isfinite(ref_noise_sigma):
                 note += f"  isobestic={ref_noise_sigma:.3g}%"
             elif not has_reference:
                 note += "  no isobestic channel"
-            if np.isfinite(jitter_ratio):
-                note += f"  jitter/signal={jitter_ratio:.2f}"
             self._add_plot_text_topleft(self.plot_noise, note)
         self.plot_noise.setLabel("left", "Residual (% dF/F)")
         self.plot_noise.setLabel("bottom", "Time (s)")
@@ -774,8 +838,12 @@ class QcDialog(QtWidgets.QDialog):
         self.lbl_stats.setProperty("class", "hint")
         self.lbl_stats.setWordWrap(True)
         self.lbl_method = QtWidgets.QLabel(
-            "Verdict uses dF/F artifact load, signal noise, isobestic noise when available, roughness, and SNR. "
-            "Z-score is shown only as a secondary corrected-output tail check."
+            "Verdict uses tiered veto rules with literature-derived thresholds (no user-chosen weights). "
+            "Three critical metrics gate the verdict: artifact load (FAIL >= 15%), "
+            "motion bleed |r| (FAIL >= 0.9, relaxed for noisy-reference GRAB sensors), "
+            "and usable SNR (FAIL < 1.5). Secondary metrics (noise floors, temporal stability, "
+            "corrected-output distribution, photobleach) refine the verdict only when all critical "
+            "metrics pass. Overall tier = worst critical-metric tier."
         )
         self.lbl_method.setProperty("class", "hint")
         self.lbl_method.setWordWrap(True)
@@ -850,6 +918,37 @@ class QcDialog(QtWidgets.QDialog):
         self._navigation_delta = int(delta)
         self.accept()
 
+    def _add_filled_band(
+        self,
+        plot: pg.PlotWidget,
+        x: np.ndarray,
+        lower: np.ndarray,
+        upper: np.ndarray,
+        fill_rgba: Tuple[int, int, int, int],
+        line_rgba: Tuple[int, int, int, int],
+        z: float = -5.0,
+    ) -> None:
+        xx = np.asarray(x, float)
+        lo = np.asarray(lower, float)
+        hi = np.asarray(upper, float)
+        n = min(xx.size, lo.size, hi.size)
+        if n < 2:
+            return
+        xx, lo, hi = xx[:n], lo[:n], hi[:n]
+        finite = np.isfinite(xx) & np.isfinite(lo) & np.isfinite(hi)
+        if int(np.sum(finite)) < 2:
+            return
+        pen = pg.mkPen(line_rgba, width=0.6)
+        upper_curve = pg.PlotCurveItem(xx[finite], hi[finite], pen=pen)
+        lower_curve = pg.PlotCurveItem(xx[finite], lo[finite], pen=pen)
+        band = pg.FillBetweenItem(upper_curve, lower_curve, brush=pg.mkBrush(fill_rgba))
+        band.setZValue(z)
+        upper_curve.setZValue(z + 0.1)
+        lower_curve.setZValue(z + 0.1)
+        plot.addItem(band)
+        plot.addItem(upper_curve)
+        plot.addItem(lower_curve)
+
     def _add_plot_text_topleft(self, plot: pg.PlotWidget, text: str) -> None:
         if not text:
             return
@@ -885,12 +984,22 @@ class QcDialog(QtWidgets.QDialog):
         try:
             with open(txt_path, "w") as f:
                 score, tier_name, _tier_color, metrics = _evaluate_qc(self._qc)
-                f.write(f"Overall quality: {tier_name} {score:.0f}/100\n")
-                for name, sub_score, weight, why in metrics:
-                    if weight > 0:
-                        f.write(f"- {name} ({weight:.0%}): {sub_score:.0f}/100 - {why}\n")
+                f.write(f"Overall quality: {tier_name} ({score:.0f}/100 representative)\n")
+                for entry in metrics:
+                    # 5-tuple (name, score, criticality, why, tier)
+                    name = entry[0]
+                    sub_score = float(entry[1])
+                    criticality = float(entry[2])
+                    why = str(entry[3])
+                    tier = str(entry[4]) if len(entry) > 4 else ""
+                    if criticality >= 1.0:
+                        kind = "critical"
+                    elif criticality > 0:
+                        kind = "advisory"
                     else:
-                        f.write(f"- {name}: {sub_score:.0f}/100 - {why}\n")
+                        kind = "rationale"
+                    tier_tag = f" [{tier}]" if tier else ""
+                    f.write(f"- {name} ({kind}){tier_tag}: {sub_score:.0f}/100 - {why}\n")
                 f.write("\n")
                 f.write(str(self._qc.get("stats", "")))
         except Exception:
@@ -5832,8 +5941,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Noise-aware metrics are computed on raw dF/F, before z-scoring can
         # hide the absolute noise floor. A low-pass envelope captures slower
-        # transients; the residual and first-difference roughness capture fast
-        # jitter/spikes that make a trace visually and analytically unreliable.
+        # transients, and the high-frequency residual estimates the local
+        # noise floor in interpretable dF/F units.
         def _metric_envelope(values: np.ndarray) -> np.ndarray:
             vals = interpolate_nans(np.asarray(values, float))
             if vals.size < 20:
@@ -5927,7 +6036,7 @@ class MainWindow(QtWidgets.QMainWindow):
         stats = (
             f"artifact_frac={art_frac*100:.2f}% | HF noise={hf_noise_pct:.3g}% dF/F "
             f"({'ref ' + format(ref_hf_noise_pct, '.3g') + '%' if has_reference else 'no isobestic'}) | event_amp={event_amp_pct:.3g}% | "
-            f"SNR~{usable_snr:.2f} | jitter/signal={jitter_ratio:.2f} | "
+            f"SNR~{usable_snr:.2f} | "
             f"r={r:.3f} (avg roll r={r_roll_mean:.2f}, std={r_roll_std:.2f}) | "
             f"Z median={q50:.3g} IQR=({q25:.3g},{q75:.3g}) | "
             f"|Z|>3: {frac_gt3:.2f}% | |Z|>5: {frac_gt5:.2f}% | "
