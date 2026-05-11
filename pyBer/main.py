@@ -6094,11 +6094,46 @@ class MainWindow(QtWidgets.QMainWindow):
 
         processed.raw_signal = _mask_arr(processed.raw_signal)
         processed.raw_reference = _mask_arr(processed.raw_reference)
+        processed.raw_thr_hi = _mask_arr(processed.raw_thr_hi)
+        processed.raw_thr_lo = _mask_arr(processed.raw_thr_lo)
         processed.sig_f = _mask_arr(processed.sig_f)
         processed.ref_f = _mask_arr(processed.ref_f)
         processed.baseline_sig = _mask_arr(processed.baseline_sig)
         processed.baseline_ref = _mask_arr(processed.baseline_ref)
         processed.output = _mask_arr(processed.output)
+
+        raw_t = getattr(processed, "raw_display_time", None)
+        if raw_t is not None:
+            raw_t = np.asarray(raw_t, float)
+            raw_mask = np.zeros_like(raw_t, dtype=bool)
+            for (a, b) in cutouts:
+                raw_mask |= (raw_t >= float(a)) & (raw_t <= float(b))
+
+            def _mask_raw_arr(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+                if arr is None:
+                    return None
+                y = np.asarray(arr, float).copy()
+                if y.size == raw_t.size:
+                    y[raw_mask] = np.nan
+                return y
+
+            processed.raw_display_signal = _mask_raw_arr(getattr(processed, "raw_display_signal", None))
+            processed.raw_display_reference = _mask_raw_arr(getattr(processed, "raw_display_reference", None))
+            processed.raw_display_thr_hi = _mask_raw_arr(getattr(processed, "raw_display_thr_hi", None))
+            processed.raw_display_thr_lo = _mask_raw_arr(getattr(processed, "raw_display_thr_lo", None))
+            processed.raw_display_ref_thr_hi = _mask_raw_arr(getattr(processed, "raw_display_ref_thr_hi", None))
+            processed.raw_display_ref_thr_lo = _mask_raw_arr(getattr(processed, "raw_display_ref_thr_lo", None))
+            if getattr(processed, "raw_display_dio_time", None) is not None:
+                dio_t = np.asarray(getattr(processed, "raw_display_dio_time"), float)
+                dio_mask = np.zeros_like(dio_t, dtype=bool)
+                for (a, b) in cutouts:
+                    dio_mask |= (dio_t >= float(a)) & (dio_t <= float(b))
+                raw_dio = getattr(processed, "raw_display_dio", None)
+                if raw_dio is not None:
+                    y = np.asarray(raw_dio, float).copy()
+                    if y.size == dio_t.size:
+                        y[dio_mask] = np.nan
+                    processed.raw_display_dio = y
         if hasattr(processed, "outputs") and processed.outputs:
             masked_outputs = {}
             for label, values in processed.outputs.items():
@@ -6300,13 +6335,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Update artifact panel regions list
         start_s, end_s = self._time_window_bounds()
-        auto_regs = processed.artifact_regions_auto_sec or []
-        auto_regs = self._clip_regions_to_window(auto_regs, start_s, end_s)
+        auto_regs_raw = processed.artifact_regions_auto_sec or []
+        auto_core_raw = list(getattr(processed, "artifact_regions_auto_core_sec", None) or [])
+        auto_sources_raw = list(getattr(processed, "artifact_regions_auto_source", None) or [])
+        auto_regs = self._clip_regions_to_window(auto_regs_raw, start_s, end_s)
+        auto_sources = []
+        auto_cores = []
+        for a, b in auto_regs:
+            source = ""
+            core = (float(a), float(b))
+            for idx, (ra, rb) in enumerate(auto_regs_raw):
+                if float(rb) >= float(a) and float(ra) <= float(b):
+                    if idx < len(auto_sources_raw):
+                        source = str(auto_sources_raw[idx] or "")
+                    if idx < len(auto_core_raw):
+                        ca, cb = auto_core_raw[idx]
+                        core = (max(float(ca), float(a)), min(float(cb), float(b)))
+                    break
+            auto_sources.append(source)
+            auto_cores.append(core)
         self._auto_regions_by_key[key] = auto_regs
         ignore = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
         # build checked list by excluding ignored
         checked_auto = [r for r in auto_regs if not any(self._regions_match(r, ig) for ig in ignore)]
-        self.artifact_panel.set_auto_regions(auto_regs, checked_regions=checked_auto)
+        self.artifact_panel.set_auto_regions(
+            auto_regs, checked_regions=checked_auto, sources=auto_sources, core_regions=auto_cores
+        )
         manual_regs = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
         self.artifact_panel.set_regions(manual_regs)
 

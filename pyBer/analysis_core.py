@@ -292,6 +292,19 @@ class ProcessedTrial:
     raw_thr_hi: Optional[np.ndarray] = None
     raw_thr_lo: Optional[np.ndarray] = None
 
+    # Exact pre-processing raw arrays used for the top trace display. These are
+    # kept separate from raw_signal/raw_reference because the latter are aligned
+    # to the processed/export timebase for backward compatibility.
+    raw_display_time: Optional[np.ndarray] = None
+    raw_display_signal: Optional[np.ndarray] = None
+    raw_display_reference: Optional[np.ndarray] = None
+    raw_display_thr_hi: Optional[np.ndarray] = None
+    raw_display_thr_lo: Optional[np.ndarray] = None
+    raw_display_ref_thr_hi: Optional[np.ndarray] = None
+    raw_display_ref_thr_lo: Optional[np.ndarray] = None
+    raw_display_dio_time: Optional[np.ndarray] = None
+    raw_display_dio: Optional[np.ndarray] = None
+
     # Optional analog/digital trigger channel aligned to processed time
     dio: Optional[np.ndarray] = None
     dio_name: str = ""
@@ -312,6 +325,8 @@ class ProcessedTrial:
 
     artifact_regions_sec: Optional[List[Tuple[float, float]]] = None
     artifact_regions_auto_sec: Optional[List[Tuple[float, float]]] = None
+    artifact_regions_auto_core_sec: Optional[List[Tuple[float, float]]] = None
+    artifact_regions_auto_source: Optional[List[str]] = None
 
     # Overlay data for the prominence-normalized output mode (None when the
     # active output mode does not use prominence normalization).
@@ -666,6 +681,34 @@ def regions_from_mask(time: np.ndarray, mask: np.ndarray) -> List[Tuple[float, f
     return regions
 
 
+def _pad_mask_by_seconds(time: np.ndarray, mask: np.ndarray, pad_s: float) -> np.ndarray:
+    """Pad a boolean time mask by pad_s seconds on both sides."""
+    t = np.asarray(time, float)
+    m = np.asarray(mask, bool).copy()
+    if m.size == 0 or t.size < 2 or float(pad_s) <= 0:
+        return m
+    n = min(t.size, m.size)
+    t = t[:n]
+    m = m[:n]
+    dt = float(np.nanmedian(np.diff(t)))
+    if not np.isfinite(dt) or dt <= 0:
+        return np.asarray(mask, bool)
+    pad_n = int(max(0, round(float(pad_s) / max(dt, 1e-12))))
+    if pad_n <= 0:
+        return np.asarray(mask, bool)
+    idx = np.where(m)[0]
+    padded = m.copy()
+    for i in idx:
+        a = max(0, i - pad_n)
+        b = min(padded.size, i + pad_n + 1)
+        padded[a:b] = True
+    if padded.size != np.asarray(mask).size:
+        out = np.zeros_like(np.asarray(mask, bool), dtype=bool)
+        out[: min(out.size, padded.size)] = padded[: min(out.size, padded.size)]
+        return out
+    return padded
+
+
 def apply_manual_regions(time: np.ndarray, mask: np.ndarray, regions: List[Tuple[float, float]]) -> np.ndarray:
     """OR a user-provided list of regions (sec) into the artifact mask."""
     t = np.asarray(time, float)
@@ -933,6 +976,10 @@ def _compute_signal_envelope(
     y = np.asarray(x, float)
     if y.size == 0:
         return y.copy(), y.copy()
+    finite_y = y[np.isfinite(y)]
+    if finite_y.size == 0:
+        empty = np.full_like(y, np.nan, dtype=float)
+        return empty, empty
 
     if mode.startswith("Adaptive"):
         dt = float(np.nanmedian(np.diff(t))) if t.size > 2 else 1.0
@@ -954,8 +1001,8 @@ def _compute_signal_envelope(
         spread = interpolate_nans(spread)
         return center + spread, center - spread
 
-    med = float(np.nanmedian(y))
-    sp = float(k * _mad(y))
+    med = float(np.median(finite_y))
+    sp = float(k * _mad(finite_y))
     hi = np.full_like(y, med + sp, dtype=float)
     lo = np.full_like(y, med - sp, dtype=float)
     return hi, lo
@@ -985,15 +1032,7 @@ def _mask_outside_signal_envelope(t: np.ndarray, y: np.ndarray, hi: np.ndarray, 
     )
     mask = np.zeros_like(yy, dtype=bool)
     mask[:n] = core
-    if pad_s > 0 and tt.size > 1:
-        dt = float(np.nanmedian(np.diff(tt)))
-        pad_n = int(max(0, round(pad_s / max(dt, 1e-12))))
-        if pad_n > 0:
-            idx = np.where(mask)[0]
-            for i in idx:
-                a = max(0, i - pad_n)
-                b = min(mask.size, i + pad_n + 1)
-                mask[a:b] = True
+    mask = _pad_mask_by_seconds(tt, mask, pad_s)
     if y.size != mask.size:
         out = np.zeros_like(y, dtype=bool)
         out[: min(out.size, mask.size)] = mask[: min(out.size, mask.size)]
@@ -1737,6 +1776,25 @@ class PhotometryProcessor:
             str(params.artifact_mode),
             float(params.adaptive_window_s),
         )
+        hi_ref_raw, lo_ref_raw = _compute_signal_envelope(
+            t,
+            ref,
+            float(params.mad_k),
+            str(params.artifact_mode),
+            float(params.adaptive_window_s),
+        )
+
+        raw_display_dio_time = None
+        raw_display_dio = None
+        if trial.trigger is not None and np.asarray(trial.trigger).size and trial.trigger_name:
+            trig = np.asarray(trial.trigger, float)
+            trig_t = getattr(trial, "trigger_time", None)
+            if trig_t is not None and np.asarray(trig_t).size == trig.size:
+                raw_display_dio_time = np.asarray(trig_t, float)
+                raw_display_dio = trig
+            elif trig.size == t.size:
+                raw_display_dio_time = np.asarray(t, float)
+                raw_display_dio = trig
 
         # ---------------------------------------------------------------------
         # 3) Artifact detection on BOTH the signal (465) and reference (405)
@@ -1747,29 +1805,50 @@ class PhotometryProcessor:
         #    processing pipeline used to look only at the signal channel,
         #    leaving reference-side spikes untouched.
         # ---------------------------------------------------------------------
+        mask_sig = np.zeros_like(t, dtype=bool)
+        mask_ref = np.zeros_like(t, dtype=bool)
+        core_sig = np.zeros_like(t, dtype=bool)
+        core_ref = np.zeros_like(t, dtype=bool)
         if bool(getattr(params, "artifact_detection_enabled", True)):
-            if str(params.artifact_mode).startswith("Adaptive"):
-                mask_sig = detect_artifacts_adaptive(
-                    t, sig, float(params.mad_k), float(params.adaptive_window_s), float(params.artifact_pad_s)
-                )
-                mask_ref = detect_artifacts_adaptive(
-                    t, ref, float(params.mad_k), float(params.adaptive_window_s), float(params.artifact_pad_s)
-                )
-            else:
-                mask_sig = detect_artifacts_global_dx(
-                    t, sig, float(params.mad_k), float(params.artifact_pad_s)
-                )
-                mask_ref = detect_artifacts_global_dx(
-                    t, ref, float(params.mad_k), float(params.artifact_pad_s)
-                )
+            core_sig = _mask_outside_signal_envelope(t, sig, hi_raw, lo_raw, 0.0)
+            core_ref = _mask_outside_signal_envelope(t, ref, hi_ref_raw, lo_ref_raw, 0.0)
+            pad_s = float(params.artifact_pad_s)
+            mask_sig = _pad_mask_by_seconds(t, core_sig, pad_s)
+            mask_ref = _pad_mask_by_seconds(t, core_ref, pad_s)
             mask = np.asarray(mask_sig, bool) | np.asarray(mask_ref, bool)
         else:
             mask = np.zeros_like(t, dtype=bool)
 
         auto_regions = regions_from_mask(t, mask)
+        core_mask = np.asarray(core_sig, bool) | np.asarray(core_ref, bool)
+        core_regions = regions_from_mask(t, core_mask)
+        auto_core_regions: List[Tuple[float, float]] = []
+        auto_sources: List[str] = []
+        for a, b in auto_regions:
+            in_region = (t >= float(a)) & (t <= float(b))
+            sig_hit = bool(np.any(np.asarray(core_sig, bool) & in_region))
+            ref_hit = bool(np.any(np.asarray(core_ref, bool) & in_region))
+            if sig_hit and ref_hit:
+                auto_sources.append("465 + 405")
+            elif sig_hit:
+                auto_sources.append("465")
+            elif ref_hit:
+                auto_sources.append("405")
+            else:
+                auto_sources.append("")
+            overlapping_core = [
+                (max(float(ca), float(a)), min(float(cb), float(b)))
+                for ca, cb in core_regions
+                if float(cb) >= float(a) and float(ca) <= float(b)
+            ]
+            if overlapping_core:
+                auto_core_regions.append((overlapping_core[0][0], overlapping_core[-1][1]))
+            else:
+                auto_core_regions.append((float(a), float(b)))
         if manual_exclude_regions_sec:
             mask = remove_manual_regions(t, mask, manual_exclude_regions_sec or [])
         mask = apply_manual_regions(t, mask, manual_regions_sec or [])
+        final_regions = regions_from_mask(t, mask)
 
         # ---------------------------------------------------------------------
         # 4) Apply selected artifact handling.
@@ -1777,6 +1856,32 @@ class PhotometryProcessor:
         #    Cut is applied after resampling so all processed arrays stay aligned.
         # ---------------------------------------------------------------------
         sig_corr, ref_corr, artifact_handling = _apply_artifact_handling(sig, ref, mask, fs, params)
+
+        raw_display_signal = np.asarray(sig, float).copy()
+        raw_display_reference = np.asarray(ref, float).copy()
+        raw_display_thr_hi = np.asarray(hi_raw, float).copy() if hi_raw is not None else None
+        raw_display_thr_lo = np.asarray(lo_raw, float).copy() if lo_raw is not None else None
+        raw_display_ref_thr_hi = np.asarray(hi_ref_raw, float).copy() if hi_ref_raw is not None else None
+        raw_display_ref_thr_lo = np.asarray(lo_ref_raw, float).copy() if lo_ref_raw is not None else None
+        if artifact_handling == "Cut" and np.any(mask):
+            raw_display_signal[mask] = np.nan
+            raw_display_reference[mask] = np.nan
+            if raw_display_thr_hi is not None and raw_display_thr_hi.size == mask.size:
+                raw_display_thr_hi[mask] = np.nan
+            if raw_display_thr_lo is not None and raw_display_thr_lo.size == mask.size:
+                raw_display_thr_lo[mask] = np.nan
+            if raw_display_ref_thr_hi is not None and raw_display_ref_thr_hi.size == mask.size:
+                raw_display_ref_thr_hi[mask] = np.nan
+            if raw_display_ref_thr_lo is not None and raw_display_ref_thr_lo.size == mask.size:
+                raw_display_ref_thr_lo[mask] = np.nan
+            if raw_display_dio is not None and raw_display_dio_time is not None:
+                dio_t = np.asarray(raw_display_dio_time, float)
+                dio_m = np.zeros_like(dio_t, dtype=bool)
+                for a, b in final_regions:
+                    dio_m |= (dio_t >= float(a)) & (dio_t <= float(b))
+                if np.asarray(raw_display_dio).size == dio_m.size:
+                    raw_display_dio = np.asarray(raw_display_dio, float).copy()
+                    raw_display_dio[dio_m] = np.nan
 
         # ---------------------------------------------------------------------
         # 5) Low-pass filter before decimation (anti-aliasing)
@@ -1800,7 +1905,9 @@ class PhotometryProcessor:
         _, hi2, lo2, _ = _resample_pair_to_target_fs(t, hi_raw, lo_raw, fs, target_fs)
 
         if artifact_handling == "Cut" and np.any(mask):
-            mask2 = np.interp(t2, t, mask.astype(float), left=0.0, right=0.0) > 0.5
+            mask2 = np.zeros_like(t2, dtype=bool)
+            for a, b in final_regions:
+                mask2 |= (t2 >= float(a)) & (t2 <= float(b))
             keep = ~mask2
             if np.sum(keep) >= 3:
                 t2 = t2[keep]
@@ -1831,7 +1938,10 @@ class PhotometryProcessor:
         # 8) Baseline estimation AFTER filtering/resampling (on final timebase)
         # ---------------------------------------------------------------------
         b_sig = self._baseline(t2, sig2, params)
-        b_ref = self._baseline(t2, ref2, params)
+        finite_ref2 = np.asarray(ref2, float)
+        finite_ref2 = finite_ref2[np.isfinite(finite_ref2)]
+        has_reference = bool(finite_ref2.size >= 5 and np.nanstd(finite_ref2) > 1e-12)
+        b_ref = self._baseline(t2, ref2, params) if has_reference else np.full_like(ref2, np.nan, dtype=float)
 
         # ---------------------------------------------------------------------
         # 9) Compute requested output mode
@@ -1839,6 +1949,7 @@ class PhotometryProcessor:
         mode = params.output_mode if params.output_mode in OUTPUT_MODES else OUTPUT_MODES[0]
         out: Optional[np.ndarray] = None
         prominence_stats: Optional[Dict[str, float]] = None
+        no_reference_fallback = False
 
         # --- Compute baseline-referenced dFFs (building blocks) ---
         # dFF_sig = (sig_filtered - baseline_sig) / baseline_sig
@@ -1860,34 +1971,54 @@ class PhotometryProcessor:
         elif mode == "dFF (motion corrected via subtraction)":
             # (3) dFF (motion corrected via subtraction)
             # dFF_mc = dFF_sig - dFF_ref
-            out = dff_sub
+            if has_reference:
+                out = dff_sub
+            else:
+                out = dff_sig
+                no_reference_fallback = True
 
         elif mode == "zscore (motion corrected via subtraction)":
             # (4) zscore (motion corrected via subtraction)
             # zscore(dFF_sig - dFF_ref)
-            out = zscore_median_std(dff_sub)
+            if has_reference:
+                out = zscore_median_std(dff_sub)
+            else:
+                out = zscore_median_std(dff_sig)
+                no_reference_fallback = True
 
         elif mode == "zscore (subtractions)":
             # (5) zscore (subtractions)
             # zscore(dFF_sig) - zscore(dFF_ref)
-            out = zscore_median_std(dff_sig) - zscore_median_std(dff_ref)
+            if has_reference:
+                out = zscore_median_std(dff_sig) - zscore_median_std(dff_ref)
+            else:
+                out = zscore_median_std(dff_sig)
+                no_reference_fallback = True
 
         elif mode == "dFF (motion corrected with fitted ref)":
             # (6) dFF (motion corrected with fitted ref)
             # 1) Fit reference (405) onto signal (465): fitted_ref = a*ref_filtered + b
             # 2) Compute dFF using fitted reference denominator:
             #    dFF = (sig_filtered - fitted_ref) / fitted_ref
-            a, b = fit_reference_to_signal(ref2, sig2, params)
-            fitted_ref = a * ref2 + b
-            out = safe_divide(sig2 - fitted_ref, fitted_ref)
+            if has_reference:
+                a, b = fit_reference_to_signal(ref2, sig2, params)
+                fitted_ref = a * ref2 + b
+                out = safe_divide(sig2 - fitted_ref, fitted_ref)
+            else:
+                out = dff_sig
+                no_reference_fallback = True
 
         elif mode == "zscore (motion corrected with fitted ref)":
             # (7) zscore (motion corrected with fitted ref)
             # zscore( (sig_filtered - fitted_ref) / fitted_ref )
-            a, b = fit_reference_to_signal(ref2, sig2, params)
-            fitted_ref = a * ref2 + b
-            dff_fit = safe_divide(sig2 - fitted_ref, fitted_ref)
-            out = zscore_median_std(dff_fit)
+            if has_reference:
+                a, b = fit_reference_to_signal(ref2, sig2, params)
+                fitted_ref = a * ref2 + b
+                dff_fit = safe_divide(sig2 - fitted_ref, fitted_ref)
+                out = zscore_median_std(dff_fit)
+            else:
+                out = zscore_median_std(dff_sig)
+                no_reference_fallback = True
 
         elif mode == "prominence normalized (motion corrected with fitted ref)":
             # (8) prominence-normalized fitted-ref dFF
@@ -1895,9 +2026,13 @@ class PhotometryProcessor:
             # 2) Exclude event windows from the selected trigger channel.
             # 3) Detect baseline peaks by prominence, average the top fraction,
             #    then scale like a z-score using peak prominence instead of std.
-            a, b = fit_reference_to_signal(ref2, sig2, params)
-            fitted_ref = a * ref2 + b
-            dff_fit = safe_divide(sig2 - fitted_ref, fitted_ref)
+            if has_reference:
+                a, b = fit_reference_to_signal(ref2, sig2, params)
+                fitted_ref = a * ref2 + b
+                dff_fit = safe_divide(sig2 - fitted_ref, fitted_ref)
+            else:
+                dff_fit = dff_sig
+                no_reference_fallback = True
             event_times = _trigger_rising_edges(t2, dio2)
             out, prominence_stats = prominence_normalize(dff_fit, t2, event_times, params, fs_used)
 
@@ -1913,6 +2048,8 @@ class PhotometryProcessor:
         context_parts = []
         if np.any(mask):
             context_parts.append(f"Artifacts: {artifact_handling}")
+        if no_reference_fallback:
+            context_parts.append("No 405 reference; using signal-only output")
         if mode == "Raw signal (465)":
             context_parts.append("Raw 465 after artifact handling, filtering, and resampling")
         else:
@@ -1960,6 +2097,15 @@ class PhotometryProcessor:
             raw_reference=ref2,
             raw_thr_hi=hi2,
             raw_thr_lo=lo2,
+            raw_display_time=np.asarray(t, float),
+            raw_display_signal=raw_display_signal,
+            raw_display_reference=raw_display_reference,
+            raw_display_thr_hi=raw_display_thr_hi,
+            raw_display_thr_lo=raw_display_thr_lo,
+            raw_display_ref_thr_hi=raw_display_ref_thr_hi,
+            raw_display_ref_thr_lo=raw_display_ref_thr_lo,
+            raw_display_dio_time=raw_display_dio_time,
+            raw_display_dio=raw_display_dio,
             dio=dio2,
             dio_name=dio_name,
             triggers=all_triggers2,
@@ -1971,8 +2117,10 @@ class PhotometryProcessor:
             output_label=mode,
             output_context=output_context,
             outputs={mode: np.asarray(out, float)} if out is not None else {},
-            artifact_regions_sec=regions_from_mask(t, mask),
+            artifact_regions_sec=final_regions,
             artifact_regions_auto_sec=auto_regions,
+            artifact_regions_auto_core_sec=auto_core_regions,
+            artifact_regions_auto_source=auto_sources,
             prominence_peak_times=(
                 np.asarray(prominence_stats.get("peak_times", np.array([], float)), float)
                 if prominence_stats is not None else None

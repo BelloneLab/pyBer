@@ -540,6 +540,8 @@ class ArtifactPanel(QtWidgets.QDialog):
 
         self._regions: List[Tuple[float, float]] = []
         self._auto_regions: List[Tuple[float, float]] = []
+        self._auto_core_regions: List[Tuple[float, float]] = []
+        self._auto_sources: List[str] = []
         self._auto_checked: List[bool] = []
         self._auto_updating = False
         self._build_ui()
@@ -549,12 +551,17 @@ class ArtifactPanel(QtWidgets.QDialog):
 
         auto_group = QtWidgets.QGroupBox("Auto-detected (threshold)")
         auto_layout = QtWidgets.QVBoxLayout(auto_group)
-        self.table_auto = QtWidgets.QTableWidget(0, 4)
-        self.table_auto.setHorizontalHeaderLabels(["ID", "Remove", "Start (s)", "End (s)"])
+        self.table_auto = QtWidgets.QTableWidget(0, 6)
+        self.table_auto.setHorizontalHeaderLabels(["ID", "Remove", "Source", "Core (s)", "Cut start", "Cut end"])
         self.table_auto.horizontalHeader().setStretchLastSection(True)
         self.table_auto.verticalHeader().setVisible(False)
         self.table_auto.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_auto.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table_auto.setColumnWidth(0, 42)
+        self.table_auto.setColumnWidth(1, 72)
+        self.table_auto.setColumnWidth(2, 66)
+        self.table_auto.setColumnWidth(3, 132)
+        self.table_auto.setColumnWidth(4, 82)
         auto_layout.addWidget(self.table_auto)
         layout.addWidget(auto_group)
 
@@ -622,10 +629,20 @@ class ArtifactPanel(QtWidgets.QDialog):
         self,
         regions: List[Tuple[float, float]],
         checked_regions: Optional[List[Tuple[float, float]]] = None,
+        sources: Optional[List[str]] = None,
+        core_regions: Optional[List[Tuple[float, float]]] = None,
     ) -> None:
-        self._auto_regions = [(float(a), float(b)) for a, b in (regions or [])]
-        self._auto_regions = [(min(a, b), max(a, b)) for a, b in self._auto_regions]
-        self._auto_regions.sort(key=lambda x: x[0])
+        region_list = [(float(a), float(b)) for a, b in (regions or [])]
+        region_list = [(min(a, b), max(a, b)) for a, b in region_list]
+        source_list = [str(s or "") for s in (sources or [])]
+        source_list += ["" for _ in range(max(0, len(region_list) - len(source_list)))]
+        core_list = [(float(a), float(b)) for a, b in (core_regions or [])]
+        core_list = [(min(a, b), max(a, b)) for a, b in core_list]
+        core_list += [r for r in region_list[len(core_list):]]
+        paired = sorted(zip(region_list, source_list, core_list), key=lambda x: x[0][0])
+        self._auto_regions = [r for r, _src, _core in paired]
+        self._auto_sources = [src for _r, src, _core in paired]
+        self._auto_core_regions = [core for _r, _src, core in paired]
 
         if checked_regions is None:
             self._auto_checked = [True for _ in self._auto_regions]
@@ -683,13 +700,30 @@ class ArtifactPanel(QtWidgets.QDialog):
                 chk.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 self.table_auto.setItem(r, 1, chk)
 
+                source = self._auto_sources[i - 1] if i - 1 < len(self._auto_sources) else ""
+                source_item = QtWidgets.QTableWidgetItem(source)
+                source_item.setFlags(source_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                source_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                source_item.setToolTip("Channel that crossed its MAD envelope.")
+                self.table_auto.setItem(r, 2, source_item)
+
+                core = self._auto_core_regions[i - 1] if i - 1 < len(self._auto_core_regions) else (a, b)
+                core_text = f"{core[0]:.3f}-{core[1]:.3f}"
+                core_item = QtWidgets.QTableWidgetItem(core_text)
+                core_item.setFlags(core_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                core_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                core_item.setToolTip("Actual threshold crossing before artifact padding.")
+                self.table_auto.setItem(r, 3, core_item)
+
                 start_item = QtWidgets.QTableWidgetItem(f"{a:.3f}")
                 start_item.setFlags(start_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-                self.table_auto.setItem(r, 2, start_item)
+                start_item.setToolTip("Start of the padded cut window.")
+                self.table_auto.setItem(r, 4, start_item)
 
                 end_item = QtWidgets.QTableWidgetItem(f"{b:.3f}")
                 end_item.setFlags(end_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-                self.table_auto.setItem(r, 3, end_item)
+                end_item.setToolTip("End of the padded cut window.")
+                self.table_auto.setItem(r, 5, end_item)
         finally:
             self._auto_updating = False
         self._emit_selection()
@@ -2757,6 +2791,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.btn_thresholds = QtWidgets.QPushButton("Thresholds: ON")
         self.btn_thresholds.setCheckable(True)
         self.btn_thresholds.setChecked(True)
+        self.btn_thresholds.setToolTip("Show the MAD envelopes used for artifact detection on both 465 and 405.")
         for b in (
             self.btn_add_region,
             self.btn_clear_regions,
@@ -2792,6 +2827,9 @@ class PlotDashboard(QtWidgets.QWidget):
         pen_env = pg.mkPen((240, 200, 90), width=1.0, style=QtCore.Qt.PenStyle.DashLine)
         self.curve_thr_hi = self.plot_raw.plot(pen=pen_env)
         self.curve_thr_lo = self.plot_raw.plot(pen=pen_env)
+        pen_ref_env = pg.mkPen((185, 145, 255, 140), width=1.0, style=QtCore.Qt.PenStyle.DashLine)
+        self.curve_ref_thr_hi = self.plot_raw.plot(pen=pen_ref_env)
+        self.curve_ref_thr_lo = self.plot_raw.plot(pen=pen_ref_env)
 
         self.curve_f465 = self.plot_proc.plot(pen=pg.mkPen((80, 250, 160), width=1.1))
         self.curve_f405 = self.plot_proc.plot(pen=pg.mkPen((160, 120, 255), width=1.0))
@@ -3009,6 +3047,8 @@ class PlotDashboard(QtWidgets.QWidget):
         visible = bool(self._artifact_thresholds_visible)
         self.curve_thr_hi.setVisible(visible)
         self.curve_thr_lo.setVisible(visible)
+        self.curve_ref_thr_hi.setVisible(visible)
+        self.curve_ref_thr_lo.setVisible(visible)
         self.btn_thresholds.blockSignals(True)
         self.btn_thresholds.setChecked(visible)
         self.btn_thresholds.setText("Thresholds: ON" if visible else "Thresholds: OFF")
@@ -3127,19 +3167,57 @@ class PlotDashboard(QtWidgets.QWidget):
         self.selector.setRegion((float(min(t0, t1)), float(max(t0, t1))))
         self.selector.setVisible(bool(visible))
 
-    def _scale_reference_to_signal(self, sig: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    def _reference_to_signal_params(self, sig: np.ndarray, ref: np.ndarray) -> Tuple[float, float]:
         s = np.asarray(sig, float)
         r = np.asarray(ref, float)
         m = np.isfinite(s) & np.isfinite(r)
         if np.sum(m) < 2:
-            return r
+            return 1.0, 0.0
         s_mu = float(np.nanmean(s[m]))
         r_mu = float(np.nanmean(r[m]))
         s_std = float(np.nanstd(s[m]))
         r_std = float(np.nanstd(r[m]))
         if not np.isfinite(s_std) or not np.isfinite(r_std) or r_std == 0:
-            return r
-        return (r - r_mu) * (s_std / r_std) + s_mu
+            return 1.0, 0.0
+        scale = s_std / r_std
+        offset = s_mu - (r_mu * scale)
+        return float(scale), float(offset)
+
+    def _scale_reference_to_signal(self, sig: np.ndarray, ref: np.ndarray) -> np.ndarray:
+        r = np.asarray(ref, float)
+        scale, offset = self._reference_to_signal_params(sig, r)
+        return (r * scale) + offset
+
+    def _with_time_gap_breaks(self, t: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        x = np.asarray(t, float)
+        vals = np.asarray(y, float)
+        n = min(x.size, vals.size)
+        x, vals = x[:n], vals[:n]
+        if n < 3:
+            return x, vals
+        diffs = np.diff(x)
+        good = diffs[np.isfinite(diffs) & (diffs > 0)]
+        if good.size == 0:
+            return x, vals
+        dt = float(np.nanmedian(good))
+        if not np.isfinite(dt) or dt <= 0:
+            return x, vals
+        gap_after = np.where(diffs > max(dt * 3.0, dt + 1e-9))[0]
+        if gap_after.size == 0:
+            return x, vals
+
+        x_parts: List[np.ndarray] = []
+        y_parts: List[np.ndarray] = []
+        start = 0
+        for idx in gap_after:
+            x_parts.append(x[start:idx + 1])
+            y_parts.append(vals[start:idx + 1])
+            x_parts.append(np.asarray([(x[idx] + x[idx + 1]) * 0.5], dtype=float))
+            y_parts.append(np.asarray([np.nan], dtype=float))
+            start = int(idx + 1)
+        x_parts.append(x[start:])
+        y_parts.append(vals[start:])
+        return np.concatenate(x_parts), np.concatenate(y_parts)
 
     def _clear_artifact_overlays(self) -> None:
         for item in self._artifact_regions:
@@ -3274,6 +3352,7 @@ class PlotDashboard(QtWidgets.QWidget):
         yy = np.asarray(dio, float)
         n = min(tt.size, yy.size)
         tt, yy = tt[:n], yy[:n]
+        tt, yy = self._with_time_gap_breaks(tt, yy)
 
         self.curve_dio_raw.setData(tt, yy, connect="finite", skipFiniteCheck=True)
         self.curve_dio_proc.setData(tt, yy, connect="finite", skipFiniteCheck=True)
@@ -3316,6 +3395,8 @@ class PlotDashboard(QtWidgets.QWidget):
             self.curve_405.setData([], [])
             self.curve_thr_hi.setData([], [])
             self.curve_thr_lo.setData([], [])
+            self.curve_ref_thr_hi.setData([], [])
+            self.curve_ref_thr_lo.setData([], [])
             self._sync_artifact_threshold_curves_visibility()
             self._set_dio(np.asarray([]), None, "")
             return
@@ -3327,7 +3408,8 @@ class PlotDashboard(QtWidgets.QWidget):
         t, s, r = t[:n], s[:n], r[:n]
 
         self.curve_465.setData(t, s, connect="finite", skipFiniteCheck=True)
-        r_scaled = self._scale_reference_to_signal(s, r)
+        ref_scale, ref_offset = self._reference_to_signal_params(s, r)
+        r_scaled = (r * ref_scale) + ref_offset
         self.curve_405.setData(t, r_scaled, connect="finite", skipFiniteCheck=True)
         if not preserve_view:
             self.set_full_xrange(t)
@@ -3350,6 +3432,26 @@ class PlotDashboard(QtWidgets.QWidget):
             nn = min(t.size, th.size, tl.size)
             self.curve_thr_hi.setData(t[:nn], th[:nn], connect="finite", skipFiniteCheck=True)
             self.curve_thr_lo.setData(t[:nn], tl[:nn], connect="finite", skipFiniteCheck=True)
+
+        ref_thr_hi = _first_not_none(kwargs, "ref_thr_hi", "raw_ref_thr_hi", "reference_thr_hi")
+        ref_thr_lo = _first_not_none(kwargs, "ref_thr_lo", "raw_ref_thr_lo", "reference_thr_lo")
+        if ref_thr_hi is None or ref_thr_lo is None:
+            self.curve_ref_thr_hi.setData([], [])
+            self.curve_ref_thr_lo.setData([], [])
+        else:
+            rth = np.asarray(ref_thr_hi, float)
+            rtl = np.asarray(ref_thr_lo, float)
+            if rth.size == 1:
+                rth = np.full_like(t, float(rth))
+            if rtl.size == 1:
+                rtl = np.full_like(t, float(rtl))
+            nn = min(t.size, rth.size, rtl.size)
+            self.curve_ref_thr_hi.setData(
+                t[:nn], (rth[:nn] * ref_scale) + ref_offset, connect="finite", skipFiniteCheck=True
+            )
+            self.curve_ref_thr_lo.setData(
+                t[:nn], (rtl[:nn] * ref_scale) + ref_offset, connect="finite", skipFiniteCheck=True
+            )
         self._sync_artifact_threshold_curves_visibility()
 
         # Baselines for raw plot (if available)
@@ -3422,7 +3524,8 @@ class PlotDashboard(QtWidgets.QWidget):
                 return
             y = np.asarray(y, float)
             n = min(t.size, y.size)
-            curve.setData(t[:n], y[:n], connect="finite", skipFiniteCheck=True)
+            xx, yy = self._with_time_gap_breaks(t[:n], y[:n])
+            curve.setData(xx, yy, connect="finite", skipFiniteCheck=True)
 
         _set_curve(self.curve_f465, sig_f)
         _set_curve(self.curve_f405, ref_f)
@@ -3469,7 +3572,8 @@ class PlotDashboard(QtWidgets.QWidget):
 
         label = _first_not_none(kwargs, "label", "output_label", default="Output")
 
-        self.curve_out.setData(t, y, connect="finite", skipFiniteCheck=True)
+        plot_t, plot_y = self._with_time_gap_breaks(t, y)
+        self.curve_out.setData(plot_t, plot_y, connect="finite", skipFiniteCheck=True)
         if not preserve_view:
             self.set_full_xrange(t)
 
@@ -3485,11 +3589,40 @@ class PlotDashboard(QtWidgets.QWidget):
 
     def update_plots(self, processed: ProcessedTrial, preserve_view: bool = False) -> None:
         t = np.asarray(processed.time, float)
+        raw_t = getattr(processed, "raw_display_time", None)
+        raw_signal = getattr(processed, "raw_display_signal", None)
+        raw_reference = getattr(processed, "raw_display_reference", None)
+        raw_thr_hi = getattr(processed, "raw_display_thr_hi", None)
+        raw_thr_lo = getattr(processed, "raw_display_thr_lo", None)
+        raw_ref_thr_hi = getattr(processed, "raw_display_ref_thr_hi", None)
+        raw_ref_thr_lo = getattr(processed, "raw_display_ref_thr_lo", None)
+        raw_dio_time = getattr(processed, "raw_display_dio_time", None)
+        raw_dio = getattr(processed, "raw_display_dio", None)
+
+        if raw_t is None or np.asarray(raw_t).size == 0:
+            raw_t = t
+        else:
+            raw_t = np.asarray(raw_t, float)
+        if raw_signal is None or np.asarray(raw_signal).size == 0:
+            raw_signal = processed.raw_signal
+        if raw_reference is None or np.asarray(raw_reference).size == 0:
+            raw_reference = processed.raw_reference
+        if raw_thr_hi is None:
+            raw_thr_hi = processed.raw_thr_hi
+        if raw_thr_lo is None:
+            raw_thr_lo = processed.raw_thr_lo
+        if raw_dio is None:
+            raw_dio = processed.dio
+            raw_dio_time = t
+        elif raw_dio_time is None:
+            raw_dio_time = raw_t
+
         kept_xrange = self.current_xrange() if preserve_view else None
         self.show_raw(
-            t, processed.raw_signal, processed.raw_reference,
-            dio=processed.dio, dio_name=processed.dio_name,
-            thr_hi=processed.raw_thr_hi, thr_lo=processed.raw_thr_lo,
+            raw_t, raw_signal, raw_reference,
+            dio=raw_dio, dio_time=raw_dio_time, dio_name=processed.dio_name,
+            thr_hi=raw_thr_hi, thr_lo=raw_thr_lo,
+            ref_thr_hi=raw_ref_thr_hi, ref_thr_lo=raw_ref_thr_lo,
             preserve_view=preserve_view,
         )
         self.show_processing(
@@ -3506,7 +3639,7 @@ class PlotDashboard(QtWidgets.QWidget):
             dio=processed.dio, dio_name=processed.dio_name,
             preserve_view=preserve_view,
         )
-        self._update_artifact_overlays(t, processed.raw_signal, processed.artifact_regions_sec)
+        self._update_artifact_overlays(raw_t, raw_signal, processed.artifact_regions_sec)
         self._update_prominence_overlay(processed)
         if kept_xrange is not None:
             self.set_xrange_all(*kept_xrange)
