@@ -487,6 +487,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     requestDioList = QtCore.Signal()
     requestDioData = QtCore.Signal(str, str)  # (path, dio)
     statusUpdate = QtCore.Signal(str, int)
+    helpRequested = QtCore.Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1574,6 +1575,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.act_load_group = self.menu_action_load.addAction("Load processed files (group)")
         self.menu_action_load.addSeparator()
         self.act_new_project = self.menu_action_load.addAction("New project")
+        self.act_reset_blank_project = self.menu_action_load.addAction("Reset blank project")
         self.act_save_project = self.menu_action_load.addAction("Save project (.h5)")
         self.act_load_project = self.menu_action_load.addAction("Load project (.h5)")
         self.menu_action_load.addSeparator()
@@ -1592,12 +1594,26 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_action_compute.setProperty("class", "compactPrimarySmall")
         self.btn_action_export = QtWidgets.QPushButton("Export")
         self.btn_action_export.setProperty("class", "compactPrimarySmall")
-        self.btn_action_undo = QtWidgets.QPushButton("Undo")
-        self.btn_action_undo.setProperty("class", "ghost")
-        self.btn_action_undo.setToolTip("Undo last postprocessing setting or view action  (Ctrl+Z)")
-        self.btn_action_redo = QtWidgets.QPushButton("Redo")
-        self.btn_action_redo.setProperty("class", "ghost")
-        self.btn_action_redo.setToolTip("Redo last undone postprocessing setting or view action  (Ctrl+Y)")
+        self.btn_action_reset = QtWidgets.QPushButton("Reset")
+        self.btn_action_reset.setProperty("class", "ghost")
+        self.btn_action_reset.setToolTip(
+            "Clear postprocessing to a blank project and stop reopening the autosaved project"
+        )
+        self.btn_action_undo = QtWidgets.QToolButton()
+        self.btn_action_undo.setObjectName("toolbarIconButton")
+        self.btn_action_undo.setText("↶")
+        self.btn_action_undo.setToolTip("Undo last postprocessing setting or view action (Ctrl+Z)")
+        self.btn_action_undo.setFixedSize(34, 30)
+        self.btn_action_redo = QtWidgets.QToolButton()
+        self.btn_action_redo.setObjectName("toolbarIconButton")
+        self.btn_action_redo.setText("↷")
+        self.btn_action_redo.setToolTip("Redo last undone postprocessing setting or view action (Ctrl+Y)")
+        self.btn_action_redo.setFixedSize(34, 30)
+        self.btn_action_help = QtWidgets.QToolButton()
+        self.btn_action_help.setObjectName("toolbarIconButton")
+        self.btn_action_help.setText("?")
+        self.btn_action_help.setToolTip("Show onboarding and panel tutorials")
+        self.btn_action_help.setFixedSize(34, 30)
         self.btn_action_hide = QtWidgets.QPushButton("Hide Panels")
         self.btn_action_hide.setProperty("class", "ghost")
 
@@ -1671,8 +1687,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_action_export.setText("Run Export")
         self.btn_action_hide.setText("Hide drawer")
 
-        # Primary group: File / Compute / Export.
-        for b in (self.btn_action_load, self.btn_action_compute, self.btn_action_export):
+        # Primary group: File / Compute / Export / Reset.
+        for b in (self.btn_action_load, self.btn_action_compute, self.btn_action_export, self.btn_action_reset):
             tb_layout.addWidget(b)
 
         # Visual hairline separator between primary actions and utilities.
@@ -1684,8 +1700,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         tb_layout.addWidget(sep)
         tb_layout.addSpacing(4)
 
-        # Utility group: Undo / Redo / Plot style (ghost).
-        for b in (self.btn_action_undo, self.btn_action_redo, self.btn_style):
+        # Utility group: Undo / Redo / Plot style / Help.
+        for b in (self.btn_action_undo, self.btn_action_redo, self.btn_style, self.btn_action_help):
             tb_layout.addWidget(b)
         self._update_history_buttons()
         tb_layout.addStretch(1)
@@ -2108,6 +2124,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.act_load_single.triggered.connect(self._load_processed_files_single)
         self.act_load_group.triggered.connect(self._load_processed_files)
         self.act_new_project.triggered.connect(self._new_project)
+        self.act_reset_blank_project.triggered.connect(self._reset_blank_project)
         self.act_save_project.triggered.connect(self._save_project_file)
         self.act_load_project.triggered.connect(self._load_project_file)
         self.act_load_behavior.triggered.connect(self._load_behavior_files)
@@ -2115,8 +2132,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.act_open_plot_style.triggered.connect(self._open_style_dialog)
         self.btn_action_compute.clicked.connect(self._compute_psth)
         self.btn_action_export.clicked.connect(self._export_results)
+        self.btn_action_reset.clicked.connect(self._reset_blank_project)
         self.btn_action_undo.clicked.connect(self._undo_post_action)
         self.btn_action_redo.clicked.connect(self._redo_post_action)
+        self.btn_action_help.clicked.connect(lambda _checked=False: self.helpRequested.emit())
         self.btn_action_hide.clicked.connect(self._hide_all_section_popups)
         for key, btn in self._section_buttons.items():
             btn.toggled.connect(lambda checked, section_key=key: self._toggle_section_popup(section_key, checked))
@@ -4168,18 +4187,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._project_dirty = False
 
     def is_project_dirty(self) -> bool:
-        if bool(getattr(self, "_project_recovered_from_autosave", False)):
-            return True
-        if not bool(getattr(self, "_project_dirty", False)):
-            return False
         clean_key = str(getattr(self, "_project_clean_key", "") or "")
         if clean_key:
             try:
                 if self._project_dirty_fingerprint() == clean_key:
                     self._project_dirty = False
+                    self._project_recovered_from_autosave = False
                     return False
             except Exception:
                 pass
+        if not bool(getattr(self, "_project_dirty", False)):
+            self._project_recovered_from_autosave = False
+            return False
         return True
 
     def _update_history_buttons(self) -> None:
@@ -7003,6 +7022,42 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.statusUpdate.emit(f"Postprocessing error: {e}", 5000)
             self._update_status_strip()
 
+    @staticmethod
+    def _short_heatmap_axis_label(value: object, max_chars: int = 18) -> str:
+        text = str(value).strip()
+        if len(text) <= max_chars:
+            return text
+        head = max(5, (max_chars - 3) // 2)
+        tail = max(5, max_chars - head - 3)
+        return f"{text[:head]}...{text[-tail:]}"
+
+    def _build_heatmap_y_ticks(
+        self,
+        labels: Optional[List[str]],
+        n_rows: int,
+        show_names: bool,
+    ) -> List[Tuple[float, str]]:
+        if n_rows <= 0:
+            return []
+        dense_limit = 12
+        if n_rows <= dense_limit:
+            indices = list(range(n_rows))
+        else:
+            target_ticks = min(8, n_rows)
+            indices = sorted({int(round(v)) for v in np.linspace(0, n_rows - 1, target_ticks)})
+            if indices[0] != 0:
+                indices.insert(0, 0)
+            if indices[-1] != n_rows - 1:
+                indices.append(n_rows - 1)
+        ticks: List[Tuple[float, str]] = []
+        for idx in indices:
+            if show_names and labels and idx < len(labels):
+                label = self._short_heatmap_axis_label(labels[idx])
+            else:
+                label = str(idx + 1)
+            ticks.append((float(idx) + 0.5, label))
+        return ticks
+
     def _render_heatmap(self, mat: np.ndarray, tvec: np.ndarray, labels: Optional[List[str]] = None) -> None:
         if mat.size == 0:
             self._suppress_heatmap_level_store = True
@@ -7075,16 +7130,28 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.heat_zero_line.setPos(0.0)
         self.heat_zero_line.setVisible(bool(x0 <= 0.0 <= x1))
 
-        # Set Y-axis labels (trial names or animal IDs)
+        # Keep row labels readable: show all only for small heatmaps, otherwise
+        # use a sparse trial/animal ruler rather than overprinting every row.
         y_axis = self.plot_heat.getAxis("left")
-        if labels and len(labels) == n_rows:
-            ticks = [(float(i) + 0.5, str(labels[i])) for i in range(n_rows)]
-            y_axis.setTicks([ticks])
-            visual_mode = self.tab_visual_mode.currentIndex()
-            self.plot_heat.setLabel("left", "Animals" if visual_mode == 1 else "Trials")
+        visual_mode = self.tab_visual_mode.currentIndex()
+        has_labels = bool(labels and len(labels) == n_rows)
+        show_names = bool(has_labels and (visual_mode == 1 or n_rows <= 12))
+        ticks = self._build_heatmap_y_ticks(labels if has_labels else None, n_rows, show_names)
+        y_axis.setTicks([ticks])
+        try:
+            y_axis.setStyle(tickTextOffset=6, autoExpandTextSpace=False)
+            y_axis.setWidth(58 if n_rows > 12 else 76)
+        except Exception:
+            pass
+        label_kind = "Animals" if visual_mode == 1 else "Trials"
+        self.plot_heat.setLabel("left", f"{label_kind} (n={n_rows})")
+        if n_rows > 12:
+            self.plot_heat.setToolTip(
+                f"Heatmap rows: {n_rows} {label_kind.lower()}. "
+                "The y-axis shows sparse row numbers to keep the display readable."
+            )
         else:
-            y_axis.setTicks(None)
-            self.plot_heat.setLabel("left", "Trials / Recordings")
+            self.plot_heat.setToolTip("")
 
     def _render_duration_hist(self, durations: np.ndarray) -> None:
         self.plot_dur.clear()
@@ -8363,6 +8430,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         return ask == QtWidgets.QMessageBox.StandardButton.Yes
 
+    def discard_unsaved_project_for_close(self) -> bool:
+        """
+        Mark the current postprocessing state as intentionally discarded.
+        Called from the main close confirmation so Discard does not create a new
+        autosave that reopens the same project on the next launch.
+        """
+        self._project_dirty = False
+        self._project_recovered_from_autosave = False
+        self._mark_project_clean()
+        self._clear_project_autosave_cache(delete_file=True)
+        return True
+
     def _reset_project_state(self) -> None:
         was_restoring = self._is_restoring_settings
         self._is_restoring_settings = True
@@ -8406,6 +8485,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._reset_project_state()
         self._reset_history_snapshot()
         self.statusUpdate.emit("Started a new postprocessing project.", 5000)
+
+    def _reset_blank_project(self) -> None:
+        if not self._confirm_discard_current_project():
+            return
+        self._reset_project_state()
+        self._reset_history_snapshot()
+        self.statusUpdate.emit(
+            "Postprocessing reset to a blank project; autosaved project was forgotten.",
+            5000,
+        )
 
     def _import_project_source_paths(self, recent_paths: Dict[str, object]) -> bool:
         proc_raw = recent_paths.get("processed_paths", []) if isinstance(recent_paths, dict) else []

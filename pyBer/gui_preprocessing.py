@@ -2566,8 +2566,16 @@ class PlotDashboard(QtWidgets.QWidget):
         tools = QtWidgets.QHBoxLayout()
         self.btn_add_region = QtWidgets.QPushButton("Add from selector")
         self.btn_clear_regions = QtWidgets.QPushButton("Clear manual")
-        self.btn_undo = QtWidgets.QPushButton("Undo")
-        self.btn_redo = QtWidgets.QPushButton("Redo")
+        self.btn_undo = QtWidgets.QToolButton()
+        self.btn_undo.setObjectName("toolbarIconButton")
+        self.btn_undo.setText("↶")
+        self.btn_undo.setToolTip("Undo last preprocessing action (Ctrl+Z)")
+        self.btn_undo.setFixedSize(34, 30)
+        self.btn_redo = QtWidgets.QToolButton()
+        self.btn_redo.setObjectName("toolbarIconButton")
+        self.btn_redo.setText("↷")
+        self.btn_redo.setToolTip("Redo last undone preprocessing action (Ctrl+Y)")
+        self.btn_redo.setFixedSize(34, 30)
         self.btn_artifacts = QtWidgets.QPushButton("Artifacts")
         self.btn_box_select = QtWidgets.QPushButton("Box select")
         self.btn_box_select.setCheckable(True)
@@ -2577,8 +2585,6 @@ class PlotDashboard(QtWidgets.QWidget):
         for b in (
             self.btn_add_region,
             self.btn_clear_regions,
-            self.btn_undo,
-            self.btn_redo,
             self.btn_artifacts,
             self.btn_box_select,
             self.btn_thresholds,
@@ -2658,8 +2664,8 @@ class PlotDashboard(QtWidgets.QWidget):
 
         self.btn_add_region.clicked.connect(self.manualRegionFromSelectorRequested.emit)
         self.btn_clear_regions.clicked.connect(self.clearManualRegionsRequested.emit)
-        self.btn_undo.clicked.connect(self.undoRequested.emit)
-        self.btn_redo.clicked.connect(self.redoRequested.emit)
+        self.btn_undo.clicked.connect(lambda _checked=False: self.undoRequested.emit())
+        self.btn_redo.clicked.connect(lambda _checked=False: self.redoRequested.emit())
         self.btn_artifacts.clicked.connect(self.showArtifactsRequested.emit)
         self.btn_box_select.toggled.connect(self._toggle_box_select)
         self.btn_thresholds.toggled.connect(self._on_thresholds_toggled)

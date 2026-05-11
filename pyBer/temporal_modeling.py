@@ -1127,6 +1127,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._group_mode: bool = False
 
         self.setMinimumSize(980, 640)
+        self.resize(1320, 880)  # preferred default whenever shown as a standalone window
+        self._first_show_done = False
         self._build_compact_ui()
         self._load_temporal_settings()
         self._connect_signals()
@@ -1137,6 +1139,31 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
     def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API name
         return QtCore.QSize(980, 640)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802
+        """Force a sensible default size the first time the widget appears as a
+        top-level window. Subsequent shows (e.g. re-docking) keep whatever
+        size the user has set."""
+        super().showEvent(event)
+        if self._first_show_done:
+            return
+        self._first_show_done = True
+        # Resize only when we're standing alone (a floating dock-content window)
+        # so embedded dock-area placement isn't disturbed.
+        win = self.window()
+        if win is self:
+            self.resize(1320, 880)
+        else:
+            # If our top-level window is brand-new and smaller than our
+            # preferred size, grow it so all controls + plots are visible.
+            try:
+                cur = win.size()
+                target_w = max(cur.width(), 1320)
+                target_h = max(cur.height(), 880)
+                if target_w != cur.width() or target_h != cur.height():
+                    win.resize(target_w, target_h)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # UI construction
@@ -1386,6 +1413,26 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.btn_cancel.setToolTip("Stop the current batch fit (single fits run synchronously).")
         h.addWidget(self.btn_cancel)
 
+        # Export menu - data CSV / plot PNG / full HDF5 bundle.
+        self.btn_export = QtWidgets.QToolButton()
+        self.btn_export.setText("Export  v")
+        self.btn_export.setToolTip("Export fit results (CSV / JSON / HDF5) or save plots as images.")
+        self.btn_export.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.menu_export = QtWidgets.QMenu(self.btn_export)
+        self.act_export_kernels_csv = self.menu_export.addAction("Active fit - kernels CSV...")
+        self.act_export_importance_csv = self.menu_export.addAction("Active fit - importance CSV...")
+        self.act_export_summary_txt = self.menu_export.addAction("Active fit - summary text...")
+        self.menu_export.addSeparator()
+        self.act_export_group_kernels_csv = self.menu_export.addAction("Group - kernels CSV...")
+        self.act_export_group_importance_csv = self.menu_export.addAction("Group - importance CSV...")
+        self.menu_export.addSeparator()
+        self.act_export_state_json = self.menu_export.addAction("All cached fits - JSON snapshot...")
+        self.menu_export.addSeparator()
+        self.act_export_current_plot = self.menu_export.addAction("Current plot - PNG...")
+        self.act_export_current_plot_svg = self.menu_export.addAction("Current plot - SVG...")
+        self.btn_export.setMenu(self.menu_export)
+        h.addWidget(self.btn_export)
+
         self.progress_model = QtWidgets.QProgressBar()
         self.progress_model.setMinimumWidth(220)
         self.progress_model.setMaximumWidth(320)
@@ -1496,6 +1543,15 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.btn_fit_side.clicked.connect(self._on_fit_clicked)
         self.btn_fit_all_files.clicked.connect(self._on_fit_all_files_clicked)
         self.btn_cancel.clicked.connect(self._on_cancel_clicked)
+        # Export menu actions.
+        self.act_export_kernels_csv.triggered.connect(self._export_kernels_csv)
+        self.act_export_importance_csv.triggered.connect(self._export_importance_csv)
+        self.act_export_summary_txt.triggered.connect(self._export_summary_txt)
+        self.act_export_group_kernels_csv.triggered.connect(self._export_group_kernels_csv)
+        self.act_export_group_importance_csv.triggered.connect(self._export_group_importance_csv)
+        self.act_export_state_json.triggered.connect(self._export_state_json)
+        self.act_export_current_plot.triggered.connect(lambda: self._export_current_plot("png"))
+        self.act_export_current_plot_svg.triggered.connect(lambda: self._export_current_plot("svg"))
         self.combo_fit_scope.currentIndexChanged.connect(self._on_fit_scope_changed)
         self.combo_active_file.currentIndexChanged.connect(self._on_active_file_changed)
         self.btn_prev_file.clicked.connect(lambda: self._step_active_file(-1))
@@ -4156,6 +4212,196 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._batch_cancel_requested = True
         self.btn_cancel.setEnabled(False)
         self.statusMessage.emit("Cancelling current batch...", 3000)
+
+    # ------------------------------------------------------------------
+    # Export menu handlers
+    # ------------------------------------------------------------------
+
+    def _pick_save_path(self, default_name: str, filters: str) -> str:
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save", default_name, filters,
+        )
+        return path or ""
+
+    def _csv_quote(self, value: object) -> str:
+        text = "" if value is None else str(value)
+        if any(ch in text for ch in (",", "\"", "\n")):
+            text = '"' + text.replace('"', '""') + '"'
+        return text
+
+    def _export_kernels_csv(self) -> None:
+        result = self._glm_result
+        if result is None:
+            self.statusMessage.emit("No active GLM fit to export.", 5000)
+            return
+        path = self._pick_save_path("temporal_kernels.csv", "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            tvec = np.asarray(result.kernel_tvec, float)
+            cols = [("time_s", tvec)]
+            for name in result.predictor_names:
+                kern = np.asarray(result.kernels.get(name, np.zeros_like(tvec)), float)
+                cols.append((self._predictor_label(name), kern))
+            n_rows = max((c[1].size for c in cols), default=0)
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(",".join(self._csv_quote(name) for name, _ in cols) + "\n")
+                for i in range(n_rows):
+                    fh.write(",".join(
+                        self._csv_quote(f"{c[1][i]:.6g}" if i < c[1].size else "")
+                        for c in cols
+                    ) + "\n")
+            self.statusMessage.emit(f"Saved kernels to {os.path.basename(path)}", 5000)
+        except Exception as exc:
+            _LOG.error("Export kernels CSV failed: %s", exc)
+            self.statusMessage.emit(f"Export failed: {exc}", 7000)
+
+    def _export_importance_csv(self) -> None:
+        result = self._glm_result
+        if result is None or not result.feature_importance:
+            self.statusMessage.emit("No leave-one-out importance to export.", 5000)
+            return
+        path = self._pick_save_path("temporal_importance.csv", "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            rows = result.feature_importance
+            # Stable column order; pull all keys present across rows.
+            preferred = ["feature", "label", "full_r2", "reduced_r2", "delta_r2",
+                         "delta_mse", "contribution_pct", "p_value", "significant",
+                         "bootstrap_n", "status"]
+            seen = list(preferred)
+            for row in rows:
+                for k in row.keys():
+                    if k not in seen:
+                        seen.append(k)
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(",".join(self._csv_quote(k) for k in seen) + "\n")
+                for row in rows:
+                    fh.write(",".join(self._csv_quote(row.get(k, "")) for k in seen) + "\n")
+            self.statusMessage.emit(f"Saved importance to {os.path.basename(path)}", 5000)
+        except Exception as exc:
+            _LOG.error("Export importance CSV failed: %s", exc)
+            self.statusMessage.emit(f"Export failed: {exc}", 7000)
+
+    def _export_summary_txt(self) -> None:
+        text = self.txt_summary.toPlainText() if hasattr(self, "txt_summary") else ""
+        if not text:
+            self.statusMessage.emit("No summary text available.", 5000)
+            return
+        path = self._pick_save_path("temporal_summary.txt", "Text files (*.txt)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            self.statusMessage.emit(f"Saved summary to {os.path.basename(path)}", 5000)
+        except Exception as exc:
+            self.statusMessage.emit(f"Export failed: {exc}", 7000)
+
+    def _export_group_kernels_csv(self) -> None:
+        results = self._glm_results_by_file
+        if not results:
+            self.statusMessage.emit("Run a Per-file batch fit first.", 5000)
+            return
+        path = self._pick_save_path("temporal_group_kernels.csv", "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            # Long-format: file_id, time_s, predictor, kernel_value
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write("file_id,time_s,predictor,kernel_value\n")
+                for file_id, res in results.items():
+                    tvec = np.asarray(res.kernel_tvec, float)
+                    for name in res.predictor_names:
+                        kern = np.asarray(res.kernels.get(name, np.zeros_like(tvec)), float)
+                        label = self._predictor_label(name)
+                        n = min(tvec.size, kern.size)
+                        for i in range(n):
+                            fh.write(
+                                f"{self._csv_quote(file_id)},"
+                                f"{tvec[i]:.6g},"
+                                f"{self._csv_quote(label)},"
+                                f"{kern[i]:.6g}\n"
+                            )
+            self.statusMessage.emit(f"Saved group kernels to {os.path.basename(path)}", 5000)
+        except Exception as exc:
+            self.statusMessage.emit(f"Export failed: {exc}", 7000)
+
+    def _export_group_importance_csv(self) -> None:
+        rows = list((self._group_glm_summary or {}).get("importance", []) or [])
+        if not rows:
+            self.statusMessage.emit("No group importance summary available.", 5000)
+            return
+        path = self._pick_save_path("temporal_group_importance.csv", "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            cols = ["feature", "label", "delta_r2", "delta_r2_sem", "n_animals"]
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(",".join(self._csv_quote(c) for c in cols) + "\n")
+                for row in rows:
+                    fh.write(",".join(self._csv_quote(row.get(c, "")) for c in cols) + "\n")
+            self.statusMessage.emit(f"Saved group importance to {os.path.basename(path)}", 5000)
+        except Exception as exc:
+            self.statusMessage.emit(f"Export failed: {exc}", 7000)
+
+    def _export_state_json(self) -> None:
+        import json
+        try:
+            state = self.serialize_state()
+        except Exception as exc:
+            self.statusMessage.emit(f"Could not snapshot state: {exc}", 7000)
+            return
+        path = self._pick_save_path("temporal_state.json", "JSON files (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(state, fh, indent=2)
+            n = len(state.get("glm_results_by_file", {}))
+            self.statusMessage.emit(f"Saved {n} cached fit(s) to {os.path.basename(path)}", 5000)
+        except Exception as exc:
+            self.statusMessage.emit(f"Export failed: {exc}", 7000)
+
+    def _current_workspace_plot(self) -> Optional[pg.PlotWidget]:
+        if not hasattr(self, "tabs_workspace"):
+            return None
+        page = self.tabs_workspace.currentWidget()
+        if page is None:
+            return None
+        for pw in page.findChildren(pg.PlotWidget):
+            return pw
+        return None
+
+    def _export_current_plot(self, fmt: str = "png") -> None:
+        pw = self._current_workspace_plot()
+        if pw is None:
+            self.statusMessage.emit("No plot is visible on the current tab.", 5000)
+            return
+        tab_name = self.tabs_workspace.tabText(self.tabs_workspace.currentIndex()).lower().replace(" ", "_")
+        ext = "svg" if fmt == "svg" else "png"
+        path = self._pick_save_path(f"temporal_{tab_name}.{ext}",
+                                    f"{ext.upper()} files (*.{ext})")
+        if not path:
+            return
+        try:
+            from pyqtgraph.exporters import ImageExporter, SVGExporter
+            scene = pw.getPlotItem()
+            if fmt == "svg":
+                exp = SVGExporter(scene)
+            else:
+                exp = ImageExporter(scene)
+                # Pixel-doubled output for crispness.
+                try:
+                    exp.parameters()["width"] = max(int(pw.width() * 2), 1200)
+                except Exception:
+                    pass
+            exp.export(path)
+            self.statusMessage.emit(f"Saved plot to {os.path.basename(path)}", 5000)
+        except Exception as exc:
+            _LOG.error("Plot export failed: %s", exc)
+            self.statusMessage.emit(f"Plot export failed: {exc}", 7000)
 
     def _on_fit_all_files_clicked(self):
         if not self._processed_trials:

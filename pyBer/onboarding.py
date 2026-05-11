@@ -1329,6 +1329,7 @@ def install_close_confirmation(
     window: QtWidgets.QMainWindow,
     is_dirty_callback: Callable[[], bool],
     save_callback: Optional[Callable[[], bool]] = None,
+    discard_callback: Optional[Callable[[], bool]] = None,
 ) -> None:
     """
     Wraps the window's closeEvent to prompt when there is unsaved work.
@@ -1360,6 +1361,14 @@ def install_close_confirmation(
         if choice == QtWidgets.QMessageBox.StandardButton.Save and save_callback is not None:
             try:
                 if not save_callback():
+                    event.ignore()
+                    return
+            except Exception:
+                event.ignore()
+                return
+        if choice == QtWidgets.QMessageBox.StandardButton.Discard and discard_callback is not None:
+            try:
+                if not discard_callback():
                     event.ignore()
                     return
             except Exception:

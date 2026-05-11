@@ -919,6 +919,36 @@ QFrame#transportBar {
     border-radius: 12px;
 }
 
+QToolButton#toolbarIconButton {
+    background: #1f242e;
+    border: 1px solid #343c4d;
+    border-radius: 7px;
+    color: #edf2ff;
+    min-width: 30px;
+    min-height: 26px;
+    padding: 0;
+    font-size: 13pt;
+    font-weight: 800;
+}
+
+QToolButton#toolbarIconButton:hover {
+    background: #293140;
+    border: 1px solid #7d4df2;
+    color: #ffffff;
+}
+
+QToolButton#toolbarIconButton:pressed {
+    background: #7d4df2;
+    border: 1px solid #8d60ff;
+    color: #ffffff;
+}
+
+QToolButton#toolbarIconButton:disabled {
+    background: #171b24;
+    border: 1px solid #2c3240;
+    color: #657083;
+}
+
 QFrame#railSeparator {
     background: #2c3240;
     max-height: 1px;
@@ -1362,6 +1392,32 @@ QPushButton#railButton:checked, QPushButton#railToggleButton:checked {
 /* Drawer panels */
 QFrame#drawerPanel, QFrame#centerPanel { background: #ffffff; border: 1px solid #d6dde9; }
 QFrame#transportBar { background: #eef1f7; border: 1px solid #d6dde9; }
+QToolButton#toolbarIconButton {
+    background: #ffffff;
+    border: 1px solid #c2ccda;
+    border-radius: 7px;
+    color: #172033;
+    min-width: 30px;
+    min-height: 26px;
+    padding: 0;
+    font-size: 13pt;
+    font-weight: 800;
+}
+QToolButton#toolbarIconButton:hover {
+    background: #dbeafe;
+    border: 1px solid #60a5fa;
+    color: #0f172a;
+}
+QToolButton#toolbarIconButton:pressed {
+    background: #2563eb;
+    border: 1px solid #1d4ed8;
+    color: #ffffff;
+}
+QToolButton#toolbarIconButton:disabled {
+    background: #f4f6fb;
+    border: 1px solid #d8e0ec;
+    color: #98a3b5;
+}
 
 /* Status bar */
 QStatusBar { background: #eef1f7; color: #4a5568; border-top: 1px solid #d6dde9; }

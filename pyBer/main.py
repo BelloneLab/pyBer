@@ -920,6 +920,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         self.tabs.addTab(self.post_tab, "Postprocessing")
         self.post_tab.statusUpdate.connect(self._show_status_message)
+        if hasattr(self.post_tab, "helpRequested"):
+            try:
+                self.post_tab.helpRequested.connect(lambda: self._show_tutorial_again(automatic=False))
+            except Exception:
+                pass
 
         # Wiring - file panel
         self.file_panel.openFileRequested.connect(self._open_files_dialog)
@@ -963,8 +968,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_plot_bg_dark.triggered.connect(self._on_pre_plot_style_changed)
         self.act_plot_bg_white.triggered.connect(self._on_pre_plot_style_changed)
         self.act_plot_grid.toggled.connect(self._on_pre_plot_style_changed)
-        self.act_app_theme_dark.triggered.connect(self._on_app_theme_changed)
-        self.act_app_theme_light.triggered.connect(self._on_app_theme_changed)
+        self.act_app_theme_dark.triggered.connect(lambda _checked=False: self._apply_app_theme("dark", persist=True))
+        self.act_app_theme_light.triggered.connect(lambda _checked=False: self._apply_app_theme("light", persist=True))
         self.btn_toggle_data.toggled.connect(self._set_data_panel_visible)
         self.btn_workflow_artifacts.clicked.connect(self._toggle_artifacts_panel)
         self.btn_workflow_qc.clicked.connect(self._run_qc_dialog)
@@ -1034,7 +1039,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._dirty_poll.timeout.connect(self._refresh_dirty_title)
         self._dirty_poll.start()
 
-        install_close_confirmation(self, _is_dirty, save_callback=self._save_post_project_for_close)
+        install_close_confirmation(
+            self,
+            _is_dirty,
+            save_callback=self._save_post_project_for_close,
+            discard_callback=self._discard_post_project_for_close,
+        )
 
         # Register the global shortcut bundle. Methods that don't exist become no-ops.
         register_global_shortcuts(self)
@@ -2354,6 +2364,26 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         # No save handler available: let the user decide via Discard/Cancel.
         return False
+
+    def _discard_post_project_for_close(self) -> bool:
+        """
+        Used by the close-confirmation handler after the user chooses Discard.
+        Prevents the discarded state from being autosaved and reopened next launch.
+        """
+        try:
+            fn = getattr(self.post_tab, "discard_unsaved_project_for_close", None)
+            if callable(fn):
+                return bool(fn())
+        except Exception:
+            pass
+        try:
+            self.post_tab._project_dirty = False
+            self.post_tab._project_recovered_from_autosave = False
+            self.post_tab._clear_project_autosave_cache(delete_file=True)
+            self.post_tab._mark_project_clean()
+            return True
+        except Exception:
+            return False
 
     def _dock_area_from_settings(
         self,
@@ -4812,9 +4842,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return "dark"
 
     def _selected_app_theme_mode(self) -> str:
+        if hasattr(self, "act_app_theme_dark") and self.act_app_theme_dark.isChecked():
+            return "dark"
         if hasattr(self, "act_app_theme_light") and self.act_app_theme_light.isChecked():
             return "light"
-        return "dark"
+        return self._normalize_app_theme_mode(getattr(self, "_app_theme_mode", "dark"))
 
     def _apply_app_theme(self, theme_mode: object, persist: bool = True) -> None:
         mode = self._normalize_app_theme_mode(theme_mode)
@@ -4828,6 +4860,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.act_app_theme_light.blockSignals(True)
             self.act_app_theme_light.setChecked(mode == "light")
             self.act_app_theme_light.blockSignals(False)
+        if hasattr(self, "btn_app_theme"):
+            try:
+                self.btn_app_theme.setToolTip(f"Current app theme: {mode.title()}. Open to switch.")
+            except Exception:
+                pass
 
         try:
             apply_app_palette(QtWidgets.QApplication.instance(), mode)
@@ -4872,6 +4909,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
 
     def _on_app_theme_changed(self, *_args) -> None:
+        sender = self.sender()
+        if sender is getattr(self, "act_app_theme_dark", None):
+            self._apply_app_theme("dark", persist=True)
+            return
+        if sender is getattr(self, "act_app_theme_light", None):
+            self._apply_app_theme("light", persist=True)
+            return
         self._apply_app_theme(self._selected_app_theme_mode(), persist=True)
 
     def _normalize_pre_plot_background(self, value: object) -> str:
