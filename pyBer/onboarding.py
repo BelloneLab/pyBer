@@ -189,6 +189,7 @@ class TutorialOverlay(QtWidgets.QWidget):
         self._host = host
         self._steps = list(steps)
         self._index = 0
+        self._dont_show_again = False
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
@@ -234,6 +235,14 @@ class TutorialOverlay(QtWidgets.QWidget):
         self._lbl_body.setMaximumWidth(420)
         lay.addWidget(self._lbl_body)
 
+        self._chk_dont_show = QtWidgets.QCheckBox("Don't show this tutorial automatically again")
+        self._chk_dont_show.setToolTip("You can always replay it later with F1.")
+        self._chk_dont_show.setStyleSheet(
+            "QCheckBox { background: transparent; color: #c5d2e3; spacing: 8px; }"
+            "QCheckBox::indicator { width: 15px; height: 15px; }"
+        )
+        lay.addWidget(self._chk_dont_show)
+
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.setSpacing(6)
         self._btn_skip = QtWidgets.QPushButton("Skip tutorial")
@@ -242,9 +251,11 @@ class TutorialOverlay(QtWidgets.QWidget):
         btn_row.addWidget(self._btn_skip)
         btn_row.addStretch(1)
         self._btn_back = QtWidgets.QPushButton("◀ Back")
+        self._btn_back.setText("< Back")
         self._btn_back.clicked.connect(self._prev)
         btn_row.addWidget(self._btn_back)
         self._btn_next = QtWidgets.QPushButton("Next ▶")
+        self._btn_next.setText("Next >")
         self._btn_next.setObjectName("tutPrimary")
         self._btn_next.setDefault(True)
         self._btn_next.clicked.connect(self._next)
@@ -262,10 +273,17 @@ class TutorialOverlay(QtWidgets.QWidget):
         self._render_step()
 
     def _end(self) -> None:
+        try:
+            self._dont_show_again = bool(self._chk_dont_show.isChecked())
+        except Exception:
+            self._dont_show_again = False
         self._host.removeEventFilter(self)
         self.finished.emit()
         self.close()
         self.deleteLater()
+
+    def dont_show_again(self) -> bool:
+        return bool(self._dont_show_again)
 
     def _next(self) -> None:
         if self._index >= len(self._steps) - 1:
@@ -296,6 +314,8 @@ class TutorialOverlay(QtWidgets.QWidget):
         self._btn_back.setEnabled(self._index > 0)
         self._btn_next.setText("Got it!" if self._index == n - 1 else "Next ▶")
 
+        if self._index < n - 1:
+            self._btn_next.setText("Next >")
         target = None
         if step.target_resolver is not None:
             try:
@@ -393,8 +413,8 @@ class TutorialOverlay(QtWidgets.QWidget):
         return False
 
 
-def build_default_tutorial(window: QtWidgets.QMainWindow) -> List[TutorialStep]:
-    """Default first-run tutorial covering the main workflow regions."""
+def _build_legacy_default_tutorial(window: QtWidgets.QMainWindow) -> List[TutorialStep]:
+    """Legacy compact tutorial kept for reference; build_default_tutorial overrides it below."""
 
     def _switch_pre(_w: QtWidgets.QMainWindow) -> None:
         try:
@@ -503,6 +523,145 @@ def build_default_tutorial(window: QtWidgets.QMainWindow) -> List[TutorialStep]:
     ]
 
 
+def build_default_tutorial(window: QtWidgets.QMainWindow) -> List[TutorialStep]:
+    """Expanded first-run tutorial covering the workflow and every rail panel."""
+
+    def _switch_pre(_w: QtWidgets.QMainWindow) -> None:
+        try:
+            window.tabs.setCurrentIndex(0)
+        except Exception:
+            pass
+
+    def _switch_post(_w: QtWidgets.QMainWindow) -> None:
+        try:
+            window.tabs.setCurrentIndex(1)
+        except Exception:
+            pass
+
+    def _resolve_tabs(_w: QtWidgets.QMainWindow) -> Optional[QtWidgets.QWidget]:
+        return getattr(window, "tabs", None)
+
+    def _resolve_pre_files(_w: QtWidgets.QMainWindow) -> Optional[QtWidgets.QWidget]:
+        return getattr(window, "file_panel", None)
+
+    def _resolve_post(_w: QtWidgets.QMainWindow) -> Optional[QtWidgets.QWidget]:
+        return getattr(window, "post_tab", None)
+
+    def _pre_button(key: str) -> Callable[[QtWidgets.QWidget], Optional[QtWidgets.QWidget]]:
+        return lambda _w: getattr(window, "_section_buttons", {}).get(key)
+
+    def _post_button(key: str) -> Callable[[QtWidgets.QWidget], Optional[QtWidgets.QWidget]]:
+        def _resolver(_w: QtWidgets.QWidget) -> Optional[QtWidgets.QWidget]:
+            post = getattr(window, "post_tab", None)
+            return getattr(post, "_section_buttons", {}).get(key) if post is not None else None
+        return _resolver
+
+    def _open_pre_panel(key: str) -> Callable[[QtWidgets.QWidget], None]:
+        def _before(_w: QtWidgets.QWidget) -> None:
+            _switch_pre(window)
+            try:
+                if hasattr(window, "_toggle_section_popup"):
+                    window._toggle_section_popup(key, True)
+            except Exception:
+                pass
+        return _before
+
+    def _open_post_panel(key: str) -> Callable[[QtWidgets.QWidget], None]:
+        def _before(_w: QtWidgets.QWidget) -> None:
+            _switch_post(window)
+            try:
+                post = getattr(window, "post_tab", None)
+                if post is not None and hasattr(post, "_toggle_section_popup"):
+                    post._toggle_section_popup(key, True)
+            except Exception:
+                pass
+        return _before
+
+    steps: List[TutorialStep] = [
+        TutorialStep(
+            "Welcome to pyBer",
+            "pyBer takes raw fiber-photometry recordings all the way to PSTH, "
+            "behavior alignment, peak/event metrics, spatial maps, and GLM/FLMM analysis.\n\n"
+            "Use < > or arrow keys to step through. Press F1 anytime to replay this tour.",
+            target_resolver=None,
+        ),
+        TutorialStep(
+            "Two main tabs",
+            "Preprocessing cleans raw recordings and exports processed traces. "
+            "Postprocessing consumes those traces for group analysis, visualization, and modeling.",
+            target_resolver=_resolve_tabs,
+            before=_switch_pre,
+        ),
+        TutorialStep(
+            "Load raw files",
+            "Drag .doric, .csv, .h5 files, or a whole folder onto the file queue. "
+            "Use Ctrl+O to browse, Ctrl+Shift+O for a folder, Delete to remove a selection.",
+            target_resolver=_resolve_pre_files,
+            before=_switch_pre,
+        ),
+    ]
+
+    for key, title, body in [
+        ("artifacts_list", "Artifact list", "Inspect detected and manual artifact windows, jump to them, and remove entries."),
+        ("artifacts", "Artifact setup", "Choose artifact thresholds and how artifacts are handled: interpolate, cut, low-pass locally, or leave unchanged."),
+        ("filtering", "Filtering", "Set low-pass and smoothing options for signal and reference traces."),
+        ("baseline", "Baseline", "Configure baseline estimation before computing dF/F, dF, or z-score outputs."),
+        ("output", "Output", "Choose the processed trace formula and preview the resulting channel."),
+        ("qc", "Quality control", "Run per-recording or batch QC before exporting processed data."),
+        ("export", "Preprocessing export", "Write selected or batch-processed traces to CSV/H5 for downstream analysis."),
+        ("config", "Preprocessing configuration", "Save, reload, or reset preprocessing parameters for reproducible batches."),
+    ]:
+        steps.append(TutorialStep(title, body, target_resolver=_pre_button(key), before=_open_pre_panel(key)))
+
+    steps.extend([
+        TutorialStep(
+            "Switch to Postprocessing",
+            "Once processed traces are exported, load them here from the File menu, by drag/drop, "
+            "or through a saved postprocessing project.",
+            target_resolver=_resolve_post,
+            before=_switch_post,
+        ),
+        TutorialStep(
+            "Individual and Group views",
+            "Individual mode shows one recording at a time; Group mode combines loaded animals. "
+            "Use Ctrl+G to toggle and Ctrl+Left / Ctrl+Right to step through files.",
+            target_resolver=_resolve_post,
+            before=_switch_post,
+        ),
+    ])
+
+    for key, title, body in [
+        ("setup", "Postprocessing setup", "Load processed traces, behavior files, and alignment sources."),
+        ("psth", "PSTH panel", "Set event windows, baselines, filtering, rate bins, and pre/post metrics."),
+        ("spatial", "Spatial panel", "Build occupancy, activity, and velocity maps from behavior trajectories."),
+        ("signal", "Signal events", "Detect peaks/transients, compare amplitude metrics, and overlay detected events/noise."),
+        ("behavior", "Behavior panel", "Analyze behavior bouts, durations, starts, and aligned behavior rate."),
+        ("temporal", "Temporal Modeling", "Fit Continuous GLM or trial-level FLMM models, including per-file batch and group summaries."),
+        ("export", "Postprocessing export", "Export PSTH matrices, metrics, peaks, behavior tables, images, and project files."),
+    ]:
+        steps.append(TutorialStep(title, body, target_resolver=_post_button(key), before=_open_post_panel(key)))
+
+    steps.extend([
+        TutorialStep(
+            "Keyboard shortcuts",
+            "Press Ctrl+/ anytime for the full cheat sheet. Highlights:\n"
+            "- F1 Help / replay tour    Ctrl+, Preferences\n"
+            "- Ctrl+S Save project      Ctrl+Shift+S Save as\n"
+            "- Ctrl+1 Preprocessing     Ctrl+2 Postprocessing\n"
+            "- Ctrl+0 Reset focused plot view\n"
+            "- Esc Cancel current operation",
+            target_resolver=None,
+        ),
+        TutorialStep(
+            "You're set",
+            "Tooltips on every input fill in the rest. If something fails, the toast "
+            "in the corner shows what happened; click it to dismiss.",
+            target_resolver=None,
+        ),
+    ])
+    return steps
+
+
 # ============================================================================
 # Preferences dialog
 # ============================================================================
@@ -521,7 +680,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         "autosave_min": "app/autosave_minutes",    # int
         "kernel_pre": "temporal_modeling/kernel_pre",
         "kernel_post": "temporal_modeling/kernel_post",
-        "show_tutorial": "onboarding/show_on_startup",
+        "show_tutorial": "onboarding/replay_next_launch",
         "toast_timeout": "ui/toast_timeout_ms",
     }
 
@@ -548,7 +707,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.spin_toast.setSuffix(" ms")
         a.addRow("Toast default duration", self.spin_toast)
         self.chk_show_tutorial = QtWidgets.QCheckBox(
-            "Show first-run tutorial on next launch"
+            "Replay tutorial on next launch"
         )
         a.addRow("Onboarding", self.chk_show_tutorial)
         tabs.addTab(appearance, "Appearance")
@@ -627,7 +786,7 @@ class PreferencesDialog(QtWidgets.QDialog):
         if idx >= 0:
             self.combo_theme.setCurrentIndex(idx)
         self.spin_toast.setValue(int(s.value(self.KEYS["toast_timeout"], 5000) or 5000))
-        self.chk_show_tutorial.setChecked(_to_bool(s.value(self.KEYS["show_tutorial"], True), True))
+        self.chk_show_tutorial.setChecked(_to_bool(s.value(self.KEYS["show_tutorial"], False), False))
         self.spin_kernel_pre.setValue(float(s.value(self.KEYS["kernel_pre"], -1.0) or -1.0))
         self.spin_kernel_post.setValue(float(s.value(self.KEYS["kernel_post"], 3.0) or 3.0))
         self.chk_autosave.setChecked(_to_bool(s.value(self.KEYS["autosave"], True), True))
@@ -781,6 +940,362 @@ def _keyboard_cheatsheet_html() -> str:
                 parts.append(f"<tr><td>{key_html}</td><td>{desc}</td></tr>")
             parts.append("</table>")
     return "".join(parts)
+
+
+# ============================================================================
+# Panel header (per-section badge + title + subtitle)
+# ============================================================================
+
+# (badge_letter, badge_color, title, subtitle)
+_POST_SECTION_META: Dict[str, Tuple[str, str, str, str]] = {
+    "setup":    ("S", "#4b9df8", "Setup",         "Load processed traces and behavior / events"),
+    "psth":     ("P", "#7d4df2", "PSTH analysis", "Trial windows, baselines and metrics"),
+    "spatial":  ("X", "#5dd39e", "Spatial maps",  "Occupancy, activity and velocity heatmaps"),
+    "temporal": ("T", "#2d8cff", "Temporal Modeling", "Continuous GLM and trial-level FLMM"),
+    "signal":   ("E", "#f5a97f", "Signal events", "Peak detection and amplitude / rate metrics"),
+    "behavior": ("B", "#ee99a0", "Behavior",       "Behavior alignment and per-state analysis"),
+    "export":   ("D", "#94e2d5", "Export",         "Export PSTH, peaks, behavior and project files"),
+}
+
+_PRE_SECTION_META: Dict[str, Tuple[str, str, str, str]] = {
+    "artifacts_list": ("L", "#f5c542", "Artifact list",   "Inspect and edit detected / manual artifacts"),
+    "artifacts":      ("A", "#ee6471", "Artifact setup",  "Detection thresholds and manual selection"),
+    "filtering":      ("F", "#7d4df2", "Filtering",       "Low-pass + smoothing for the photometry trace"),
+    "baseline":       ("B", "#4b9df8", "Baseline",        "Baseline estimation across the recording"),
+    "output":         ("O", "#5dd39e", "Output",          "Choose dFF / dF / z-score formula"),
+    "qc":             ("Q", "#94e2d5", "Quality control", "Per-recording diagnostic checks"),
+    "export":         ("D", "#f5a97f", "Export",          "Export processed traces"),
+    "config":         ("C", "#aab4c5", "Configuration",   "Save / load preprocessing parameter sets"),
+}
+
+
+class PanelHeader(QtWidgets.QFrame):
+    """
+    Reusable per-panel header. Shows:
+        [coloured badge with letter]  Title (large, bold)
+                                      Subtitle (muted, single line)
+    Use `set_section(key, meta_dict)` to swap the displayed section.
+    """
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("pyberPanelHeader")
+        self.setStyleSheet("")
+        self.setMinimumHeight(54)
+
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(0, 4, 0, 10)
+        lay.setSpacing(12)
+
+        self._badge = QtWidgets.QLabel("")
+        self._badge.setObjectName("pyberPanelBadge")
+        self._badge.setFixedSize(36, 36)
+        self._badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._badge)
+
+        col = QtWidgets.QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        self._title = QtWidgets.QLabel("")
+        self._title.setObjectName("pyberPanelHeaderTitle")
+        self._subtitle = QtWidgets.QLabel("")
+        self._subtitle.setObjectName("pyberPanelHeaderSubtitle")
+        self._subtitle.setWordWrap(True)
+        col.addWidget(self._title)
+        col.addWidget(self._subtitle)
+        lay.addLayout(col, 1)
+
+    def set_from_meta(self, meta: Optional[Tuple[str, str, str, str]]) -> None:
+        """meta = (badge_letter, badge_color, title, subtitle); falsy hides everything."""
+        if not meta:
+            self._badge.setText("")
+            self._title.setText("")
+            self._subtitle.setText("")
+            self._badge.setStyleSheet("background: transparent;")
+            return
+        letter, color, title, subtitle = meta
+        self._badge.setText(letter)
+        self._badge.setStyleSheet(
+            f"background: {color}; color: #ffffff; border-radius: 18px; "
+            f"font-weight: 800; font-size: 14pt;"
+        )
+        self._title.setText(title)
+        self._subtitle.setText(subtitle)
+
+    def set_postprocess_section(self, key: str) -> None:
+        self.set_from_meta(_POST_SECTION_META.get(str(key)))
+
+    def set_preprocess_section(self, key: str) -> None:
+        self.set_from_meta(_PRE_SECTION_META.get(str(key)))
+
+
+# ============================================================================
+# Reusable in-panel building blocks
+#   - Subsection: collapsible card with title + hint + chevron toggle
+#   - FooterActions: right-pinned primary button strip pinned to panel bottom
+#   - InlineStatus: small banner with severity (info / ok / warn / error)
+# ============================================================================
+
+
+class Subsection(QtWidgets.QFrame):
+    """
+    A lightweight section inside a panel:
+        [▾ ]  Title                                            [optional toggle]
+              one-line hint
+        ┌───────────────────────────────────────────────────────────────┐
+        │  body content (whatever the caller adds)                      │
+        └───────────────────────────────────────────────────────────────┘
+
+    Use `add(widget)` or `add_layout(layout)` to populate the body.
+    Set `collapsible=True` to expose a chevron that hides the body.
+    """
+
+    toggled = QtCore.Signal(bool)  # emitted when collapsed/expanded
+
+    def __init__(
+        self,
+        title: str,
+        hint: Optional[str] = None,
+        *,
+        collapsible: bool = False,
+        start_collapsed: bool = False,
+        parent: Optional[QtWidgets.QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.setProperty("class", "subsection")
+        self.setStyleSheet("")  # let global QSS style the subsection class
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 6, 0, 8)
+        outer.setSpacing(4)
+
+        head = QtWidgets.QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(8)
+
+        self._chevron = QtWidgets.QToolButton()
+        self._chevron.setProperty("class", "chevron")
+        self._chevron.setText("▾")
+        self._chevron.setVisible(bool(collapsible))
+        self._chevron.clicked.connect(self._toggle)
+        head.addWidget(self._chevron)
+
+        text_col = QtWidgets.QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(0)
+        self._title = QtWidgets.QLabel(title)
+        self._title.setProperty("class", "subsectionTitle")
+        text_col.addWidget(self._title)
+        if hint:
+            self._hint = QtWidgets.QLabel(hint)
+            self._hint.setProperty("class", "subsectionHint")
+            self._hint.setWordWrap(True)
+            text_col.addWidget(self._hint)
+        else:
+            self._hint = None
+        head.addLayout(text_col, 1)
+
+        # Caller can attach an action widget (e.g., "Reset to defaults" link).
+        self._head_extra_holder = QtWidgets.QWidget()
+        self._head_extra_holder.setStyleSheet("background: transparent;")
+        self._head_extra_layout = QtWidgets.QHBoxLayout(self._head_extra_holder)
+        self._head_extra_layout.setContentsMargins(0, 0, 0, 0)
+        self._head_extra_layout.setSpacing(6)
+        head.addWidget(self._head_extra_holder)
+        outer.addLayout(head)
+
+        self._body = QtWidgets.QWidget()
+        self._body.setStyleSheet("background: transparent;")
+        self._body_layout = QtWidgets.QVBoxLayout(self._body)
+        # Small left indent so subsection body sits under the title text but
+        # leaves the full drawer width available for inputs.
+        self._body_layout.setContentsMargins(6, 4, 0, 4)
+        self._body_layout.setSpacing(6)
+        outer.addWidget(self._body)
+
+        if start_collapsed and collapsible:
+            self._chevron.setText("▸")
+            self._body.setVisible(False)
+
+    def add(self, widget: QtWidgets.QWidget) -> None:
+        self._body_layout.addWidget(widget)
+
+    def add_layout(self, layout: QtWidgets.QLayout) -> None:
+        self._body_layout.addLayout(layout)
+
+    def add_head_action(self, widget: QtWidgets.QWidget) -> None:
+        """Pin a small action widget (button / link) to the right of the title."""
+        self._head_extra_layout.addWidget(widget)
+
+    def _toggle(self) -> None:
+        is_open = self._body.isVisible()
+        self._body.setVisible(not is_open)
+        self._chevron.setText("▸" if is_open else "▾")
+        self.toggled.emit(not is_open)
+
+
+class FooterActions(QtWidgets.QFrame):
+    """
+    A pinned footer strip for primary panel actions:
+        [optional status]                                [Cancel] [Primary]
+    Add buttons via `add_primary` (right side) or `add_secondary` (right side, ghost).
+    """
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.setProperty("class", "footerActions")
+        self.setStyleSheet("")
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(8)
+
+        self._status = QtWidgets.QLabel("")
+        self._status.setProperty("class", "muted")
+        self._status.setWordWrap(True)
+        lay.addWidget(self._status, 1)
+
+        self._right = QtWidgets.QHBoxLayout()
+        self._right.setSpacing(6)
+        lay.addLayout(self._right)
+
+    def set_status(self, text: str) -> None:
+        self._status.setText(str(text or ""))
+
+    def add_primary(self, button: QtWidgets.QPushButton) -> None:
+        button.setProperty("class", "primary")
+        self._right.addWidget(button)
+
+    def add_secondary(self, button: QtWidgets.QPushButton) -> None:
+        button.setProperty("class", "ghost")
+        self._right.addWidget(button)
+
+    def add_widget(self, widget: QtWidgets.QWidget) -> None:
+        self._right.addWidget(widget)
+
+
+class InlineStatus(QtWidgets.QFrame):
+    """
+    Inline status banner: [icon] short-message
+    severity = "info" | "ok" | "warn" | "error"
+    """
+
+    def __init__(self, text: str = "", severity: str = "info",
+                 parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.setProperty("class", "inlineStatus")
+        self.setProperty("severity", severity)
+        self.setStyleSheet("")
+
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(10, 4, 10, 4)
+        lay.setSpacing(8)
+
+        self._icon = QtWidgets.QLabel("")
+        self._icon.setFixedWidth(18)
+        self._icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._icon)
+
+        self._label = QtWidgets.QLabel("")
+        self._label.setWordWrap(True)
+        lay.addWidget(self._label, 1)
+
+        self.setVisible(bool(text))
+        self.set(text, severity)
+
+    def set(self, text: str, severity: str = "info") -> None:
+        glyph = {"info": "i", "ok": "v", "warn": "!", "error": "x"}.get(severity, "i")
+        self._icon.setText(glyph)
+        self._label.setText(str(text or ""))
+        self.setProperty("severity", severity)
+        self.style().unpolish(self); self.style().polish(self)
+        self.setVisible(bool(text))
+
+
+# ============================================================================
+# Top app bar (workflow header)
+# ============================================================================
+
+
+class TopAppBar(QtWidgets.QFrame):
+    """
+    Persistent strip above the main tab widget. Shows:
+        [logo]  pyBer        Preprocessing > Postprocessing      [Project: name *]   [Help]
+    The workflow step is highlighted based on the active main tab.
+    """
+
+    helpRequested = QtCore.Signal()
+    preferencesRequested = QtCore.Signal()
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("pyberTopBar")
+        self.setFixedHeight(54)
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(16, 6, 16, 6)
+        lay.setSpacing(12)
+
+        self._mark = QtWidgets.QLabel("p")
+        self._mark.setObjectName("pyberAppMark")
+        self._mark.setFixedSize(30, 30)
+        lay.addWidget(self._mark)
+
+        self._app_name = QtWidgets.QLabel("pyBer")
+        self._app_name.setObjectName("pyberAppName")
+        lay.addWidget(self._app_name)
+
+        # Workflow steps
+        self._steps_holder = QtWidgets.QFrame()
+        sl = QtWidgets.QHBoxLayout(self._steps_holder)
+        sl.setContentsMargins(12, 0, 12, 0)
+        sl.setSpacing(6)
+        self._step_labels: List[QtWidgets.QLabel] = []
+        for i, name in enumerate(("Preprocessing", "Postprocessing")):
+            if i > 0:
+                sep = QtWidgets.QLabel("›")
+                sep.setObjectName("pyberWorkflowSep")
+                sl.addWidget(sep)
+            lbl = QtWidgets.QLabel(name)
+            lbl.setObjectName("pyberWorkflowStep")
+            lbl.setProperty("active", "true" if i == 0 else "false")
+            self._step_labels.append(lbl)
+            sl.addWidget(lbl)
+        lay.addWidget(self._steps_holder)
+        lay.addStretch(1)
+
+        self._project_lbl = QtWidgets.QLabel("Untitled project")
+        self._project_lbl.setObjectName("pyberProjectName")
+        self._project_lbl.setProperty("dirty", "false")
+        lay.addWidget(self._project_lbl)
+
+        self._btn_prefs = QtWidgets.QPushButton("Preferences")
+        self._btn_prefs.setProperty("class", "ghost")
+        self._btn_prefs.setToolTip("Open preferences (Ctrl+,)")
+        self._btn_prefs.clicked.connect(self.preferencesRequested.emit)
+        lay.addWidget(self._btn_prefs)
+
+        self._btn_help = QtWidgets.QPushButton("?")
+        self._btn_help.setProperty("class", "help")
+        self._btn_help.setToolTip("Replay tutorial / help (F1)")
+        self._btn_help.clicked.connect(self.helpRequested.emit)
+        lay.addWidget(self._btn_help)
+
+    def set_active_step(self, index: int) -> None:
+        for i, lbl in enumerate(self._step_labels):
+            lbl.setProperty("active", "true" if i == int(index) else "false")
+            # Force style recompute.
+            lbl.style().unpolish(lbl)
+            lbl.style().polish(lbl)
+            lbl.update()
+
+    def set_project_name(self, name: str, dirty: bool = False) -> None:
+        text = (str(name).strip() or "Untitled project")
+        if dirty:
+            text = text + " *"
+        self._project_lbl.setText(text)
+        self._project_lbl.setProperty("dirty", "true" if dirty else "false")
+        self._project_lbl.style().unpolish(self._project_lbl)
+        self._project_lbl.style().polish(self._project_lbl)
+        self._project_lbl.update()
 
 
 # ============================================================================

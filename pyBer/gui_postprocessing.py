@@ -20,6 +20,12 @@ import h5py
 from analysis_core import ProcessedTrial, coerce_time_value
 from ethovision_process_gui import clean_sheet
 from temporal_modeling import TemporalModelingWidget
+from onboarding import (
+    PanelHeader as _PyberPanelHeader,
+    Subsection as _PyberSubsection,
+    FooterActions as _PyberFooterActions,
+    InlineStatus as _PyberInlineStatus,
+)
 
 _DOCK_STATE_VERSION = 3
 _POST_DOCK_STATE_KEY = "post_main_dock_state_v4"
@@ -559,6 +565,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._pending_fixed_layout_retry: bool = False
         self._pending_project_recompute_from_current: bool = False
         self._project_dirty: bool = False
+        self._project_clean_key: str = ""
         self._autosave_restoring: bool = False
         self._project_recovered_from_autosave: bool = False
         self._suppress_heatmap_level_store: bool = False
@@ -582,6 +589,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             app.aboutToQuit.connect(self._on_about_to_quit)
         QtCore.QTimer.singleShot(0, self._restore_project_autosave_if_needed)
         QtCore.QTimer.singleShot(0, self._reset_history_snapshot)
+        QtCore.QTimer.singleShot(0, self._mark_project_clean)
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
@@ -788,13 +796,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
 
         # ── Shared QSS for PSTH subsection headers ──
-        _psth_section_qss = (
-            "QGroupBox { font-weight: 700; font-size: 11px; "
-            "border: 1px solid rgba(255,255,255,0.07); border-radius: 6px; "
-            "margin-top: 10px; padding: 14px 8px 8px 8px; }"
-            "QGroupBox::title { subcontrol-origin: margin; left: 10px; "
-            "padding: 0 6px; color: #8899b0; }"
-        )
+        _psth_section_qss = ""
 
         # ── Widget creation (unchanged logic, reordered for sections) ──
         self.spin_pre = QtWidgets.QDoubleSpinBox(); self.spin_pre.setRange(0.1, 60); self.spin_pre.setValue(2.0); self.spin_pre.setDecimals(2)
@@ -969,7 +971,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_export_img.setProperty("class", "compactSmall")
         self.btn_export_img.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_style = QtWidgets.QPushButton("Plot style")
-        self.btn_style.setProperty("class", "compactSmall")
+        self.btn_style.setProperty("class", "ghost")
+        self.btn_style.setToolTip("Open plot styling options")
         self.btn_style.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_save_cfg = QtWidgets.QPushButton("Save config")
         self.btn_save_cfg.setProperty("class", "compactSmall")
@@ -1095,56 +1098,139 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.tbl_signal_metrics.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tbl_signal_metrics.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
 
-        grp_behavior_analysis = QtWidgets.QGroupBox("Behavior Analysis")
-        f_behavior = QtWidgets.QFormLayout(grp_behavior_analysis)
-        f_behavior.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
-        f_behavior.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        # Plain frame holds the behavior subsections - no outer GroupBox chip,
+        # the panel header already says "Behavior".
+        grp_behavior_analysis = QtWidgets.QFrame()
+        grp_behavior_analysis.setStyleSheet("background: transparent; border: 0;")
         self.combo_behavior_analysis = QtWidgets.QComboBox()
         _compact_combo(self.combo_behavior_analysis, min_chars=8)
         self.spin_behavior_bin = QtWidgets.QDoubleSpinBox()
         self.spin_behavior_bin.setRange(0.5, 3600.0)
         self.spin_behavior_bin.setValue(30.0)
         self.spin_behavior_bin.setDecimals(2)
-        self.cb_behavior_aligned = QtWidgets.QCheckBox("Use aligned timeline when possible")
+        self.spin_behavior_bin.setSuffix(" s")
+        self.spin_behavior_bin.setMaximumWidth(160)
+        self.cb_behavior_aligned = QtWidgets.QCheckBox()  # label text moved to form row
         self.cb_behavior_aligned.setChecked(False)
-        self.btn_compute_behavior = QtWidgets.QPushButton("Compute behavior metrics")
-        self.btn_compute_behavior.setProperty("class", "compactPrimarySmall")
-        self.btn_export_behavior_metrics = QtWidgets.QPushButton("Export behavior metrics")
-        self.btn_export_behavior_metrics.setProperty("class", "compactSmall")
-        self.btn_export_behavior_events = QtWidgets.QPushButton("Export event list")
-        self.btn_export_behavior_events.setProperty("class", "compactSmall")
+        self.cb_behavior_aligned.setToolTip(
+            "When the recordings include an aligned timeline, use it instead of "
+            "the raw behavior timestamps."
+        )
+        self.btn_compute_behavior = QtWidgets.QPushButton("Compute metrics")
+        self.btn_compute_behavior.setToolTip("Recompute behavior metrics for the loaded recordings (Ctrl+R)")
+        self.btn_export_behavior_metrics = QtWidgets.QPushButton("Export metrics CSV")
+        self.btn_export_behavior_metrics.setToolTip("Export the per-file behavior metrics table to CSV")
+        self.btn_export_behavior_events = QtWidgets.QPushButton("Export events CSV")
+        self.btn_export_behavior_events.setToolTip("Export the underlying behavior event list to CSV")
         self.lbl_behavior_msg = QtWidgets.QLabel("")
         self.lbl_behavior_msg.setProperty("class", "hint")
-        f_behavior.addRow("Behavior", self.combo_behavior_analysis)
-        f_behavior.addRow("Bin size (s)", self.spin_behavior_bin)
-        f_behavior.addRow(self.cb_behavior_aligned)
-        behavior_btn_row = QtWidgets.QHBoxLayout()
-        behavior_btn_row.addWidget(self.btn_compute_behavior)
-        behavior_btn_row.addWidget(self.btn_export_behavior_metrics)
-        behavior_btn_row.addWidget(self.btn_export_behavior_events)
-        behavior_btn_row.addStretch(1)
-        behavior_btn_wrap = QtWidgets.QWidget()
-        behavior_btn_wrap.setLayout(behavior_btn_row)
-        f_behavior.addRow(behavior_btn_wrap)
+
+        # Build into clean Subsections instead of a flat 4-row form.
+        BEH_LABEL_W = 96
+
+        def _beh_form() -> QtWidgets.QFormLayout:
+            f = QtWidgets.QFormLayout()
+            f.setContentsMargins(0, 2, 0, 2)
+            f.setHorizontalSpacing(10)
+            f.setVerticalSpacing(8)
+            f.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            f.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.DontWrapRows)
+            f.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            return f
+
+        def _beh_add(form: QtWidgets.QFormLayout, label: str, field: QtWidgets.QWidget) -> None:
+            lbl = QtWidgets.QLabel(label)
+            lbl.setMinimumWidth(BEH_LABEL_W)
+            lbl.setMaximumWidth(BEH_LABEL_W)
+            form.addRow(lbl, field)
+
+        # Subsection: which behavior + bin size
+        sub_beh_pick = _PyberSubsection(
+            "Selection",
+            "Behavior to analyze and bin width for over-time rate.",
+        )
+        f_pick = _beh_form()
+        _beh_add(f_pick, "Behavior", self.combo_behavior_analysis)
+        _beh_add(f_pick, "Bin size", self.spin_behavior_bin)
+        _beh_add(f_pick, "Aligned timeline", self.cb_behavior_aligned)
+        sub_beh_pick.add_layout(f_pick)
+
+        grp_beh_layout = QtWidgets.QVBoxLayout()
+        grp_beh_layout.setContentsMargins(0, 0, 0, 0)
+        grp_beh_layout.setSpacing(4)
+        grp_beh_layout.addWidget(sub_beh_pick)
+        old_beh_layout = grp_behavior_analysis.layout()
+        if old_beh_layout is not None:
+            QtWidgets.QWidget().setLayout(old_beh_layout)
+        grp_behavior_analysis.setLayout(grp_beh_layout)
+
+        # Footer: primary Compute + two ghost Exports.
+        self.behavior_status = _PyberInlineStatus("", "info")
+        self.behavior_footer = _PyberFooterActions()
+        self.behavior_footer.add_secondary(self.btn_export_behavior_events)
+        self.behavior_footer.add_secondary(self.btn_export_behavior_metrics)
+        self.behavior_footer.add_primary(self.btn_compute_behavior)
+
+        # Mirror existing self.lbl_behavior_msg.setText -> banner with severity.
+        self.lbl_behavior_msg.hide()
+        _orig_beh_set_text = self.lbl_behavior_msg.setText
+        def _beh_set_text(text: str) -> None:
+            _orig_beh_set_text(text)
+            try:
+                low = str(text or "").lower()
+                if not text:
+                    sev = "info"
+                elif "fail" in low or "error" in low:
+                    sev = "error"
+                elif "skip" in low or "no " in low or "missing" in low:
+                    sev = "warn"
+                elif "compute" in low or "export" in low or "ok" in low or "saved" in low:
+                    sev = "ok"
+                else:
+                    sev = "info"
+                self.behavior_status.set(text, sev)
+            except Exception:
+                pass
+        self.lbl_behavior_msg.setText = _beh_set_text  # type: ignore[assignment]
+
+        # NB: lbl_behavior_summary is created later (after the metrics table).
+        # The mirror that re-routes its setText into the InlineStatus banner
+        # is wired further down, after the label exists.
 
         self.tbl_behavior_metrics = QtWidgets.QTableWidget(0, 8)
+        # Short, glance-able column names so the table fits the drawer.
         self.tbl_behavior_metrics.setHorizontalHeaderLabels(
-            [
-                "file_id",
-                "event_count",
-                "total_time",
-                "mean_duration",
-                "median_duration",
-                "std_duration",
-                "rate_per_min",
-                "fraction_time",
-            ]
+            ["File", "n", "Total", "Mean", "Med", "SD", "Rate/min", "Frac"]
         )
         self.tbl_behavior_metrics.verticalHeader().setVisible(False)
-        self.tbl_behavior_metrics.horizontalHeader().setStretchLastSection(True)
         self.tbl_behavior_metrics.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tbl_behavior_metrics.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_behavior_metrics.setAlternatingRowColors(True)
+        self.tbl_behavior_metrics.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        # First column (File) takes available width; rest size to contents.
+        _hdr = self.tbl_behavior_metrics.horizontalHeader()
+        _hdr.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        _hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        _hdr.setStretchLastSection(False)
+
         self.lbl_behavior_summary = QtWidgets.QLabel("Group metrics: -")
+        self.lbl_behavior_summary.hide()
+
+        # Mirror the (now hidden) summary label's text into the InlineStatus
+        # banner so existing self.lbl_behavior_summary.setText(...) calls
+        # surface as a properly styled status above the footer.
+        _orig_beh_summary_set_text = self.lbl_behavior_summary.setText
+        def _beh_summary_set_text(text: str) -> None:
+            _orig_beh_summary_set_text(text)
+            try:
+                txt = str(text or "").strip()
+                if not txt or txt == "Group metrics: -":
+                    self.behavior_status.set("", "info")  # hides
+                else:
+                    self.behavior_status.set(txt, "info")
+            except Exception:
+                pass
+        self.lbl_behavior_summary.setText = _beh_summary_set_text  # type: ignore[assignment]
         self.lbl_behavior_summary.setProperty("class", "hint")
 
         grp_spatial = QtWidgets.QGroupBox("Spatial")
@@ -1171,7 +1257,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             ]
         )
         _compact_combo(self.combo_spatial_weight, min_chars=10)
-        self.cb_spatial_clip = QtWidgets.QCheckBox("Enabled")
+        self.cb_spatial_clip = QtWidgets.QCheckBox()
         self.cb_spatial_clip.setChecked(True)
         self.spin_spatial_clip_low = QtWidgets.QDoubleSpinBox()
         self.spin_spatial_clip_low.setRange(0.0, 49.0)
@@ -1185,9 +1271,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_spatial_smooth.setRange(0.0, 20.0)
         self.spin_spatial_smooth.setValue(0.0)
         self.spin_spatial_smooth.setDecimals(2)
-        self.cb_spatial_log = QtWidgets.QCheckBox("Log scale (log1p)")
+        self.cb_spatial_log = QtWidgets.QCheckBox()
         self.cb_spatial_log.setChecked(False)
-        self.cb_spatial_invert_y = QtWidgets.QCheckBox("Invert Y axis")
+        self.cb_spatial_invert_y = QtWidgets.QCheckBox()
         self.cb_spatial_invert_y.setChecked(False)
         self.combo_spatial_activity_mode = QtWidgets.QComboBox()
         self.combo_spatial_activity_mode.addItems(
@@ -1199,7 +1285,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         self.combo_spatial_activity_mode.setCurrentIndex(0)
         _compact_combo(self.combo_spatial_activity_mode, min_chars=12)
-        self.cb_spatial_time_filter = QtWidgets.QCheckBox("Enabled")
+        self.cb_spatial_time_filter = QtWidgets.QCheckBox()
         self.cb_spatial_time_filter.setChecked(False)
         self.spin_spatial_time_min = QtWidgets.QDoubleSpinBox()
         self.spin_spatial_time_min.setRange(-1e9, 1e9)
@@ -1223,38 +1309,56 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         self.btn_compute_spatial = QtWidgets.QPushButton("Compute spatial heatmap")
         self.btn_compute_spatial.setProperty("class", "compactPrimarySmall")
+        self.btn_compute_spatial.setToolTip("Render occupancy + activity + velocity heatmaps from the trajectory")
+        self.btn_compute_spatial.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed
+        )
+        self.btn_compute_spatial.setMinimumWidth(220)
         self.lbl_spatial_msg = QtWidgets.QLabel("")
         self.lbl_spatial_msg.setProperty("class", "hint")
+        self.lbl_spatial_msg.setWordWrap(True)
 
-        bins_row = QtWidgets.QGridLayout()
-        bins_row.setHorizontalSpacing(6)
-        bins_row.setContentsMargins(0, 0, 0, 0)
-        bins_row.addWidget(QtWidgets.QLabel("X"), 0, 0)
-        bins_row.addWidget(self.spin_spatial_bins_x, 0, 1)
-        bins_row.addWidget(QtWidgets.QLabel("Y"), 0, 2)
-        bins_row.addWidget(self.spin_spatial_bins_y, 0, 3)
-        bins_widget = QtWidgets.QWidget()
-        bins_widget.setLayout(bins_row)
+        # Compact paired inputs: one row, max-width spinboxes, prefix labels
+        # baked into the input via setPrefix so they don't compete for space.
+        for sb, prefix in (
+            (self.spin_spatial_bins_x, "X "),
+            (self.spin_spatial_bins_y, "Y "),
+        ):
+            sb.setPrefix(prefix)
+            sb.setMaximumWidth(110)
+            sb.setMinimumWidth(80)
+        for sb, prefix in (
+            (self.spin_spatial_clip_low, "Lo "),
+            (self.spin_spatial_clip_high, "Hi "),
+        ):
+            sb.setPrefix(prefix)
+            sb.setSuffix(" %")
+            sb.setMaximumWidth(120)
+            sb.setMinimumWidth(90)
+        for sb, prefix in (
+            (self.spin_spatial_time_min, "Start "),
+            (self.spin_spatial_time_max, "End "),
+        ):
+            sb.setPrefix(prefix)
+            sb.setSuffix(" s")
+            sb.setMaximumWidth(140)
+            sb.setMinimumWidth(110)
+        self.spin_spatial_smooth.setSuffix(" bins")
+        self.spin_spatial_smooth.setMaximumWidth(140)
 
-        clip_row = QtWidgets.QGridLayout()
-        clip_row.setHorizontalSpacing(6)
-        clip_row.setContentsMargins(0, 0, 0, 0)
-        clip_row.addWidget(QtWidgets.QLabel("Low"), 0, 0)
-        clip_row.addWidget(self.spin_spatial_clip_low, 0, 1)
-        clip_row.addWidget(QtWidgets.QLabel("High"), 0, 2)
-        clip_row.addWidget(self.spin_spatial_clip_high, 0, 3)
-        clip_widget = QtWidgets.QWidget()
-        clip_widget.setLayout(clip_row)
+        def _pair(a: QtWidgets.QWidget, b: QtWidgets.QWidget) -> QtWidgets.QWidget:
+            box = QtWidgets.QWidget()
+            row = QtWidgets.QHBoxLayout(box)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            row.addWidget(a)
+            row.addWidget(b)
+            row.addStretch(1)
+            return box
 
-        time_row = QtWidgets.QGridLayout()
-        time_row.setHorizontalSpacing(6)
-        time_row.setContentsMargins(0, 0, 0, 0)
-        time_row.addWidget(QtWidgets.QLabel("Start"), 0, 0)
-        time_row.addWidget(self.spin_spatial_time_min, 0, 1)
-        time_row.addWidget(QtWidgets.QLabel("End"), 0, 2)
-        time_row.addWidget(self.spin_spatial_time_max, 0, 3)
-        time_widget = QtWidgets.QWidget()
-        time_widget.setLayout(time_row)
+        bins_widget = _pair(self.spin_spatial_bins_x, self.spin_spatial_bins_y)
+        clip_widget = _pair(self.spin_spatial_clip_low, self.spin_spatial_clip_high)
+        time_widget = _pair(self.spin_spatial_time_min, self.spin_spatial_time_max)
 
         help_row = QtWidgets.QHBoxLayout()
         help_row.setContentsMargins(0, 0, 0, 0)
@@ -1263,21 +1367,121 @@ class PostProcessingPanel(QtWidgets.QWidget):
         help_widget = QtWidgets.QWidget()
         help_widget.setLayout(help_row)
 
-        f_spatial.addRow("X trajectory column", self.combo_spatial_x)
-        f_spatial.addRow("Y trajectory column", self.combo_spatial_y)
-        f_spatial.addRow("Help", help_widget)
-        f_spatial.addRow("Bins (X/Y)", bins_widget)
-        f_spatial.addRow("Occupancy map value", self.combo_spatial_weight)
-        f_spatial.addRow("Clip ranges", self.cb_spatial_clip)
-        f_spatial.addRow("Percentiles", clip_widget)
-        f_spatial.addRow("Time filter", self.cb_spatial_time_filter)
-        f_spatial.addRow("Time range (s)", time_widget)
-        f_spatial.addRow("Spatial smooth (bins)", self.spin_spatial_smooth)
-        f_spatial.addRow("Activity map mode", self.combo_spatial_activity_mode)
-        f_spatial.addRow("Log scale", self.cb_spatial_log)
-        f_spatial.addRow("Invert Y axis", self.cb_spatial_invert_y)
-        f_spatial.addRow("", self.btn_compute_spatial)
-        f_spatial.addRow("", self.lbl_spatial_msg)
+        # Build the form into clearly-labelled subsections instead of a 15-row flat list.
+        # All form labels share a fixed minimum width so columns line up across subsections.
+        FORM_LABEL_W = 96
+
+        def _form() -> QtWidgets.QFormLayout:
+            f = QtWidgets.QFormLayout()
+            f.setContentsMargins(0, 2, 0, 2)
+            f.setHorizontalSpacing(10)
+            f.setVerticalSpacing(8)
+            f.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            f.setFormAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+            f.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.DontWrapRows)
+            f.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            return f
+
+        def _add_row(form: QtWidgets.QFormLayout, label: str, field: QtWidgets.QWidget) -> None:
+            lbl = QtWidgets.QLabel(label)
+            lbl.setMinimumWidth(FORM_LABEL_W)
+            lbl.setMaximumWidth(FORM_LABEL_W)
+            form.addRow(lbl, field)
+
+        # ---- Subsection: trajectory source ----
+        sub_traj = _PyberSubsection(
+            "Trajectory",
+            "X / Y position columns from the loaded behavior file.",
+        )
+        sub_traj.add_head_action(self.btn_spatial_help)
+        f1 = _form()
+        _add_row(f1, "X column", self.combo_spatial_x)
+        _add_row(f1, "Y column", self.combo_spatial_y)
+        sub_traj.add_layout(f1)
+
+        # ---- Subsection: occupancy map ----
+        sub_occ = _PyberSubsection(
+            "Occupancy",
+            "Spatial bin grid and what each bin counts.",
+        )
+        f2 = _form()
+        _add_row(f2, "Bins", bins_widget)
+        _add_row(f2, "Map value", self.combo_spatial_weight)
+        _add_row(f2, "Smoothing", self.spin_spatial_smooth)
+        _add_row(f2, "Log scale", self.cb_spatial_log)
+        _add_row(f2, "Invert Y axis", self.cb_spatial_invert_y)
+        sub_occ.add_layout(f2)
+
+        # ---- Subsection: range clipping ----
+        sub_clip = _PyberSubsection(
+            "Display range",
+            "Clip extreme percentiles for readable colors.",
+        )
+        f3 = _form()
+        _add_row(f3, "Enable", self.cb_spatial_clip)
+        _add_row(f3, "Percentiles", clip_widget)
+        sub_clip.add_layout(f3)
+
+        # ---- Subsection: time filter ----
+        sub_time = _PyberSubsection(
+            "Time filter",
+            "Restrict trajectory samples to a window.",
+        )
+        f4 = _form()
+        _add_row(f4, "Enable", self.cb_spatial_time_filter)
+        _add_row(f4, "Range", time_widget)
+        sub_time.add_layout(f4)
+
+        # ---- Subsection: activity map ----
+        sub_act = _PyberSubsection(
+            "Activity map",
+            "How per-bin signal values are normalized.",
+        )
+        f5 = _form()
+        _add_row(f5, "Mode", self.combo_spatial_activity_mode)
+        sub_act.add_layout(f5)
+
+        # Stack subsections inside the existing group box.
+        grp_spatial_layout = QtWidgets.QVBoxLayout()
+        grp_spatial_layout.setContentsMargins(0, 0, 0, 0)
+        grp_spatial_layout.setSpacing(4)
+        for sub in (sub_traj, sub_occ, sub_clip, sub_time, sub_act):
+            grp_spatial_layout.addWidget(sub)
+
+        # Replace the existing group box's layout (was f_spatial / QFormLayout).
+        # We drop f_spatial entirely; it was assigned but is no longer attached.
+        old_layout = grp_spatial.layout()
+        if old_layout is not None:
+            QtWidgets.QWidget().setLayout(old_layout)  # detach safely
+        grp_spatial.setLayout(grp_spatial_layout)
+
+        # Inline status banner + footer with the primary Compute action.
+        self.spatial_status = _PyberInlineStatus("", "info")
+        self.spatial_footer = _PyberFooterActions()
+        self.spatial_footer.add_primary(self.btn_compute_spatial)
+
+        # Mirror existing `self.lbl_spatial_msg.setText(...)` calls into the new
+        # banner without changing every call site: monkey-patch setText.
+        self.lbl_spatial_msg.hide()
+        _orig_set_text = self.lbl_spatial_msg.setText
+        def _set_text_with_banner(text: str) -> None:
+            _orig_set_text(text)
+            try:
+                low = str(text or "").lower()
+                if not text:
+                    sev = "info"
+                elif "skip" in low or "no " in low or "missing" in low:
+                    sev = "warn"
+                elif "fail" in low or "error" in low:
+                    sev = "error"
+                elif "render" in low or "compute" in low or "ok" in low:
+                    sev = "ok"
+                else:
+                    sev = "info"
+                self.spatial_status.set(text, sev)
+            except Exception:
+                pass
+        self.lbl_spatial_msg.setText = _set_text_with_banner  # type: ignore[assignment]
 
         self.section_setup = QtWidgets.QWidget()
         setup_layout = QtWidgets.QVBoxLayout(self.section_setup)
@@ -1325,9 +1529,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         behavior_layout.setContentsMargins(6, 6, 6, 6)
         behavior_layout.setSpacing(8)
         behavior_layout.addWidget(grp_behavior_analysis)
-        behavior_layout.addWidget(self.tbl_behavior_metrics)
+        behavior_layout.addWidget(self.behavior_status)
+        behavior_layout.addWidget(self.tbl_behavior_metrics, 1)
         behavior_layout.addWidget(self.lbl_behavior_summary)
-        behavior_layout.addStretch(1)
+        behavior_layout.addWidget(self.behavior_footer)
 
         self.section_temporal = TemporalModelingWidget()
         self.section_temporal.statusMessage.connect(
@@ -1339,7 +1544,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         spatial_layout.setContentsMargins(6, 6, 6, 6)
         spatial_layout.setSpacing(8)
         spatial_layout.addWidget(grp_spatial)
+        spatial_layout.addWidget(self.spatial_status)
         spatial_layout.addStretch(1)
+        spatial_layout.addWidget(self.spatial_footer)
 
         self.section_export = QtWidgets.QWidget()
         export_layout = QtWidgets.QVBoxLayout(self.section_export)
@@ -1386,21 +1593,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_action_export = QtWidgets.QPushButton("Export")
         self.btn_action_export.setProperty("class", "compactPrimarySmall")
         self.btn_action_undo = QtWidgets.QPushButton("Undo")
-        self.btn_action_undo.setProperty("class", "compactSmall")
-        self.btn_action_undo.setToolTip("Undo last postprocessing setting or view action")
+        self.btn_action_undo.setProperty("class", "ghost")
+        self.btn_action_undo.setToolTip("Undo last postprocessing setting or view action  (Ctrl+Z)")
         self.btn_action_redo = QtWidgets.QPushButton("Redo")
-        self.btn_action_redo.setProperty("class", "compactSmall")
-        self.btn_action_redo.setToolTip("Redo last undone postprocessing setting or view action")
+        self.btn_action_redo.setProperty("class", "ghost")
+        self.btn_action_redo.setToolTip("Redo last undone postprocessing setting or view action  (Ctrl+Y)")
         self.btn_action_hide = QtWidgets.QPushButton("Hide Panels")
-        self.btn_action_hide.setProperty("class", "compactSmall")
+        self.btn_action_hide.setProperty("class", "ghost")
 
-        self.btn_panel_setup = QtWidgets.QPushButton("Setup")
-        self.btn_panel_psth = QtWidgets.QPushButton("PSTH")
-        self.btn_panel_spatial = QtWidgets.QPushButton("Spatial")
-        self.btn_panel_export = QtWidgets.QPushButton("Export")
-        self.btn_panel_signal = QtWidgets.QPushButton("Signal")
-        self.btn_panel_behavior = QtWidgets.QPushButton("Behavior")
-        self.btn_panel_temporal = QtWidgets.QPushButton("Temporal")
+        self.btn_panel_setup = QtWidgets.QToolButton(); self.btn_panel_setup.setText("Setup")
+        self.btn_panel_psth = QtWidgets.QToolButton(); self.btn_panel_psth.setText("PSTH")
+        self.btn_panel_spatial = QtWidgets.QToolButton(); self.btn_panel_spatial.setText("Spatial")
+        self.btn_panel_export = QtWidgets.QToolButton(); self.btn_panel_export.setText("Export")
+        self.btn_panel_signal = QtWidgets.QToolButton(); self.btn_panel_signal.setText("Signal")
+        self.btn_panel_behavior = QtWidgets.QToolButton(); self.btn_panel_behavior.setText("Behavior")
+        self.btn_panel_temporal = QtWidgets.QToolButton(); self.btn_panel_temporal.setText("Temporal")
         self._section_buttons = {
             "setup": self.btn_panel_setup,
             "psth": self.btn_panel_psth,
@@ -1421,24 +1628,27 @@ class PostProcessingPanel(QtWidgets.QWidget):
             _paint_export, _paint_pulse, _paint_paw, _paint_temporal,
         )
         _post_rail_meta = {
-            "setup":    ("Setup", _paint_sliders),
-            "psth":     ("PSTH analysis", _paint_chart),
-            "spatial":  ("Spatial maps", _paint_grid),
-            "export":   ("Export panel", _paint_export),
-            "signal":   ("Signal events", _paint_pulse),
-            "behavior": ("Behavior", _paint_paw),
-            "temporal": ("Temporal modeling (GLM / FLMM)", _paint_temporal),
+            "setup":    ("Setup",     "Load processed traces and behavior", _paint_sliders),
+            "psth":     ("PSTH",      "Trial windows, baselines and metrics", _paint_chart),
+            "spatial":  ("Spatial",   "Occupancy and activity heatmaps", _paint_grid),
+            "export":   ("Export",    "Export PSTH, peaks, behavior", _paint_export),
+            "signal":   ("Events",    "Peak / event detection", _paint_pulse),
+            "behavior": ("Behavior",  "Behavior alignment and per-state analysis", _paint_paw),
+            "temporal": ("Temporal",  "GLM / FLMM modeling", _paint_temporal),
         }
+        self._post_rail_icon_painters = {key: meta[2] for key, meta in _post_rail_meta.items()}
         for key, btn in self._section_buttons.items():
-            tip, painter = _post_rail_meta[key]
+            label, hint, painter = _post_rail_meta[key]
             btn.setObjectName("railButton")
             btn.setProperty("class", "")
-            btn.setText("")
-            btn.setToolTip(tip)
-            btn.setStatusTip(tip)
+            btn.setText(label)
+            btn.setToolTip(f"{label} - {hint}")
+            btn.setStatusTip(f"{label} - {hint}")
             btn.setIcon(_make_icon(painter))
             btn.setIconSize(QtCore.QSize(22, 22))
-            btn.setFixedSize(44, 44)
+            btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            btn.setFixedSize(76, 60)
+            btn.setCheckable(True)
 
         self._post_side_rail = QtWidgets.QFrame()
         self._post_side_rail.setObjectName("sideRail")
@@ -1449,7 +1659,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             rail_layout.addWidget(self._section_buttons[key], 0,
                                   QtCore.Qt.AlignmentFlag.AlignHCenter)
         rail_layout.addStretch(1)
-        self._post_side_rail.setFixedWidth(64)
+        self._post_side_rail.setFixedWidth(96)
 
         # Transport bar holds the workflow actions.
         self._post_transport_bar = QtWidgets.QFrame()
@@ -1460,9 +1670,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_action_compute.setText("Compute PSTH")
         self.btn_action_export.setText("Run Export")
         self.btn_action_hide.setText("Hide drawer")
-        for b in (self.btn_action_load, self.btn_action_compute,
-                  self.btn_action_export, self.btn_action_undo,
-                  self.btn_action_redo, self.btn_style):
+
+        # Primary group: File / Compute / Export.
+        for b in (self.btn_action_load, self.btn_action_compute, self.btn_action_export):
+            tb_layout.addWidget(b)
+
+        # Visual hairline separator between primary actions and utilities.
+        sep = QtWidgets.QFrame()
+        sep.setFixedWidth(1)
+        sep.setFixedHeight(22)
+        sep.setStyleSheet("background: #2c3240; border: 0;")
+        tb_layout.addSpacing(4)
+        tb_layout.addWidget(sep)
+        tb_layout.addSpacing(4)
+
+        # Utility group: Undo / Redo / Plot style (ghost).
+        for b in (self.btn_action_undo, self.btn_action_redo, self.btn_style):
             tb_layout.addWidget(b)
         self._update_history_buttons()
         tb_layout.addStretch(1)
@@ -1500,12 +1723,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.tab_visual_mode.addTab("Group")
         self.tab_visual_mode.setDrawBase(False)
         self.tab_visual_mode.setExpanding(False)
-        self.tab_visual_mode.setStyleSheet(
-            "QTabBar#visualModeBar::tab { min-width: 90px; padding: 5px 14px; "
-            "border-radius: 6px; margin-right: 4px; font-weight: 600; }"
-            "QTabBar#visualModeBar::tab:selected { background: rgba(90,190,255,0.25); color: #5abeFF; }"
-            "QTabBar#visualModeBar::tab:!selected { background: rgba(255,255,255,0.06); color: #9aa3b4; }"
-        )
         visual_bar.addWidget(self.tab_visual_mode)
         visual_bar.addWidget(QtWidgets.QLabel("  File:"))
         self.combo_individual_file = QtWidgets.QComboBox()
@@ -1560,6 +1777,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_spatial_velocity,
         ):
             _opt_plot(w)
+
+        # Empty-state hints removed by design - keep plots visually clean.
+        self._postproc_empty_hints: List[Any] = []
 
         self.curve_trace = self.plot_trace.plot(pen=pg.mkPen(self._style["trace"], width=1.1))
         self.curve_behavior = self.plot_trace.plot(pen=pg.mkPen(self._style["behavior"], width=1.0))
@@ -1836,9 +2056,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             _drw = QtWidgets.QVBoxLayout(self._post_drawer)
             _drw.setContentsMargins(12, 10, 12, 10)
             _drw.setSpacing(8)
+            # Rich panel header (badge + title + subtitle); set per active section.
+            self._post_drawer_header = _PyberPanelHeader()
+            _drw.addWidget(self._post_drawer_header)
+            # Hidden compat label so legacy lookups don't crash.
             self._post_drawer_title = QtWidgets.QLabel("")
-            self._post_drawer_title.setObjectName("panelTitle")
-            _drw.addWidget(self._post_drawer_title)
+            self._post_drawer_title.setVisible(False)
             _drw.addWidget(self._dockarea, stretch=1)
             self._post_drawer.setVisible(False)
             workspace.addWidget(self._post_drawer)
@@ -1936,7 +2159,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_hide_filters.toggled.connect(self._toggle_filter_panel)
         self.btn_hide_metrics.toggled.connect(self._toggle_metrics_panel)
         self.combo_view_layout.currentIndexChanged.connect(self._apply_view_layout)
-        self.combo_view_layout.currentIndexChanged.connect(self._queue_settings_save)
+        self.combo_view_layout.currentIndexChanged.connect(self._queue_view_settings_save)
         self.cb_peak_overlay.toggled.connect(self._refresh_signal_overlay)
         self.combo_signal_source.currentIndexChanged.connect(self._refresh_signal_file_combo)
         self.combo_signal_scope.currentIndexChanged.connect(self._refresh_signal_file_combo)
@@ -1946,9 +2169,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_peak_norm_prominence.toggled.connect(lambda _checked=False: self._save_settings())
         self.tab_sources.currentChanged.connect(self._refresh_signal_file_combo)
         self.tab_visual_mode.currentChanged.connect(self._on_visual_mode_changed)
-        self.tab_visual_mode.currentChanged.connect(self._queue_settings_save)
+        self.tab_visual_mode.currentChanged.connect(self._queue_view_settings_save)
         self.combo_individual_file.currentIndexChanged.connect(self._on_individual_file_changed)
-        self.combo_individual_file.currentIndexChanged.connect(self._queue_settings_save)
+        self.combo_individual_file.currentIndexChanged.connect(self._queue_view_settings_save)
 
         self.combo_align.currentIndexChanged.connect(self._update_align_ui)
         self.combo_behavior_file_type.currentIndexChanged.connect(self._update_align_ui)
@@ -2068,9 +2291,32 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 continue
 
+    def _refresh_post_rail_icons(self) -> None:
+        try:
+            from styles import _make_icon
+        except Exception:
+            return
+        icon_color = "#334155" if self._app_theme_mode == "light" else "#cdd6f4"
+        buttons = getattr(self, "_section_buttons", {}) or {}
+        for key, painter in (getattr(self, "_post_rail_icon_painters", {}) or {}).items():
+            btn = buttons.get(key)
+            if btn is None:
+                continue
+            try:
+                btn.setIcon(_make_icon(painter, color=icon_color))
+            except Exception:
+                continue
+
     def set_app_theme_mode(self, theme_mode: object) -> None:
         self._app_theme_mode = self._normalize_app_theme_mode(theme_mode)
         self._apply_widget_theme_mode()
+        self._refresh_post_rail_icons()
+        temporal = getattr(self, "section_temporal", None)
+        if hasattr(temporal, "set_app_theme_mode"):
+            try:
+                temporal.set_app_theme_mode(self._app_theme_mode)
+            except Exception:
+                pass
         self._style["plot_bg"] = (248, 250, 255) if self._app_theme_mode == "light" else (36, 42, 52)
         try:
             self._apply_plot_style()
@@ -2193,10 +2439,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         pass
                     btn.clicked.connect(lambda _checked=False, section_dock=dock: self._hide_dockarea_dock(section_dock))
                     btn.setProperty("_pyber_hide_wired", True)
+                light = str(getattr(self, "_app_theme_mode", "dark")).lower() == "light"
+                fg = "#4a5568" if light else "#f3f5f8"
+                fg_hover = "#172033" if light else "#ffffff"
                 btn.setStyleSheet(
                     "QToolButton {"
                     " background: transparent;"
-                    " color: #f3f5f8;"
+                    f" color: {fg};"
                     " border: none;"
                     " padding: 0px;"
                     " margin: 0px;"
@@ -2205,7 +2454,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     " }"
                     "QToolButton:hover {"
                     " background: transparent;"
-                    " color: #ffffff;"
+                    f" color: {fg_hover};"
                     " border: none;"
                     " }"
                 )
@@ -2540,6 +2789,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         "export": "Export",
         "signal": "Signal events",
         "behavior": "Behavior",
+        "temporal": "Temporal Modeling",
     }
 
     def _update_post_drawer_visibility(self) -> None:
@@ -2547,10 +2797,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if drawer is None:
             return
         any_checked = any(b.isChecked() for b in self._section_buttons.values())
+        active_key = next((k for k, b in self._section_buttons.items() if b.isChecked()), None)
+        # Compat title (kept hidden, used by tests).
         title_lbl = getattr(self, "_post_drawer_title", None)
         if title_lbl is not None:
-            active_key = next((k for k, b in self._section_buttons.items() if b.isChecked()), None)
             title_lbl.setText(self._POST_SECTION_TITLES.get(active_key or "", ""))
+        # Rich header (badge + title + subtitle).
+        header = getattr(self, "_post_drawer_header", None)
+        if header is not None:
+            try:
+                header.set_postprocess_section(active_key or "")
+            except Exception:
+                pass
         drawer.setVisible(any_checked)
         splitter = self._dockarea_splitter
         if splitter is None:
@@ -2742,6 +3000,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "signal": (420, 640),
             "behavior": (500, 620),
             "spatial": (420, 520),
+            "temporal": (1320, 880),
             "export": (340, 300),
         }
         return size_map.get(key, (420, 620))
@@ -3793,6 +4052,136 @@ class PostProcessingPanel(QtWidgets.QWidget):
         except Exception:
             return repr(state)
 
+    def _project_dirty_fingerprint(self) -> str:
+        """
+        Stable, lightweight fingerprint of content saved in a postprocessing
+        project. View-only navigation is intentionally excluded so browsing
+        Individual/Group or changing the active displayed file does not trigger
+        an exit warning.
+        """
+        try:
+            settings = dict(self._collect_settings())
+        except Exception:
+            settings = {}
+        for key in ("view_layout", "visual_mode", "individual_file", "signal_file"):
+            settings.pop(key, None)
+
+        processed: List[Dict[str, object]] = []
+        for proc in getattr(self, "_processed", []) or []:
+            try:
+                output = np.asarray(getattr(proc, "output", np.array([], float)), float)
+                time = np.asarray(getattr(proc, "time", np.array([], float)), float)
+            except Exception:
+                output = np.array([], float)
+                time = np.array([], float)
+            processed.append(
+                {
+                    "path": str(getattr(proc, "path", "") or ""),
+                    "channel_id": str(getattr(proc, "channel_id", "") or ""),
+                    "dio_name": str(getattr(proc, "dio_name", "") or ""),
+                    "output_label": str(getattr(proc, "output_label", "") or ""),
+                    "output_context": str(getattr(proc, "output_context", "") or ""),
+                    "fs_actual": float(getattr(proc, "fs_actual", np.nan)),
+                    "fs_target": float(getattr(proc, "fs_target", np.nan)),
+                    "fs_used": float(getattr(proc, "fs_used", np.nan)),
+                    "n_time": int(time.size),
+                    "n_output": int(output.size),
+                }
+            )
+
+        behavior: List[Dict[str, object]] = []
+        for name, info in sorted((getattr(self, "_behavior_sources", {}) or {}).items()):
+            data = info if isinstance(info, dict) else {}
+            behavior.append(
+                {
+                    "name": str(name),
+                    "source_path": str(data.get("source_path", "") or ""),
+                    "kind": str(data.get("kind", "") or ""),
+                    "row_count": int(data.get("row_count", 0) or 0),
+                    "behaviors": sorted(str(k) for k in (data.get("behaviors", {}) or {}).keys()),
+                    "trajectory": sorted(str(k) for k in (data.get("trajectory", {}) or {}).keys()),
+                }
+            )
+
+        signal = getattr(self, "last_signal_events", None)
+        signal_summary: Dict[str, object] = {}
+        if isinstance(signal, dict) and signal:
+            signal_summary = {
+                "params": signal.get("params", {}) or {},
+                "derived_metrics": signal.get("derived_metrics", {}) or {},
+                "n_peaks": int(np.asarray(signal.get("peak_times_sec", np.array([], float))).size),
+                "file_ids": [str(v) for v in (signal.get("file_ids", []) or [])],
+            }
+
+        behavior_analysis = getattr(self, "last_behavior_analysis", None)
+        behavior_summary: Dict[str, object] = {}
+        if isinstance(behavior_analysis, dict) and behavior_analysis:
+            behavior_summary = {
+                "behavior_name": str(behavior_analysis.get("behavior_name", "") or ""),
+                "params": behavior_analysis.get("params", {}) or {},
+                "per_file_metrics": behavior_analysis.get("per_file_metrics", []) or [],
+                "group_metrics": behavior_analysis.get("group_metrics", {}) or {},
+                "n_event_rows": len(behavior_analysis.get("per_file_events", []) or []),
+            }
+
+        temporal_summary: Dict[str, object] = {}
+        section = getattr(self, "section_temporal", None)
+        if section is not None:
+            try:
+                glm = getattr(section, "_glm_result", None)
+                by_file = getattr(section, "_glm_results_by_file", {}) or {}
+                temporal_summary = {
+                    "fit_mode": str(getattr(section, "_fit_mode", "") or ""),
+                    "active_file_id": str(getattr(section, "_active_file_id", "") or ""),
+                    "glm_r2": float(getattr(glm, "r2", np.nan)) if glm is not None else None,
+                    "glm_predictors": list(getattr(glm, "predictor_names", []) or []) if glm is not None else [],
+                    "by_file": {
+                        str(fid): {
+                            "r2": float(getattr(res, "r2", np.nan)),
+                            "predictors": list(getattr(res, "predictor_names", []) or []),
+                        }
+                        for fid, res in sorted(by_file.items())
+                    },
+                }
+            except Exception:
+                temporal_summary = {}
+
+        payload = {
+            "settings": settings,
+            "tab_sources_index": int(self.tab_sources.currentIndex()) if hasattr(self, "tab_sources") else 0,
+            "processed": processed,
+            "behavior": behavior,
+            "signal_events": signal_summary,
+            "behavior_analysis": behavior_summary,
+            "temporal": temporal_summary,
+        }
+        try:
+            return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        except Exception:
+            return repr(payload)
+
+    def _mark_project_clean(self) -> None:
+        try:
+            self._project_clean_key = self._project_dirty_fingerprint()
+        except Exception:
+            self._project_clean_key = ""
+        self._project_dirty = False
+
+    def is_project_dirty(self) -> bool:
+        if bool(getattr(self, "_project_recovered_from_autosave", False)):
+            return True
+        if not bool(getattr(self, "_project_dirty", False)):
+            return False
+        clean_key = str(getattr(self, "_project_clean_key", "") or "")
+        if clean_key:
+            try:
+                if self._project_dirty_fingerprint() == clean_key:
+                    self._project_dirty = False
+                    return False
+            except Exception:
+                pass
+        return True
+
     def _update_history_buttons(self) -> None:
         for button, enabled in (
             (getattr(self, "btn_action_undo", None), bool(self._history_undo)),
@@ -3883,6 +4272,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._record_history_change()
         if not self._autosave_restoring:
             self._project_dirty = True
+        timer = getattr(self, "_settings_save_timer", None)
+        if timer is None:
+            self._save_settings()
+            return
+        timer.start()
+
+    def _queue_view_settings_save(self, *_args: object) -> None:
+        """Persist navigation/view state without marking the project unsaved."""
+        if self._is_restoring_settings:
+            return
         timer = getattr(self, "_settings_save_timer", None)
         if timer is None:
             self._save_settings()
@@ -7169,6 +7568,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         except Exception:
             grid_alpha = 0.25
         grid_alpha = max(0.0, min(1.0, grid_alpha))
+        light_plot = (sum(bg[:3]) / 3.0) >= 180.0
+        axis_color = (45, 55, 72) if light_plot else (182, 194, 212)
+        text_color = (31, 42, 55) if light_plot else (200, 211, 226)
+        grid_draw_alpha = max(grid_alpha, 0.22) if light_plot else grid_alpha
         for pw in (
             self.plot_trace,
             self.plot_heat,
@@ -7192,7 +7595,23 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
             try:
-                pw.showGrid(x=grid_enabled, y=grid_enabled, alpha=grid_alpha)
+                pw.showGrid(x=grid_enabled, y=grid_enabled, alpha=grid_draw_alpha)
+            except Exception:
+                pass
+            try:
+                plot_item = pw.getPlotItem()
+                axis_pen = pg.mkPen(axis_color)
+                text_pen = pg.mkPen(text_color)
+                for axis_name in ("left", "right", "bottom", "top"):
+                    axis = plot_item.getAxis(axis_name)
+                    if axis is None:
+                        continue
+                    axis.setPen(axis_pen)
+                    axis.setTextPen(text_pen)
+                title_label = getattr(plot_item, "titleLabel", None)
+                title_item = getattr(title_label, "item", None)
+                if title_item is not None:
+                    title_item.setDefaultTextColor(QtGui.QColor(*text_color))
             except Exception:
                 pass
         cmap_name = str(self._style.get("heatmap_cmap", "viridis"))
@@ -7864,7 +8283,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not self._has_project_state_for_autosave():
             self._clear_project_autosave_cache(delete_file=True)
             return
-        should_write = bool(self._project_dirty or self._project_recovered_from_autosave)
+        should_write = bool(self.is_project_dirty() or self._project_recovered_from_autosave)
         if not should_write:
             self._clear_project_autosave_cache(delete_file=True)
             return
@@ -7913,7 +8332,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._save_project_h5(path)
             self._push_recent_paths("postprocess_recent_project_paths", [path])
             self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
-            self._project_dirty = False
+            self._mark_project_clean()
             self._project_recovered_from_autosave = False
             self._clear_project_autosave_cache(delete_file=True)
             self.statusUpdate.emit(f"Project saved: {os.path.basename(path)}", 5000)
@@ -7933,7 +8352,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._load_project_from_path(path)
 
     def _confirm_discard_current_project(self) -> bool:
-        if not self._project_dirty and not self._has_project_state_for_autosave():
+        if not self.is_project_dirty() and not self._has_project_state_for_autosave():
             return True
         ask = QtWidgets.QMessageBox.question(
             self,
@@ -7970,7 +8389,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._compute_psth()
         self._compute_spatial_heatmap()
         self._save_settings()
-        self._project_dirty = False
+        self._mark_project_clean()
         self._project_recovered_from_autosave = False
         self._clear_project_autosave_cache(delete_file=True)
         self._update_status_strip()
@@ -8103,7 +8522,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._restore_cached_analysis_outputs(payload)
         self._save_settings()
         self._update_status_strip()
-        self._project_dirty = False
+        self._mark_project_clean()
         self._project_recovered_from_autosave = bool(from_autosave)
         if from_autosave:
             self.statusUpdate.emit("Recovered autosaved postprocessing project.", 5000)

@@ -117,6 +117,7 @@ from onboarding import (
     ToastManager,
     TutorialOverlay,
     PreferencesDialog,
+    PanelHeader,
     register_global_shortcuts,
     attach_dirty_title,
     install_close_confirmation,
@@ -644,14 +645,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Busy / cancel indicator (left of theme widgets). Hidden until something runs.
         self._busy_widget = QtWidgets.QFrame()
         self._busy_widget.setObjectName("pyberBusyWidget")
-        self._busy_widget.setStyleSheet(
-            "QFrame#pyberBusyWidget { background: #2a3045; border: 1px solid #46527a;"
-            " border-radius: 6px; padding: 0 8px; }"
-            "QFrame#pyberBusyWidget QLabel { background: transparent; color: #d7e0ee; }"
-            "QFrame#pyberBusyWidget QPushButton { background: #543035; color: #ffd6dc;"
-            " border: 1px solid #8a3949; border-radius: 4px; padding: 1px 8px; }"
-            "QFrame#pyberBusyWidget QPushButton:hover { background: #6b3a40; }"
-        )
         bl = QtWidgets.QHBoxLayout(self._busy_widget)
         bl.setContentsMargins(6, 1, 6, 1)
         bl.setSpacing(8)
@@ -720,7 +713,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_workflow_qc = QtWidgets.QPushButton("QC")
         self.btn_workflow_export = QtWidgets.QPushButton("Export")
         self.btn_plot_style = QtWidgets.QPushButton("Plot style")
-        self.btn_toggle_data = QtWidgets.QPushButton("Data")
+        self.btn_toggle_data = QtWidgets.QToolButton(); self.btn_toggle_data.setText("Data")
         self.btn_toggle_data.setCheckable(True)
         self.btn_toggle_data.setChecked(True)
         self.btn_toggle_data.setProperty("class", "blueSecondarySmall")
@@ -755,14 +748,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_plot_style.setMenu(self.menu_plot_style)
 
         # Inline parameter section buttons (same row as workflow actions).
-        self.btn_section_artifacts_list = QtWidgets.QPushButton("Artifact list")
-        self.btn_section_artifacts = QtWidgets.QPushButton("Artifact setup")
-        self.btn_section_filtering = QtWidgets.QPushButton("Filtering")
-        self.btn_section_baseline = QtWidgets.QPushButton("Baseline")
-        self.btn_section_output = QtWidgets.QPushButton("Output")
-        self.btn_section_qc = QtWidgets.QPushButton("QC")
-        self.btn_section_export = QtWidgets.QPushButton("Export")
-        self.btn_section_config = QtWidgets.QPushButton("Configuration")
+        self.btn_section_artifacts_list = QtWidgets.QToolButton(); self.btn_section_artifacts_list.setText("Artifact list")
+        self.btn_section_artifacts = QtWidgets.QToolButton(); self.btn_section_artifacts.setText("Artifact setup")
+        self.btn_section_filtering = QtWidgets.QToolButton(); self.btn_section_filtering.setText("Filtering")
+        self.btn_section_baseline = QtWidgets.QToolButton(); self.btn_section_baseline.setText("Baseline")
+        self.btn_section_output = QtWidgets.QToolButton(); self.btn_section_output.setText("Output")
+        self.btn_section_qc = QtWidgets.QToolButton(); self.btn_section_qc.setText("QC")
+        self.btn_section_export = QtWidgets.QToolButton(); self.btn_section_export.setText("Export")
+        self.btn_section_config = QtWidgets.QToolButton(); self.btn_section_config.setText("Configuration")
         self._section_buttons: Dict[str, QtWidgets.QPushButton] = {
             "artifacts_list": self.btn_section_artifacts_list,
             "artifacts": self.btn_section_artifacts,
@@ -782,35 +775,41 @@ class MainWindow(QtWidgets.QMainWindow):
         # ----- Modern shell: vertical icon rail + thin transport bar ------
         # Configure section buttons as icon-only rail buttons.
         _rail_section_meta = {
-            "artifacts_list": ("Artifact list", _paint_list),
-            "artifacts":      ("Artifact setup", _paint_sliders),
-            "filtering":      ("Filtering", _paint_filter),
-            "baseline":       ("Baseline", _paint_wave),
-            "output":         ("Output", _paint_chart),
-            "qc":             ("Quality control", _paint_badge),
-            "export":         ("Export", _paint_export),
-            "config":         ("Configuration", _paint_gear),
+            "artifacts_list": ("Artifacts",  "Detected and manual artifacts list", _paint_list),
+            "artifacts":      ("Artifact",   "Artifact detection thresholds",      _paint_sliders),
+            "filtering":      ("Filtering",  "Low-pass and smoothing options",     _paint_filter),
+            "baseline":       ("Baseline",   "Baseline estimation across recording", _paint_wave),
+            "output":         ("Output",     "Choose dFF / dF / z-score formula",  _paint_chart),
+            "qc":             ("QC",         "Per-recording diagnostic checks",    _paint_badge),
+            "export":         ("Export",     "Export processed traces",             _paint_export),
+            "config":         ("Config",     "Save / load preprocessing parameter sets", _paint_gear),
         }
+        self._pre_rail_icon_painters = {key: meta[2] for key, meta in _rail_section_meta.items()}
+        self._pre_toggle_data_icon_painter = _paint_database
         for key, btn in self._section_buttons.items():
-            tip, painter = _rail_section_meta[key]
+            label, hint, painter = _rail_section_meta[key]
             btn.setObjectName("railButton")
             btn.setProperty("class", "")
-            btn.setText("")
-            btn.setToolTip(tip)
-            btn.setStatusTip(tip)
+            btn.setText(label)
+            btn.setToolTip(f"{label} - {hint}")
+            btn.setStatusTip(f"{label} - {hint}")
             btn.setIcon(_make_icon(painter))
             btn.setIconSize(QtCore.QSize(22, 22))
-            btn.setFixedSize(44, 44)
+            btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            btn.setFixedSize(76, 60)
+            btn.setCheckable(True)
 
         # Data-browser toggle as a rail toggle button.
         self.btn_toggle_data.setObjectName("railToggleButton")
         self.btn_toggle_data.setProperty("class", "")
-        self.btn_toggle_data.setText("")
-        self.btn_toggle_data.setToolTip("Show or hide data browser")
-        self.btn_toggle_data.setStatusTip("Show or hide data browser")
+        self.btn_toggle_data.setText("Data")
+        self.btn_toggle_data.setToolTip("Data - Show or hide data browser")
+        self.btn_toggle_data.setStatusTip("Data - Show or hide data browser")
         self.btn_toggle_data.setIcon(_make_icon(_paint_database))
         self.btn_toggle_data.setIconSize(QtCore.QSize(22, 22))
-        self.btn_toggle_data.setFixedSize(44, 44)
+        self.btn_toggle_data.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.btn_toggle_data.setFixedSize(76, 60)
+        self.btn_toggle_data.setCheckable(True)
 
         side_rail = QtWidgets.QFrame()
         side_rail.setObjectName("sideRail")
@@ -827,7 +826,7 @@ class MainWindow(QtWidgets.QMainWindow):
             rail_layout.addWidget(self._section_buttons[key], 0,
                                   QtCore.Qt.AlignmentFlag.AlignHCenter)
         rail_layout.addStretch(1)
-        side_rail.setFixedWidth(64)
+        side_rail.setFixedWidth(96)
 
         # Transport bar: workflow actions + status meta. Compact, single row.
         transport_bar = QtWidgets.QFrame()
@@ -875,9 +874,12 @@ class MainWindow(QtWidgets.QMainWindow):
             _drawer_l = QtWidgets.QVBoxLayout(self._pre_drawer)
             _drawer_l.setContentsMargins(12, 10, 12, 10)
             _drawer_l.setSpacing(8)
+            # Rich panel header (badge + title + subtitle); set per active section.
+            self._pre_drawer_header = PanelHeader()
+            _drawer_l.addWidget(self._pre_drawer_header)
+            # Hidden compat label so legacy lookups don't crash.
             self._pre_drawer_title = QtWidgets.QLabel("")
-            self._pre_drawer_title.setObjectName("panelTitle")
-            _drawer_l.addWidget(self._pre_drawer_title)
+            self._pre_drawer_title.setVisible(False)
             _drawer_l.addWidget(self._pre_dockarea, stretch=1)
             self._pre_drawer.setVisible(False)
             self._pre_drawer_splitter.addWidget(self._pre_drawer)
@@ -1002,7 +1004,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_plot_status()
         self.setAcceptDrops(True)
 
-        # ----- UX polish: toasts, dirty-title, global shortcuts, tutorial -----
+        # ----- UX polish: toasts, dirty-title, shortcuts, tutorial -----
         try:
             self._toaster = ToastManager(self, max_visible=4)
         except Exception:
@@ -1017,6 +1019,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Dirty-title indicator: '*' suffix while postprocessing has unsaved changes.
         def _is_dirty() -> bool:
             try:
+                checker = getattr(self.post_tab, "is_project_dirty", None)
+                if callable(checker):
+                    return bool(checker())
                 return bool(getattr(self.post_tab, "_project_dirty", False))
             except Exception:
                 return False
@@ -1196,10 +1201,13 @@ class MainWindow(QtWidgets.QMainWindow):
                         pass
                     btn.clicked.connect(lambda _checked=False, section_dock=dock: self._hide_pre_dockarea_dock(section_dock))
                     btn.setProperty("_pyber_hide_wired", True)
+                light = str(getattr(self, "_app_theme_mode", "dark")).lower() == "light"
+                fg = "#4a5568" if light else "#f3f5f8"
+                fg_hover = "#172033" if light else "#ffffff"
                 btn.setStyleSheet(
                     "QToolButton {"
                     " background: transparent;"
-                    " color: #f3f5f8;"
+                    f" color: {fg};"
                     " border: none;"
                     " padding: 0px;"
                     " margin: 0px;"
@@ -1208,7 +1216,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     " }"
                     "QToolButton:hover {"
                     " background: transparent;"
-                    " color: #ffffff;"
+                    f" color: {fg_hover};"
                     " border: none;"
                     " }"
                 )
@@ -1524,11 +1532,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if drawer is None:
             return
         any_checked = any(btn.isChecked() for btn in self._section_buttons.values())
-        # Update header label to the active section title.
+        active_key = next((k for k, b in self._section_buttons.items() if b.isChecked()), None)
+        # Compat title (kept hidden, used by tests / legacy code).
         title_lbl = getattr(self, "_pre_drawer_title", None)
         if title_lbl is not None:
-            active_key = next((k for k, b in self._section_buttons.items() if b.isChecked()), None)
             title_lbl.setText(self._PRE_SECTION_TITLES.get(active_key or "", ""))
+        # Rich header (badge + title + subtitle).
+        header = getattr(self, "_pre_drawer_header", None)
+        if header is not None:
+            try:
+                header.set_preprocess_section(active_key or "")
+            except Exception:
+                pass
         drawer.setVisible(any_checked)
         splitter = self._pre_drawer_splitter
         if splitter is None:
@@ -2124,19 +2139,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def _maybe_show_first_run_tutorial(self) -> None:
         try:
             seen = self.settings.value("onboarding/first_run_completed", False)
-            show_pref = self.settings.value("onboarding/show_on_startup", True)
+            replay_next_launch = self.settings.value("onboarding/replay_next_launch", False)
             from onboarding import _to_bool
-            if _to_bool(seen, False) and not _to_bool(show_pref, True):
+            if _to_bool(seen, False) and not _to_bool(replay_next_launch, False):
                 return
         except Exception:
             pass
-        self._show_tutorial_again()
+        self._show_tutorial_again(automatic=True)
 
-    def _show_tutorial_again(self) -> None:
+    def _show_tutorial_again(self, automatic: bool = False) -> None:
         try:
             steps = build_default_tutorial(self)
             overlay = TutorialOverlay(self, steps)
-            overlay.finished.connect(lambda: self.settings.setValue("onboarding/first_run_completed", True))
+            def _finish_tutorial() -> None:
+                self.settings.setValue("onboarding/first_run_completed", True)
+                if automatic or overlay.dont_show_again():
+                    self.settings.setValue("onboarding/replay_next_launch", False)
+                    self.settings.setValue("onboarding/show_on_startup", False)
+            overlay.finished.connect(_finish_tutorial)
             overlay.start()
         except Exception:
             pass
@@ -2319,9 +2339,16 @@ class MainWindow(QtWidgets.QMainWindow):
         Used by the close-confirmation handler. Returns True on success.
         """
         try:
-            fn = getattr(self.post_tab, "_save_project_dialog", None) or getattr(self.post_tab, "_save_project", None)
+            fn = (
+                getattr(self.post_tab, "_save_project_dialog", None)
+                or getattr(self.post_tab, "_save_project_file", None)
+                or getattr(self.post_tab, "_save_project", None)
+            )
             if callable(fn):
                 fn()
+                checker = getattr(self.post_tab, "is_project_dirty", None)
+                if callable(checker):
+                    return not bool(checker())
                 return not bool(getattr(self.post_tab, "_project_dirty", False))
         except Exception:
             pass
@@ -4807,6 +4834,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.setStyleSheet(app_qss(mode))
         except Exception:
             pass
+        self._refresh_pre_rail_icons()
 
         pre_bg = "white" if mode == "light" else "dark"
         pre_grid = self.act_plot_grid.isChecked() if hasattr(self, "act_plot_grid") else True
@@ -4820,6 +4848,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if persist:
             self._save_settings()
+
+    def _refresh_pre_rail_icons(self) -> None:
+        try:
+            from styles import _make_icon
+        except Exception:
+            return
+        icon_color = "#334155" if self._app_theme_mode == "light" else "#cdd6f4"
+        painters = getattr(self, "_pre_rail_icon_painters", {}) or {}
+        for key, painter in painters.items():
+            btn = getattr(self, "_section_buttons", {}).get(key)
+            if btn is None:
+                continue
+            try:
+                btn.setIcon(_make_icon(painter, color=icon_color))
+            except Exception:
+                continue
+        toggle_painter = getattr(self, "_pre_toggle_data_icon_painter", None)
+        if toggle_painter is not None and hasattr(self, "btn_toggle_data"):
+            try:
+                self.btn_toggle_data.setIcon(_make_icon(toggle_painter, color=icon_color))
+            except Exception:
+                pass
 
     def _on_app_theme_changed(self, *_args) -> None:
         self._apply_app_theme(self._selected_app_theme_mode(), persist=True)

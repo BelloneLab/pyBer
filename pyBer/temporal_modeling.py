@@ -14,7 +14,9 @@ PostProcessingPanel side-rail/dock system.
 from __future__ import annotations
 
 import concurrent.futures
+import csv
 import hashlib
+import json
 import logging
 import os
 import re
@@ -825,6 +827,11 @@ QFrame#temporalWorkspace {
     border: 1px solid #263a52;
     border-radius: 8px;
 }
+QFrame#temporalScopeBar {
+    background: #101b2b;
+    border: 1px solid #263a52;
+    border-radius: 8px;
+}
 QLabel {
     color: #d7e0ee;
 }
@@ -932,6 +939,140 @@ QTabBar::tab:selected {
 """
 _SECTION_QSS = _TEMPORAL_QSS
 
+_TEMPORAL_QSS_LIGHT = _TEMPORAL_QSS + """
+TemporalModelingWidget {
+    background: #f4f6fb;
+    color: #1f2a37;
+}
+QFrame#temporalHeader {
+    background: #eef4ff;
+    border: 1px solid #bfd7ff;
+}
+QFrame#temporalNav,
+QFrame#temporalControls,
+QFrame#temporalWorkspace,
+QFrame#temporalScopeBar {
+    background: #ffffff;
+    border: 1px solid #d6dde9;
+}
+QLabel {
+    color: #1f2a37;
+}
+QLabel[class="muted"] {
+    color: #4c5a6f;
+}
+QLabel[class="title"] {
+    color: #172033;
+}
+QGroupBox {
+    color: #1f2a37;
+    border: 1px solid #d6dde9;
+    background: #ffffff;
+}
+QGroupBox::title {
+    background: #f4f6fb;
+    color: #334155;
+}
+QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {
+    color: #1f2a37;
+    background: #ffffff;
+    border: 1px solid #c2ccda;
+    selection-background-color: #2563eb;
+    selection-color: #ffffff;
+}
+QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus {
+    border: 1px solid #2563eb;
+}
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    color: #1f2a37;
+    border: 1px solid #c2ccda;
+    selection-background-color: #2563eb;
+    selection-color: #ffffff;
+}
+QProgressBar {
+    color: #1f2a37;
+    background: #ffffff;
+    border: 1px solid #c2ccda;
+}
+QProgressBar::chunk {
+    background: #2563eb;
+}
+QListWidget, QTextEdit {
+    color: #1f2a37;
+    background: #ffffff;
+    border: 1px solid #c2ccda;
+    selection-background-color: #2563eb;
+    selection-color: #ffffff;
+}
+QListWidget::item:hover {
+    background: #dbeafe;
+    color: #172033;
+}
+QListWidget::item:selected {
+    background: #2563eb;
+    color: #ffffff;
+}
+QPushButton {
+    color: #1f2a37;
+    background: #ffffff;
+    border: 1px solid #c2ccda;
+}
+QPushButton:hover {
+    background: #eff6ff;
+    border: 1px solid #93c5fd;
+}
+QPushButton[class="primary"] {
+    color: #ffffff;
+    background: #2563eb;
+    border: 1px solid #1d4ed8;
+}
+QPushButton[class="primary"]:hover {
+    background: #1d4ed8;
+}
+QToolButton {
+    color: #334155;
+    background: #ffffff;
+    border: 1px solid #c2ccda;
+}
+QToolButton:hover {
+    background: #dbeafe;
+    border: 1px solid #93c5fd;
+}
+QToolButton:checked {
+    color: #ffffff;
+    background: #2563eb;
+    border: 1px solid #1d4ed8;
+}
+QTabWidget::pane {
+    border: 1px solid #d6dde9;
+    background: #ffffff;
+}
+QTabBar::tab {
+    color: #4a5568;
+    background: #eef2f8;
+    border: 1px solid #d6dde9;
+}
+QTabBar::tab:hover:!selected {
+    color: #172033;
+    background: #dbeafe;
+    border-color: #93c5fd;
+}
+QTabBar::tab:selected {
+    color: #ffffff;
+    background: #2563eb;
+    border-color: #1d4ed8;
+}
+QCheckBox::indicator {
+    border: 1px solid #c2ccda;
+    background: #ffffff;
+}
+QCheckBox::indicator:checked {
+    background: #2563eb;
+    border: 1px solid #1d4ed8;
+}
+"""
+
 
 class TemporalModelingWidget(QtWidgets.QWidget):
     """
@@ -944,11 +1085,15 @@ class TemporalModelingWidget(QtWidgets.QWidget):
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
         self._settings = QtCore.QSettings("BelloneLab", "pyBer")
+        self._app_theme_mode: str = "dark"
         self._loading_settings = True
         self._saved_predictor_keys: List[str] = []
+        self._predictor_keys_by_file: Dict[str, List[str]] = {}
+        self._restoring_predictors: bool = False
         self._kernel_visible: Dict[str, bool] = {}
         self._kernel_filter_guard = False
         self._illustration_vb: Optional[pg.ViewBox] = None
+        self._kernel_grid_plots: List[pg.PlotWidget] = []
         self._glm = ContinuousGLM()
         self._flmm = TrialFLMM()
         self._glm_result: Optional[GLMResult] = None
@@ -981,10 +1126,17 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._visual_mode: int = 0
         self._group_mode: bool = False
 
+        self.setMinimumSize(980, 640)
         self._build_compact_ui()
         self._load_temporal_settings()
         self._connect_signals()
         self._on_model_type_changed(self.combo_model_type.currentIndex())
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API name
+        return QtCore.QSize(1320, 880)
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API name
+        return QtCore.QSize(980, 640)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -1185,7 +1337,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._on_model_type_changed(0)
 
     def _build_compact_ui(self):
-        self.setStyleSheet(_TEMPORAL_QSS)
+        self._apply_theme_styles(restyle_plots=False)
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -1554,6 +1706,18 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         )
         gl.addWidget(self.btn_fit_side)
 
+        export_row = QtWidgets.QHBoxLayout()
+        export_row.setContentsMargins(0, 0, 0, 0)
+        export_row.setSpacing(8)
+        self.btn_export_temporal_results = QtWidgets.QPushButton("Export results")
+        self.btn_export_temporal_results.setToolTip("Export model summary, predictions, kernels, and importance tables.")
+        self.btn_export_temporal_plots = QtWidgets.QPushButton("Export plots")
+        self.btn_export_temporal_plots.setToolTip("Export the temporal modeling plots as PNG and PDF.")
+        export_row.addWidget(self.btn_export_temporal_results)
+        export_row.addWidget(self.btn_export_temporal_plots)
+        export_row.addStretch(1)
+        gl.addLayout(export_row)
+
         contrib_lay = QtWidgets.QHBoxLayout()
         self.chk_run_contrib = QtWidgets.QCheckBox("Run leave-one-predictor-out contribution")
         self.chk_run_contrib.setChecked(True)
@@ -1589,6 +1753,15 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.btn_kernel_none = QtWidgets.QPushButton("None")
         filter_row.addWidget(self.btn_kernel_all)
         filter_row.addWidget(self.btn_kernel_none)
+        filter_row.addSpacing(8)
+        filter_row.addWidget(QtWidgets.QLabel("Layout"))
+        self.combo_kernel_layout = QtWidgets.QComboBox()
+        self.combo_kernel_layout.addItem("Overlay", "overlay")
+        self.combo_kernel_layout.addItem("Small panels", "grid")
+        self.combo_kernel_layout.setToolTip(
+            "Overlay compares every selected kernel in one plot. Small panels give each feature its own axis."
+        )
+        filter_row.addWidget(self.combo_kernel_layout)
         self.list_kernel_filter = QtWidgets.QListWidget()
         self.list_kernel_filter.setMaximumHeight(86)
         self.list_kernel_filter.setFlow(QtWidgets.QListView.Flow.LeftToRight)
@@ -1598,9 +1771,30 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.list_kernel_filter.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         filter_row.addWidget(self.list_kernel_filter, 1)
         kernel_lay.addLayout(filter_row)
+
+        self.lbl_kernel_hint = QtWidgets.QLabel(
+            "Event predictors show impulse-response kernels. Continuous predictors are z-scored and show signal gain per +1 SD."
+        )
+        self.lbl_kernel_hint.setProperty("class", "muted")
+        self.lbl_kernel_hint.setWordWrap(True)
+        kernel_lay.addWidget(self.lbl_kernel_hint)
+
+        self.stack_kernel_plots = QtWidgets.QStackedWidget()
         self.plot_kernel = pg.PlotWidget(title="Estimated kernels")
         self._style_plot(self.plot_kernel)
-        kernel_lay.addWidget(self.plot_kernel, 1)
+        self.stack_kernel_plots.addWidget(self.plot_kernel)
+
+        self.kernel_grid_container = QtWidgets.QWidget()
+        self.kernel_grid_layout = QtWidgets.QGridLayout(self.kernel_grid_container)
+        self.kernel_grid_layout.setContentsMargins(0, 0, 0, 0)
+        self.kernel_grid_layout.setHorizontalSpacing(10)
+        self.kernel_grid_layout.setVerticalSpacing(10)
+        self.kernel_grid_scroll = QtWidgets.QScrollArea()
+        self.kernel_grid_scroll.setWidgetResizable(True)
+        self.kernel_grid_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.kernel_grid_scroll.setWidget(self.kernel_grid_container)
+        self.stack_kernel_plots.addWidget(self.kernel_grid_scroll)
+        kernel_lay.addWidget(self.stack_kernel_plots, 1)
         self.tabs_workspace.addTab(kernel_page, "Kernels")
 
         prediction_page = QtWidgets.QWidget()
@@ -1716,49 +1910,64 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             btn.setChecked(i == index)
 
     def _install_empty_state_hints(self) -> None:
-        """Attach hint TextItems to the workspace plots; cleared on first fit."""
+        """Empty-state hints removed by design - keep plots visually clean."""
         self._empty_state_items = []
-        plots_and_text = [
-            (getattr(self, "plot_kernel", None), "No GLM fit yet.\nPick predictors and press Fit (Ctrl+Shift+F)."),
-            (getattr(self, "plot_prediction", None), "Predicted vs actual will appear after fitting."),
-            (getattr(self, "plot_residuals", None), "Residuals appear after a successful fit."),
-            (getattr(self, "plot_importance", None), "Leave-one-out feature contribution.\nFit a model first."),
-            (getattr(self, "plot_illustration", None), "Signal + selected feature contribution.\nFit, then pick a feature."),
-            (getattr(self, "plot_coeff", None), "FLMM coefficient curves appear after a trial-level fit."),
-            (getattr(self, "plot_group_kernels", None), "Group view\n\nRun a Per-file batch fit to populate this tab."),
-            (getattr(self, "plot_group_importance", None), "Group leave-one-out contribution\n\nRun a Per-file batch fit to populate this tab."),
-        ]
-        for plot, text in plots_and_text:
-            if plot is None:
-                continue
-            try:
-                item = pg.TextItem(text, color="#6f7d95", anchor=(0.5, 0.5))
-                item.setZValue(100)
-                plot.addItem(item)
-                item.setPos(0, 0)
-                self._empty_state_items.append(item)
-            except Exception:
-                pass
 
     def _clear_empty_state_hints(self) -> None:
-        for item in getattr(self, "_empty_state_items", []) or []:
-            try:
-                item.setVisible(False)
-            except Exception:
-                pass
         self._empty_state_items = []
 
-    def _style_plot(self, plot: pg.PlotWidget) -> None:
-        plot.setMinimumHeight(360)
-        plot.setBackground("#05080d")
-        plot.showGrid(x=True, y=True, alpha=0.22)
-        plot.addLegend(offset=(12, 12))
+    def _style_plot(self, plot: pg.PlotWidget, min_height: int = 360) -> None:
+        plot.setMinimumHeight(int(min_height))
+        light = self._app_theme_mode == "light"
+        bg = "#fbfcfe" if light else "#05080d"
+        axis_color = "#334155" if light else "#516179"
+        text_color = "#1f2a37" if light else "#c5d2e3"
+        title_color = "#172033" if light else "#d7e0ee"
+        plot.setBackground(bg)
+        plot.showGrid(x=True, y=True, alpha=0.26 if light else 0.22)
         pi = plot.getPlotItem()
-        pi.getAxis("bottom").setPen(pg.mkPen("#516179"))
-        pi.getAxis("left").setPen(pg.mkPen("#516179"))
-        pi.getAxis("bottom").setTextPen(pg.mkPen("#c5d2e3"))
-        pi.getAxis("left").setTextPen(pg.mkPen("#c5d2e3"))
-        pi.titleLabel.item.setDefaultTextColor(QtGui.QColor("#d7e0ee"))
+        if getattr(pi, "legend", None) is None:
+            plot.addLegend(offset=(12, 12))
+        for axis_name in ("left", "right", "bottom", "top"):
+            axis = pi.getAxis(axis_name)
+            if axis is None:
+                continue
+            axis.setPen(pg.mkPen(axis_color))
+            axis.setTextPen(pg.mkPen(text_color))
+        pi.titleLabel.item.setDefaultTextColor(QtGui.QColor(title_color))
+
+    def _plot_widgets(self) -> List[pg.PlotWidget]:
+        attrs = (
+            "plot_kernel",
+            "plot_prediction",
+            "plot_illustration",
+            "plot_residuals",
+            "plot_importance",
+            "plot_coeff",
+            "plot_group_kernels",
+            "plot_group_importance",
+        )
+        plots: List[pg.PlotWidget] = []
+        for attr in attrs:
+            plot = getattr(self, attr, None)
+            if isinstance(plot, pg.PlotWidget):
+                plots.append(plot)
+        plots.extend([plot for plot in getattr(self, "_kernel_grid_plots", []) if isinstance(plot, pg.PlotWidget)])
+        return plots
+
+    def _normalize_app_theme_mode(self, value: object) -> str:
+        mode = str(value or "").strip().lower()
+        return "light" if mode in {"light", "white", "l", "w"} else "dark"
+
+    def _apply_theme_styles(self, restyle_plots: bool = True) -> None:
+        self.setStyleSheet(_TEMPORAL_QSS_LIGHT if self._app_theme_mode == "light" else _TEMPORAL_QSS)
+        if restyle_plots:
+            for plot in self._plot_widgets():
+                self._style_plot(plot)
+
+    def set_app_theme_mode(self, theme_mode: object) -> None:
+        self._app_theme_mode = self._normalize_app_theme_mode(theme_mode)
+        self._apply_theme_styles(restyle_plots=True)
 
     def _progress_start(self, label: str, maximum: int = 0) -> None:
         if not hasattr(self, "progress_model"):
@@ -1827,8 +2036,14 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.list_kernel_filter.itemChanged.connect(self._on_kernel_filter_changed)
             self.btn_kernel_all.clicked.connect(lambda: self._set_all_kernels_visible(True))
             self.btn_kernel_none.clicked.connect(lambda: self._set_all_kernels_visible(False))
+        if hasattr(self, "combo_kernel_layout"):
+            self.combo_kernel_layout.currentIndexChanged.connect(self._on_kernel_layout_changed)
         if hasattr(self, "combo_illustration_feature"):
             self.combo_illustration_feature.currentIndexChanged.connect(self._on_illustration_feature_changed)
+        if hasattr(self, "btn_export_temporal_results"):
+            self.btn_export_temporal_results.clicked.connect(self._export_temporal_results)
+        if hasattr(self, "btn_export_temporal_plots"):
+            self.btn_export_temporal_plots.clicked.connect(self._export_temporal_plots)
 
     def _load_temporal_settings(self) -> None:
         self._loading_settings = True
@@ -1859,6 +2074,24 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 self.combo_flmm_importance.setCurrentIndex(idx)
             raw_predictors = str(self._settings.value(prefix + "predictor_keys", "") or "")
             self._saved_predictor_keys = [key for key in raw_predictors.split("\n") if key.strip()]
+            raw_by_file = self._settings.value(prefix + "predictor_keys_by_file_json", "")
+            if isinstance(raw_by_file, (bytes, bytearray)):
+                raw_by_file = raw_by_file.decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(str(raw_by_file or "{}"))
+            except Exception:
+                parsed = {}
+            if isinstance(parsed, dict):
+                self._predictor_keys_by_file = {
+                    str(fid): [str(key) for key in keys if str(key).strip()]
+                    for fid, keys in parsed.items()
+                    if isinstance(keys, list)
+                }
+            layout = str(self._settings.value(prefix + "kernel_layout", "overlay") or "overlay")
+            if hasattr(self, "combo_kernel_layout"):
+                idx = self.combo_kernel_layout.findData(layout, QtCore.Qt.ItemDataRole.UserRole)
+                if idx >= 0:
+                    self.combo_kernel_layout.setCurrentIndex(idx)
         finally:
             self._loading_settings = False
 
@@ -1882,11 +2115,14 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._settings.setValue(prefix + "flmm_boots", self.spin_boots.value())
         self._settings.setValue(prefix + "flmm_importance_mode", self.combo_flmm_importance.currentData(QtCore.Qt.ItemDataRole.UserRole) or "fast")
         predictors = self._selected_predictor_keys() if hasattr(self, "list_predictors") else self._saved_predictor_keys
-        if predictors or getattr(self, "_predictor_catalog", None):
-            self._saved_predictor_keys = list(predictors)
-        else:
-            predictors = list(self._saved_predictor_keys)
+        predictors = list(predictors)
+        self._saved_predictor_keys = list(predictors)
+        if getattr(self, "_active_file_id", ""):
+            self._predictor_keys_by_file[str(self._active_file_id)] = list(predictors)
         self._settings.setValue(prefix + "predictor_keys", "\n".join(predictors))
+        self._settings.setValue(prefix + "predictor_keys_by_file_json", json.dumps(self._predictor_keys_by_file, sort_keys=True))
+        if hasattr(self, "combo_kernel_layout"):
+            self._settings.setValue(prefix + "kernel_layout", self.combo_kernel_layout.currentData(QtCore.Qt.ItemDataRole.UserRole) or "overlay")
 
     # ------------------------------------------------------------------
     # Public API — called by PostProcessingPanel
@@ -1922,8 +2158,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._group_labels = list(group_labels or [])
         self._visual_mode = int(visual_mode) if isinstance(visual_mode, (int, np.integer)) else 0
         self._group_mode = bool(group_mode)
-        self._refresh_predictor_catalog()
         self._refresh_file_widgets()
+        self._refresh_predictor_catalog()
         # Drop cached fits for files that disappeared.
         live_ids = {self._proc_file_id(p, fallback=f"file_{i + 1}") for i, p in enumerate(self._processed_trials)}
         for fid in list(self._glm_results_by_file):
@@ -2003,6 +2239,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             "fit_mode": self._fit_mode,
             "active_file_id": self._active_file_id,
             "selected_predictors": self._selected_predictor_keys() if hasattr(self, "list_predictors") else [],
+            "predictors_by_file": dict(self._predictor_keys_by_file),
             "settings": {
                 "model_type": int(self.combo_model_type.currentIndex()) if hasattr(self, "combo_model_type") else 0,
                 "basis": self.combo_basis.currentText() if hasattr(self, "combo_basis") else "",
@@ -2029,6 +2266,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             return
         try:
             self._fit_mode = str(state.get("fit_mode", "all"))
+            by_file_predictors = state.get("predictors_by_file", {}) or {}
+            if isinstance(by_file_predictors, dict):
+                self._predictor_keys_by_file.update({
+                    str(fid): [str(key) for key in keys if str(key).strip()]
+                    for fid, keys in by_file_predictors.items()
+                    if isinstance(keys, list)
+                })
             if hasattr(self, "combo_fit_scope"):
                 idx = self.combo_fit_scope.findData(self._fit_mode)
                 if idx >= 0:
@@ -2067,6 +2311,203 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self._update_fit_state_label()
         except Exception as exc:
             _LOG.warning("Could not restore temporal modeling state: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _safe_filename(text: object, fallback: str = "temporal_modeling") -> str:
+        name = re.sub(r"[^0-9A-Za-z._-]+", "_", str(text or "").strip()).strip("._-")
+        return name or fallback
+
+    def _export_dir_from_user(self, title: str) -> str:
+        start_dir = str(self._settings.value("temporal_modeling/export_dir", "") or "")
+        if not start_dir or not os.path.isdir(start_dir):
+            start_dir = os.getcwd()
+        out_dir = QtWidgets.QFileDialog.getExistingDirectory(self, title, start_dir)
+        if out_dir:
+            self._settings.setValue("temporal_modeling/export_dir", out_dir)
+        return out_dir
+
+    def _export_prefix(self) -> str:
+        model = "glm" if self.combo_model_type.currentIndex() == 0 else "flmm"
+        scope = self._fit_mode or "all"
+        fid = self._active_file_id if scope == "active" else scope
+        return self._safe_filename(f"temporal_{model}_{fid}")
+
+    @staticmethod
+    def _write_dict_rows_csv(path: str, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                fh.write("")
+            return
+        fieldnames: List[str] = []
+        for row in rows:
+            for key in row.keys():
+                if key not in fieldnames:
+                    fieldnames.append(str(key))
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+    def _export_glm_tables(self, out_dir: str, prefix: str) -> List[str]:
+        result = self._glm_result
+        if result is None:
+            return []
+        written: List[str] = []
+        t = np.asarray(result.kernel_tvec, float)
+        kernel_path = os.path.join(out_dir, f"{prefix}_glm_kernels.csv")
+        with open(kernel_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["time_s"] + [self._predictor_label(name) for name in result.predictor_names])
+            for idx in range(int(t.size)):
+                row = [t[idx]]
+                for name in result.predictor_names:
+                    vals = np.asarray(result.kernels.get(name, np.array([], float)), float)
+                    row.append(vals[idx] if idx < vals.size else "")
+                writer.writerow(row)
+        written.append(kernel_path)
+
+        n = min(
+            len(np.asarray(result.time)),
+            len(np.asarray(result.y_actual)),
+            len(np.asarray(result.y_pred)),
+            len(np.asarray(result.residuals)),
+        )
+        pred_path = os.path.join(out_dir, f"{prefix}_glm_prediction.csv")
+        with open(pred_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["time_s", "actual", "predicted", "residual"])
+            for i in range(n):
+                writer.writerow([result.time[i], result.y_actual[i], result.y_pred[i], result.residuals[i]])
+        written.append(pred_path)
+
+        imp_path = os.path.join(out_dir, f"{prefix}_glm_importance.csv")
+        self._write_dict_rows_csv(imp_path, list(result.feature_importance or []))
+        written.append(imp_path)
+        return written
+
+    def _export_flmm_tables(self, out_dir: str, prefix: str) -> List[str]:
+        result = self._flmm_result
+        if result is None:
+            return []
+        written: List[str] = []
+        t = np.asarray(result.tvec, float)
+        coeff_path = os.path.join(out_dir, f"{prefix}_flmm_coefficients.csv")
+        with open(coeff_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["term", "time_s", "coefficient", "ci_lower", "ci_upper", "joint_ci_lower", "joint_ci_upper"])
+            for term, coeff in (result.coefficients or {}).items():
+                coeff = np.asarray(coeff, float)
+                lo = np.asarray((result.ci_lower or {}).get(term, np.full_like(coeff, np.nan)), float)
+                hi = np.asarray((result.ci_upper or {}).get(term, np.full_like(coeff, np.nan)), float)
+                jlo = np.asarray((result.joint_ci_lower or {}).get(term, np.full_like(coeff, np.nan)), float)
+                jhi = np.asarray((result.joint_ci_upper or {}).get(term, np.full_like(coeff, np.nan)), float)
+                for i in range(min(t.size, coeff.size)):
+                    writer.writerow([
+                        term,
+                        t[i],
+                        coeff[i],
+                        lo[i] if i < lo.size else "",
+                        hi[i] if i < hi.size else "",
+                        jlo[i] if i < jlo.size else "",
+                        jhi[i] if i < jhi.size else "",
+                    ])
+        written.append(coeff_path)
+
+        imp_path = os.path.join(out_dir, f"{prefix}_flmm_importance.csv")
+        self._write_dict_rows_csv(imp_path, list(result.feature_importance or []))
+        written.append(imp_path)
+        return written
+
+    def _export_temporal_results(self) -> None:
+        out_dir = self._export_dir_from_user("Export temporal modeling results")
+        if not out_dir:
+            return
+        prefix = self._export_prefix()
+        summary_path = os.path.join(out_dir, f"{prefix}_summary.txt")
+        with open(summary_path, "w", encoding="utf-8") as fh:
+            fh.write(self.txt_summary.toPlainText() if hasattr(self, "txt_summary") else "")
+
+        state_path = os.path.join(out_dir, f"{prefix}_state.json")
+        with open(state_path, "w", encoding="utf-8") as fh:
+            json.dump(self.serialize_state(), fh, indent=2, allow_nan=True)
+
+        written = [summary_path, state_path]
+        written.extend(self._export_glm_tables(out_dir, prefix))
+        written.extend(self._export_flmm_tables(out_dir, prefix))
+        self.statusMessage.emit(f"Exported temporal results: {len(written)} file(s).", 5000)
+
+    @staticmethod
+    def _render_widget_png_pdf(widget: QtWidgets.QWidget, base_path: str) -> List[str]:
+        written: List[str] = []
+        if widget is None:
+            return written
+        png_path = f"{base_path}.png"
+        pix = widget.grab()
+        if not pix.isNull() and pix.save(png_path, "PNG"):
+            written.append(png_path)
+        pdf_path = f"{base_path}.pdf"
+        size = widget.size()
+        if size.width() > 0 and size.height() > 0:
+            writer = QtGui.QPdfWriter(pdf_path)
+            writer.setResolution(300)
+            page_size = QtGui.QPageSize(
+                QtCore.QSizeF(size.width() / 96.0 * 25.4, size.height() / 96.0 * 25.4),
+                QtGui.QPageSize.Unit.Millimeter,
+            )
+            writer.setPageSize(page_size)
+            painter = QtGui.QPainter(writer)
+            try:
+                widget.render(painter)
+                written.append(pdf_path)
+            finally:
+                painter.end()
+        return written
+
+    def _temporal_plot_targets(self) -> List[Tuple[str, QtWidgets.QWidget]]:
+        targets: List[Tuple[str, QtWidgets.QWidget]] = []
+        if self._kernel_layout_mode() == "grid" and self._kernel_grid_plots:
+            for idx, plot in enumerate(self._kernel_grid_plots, 1):
+                title_label = getattr(plot.getPlotItem(), "titleLabel", None)
+                title_text = getattr(title_label, "text", "") if title_label is not None else ""
+                title = self._safe_filename(title_text or f"kernel_{idx}", f"kernel_{idx}")
+                targets.append((f"kernel_{idx:02d}_{title}", plot))
+        elif hasattr(self, "plot_kernel"):
+            targets.append(("kernels", self.plot_kernel))
+        for suffix, attr in (
+            ("prediction", "plot_prediction"),
+            ("illustration", "plot_illustration"),
+            ("residuals", "plot_residuals"),
+            ("importance", "plot_importance"),
+            ("flmm_coefficients", "plot_coeff"),
+            ("group_kernels", "plot_group_kernels"),
+            ("group_importance", "plot_group_importance"),
+        ):
+            widget = getattr(self, attr, None)
+            if isinstance(widget, QtWidgets.QWidget):
+                targets.append((suffix, widget))
+        return targets
+
+    def _export_temporal_plots(self) -> None:
+        out_dir = self._export_dir_from_user("Export temporal modeling plots")
+        if not out_dir:
+            return
+        prefix = self._export_prefix()
+        written: List[str] = []
+        for suffix, widget in self._temporal_plot_targets():
+            base = os.path.join(out_dir, self._safe_filename(f"{prefix}_{suffix}"))
+            try:
+                written.extend(self._render_widget_png_pdf(widget, base))
+            except Exception as exc:
+                _LOG.warning("Temporal plot export failed for %s: %s", suffix, exc)
+        if written:
+            self.statusMessage.emit(f"Exported temporal plots: {len(written)} file(s).", 5000)
+        else:
+            QtWidgets.QMessageBox.warning(self, "Export plots", "No temporal plots could be exported.")
 
     # ------------------------------------------------------------------
     # Predictor catalog and extraction
@@ -2153,6 +2594,117 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 self.list_kernel_filter.addItem(item)
         finally:
             self._kernel_filter_guard = False
+
+    def _kernel_layout_mode(self) -> str:
+        if hasattr(self, "combo_kernel_layout"):
+            mode = self.combo_kernel_layout.currentData(QtCore.Qt.ItemDataRole.UserRole)
+            if str(mode) == "grid":
+                return "grid"
+        return "overlay"
+
+    def _selected_kernel_names(self, result: GLMResult) -> List[str]:
+        names: List[str] = []
+        for name in result.predictor_names:
+            if not self._kernel_visible.get(name, True):
+                continue
+            if result.kernels.get(name) is not None:
+                names.append(name)
+        return names
+
+    def _kernel_y_label(self, key: str) -> str:
+        kind = str(self._predictor_catalog.get(str(key), {}).get("kind", "") or "")
+        if kind == "continuous":
+            return "Signal gain / +1 SD"
+        return "Event kernel weight"
+
+    def _kernel_title(self, key: str) -> str:
+        label = self._compact_feature_label(self._predictor_label(key), 54)
+        kind = str(self._predictor_catalog.get(str(key), {}).get("kind", "") or "")
+        if kind == "continuous":
+            return f"{label} (continuous, z-scored)"
+        return f"{label} (event)"
+
+    def _clear_kernel_grid(self) -> None:
+        self._kernel_grid_plots = []
+        layout = getattr(self, "kernel_grid_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _plot_single_kernel_panel(self, plot: pg.PlotWidget, result: GLMResult, name: str) -> None:
+        kernel = result.kernels.get(name)
+        plot.clear()
+        try:
+            plot.getPlotItem().legend.clear()
+        except Exception:
+            pass
+        color = self._kernel_color(name)
+        if kernel is not None:
+            plot.plot(result.kernel_tvec, kernel, pen=pg.mkPen(color, width=2.0), name=self._predictor_label(name))
+        plot.setTitle(self._kernel_title(name))
+        plot.setLabel("bottom", "Time", units="s")
+        plot.setLabel("left", self._kernel_y_label(name))
+        plot.addLine(y=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        plot.addLine(x=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
+
+    def _plot_kernel_grid(self, result: GLMResult, names: List[str]) -> None:
+        self._clear_kernel_grid()
+        if hasattr(self, "stack_kernel_plots"):
+            self.stack_kernel_plots.setCurrentIndex(1)
+        layout = getattr(self, "kernel_grid_layout", None)
+        if layout is None:
+            return
+        if not names:
+            msg = QtWidgets.QLabel("No kernels selected.")
+            msg.setProperty("class", "muted")
+            msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(msg, 0, 0)
+            return
+        cols = 2 if max(self.width(), self.sizeHint().width()) >= 1100 else 1
+        for idx, name in enumerate(names):
+            plot = pg.PlotWidget()
+            self._style_plot(plot, min_height=230)
+            self._plot_single_kernel_panel(plot, result, name)
+            row = idx // cols
+            col = idx % cols
+            layout.addWidget(plot, row, col)
+            self._kernel_grid_plots.append(plot)
+        layout.setRowStretch((len(names) + cols - 1) // cols, 1)
+
+    def _plot_kernel_overlay(self, result: GLMResult, names: List[str]) -> None:
+        pw = self.plot_kernel
+        if hasattr(self, "stack_kernel_plots"):
+            self.stack_kernel_plots.setCurrentIndex(0)
+        pw.clear()
+        try:
+            pw.getPlotItem().legend.clear()
+        except Exception:
+            pass
+        for name in names:
+            kernel = result.kernels.get(name)
+            if kernel is None:
+                continue
+            color = self._kernel_color(name)
+            pw.plot(result.kernel_tvec, kernel, pen=pg.mkPen(color, width=2), name=self._predictor_label(name))
+        if not names:
+            txt = pg.TextItem("No kernels selected.", color="#c5d2e3")
+            pw.addItem(txt)
+            txt.setPos(0, 0)
+        pw.setTitle("Estimated kernels")
+        pw.setLabel("bottom", "Time", units="s")
+        pw.setLabel("left", "Kernel weight")
+        pw.addLine(y=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        pw.addLine(x=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
+
+    def _on_kernel_layout_changed(self, *_args) -> None:
+        self._save_temporal_settings()
+        if self._glm_result is not None:
+            self._plot_glm_kernels(self._glm_result, refresh_filter=False)
 
     def _on_kernel_filter_changed(self, item: QtWidgets.QListWidgetItem) -> None:
         if self._kernel_filter_guard:
@@ -2299,6 +2851,34 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.list_predictors.addItem(item)
         return True
 
+    def _remember_current_predictors_for_file(self, file_id: Optional[str] = None) -> None:
+        if getattr(self, "_restoring_predictors", False) or not hasattr(self, "list_predictors"):
+            return
+        fid = str(file_id or self._active_file_id or "").strip()
+        keys = self._selected_predictor_keys()
+        self._saved_predictor_keys = list(keys)
+        if fid:
+            self._predictor_keys_by_file[fid] = list(keys)
+
+    def _restore_predictors_for_active_file(self, allow_default: bool = True) -> None:
+        if not hasattr(self, "list_predictors"):
+            return
+        fid = str(self._active_file_id or "").strip()
+        keys: List[str] = []
+        if fid and fid in self._predictor_keys_by_file:
+            keys = [key for key in self._predictor_keys_by_file.get(fid, []) if key in self._predictor_catalog]
+        if not keys:
+            keys = [key for key in self._saved_predictor_keys if key in self._predictor_catalog]
+        self._restoring_predictors = True
+        try:
+            self.list_predictors.clear()
+            for key in keys:
+                self._add_predictor_item(key)
+            if allow_default and self.list_predictors.count() == 0 and "events" in self._predictor_catalog:
+                self._add_predictor_item("events")
+        finally:
+            self._restoring_predictors = False
+
     def _refresh_predictor_combo(self) -> None:
         if not hasattr(self, "combo_available_predictors"):
             return
@@ -2375,16 +2955,23 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             }
 
         previous_keys = self._selected_predictor_keys() if hasattr(self, "list_predictors") else []
-        restore_keys = previous_keys or [key for key in self._saved_predictor_keys if key in catalog]
         self._predictor_catalog = catalog
         self._refresh_predictor_combo()
         if hasattr(self, "list_predictors"):
-            self.list_predictors.clear()
-            for key in restore_keys:
-                if key in catalog:
-                    self._add_predictor_item(key)
-            if self.list_predictors.count() == 0 and "events" in catalog:
-                self._add_predictor_item("events")
+            if str(self._active_file_id or "") in self._predictor_keys_by_file:
+                self._restore_predictors_for_active_file(allow_default=True)
+            else:
+                restore_keys = previous_keys or [key for key in self._saved_predictor_keys if key in catalog]
+                self._restoring_predictors = True
+                try:
+                    self.list_predictors.clear()
+                    for key in restore_keys:
+                        if key in catalog:
+                            self._add_predictor_item(key)
+                    if self.list_predictors.count() == 0 and "events" in catalog:
+                        self._add_predictor_item("events")
+                finally:
+                    self._restoring_predictors = False
             if self.list_predictors.count() > 0 or previous_keys:
                 self._save_temporal_settings()
 
@@ -3364,13 +3951,17 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         if not is_glm:
             if self._flmm.available:
                 self.lbl_flmm_status.setText("R + fastFMM detected.")
-                self.lbl_flmm_status.setStyleSheet("color: #6bdb74;")
+                self.lbl_flmm_status.setStyleSheet(
+                    "color: #15803d;" if self._app_theme_mode == "light" else "color: #6bdb74;"
+                )
             else:
                 self.lbl_flmm_status.setText(
                     "R or fastFMM not found. Install R and the fastFMM package, "
                     "then install rpy2 (pip install rpy2)."
                 )
-                self.lbl_flmm_status.setStyleSheet("color: #f5a97f;")
+                self.lbl_flmm_status.setStyleSheet(
+                    "color: #b45309;" if self._app_theme_mode == "light" else "color: #f5a97f;"
+                )
         self._save_temporal_settings()
 
     def _on_add_predictor(self):
@@ -3462,7 +4053,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             return
         data = self.combo_active_file.currentData()
         if isinstance(data, str) and data:
+            old_file_id = str(self._active_file_id or "")
+            if old_file_id and old_file_id != data:
+                self._remember_current_predictors_for_file(old_file_id)
             self._active_file_id = data
+            if old_file_id != data:
+                self._restore_predictors_for_active_file(allow_default=True)
+                self._save_temporal_settings()
             # Mirror selection in the list
             if hasattr(self, "list_files"):
                 for i in range(self.list_files.count()):
@@ -3998,33 +4595,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.statusMessage.emit(f"GLM fit complete — R² = {result.r2:.4f}", 5000)
 
     def _plot_glm_kernels(self, result: GLMResult, refresh_filter: bool = True):
-        pw = self.plot_kernel
         if refresh_filter:
             self._sync_kernel_filter(result)
-        pw.clear()
-        try:
-            pw.getPlotItem().legend.clear()
-        except Exception:
-            pass
-        plotted = 0
-        for name in result.predictor_names:
-            if not self._kernel_visible.get(name, True):
-                continue
-            kernel = result.kernels.get(name)
-            if kernel is None:
-                continue
-            color = self._kernel_color(name)
-            pw.plot(result.kernel_tvec, kernel, pen=pg.mkPen(color, width=2), name=self._predictor_label(name))
-            plotted += 1
-        if plotted == 0:
-            txt = pg.TextItem("No kernels selected.", color="#c5d2e3")
-            pw.addItem(txt)
-            txt.setPos(0, 0)
-        pw.setLabel("bottom", "Time", units="s")
-        pw.setLabel("left", "Kernel weight")
-        # Zero line
-        pw.addLine(y=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
-        pw.addLine(x=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        names = self._selected_kernel_names(result)
+        if self._kernel_layout_mode() == "grid":
+            self._plot_kernel_grid(result, names)
+        else:
+            self._plot_kernel_overlay(result, names)
 
     def _plot_glm_fit(self, result: GLMResult):
         pw = self.plot_prediction

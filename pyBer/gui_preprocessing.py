@@ -2601,6 +2601,9 @@ class PlotDashboard(QtWidgets.QWidget):
         for w in (self.plot_raw, self.plot_proc, self.plot_out):
             _optimize_plot(w)
 
+        # Empty-state hints removed by design - keep plots visually clean.
+        self._preproc_empty_hints = []
+
         # Raw traces share the same primary y-axis.
         self.curve_465 = self.plot_raw.plot(pen=pg.mkPen((80, 250, 160), width=1.3))
         self.curve_405 = self.plot_raw.plot(pen=pg.mkPen((160, 120, 255, 128), width=1.2))
