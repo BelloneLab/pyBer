@@ -737,8 +737,21 @@ def _apply_artifact_handling(
     if sig_corr.size == 0 or ref_corr.size == 0 or m.size != sig_corr.size or not np.any(m):
         return sig_corr, ref_corr, handling
 
-    if handling == "Do nothing" or handling == "Cut":
+    if handling == "Do nothing":
         return sig_corr, ref_corr, handling
+
+    if handling == "Cut":
+        # IMPORTANT: don't return the raw signal here. The downstream cut
+        # step (after resampling) removes the artifact samples, but the
+        # low-pass filter runs BEFORE that step - if the artifact is still
+        # in the signal it gets smeared across neighbouring samples and
+        # creates an even worse artefact at the cut boundary.
+        # Fill the artifact region with interpolated values so the filter
+        # sees a smooth trace; those samples are then dropped at the cut
+        # step and never reach the output anyway.
+        sig_corr[m] = np.nan
+        ref_corr[m] = np.nan
+        return interpolate_nans(sig_corr), interpolate_nans(ref_corr), handling
 
     if handling == "Strong local low-pass":
         cutoff = float(getattr(params, "lowpass_hz", 12.0))
@@ -1167,21 +1180,55 @@ def prominence_normalize(
     # transient amplitude above baseline (matches MATLAB data_norm.data input).
     y_centered = y - baseline_median
 
+    min_peak = float(getattr(params, "prominence_min_peak", 0.0))
+    max_peak = float(getattr(params, "prominence_max_peak", 1e6))
+    top_fraction = float(getattr(params, "prominence_percent_top", 0.10))
+
     amplitudes, _idx_peak, _top_peaks = prominence_peaks_detection(
         y_centered,
-        float(getattr(params, "prominence_percent_top", 0.10)),
+        top_fraction,
         keep,
-        float(getattr(params, "prominence_min_peak", 0.0)),
-        float(getattr(params, "prominence_max_peak", 1e6)),
+        min_peak,
+        max_peak,
     )
+    scale_source = "baseline_peak_prominence"
     n_peaks = int(amplitudes.size)
+
+    # Fallback 1: retry without the user's min-prominence floor in case the
+    # configured threshold is too aggressive for this trace.
+    if n_peaks == 0 and min_peak > 0.0:
+        amplitudes_retry, _i2, _t2 = prominence_peaks_detection(
+            y_centered, top_fraction, keep, 0.0, max_peak,
+        )
+        if amplitudes_retry.size:
+            amplitudes = amplitudes_retry
+            n_peaks = int(amplitudes.size)
+            scale_source = "baseline_peak_prominence_no_min_floor"
+
     mean_amp = float(np.nanmean(amplitudes)) if n_peaks else np.nan
+
+    # Fallback 2: still nothing? Use a MAD-noise estimate of the baseline.
+    # Better than emitting an all-NaN output that hides every transient.
+    mad_sigma = float("nan")
+    if (not np.isfinite(mean_amp) or mean_amp <= 1e-12):
+        base_arr = y_centered[finite_keep] if np.any(finite_keep) else y_centered[np.isfinite(y_centered)]
+        if base_arr.size >= 5:
+            mad = float(np.nanmedian(np.abs(base_arr - np.nanmedian(base_arr))))
+            if np.isfinite(mad) and mad > 1e-12:
+                mad_sigma = 1.4826 * mad
+                # Use a peak-equivalent scale: mean of |samples| above 2*sigma.
+                # Falls back to mad_sigma itself if no such samples exist.
+                tail = np.abs(base_arr)
+                tail = tail[tail >= 2.0 * mad_sigma]
+                mean_amp = float(np.nanmean(tail)) if tail.size else float(mad_sigma)
+                scale_source = "mad_noise_fallback"
+
     if n_peaks > 1:
         sem_amp = float(np.nanstd(amplitudes, ddof=1) / np.sqrt(n_peaks))
     elif n_peaks == 1:
         sem_amp = 0.0
     else:
-        sem_amp = np.nan
+        sem_amp = float("nan")
 
     fs = float(fs_used)
     if not np.isfinite(fs) or fs <= 0:
@@ -1189,7 +1236,11 @@ def prominence_normalize(
     duration = float(np.sum(keep) / fs) if np.isfinite(fs) and fs > 0 else np.nan
 
     if not np.isfinite(mean_amp) or mean_amp <= 1e-12 or not np.isfinite(baseline_median):
-        out = np.full_like(y, np.nan)
+        # Absolute last resort: leave the trace centered by baseline median
+        # so the user at least sees the data, instead of a flat-line NaN.
+        out = y - baseline_median
+        scale_source = "centered_only_no_scale"
+        mean_amp = float("nan")
     else:
         out = (y - baseline_median) / mean_amp
 
@@ -1199,6 +1250,8 @@ def prominence_normalize(
         "sem_amplitude": sem_amp,
         "n_peaks": float(n_peaks),
         "baseline_median": baseline_median,
+        "scale_source": scale_source,
+        "mad_noise_sigma": mad_sigma,
     }
 
 
@@ -1721,8 +1774,9 @@ class PhotometryProcessor:
                 sem_amp = prominence_stats.get("sem_amplitude", np.nan)
                 n_peaks = int(prominence_stats.get("n_peaks", 0.0))
                 duration = prominence_stats.get("duration_s", np.nan)
+                scale_source = str(prominence_stats.get("scale_source", "baseline_peak_prominence"))
                 context_parts.append(
-                    "Prominence scale: "
+                    f"Prominence scale [{scale_source}]: "
                     f"mean={mean_amp:.3g}, sem={sem_amp:.3g}, n={n_peaks}, "
                     f"baseline={duration:.3g}s, top={float(getattr(params, 'prominence_percent_top', 0.10)):.3g}, "
                     f"exclude=-{float(getattr(params, 'prominence_exclude_before_s', 0.0)):.3g}/+"

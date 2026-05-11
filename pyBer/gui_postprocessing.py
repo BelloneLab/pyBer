@@ -1048,11 +1048,74 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_peak_auc_window.setRange(0.0, 30.0)
         self.spin_peak_auc_window.setValue(0.5)
         self.spin_peak_auc_window.setDecimals(3)
-        self.cb_peak_norm_prominence = QtWidgets.QCheckBox("Baseline-prominence normalized amplitude")
+        self.cb_peak_norm_prominence = QtWidgets.QCheckBox()
         self.cb_peak_norm_prominence.setChecked(False)
         self.cb_peak_norm_prominence.setToolTip(
             "Report peak amplitude after scaling by the top baseline peak prominences."
         )
+
+        # ---- Baseline-prominence configuration ------------------------------
+        self.combo_signal_baseline_source = QtWidgets.QComboBox()
+        self.combo_signal_baseline_source.addItem("Time window (e.g. before task)", "window")
+        self.combo_signal_baseline_source.addItem("Exclude behavior bouts", "exclude")
+        self.combo_signal_baseline_source.addItem("Whole recording (MAD noise)", "whole")
+        self.combo_signal_baseline_source.setToolTip(
+            "How to define the 'quiet' segment used to set the prominence "
+            "normalization scale and (when enabled) MAD noise estimate.\n\n"
+            "- Time window: an explicit [start, end] interval, ideal for "
+            "  pre-task recordings (e.g. 5 min before social interaction).\n"
+            "- Exclude behavior bouts: load behavior files in Setup and tick the "
+            "  behaviors you want removed; everything OUTSIDE those bouts becomes "
+            "  baseline.\n"
+            "- Whole recording: fall back to MAD noise across the whole trace."
+        )
+        _compact_combo(self.combo_signal_baseline_source, min_chars=12)
+
+        self.spin_signal_baseline_start = QtWidgets.QDoubleSpinBox()
+        self.spin_signal_baseline_start.setRange(0.0, 1e6)
+        self.spin_signal_baseline_start.setDecimals(2)
+        self.spin_signal_baseline_start.setSuffix(" s")
+        self.spin_signal_baseline_start.setValue(0.0)
+        self.spin_signal_baseline_start.setMaximumWidth(150)
+
+        self.spin_signal_baseline_end = QtWidgets.QDoubleSpinBox()
+        self.spin_signal_baseline_end.setRange(0.0, 1e6)
+        self.spin_signal_baseline_end.setDecimals(2)
+        self.spin_signal_baseline_end.setSuffix(" s")
+        self.spin_signal_baseline_end.setValue(300.0)  # 5 min default
+        self.spin_signal_baseline_end.setMaximumWidth(150)
+        self.spin_signal_baseline_end.setToolTip("Set to 0 to extend until the end of the recording.")
+
+        self.combo_signal_baseline_behavior_file = QtWidgets.QComboBox()
+        self.combo_signal_baseline_behavior_file.setToolTip(
+            "Which loaded behavior file should provide the exclusion intervals "
+            "(behavior files are loaded in the Setup panel)."
+        )
+        _compact_combo(self.combo_signal_baseline_behavior_file, min_chars=10)
+
+        self.list_signal_baseline_exclude = QtWidgets.QListWidget()
+        self.list_signal_baseline_exclude.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.NoSelection
+        )
+        self.list_signal_baseline_exclude.setMaximumHeight(110)
+        self.list_signal_baseline_exclude.setToolTip(
+            "Tick the behaviors whose intervals should be removed from baseline."
+        )
+
+        self.spin_signal_baseline_pad = QtWidgets.QDoubleSpinBox()
+        self.spin_signal_baseline_pad.setRange(0.0, 600.0)
+        self.spin_signal_baseline_pad.setDecimals(2)
+        self.spin_signal_baseline_pad.setSuffix(" s")
+        self.spin_signal_baseline_pad.setValue(1.0)
+        self.spin_signal_baseline_pad.setMaximumWidth(150)
+        self.spin_signal_baseline_pad.setToolTip(
+            "Also exclude this many seconds before and after each behavior event "
+            "(catches the rise / decay of evoked transients)."
+        )
+
+        self.lbl_signal_baseline_status = QtWidgets.QLabel("")
+        self.lbl_signal_baseline_status.setProperty("class", "hint")
+        self.lbl_signal_baseline_status.setWordWrap(True)
         self.cb_peak_overlay = QtWidgets.QCheckBox("Show detected peaks on trace")
         self.cb_peak_overlay.setChecked(True)
         self.cb_peak_noise_overlay = QtWidgets.QCheckBox("Show noise trace / MAD threshold overlay")
@@ -1067,30 +1130,153 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_export_peaks.setProperty("class", "compactSmall")
         self.lbl_signal_msg = QtWidgets.QLabel("")
         self.lbl_signal_msg.setProperty("class", "hint")
-        f_signal.addRow("Signal source", self.combo_signal_source)
-        f_signal.addRow("Group mode", self.combo_signal_scope)
-        f_signal.addRow("File", self.combo_signal_file)
-        f_signal.addRow("Method", self.combo_signal_method)
-        f_signal.addRow("Min prominence", self.spin_peak_prominence)
-        f_signal.addRow(self.cb_peak_auto_mad)
-        f_signal.addRow("MAD multiplier", self.spin_peak_mad_multiplier)
-        f_signal.addRow("Min height (0=off)", self.spin_peak_height)
-        f_signal.addRow("Min distance (s)", self.spin_peak_distance)
-        f_signal.addRow("Smooth sigma (s)", self.spin_peak_smooth)
-        f_signal.addRow("Baseline handling", self.combo_peak_baseline)
-        f_signal.addRow("Baseline window (s)", self.spin_peak_baseline_window)
-        f_signal.addRow(self.cb_peak_norm_prominence)
-        f_signal.addRow("Rate bin (s)", self.spin_peak_rate_bin)
-        f_signal.addRow("AUC window (+/- s)", self.spin_peak_auc_window)
-        f_signal.addRow(self.cb_peak_overlay)
-        f_signal.addRow(self.cb_peak_noise_overlay)
-        signal_btn_row = QtWidgets.QHBoxLayout()
-        signal_btn_row.addWidget(self.btn_detect_peaks)
-        signal_btn_row.addWidget(self.btn_export_peaks)
-        signal_btn_row.addStretch(1)
-        signal_btn_wrap = QtWidgets.QWidget()
-        signal_btn_wrap.setLayout(signal_btn_row)
-        f_signal.addRow(signal_btn_wrap)
+        # Build into Subsections instead of a 17-row flat form.
+        SIG_LABEL_W = 110
+
+        def _sig_form() -> QtWidgets.QFormLayout:
+            f = QtWidgets.QFormLayout()
+            f.setContentsMargins(0, 2, 0, 2)
+            f.setHorizontalSpacing(10)
+            f.setVerticalSpacing(8)
+            f.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            f.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.DontWrapRows)
+            f.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            return f
+
+        def _sig_add(form: QtWidgets.QFormLayout, label: str, field: QtWidgets.QWidget) -> None:
+            lbl = QtWidgets.QLabel(label)
+            lbl.setMinimumWidth(SIG_LABEL_W)
+            lbl.setMaximumWidth(SIG_LABEL_W)
+            form.addRow(lbl, field)
+
+        # Source subsection.
+        sub_sig_source = _PyberSubsection(
+            "Source",
+            "Pick the trace and scope for peak detection.",
+        )
+        fs_src = _sig_form()
+        _sig_add(fs_src, "Signal source", self.combo_signal_source)
+        _sig_add(fs_src, "Group mode", self.combo_signal_scope)
+        _sig_add(fs_src, "File", self.combo_signal_file)
+        sub_sig_source.add_layout(fs_src)
+
+        # Detection subsection.
+        # Suffixes baked into spinboxes for tighter forms.
+        self.spin_peak_prominence.setMaximumWidth(150)
+        self.spin_peak_mad_multiplier.setSuffix(" sigma")
+        self.spin_peak_mad_multiplier.setMaximumWidth(150)
+        self.spin_peak_height.setMaximumWidth(150)
+        self.spin_peak_distance.setSuffix(" s")
+        self.spin_peak_distance.setMaximumWidth(150)
+        self.spin_peak_smooth.setSuffix(" s")
+        self.spin_peak_smooth.setMaximumWidth(150)
+        # Strip the redundant text from cb_peak_auto_mad - form row now labels it.
+        self.cb_peak_auto_mad.setText("")
+        sub_sig_detect = _PyberSubsection(
+            "Detection",
+            "Where to draw the peak threshold (manual prominence or MAD-noise auto).",
+        )
+        fs_det = _sig_form()
+        _sig_add(fs_det, "Method", self.combo_signal_method)
+        _sig_add(fs_det, "Auto MAD threshold", self.cb_peak_auto_mad)
+        _sig_add(fs_det, "MAD multiplier", self.spin_peak_mad_multiplier)
+        _sig_add(fs_det, "Min prominence", self.spin_peak_prominence)
+        _sig_add(fs_det, "Min height (0=off)", self.spin_peak_height)
+        _sig_add(fs_det, "Min distance", self.spin_peak_distance)
+        _sig_add(fs_det, "Smooth sigma", self.spin_peak_smooth)
+        sub_sig_detect.add_layout(fs_det)
+
+        # Baseline subsection (the headline fix).
+        self.spin_peak_baseline_window.setSuffix(" s")
+        self.spin_peak_baseline_window.setMaximumWidth(150)
+        sub_sig_baseline = _PyberSubsection(
+            "Baseline prominence",
+            "Define the 'quiet' segment used as the normalization reference and "
+            "(optionally) for the MAD noise floor.",
+        )
+        fs_base = _sig_form()
+        _sig_add(fs_base, "Baseline handling", self.combo_peak_baseline)
+        _sig_add(fs_base, "Detrend window", self.spin_peak_baseline_window)
+        _sig_add(fs_base, "Normalize amplitude", self.cb_peak_norm_prominence)
+        _sig_add(fs_base, "Baseline source", self.combo_signal_baseline_source)
+
+        # Time window inputs - one row.
+        win_row = QtWidgets.QHBoxLayout()
+        win_row.setContentsMargins(0, 0, 0, 0)
+        win_row.setSpacing(6)
+        self.spin_signal_baseline_start.setPrefix("Start ")
+        self.spin_signal_baseline_end.setPrefix("End ")
+        win_row.addWidget(self.spin_signal_baseline_start)
+        win_row.addWidget(self.spin_signal_baseline_end)
+        win_row.addStretch(1)
+        self._signal_baseline_window_wrap = QtWidgets.QWidget()
+        self._signal_baseline_window_wrap.setLayout(win_row)
+        _sig_add(fs_base, "Window", self._signal_baseline_window_wrap)
+
+        # Exclude-behaviors inputs (file picker + list + pad).
+        _sig_add(fs_base, "Behavior file", self.combo_signal_baseline_behavior_file)
+        _sig_add(fs_base, "Exclude bouts", self.list_signal_baseline_exclude)
+        _sig_add(fs_base, "Pad before/after", self.spin_signal_baseline_pad)
+
+        fs_base.addRow(self.lbl_signal_baseline_status)
+        sub_sig_baseline.add_layout(fs_base)
+
+        # Output subsection.
+        self.spin_peak_rate_bin.setSuffix(" s")
+        self.spin_peak_rate_bin.setMaximumWidth(150)
+        self.spin_peak_auc_window.setSuffix(" s")
+        self.spin_peak_auc_window.setMaximumWidth(150)
+        # The two overlay checkboxes' labels are descriptive; keep them, no row label.
+        sub_sig_output = _PyberSubsection(
+            "Output",
+            "Rate aggregation, AUC window, and trace overlays.",
+        )
+        fs_out = _sig_form()
+        _sig_add(fs_out, "Rate bin", self.spin_peak_rate_bin)
+        _sig_add(fs_out, "AUC window +/-", self.spin_peak_auc_window)
+        fs_out.addRow(self.cb_peak_overlay)
+        fs_out.addRow(self.cb_peak_noise_overlay)
+        sub_sig_output.add_layout(fs_out)
+
+        # Stack subsections inside the group box.
+        grp_signal_layout = QtWidgets.QVBoxLayout()
+        grp_signal_layout.setContentsMargins(0, 0, 0, 0)
+        grp_signal_layout.setSpacing(4)
+        for sub in (sub_sig_source, sub_sig_detect, sub_sig_baseline, sub_sig_output):
+            grp_signal_layout.addWidget(sub)
+        # Detach the now-empty f_signal layout and install the new one.
+        _old_sig_layout = grp_signal.layout()
+        if _old_sig_layout is not None:
+            QtWidgets.QWidget().setLayout(_old_sig_layout)
+        grp_signal.setLayout(grp_signal_layout)
+
+        # Footer: primary Detect + ghost Export, status banner above.
+        self.signal_status = _PyberInlineStatus("", "info")
+        self.signal_footer = _PyberFooterActions()
+        self.signal_footer.add_secondary(self.btn_export_peaks)
+        self.signal_footer.add_primary(self.btn_detect_peaks)
+
+        # Mirror existing self.lbl_signal_msg.setText -> banner with severity.
+        self.lbl_signal_msg.hide()
+        _orig_sig_msg_set_text = self.lbl_signal_msg.setText
+        def _sig_msg_set_text(text: str) -> None:
+            _orig_sig_msg_set_text(text)
+            try:
+                low = str(text or "").lower()
+                if not text:
+                    sev = "info"
+                elif "fail" in low or "error" in low:
+                    sev = "error"
+                elif "no peaks" in low or "skip" in low or "no " in low:
+                    sev = "warn"
+                elif "detect" in low or "saved" in low or "export" in low:
+                    sev = "ok"
+                else:
+                    sev = "info"
+                self.signal_status.set(text, sev)
+            except Exception:
+                pass
+        self.lbl_signal_msg.setText = _sig_msg_set_text  # type: ignore[assignment]
 
         self.tbl_signal_metrics = QtWidgets.QTableWidget(0, 2)
         self.tbl_signal_metrics.setHorizontalHeaderLabels(["Metric", "Value"])
@@ -1522,8 +1708,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         signal_layout.setContentsMargins(6, 6, 6, 6)
         signal_layout.setSpacing(8)
         signal_layout.addWidget(grp_signal)
-        signal_layout.addWidget(self.tbl_signal_metrics)
-        signal_layout.addStretch(1)
+        signal_layout.addWidget(self.signal_status)
+        signal_layout.addWidget(self.tbl_signal_metrics, 1)
+        signal_layout.addWidget(self.signal_footer)
 
         self.section_behavior = QtWidgets.QWidget()
         behavior_layout = QtWidgets.QVBoxLayout(self.section_behavior)
@@ -2184,6 +2371,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_signal_scope.currentIndexChanged.connect(self._refresh_signal_file_combo)
         self.combo_signal_file.currentIndexChanged.connect(self._on_signal_file_changed)
         self.cb_peak_auto_mad.toggled.connect(self._update_peak_auto_mad_enabled)
+
+        # Baseline-prominence source plumbing.
+        self.combo_signal_baseline_source.currentIndexChanged.connect(self._update_signal_baseline_source_visibility)
+        self.cb_peak_norm_prominence.toggled.connect(self._update_signal_baseline_source_visibility)
+        self.spin_signal_baseline_start.valueChanged.connect(self._refresh_signal_baseline_status)
+        self.spin_signal_baseline_end.valueChanged.connect(self._refresh_signal_baseline_status)
+        self.spin_signal_baseline_pad.valueChanged.connect(self._refresh_signal_baseline_status)
+        self.combo_signal_baseline_behavior_file.currentIndexChanged.connect(
+            lambda *_: (self._rebuild_signal_baseline_exclude_list(set()), self._refresh_signal_baseline_status())
+        )
+        self.list_signal_baseline_exclude.itemChanged.connect(lambda *_: self._refresh_signal_baseline_status())
         self.cb_peak_noise_overlay.toggled.connect(self._refresh_signal_overlay)
         self.cb_peak_norm_prominence.toggled.connect(lambda _checked=False: self._save_settings())
         self.tab_sources.currentChanged.connect(self._refresh_signal_file_combo)
@@ -3607,6 +3805,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._processed.extend(loaded)
         if not self._autosave_restoring:
             self._project_dirty = True
+        # File to surface as the newly active selection. On replace, that's the
+        # first of the loaded batch; on append, the most recently added.
+        target_trial = loaded[0] if replace else loaded[-1]
+        target_id = os.path.splitext(os.path.basename(target_trial.path))[0] if target_trial.path else ""
+        self._pending_active_file_id = target_id
+
         self.lbl_group.setText(f"{len(self._processed)} file(s) loaded")
         self._push_recent_paths("postprocess_recent_processed_paths", paths)
         self._update_file_lists()
@@ -3615,6 +3819,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
+        # _compute_psth -> _refresh_individual_file_combo picks up the pending id.
+        self._pending_active_file_id = ""
 
     def _on_preprocessed_files_dropped(self, paths: List[str]) -> None:
         allowed = {".csv", ".h5", ".hdf5"}
@@ -3826,15 +4032,31 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not hasattr(self, "combo_individual_file"):
             return
         prev = self.combo_individual_file.currentText().strip()
+        # A `_pending_active_file_id` set by file loading wins over the previous selection.
+        pending = str(getattr(self, "_pending_active_file_id", "") or "").strip()
         self.combo_individual_file.blockSignals(True)
         self.combo_individual_file.clear()
         for fid in self._all_file_ids:
             self.combo_individual_file.addItem(fid)
-        if prev:
-            idx = self.combo_individual_file.findText(prev)
-            if idx >= 0:
-                self.combo_individual_file.setCurrentIndex(idx)
+
+        chosen_idx = -1
+        if pending:
+            chosen_idx = self.combo_individual_file.findText(pending)
+        if chosen_idx < 0 and prev:
+            chosen_idx = self.combo_individual_file.findText(prev)
+        if chosen_idx < 0 and self.combo_individual_file.count() > 0:
+            chosen_idx = 0  # default to first file when nothing else matches
+        if chosen_idx >= 0:
+            self.combo_individual_file.setCurrentIndex(chosen_idx)
         self.combo_individual_file.blockSignals(False)
+
+        # Fire the slot so downstream (PSTH heatmap, Temporal panel) follows.
+        if chosen_idx >= 0:
+            try:
+                self._on_individual_file_changed(chosen_idx)
+            except Exception:
+                pass
+
         # Show file selector only in Individual mode
         is_individual = self.tab_visual_mode.currentIndex() == 0
         self.combo_individual_file.setVisible(is_individual)
@@ -3946,6 +4168,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         ):
             w.setEnabled(has_processed)
         self._update_peak_auto_mad_enabled(queue=False)
+        # Surface baseline-source widget visibility + status preview.
+        try:
+            self._update_signal_baseline_source_visibility()
+        except Exception:
+            pass
         for w in (
             self.btn_compute_behavior,
             self.btn_export_behavior_metrics,
@@ -4052,6 +4279,165 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_peak_mad_multiplier.setEnabled(has_processed and auto_mad)
         if queue:
             self._queue_settings_save()
+
+    # ------------------------------------------------------------------
+    # Baseline-prominence UI plumbing
+    # ------------------------------------------------------------------
+
+    def _update_signal_baseline_source_visibility(self, _idx: int = 0) -> None:
+        """Show only the controls relevant to the chosen baseline source mode."""
+        if not hasattr(self, "combo_signal_baseline_source"):
+            return
+        mode = self.combo_signal_baseline_source.currentData() or "window"
+        is_window = (mode == "window")
+        is_exclude = (mode == "exclude")
+        norm_on = bool(self.cb_peak_norm_prominence.isChecked())
+
+        # Window inputs
+        for w, lbl_row_widget in self._signal_baseline_window_rows():
+            w.setVisible(is_window and norm_on)
+            if lbl_row_widget is not None:
+                lbl_row_widget.setVisible(is_window and norm_on)
+        # Exclude inputs
+        for w, lbl_row_widget in self._signal_baseline_exclude_rows():
+            w.setVisible(is_exclude and norm_on)
+            if lbl_row_widget is not None:
+                lbl_row_widget.setVisible(is_exclude and norm_on)
+
+        # The source dropdown itself is only meaningful when normalization is on.
+        for attr in ("combo_signal_baseline_source",):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.setEnabled(norm_on)
+                # Find form row label for it via parent form layout - just enable.
+
+        # Refresh the live status preview.
+        self._refresh_signal_baseline_status()
+
+    def _form_row_label_widget(self, field: QtWidgets.QWidget) -> Optional[QtWidgets.QWidget]:
+        """Locate the QLabel paired with `field` inside the enclosing QFormLayout."""
+        parent = field.parentWidget()
+        if parent is None:
+            return None
+        layout = parent.layout()
+        if not isinstance(layout, QtWidgets.QFormLayout):
+            return None
+        for r in range(layout.rowCount()):
+            li = layout.itemAt(r, QtWidgets.QFormLayout.ItemRole.FieldRole)
+            if li is not None and li.widget() is field:
+                lr = layout.itemAt(r, QtWidgets.QFormLayout.ItemRole.LabelRole)
+                if lr is not None:
+                    return lr.widget()
+        return None
+
+    def _signal_baseline_window_rows(self) -> List[Tuple[QtWidgets.QWidget, Optional[QtWidgets.QWidget]]]:
+        return [
+            (
+                self._signal_baseline_window_wrap,
+                self._form_row_label_widget(self._signal_baseline_window_wrap),
+            )
+        ]
+
+    def _signal_baseline_exclude_rows(self) -> List[Tuple[QtWidgets.QWidget, Optional[QtWidgets.QWidget]]]:
+        return [
+            (
+                self.combo_signal_baseline_behavior_file,
+                self._form_row_label_widget(self.combo_signal_baseline_behavior_file),
+            ),
+            (
+                self.list_signal_baseline_exclude,
+                self._form_row_label_widget(self.list_signal_baseline_exclude),
+            ),
+            (
+                self.spin_signal_baseline_pad,
+                self._form_row_label_widget(self.spin_signal_baseline_pad),
+            ),
+        ]
+
+    def _refresh_signal_baseline_behavior_lists(self) -> None:
+        """Rebuild the behavior-file combo and the exclude-bouts list from the
+        loaded `_behavior_sources`. Preserves prior selections where possible."""
+        if not hasattr(self, "combo_signal_baseline_behavior_file"):
+            return
+        prev_stem = self.combo_signal_baseline_behavior_file.currentData()
+        ticked_prev: set = set()
+        for i in range(self.list_signal_baseline_exclude.count()):
+            it = self.list_signal_baseline_exclude.item(i)
+            if it.checkState() == QtCore.Qt.CheckState.Checked:
+                ticked_prev.add(it.data(QtCore.Qt.ItemDataRole.UserRole) or it.text())
+
+        self.combo_signal_baseline_behavior_file.blockSignals(True)
+        try:
+            self.combo_signal_baseline_behavior_file.clear()
+            self.combo_signal_baseline_behavior_file.addItem("Auto-match by file id", "")
+            for stem in (self._behavior_sources or {}).keys():
+                self.combo_signal_baseline_behavior_file.addItem(str(stem), str(stem))
+            # Restore selection
+            if isinstance(prev_stem, str) and prev_stem:
+                idx = self.combo_signal_baseline_behavior_file.findData(prev_stem)
+                if idx >= 0:
+                    self.combo_signal_baseline_behavior_file.setCurrentIndex(idx)
+        finally:
+            self.combo_signal_baseline_behavior_file.blockSignals(False)
+
+        self._rebuild_signal_baseline_exclude_list(ticked_prev)
+
+    def _rebuild_signal_baseline_exclude_list(self, ticked_prev: set) -> None:
+        """Populate the exclude-bouts list with behaviors from the currently
+        selected file (or union across all files when 'Auto-match' is chosen)."""
+        self.list_signal_baseline_exclude.blockSignals(True)
+        try:
+            self.list_signal_baseline_exclude.clear()
+            stem = self.combo_signal_baseline_behavior_file.currentData() if hasattr(self, "combo_signal_baseline_behavior_file") else ""
+            sources: Dict[str, Dict[str, Any]] = self._behavior_sources or {}
+            names: set = set()
+            if isinstance(stem, str) and stem and stem in sources:
+                names.update((sources[stem].get("behaviors") or {}).keys())
+            else:
+                # Union across all behavior files.
+                for info in sources.values():
+                    names.update((info.get("behaviors") or {}).keys())
+            for name in sorted(names):
+                item = QtWidgets.QListWidgetItem(str(name))
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, str(name))
+                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    QtCore.Qt.CheckState.Checked if str(name) in ticked_prev else QtCore.Qt.CheckState.Unchecked
+                )
+                self.list_signal_baseline_exclude.addItem(item)
+        finally:
+            self.list_signal_baseline_exclude.blockSignals(False)
+
+    def _refresh_signal_baseline_status(self) -> None:
+        """Live preview of the resulting baseline duration (independent of fit)."""
+        if not hasattr(self, "lbl_signal_baseline_status"):
+            return
+        if not self._processed:
+            self.lbl_signal_baseline_status.setText("Load a recording first.")
+            return
+        proc = self._processed[0]
+        t = np.asarray(getattr(proc, "time", np.array([], float)), float)
+        if t.size < 3:
+            self.lbl_signal_baseline_status.setText("Active trace has no time vector.")
+            return
+        finite = np.isfinite(t)
+        file_id = os.path.splitext(os.path.basename(getattr(proc, "path", "") or ""))[0] or "import"
+        try:
+            mask, source, explanation = self._signal_baseline_mask(t, finite, file_id=file_id)
+        except Exception as exc:
+            self.lbl_signal_baseline_status.setText(f"Baseline preview error: {exc}")
+            return
+        n = int(np.sum(mask))
+        t_finite = t[mask]
+        if t_finite.size >= 2:
+            dur = float(np.nanmax(t_finite) - np.nanmin(t_finite))
+        else:
+            dur = 0.0
+        total_dur = float(np.nanmax(t[finite]) - np.nanmin(t[finite])) if np.sum(finite) >= 2 else 0.0
+        pct = (dur / total_dur * 100.0) if total_dur > 0 else 0.0
+        self.lbl_signal_baseline_status.setText(
+            f"Baseline: {n} samples, {dur:.1f} s ({pct:.1f}% of trace) - {explanation}."
+        )
 
     def _history_snapshot(self) -> Dict[str, object]:
         state = self._collect_settings()
@@ -4665,6 +5051,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_behavior_name.clear()
         if hasattr(self, "combo_behavior_analysis"):
             self.combo_behavior_analysis.clear()
+        # Also refresh the Signal Events baseline-exclusion list, since it pulls
+        # from the same loaded _behavior_sources.
+        try:
+            self._refresh_signal_baseline_behavior_lists()
+            self._refresh_signal_baseline_status()
+        except Exception:
+            pass
         if not self._behavior_sources:
             self._refresh_spatial_columns()
             self._compute_spatial_heatmap()
@@ -5515,7 +5908,43 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 del self._processed[row]
         if not self._autosave_restoring:
             self._project_dirty = True
+
+        # If nothing is left, run the same teardown as Reset so every plot
+        # clears (trace, heatmap, avg, metrics, global, duration, peaks,
+        # behavior plots) and the temporal-modeling cache is dropped.
+        if not self._processed:
+            try:
+                self._clear_cached_analysis_outputs()
+            except Exception:
+                pass
+            try:
+                section = getattr(self, "section_temporal", None)
+                if section is not None:
+                    section._on_clear_cached_fits()
+                    section._glm_result = None
+                    section._flmm_result = None
+                    if hasattr(section, "txt_summary"):
+                        section.txt_summary.clear()
+                    for plot_attr in (
+                        "plot_kernel", "plot_prediction", "plot_residuals",
+                        "plot_importance", "plot_illustration", "plot_coeff",
+                        "plot_group_kernels", "plot_group_importance",
+                    ):
+                        pw = getattr(section, plot_attr, None)
+                        if pw is not None:
+                            try:
+                                pw.clear()
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+            self.lbl_group.setText("(none)")
+
         self._update_file_lists()
+        # _compute_psth handles both the populated and empty-list paths; in the
+        # empty case it now nulls cached matrices and clears the PSTH plots.
+        self._compute_psth()
+        self._update_trace_preview()
         self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
@@ -5896,11 +6325,147 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         return t, y_proc, y_trace
 
+    # ------------------------------------------------------------------
+    # Baseline-prominence helpers
+    # ------------------------------------------------------------------
+
+    def _signal_baseline_mask(
+        self,
+        t: np.ndarray,
+        finite: np.ndarray,
+        file_id: str = "",
+    ) -> Tuple[np.ndarray, str, str]:
+        """Compute the baseline boolean mask for `t` according to the user's
+        Baseline-source choice. Returns (mask, source_label, explanation)."""
+        t = np.asarray(t, float)
+        finite = np.asarray(finite, bool)
+
+        # Default: full recording.
+        source = "whole"
+        if hasattr(self, "combo_signal_baseline_source"):
+            data = self.combo_signal_baseline_source.currentData()
+            if isinstance(data, str) and data:
+                source = data
+
+        if source == "window":
+            start_s = float(self.spin_signal_baseline_start.value())
+            end_s = float(self.spin_signal_baseline_end.value())
+            t_finite = t[finite]
+            if t_finite.size == 0:
+                return finite.copy(), "whole", "no finite samples; fell back to whole trace"
+            t_lo = float(np.nanmin(t_finite))
+            # User-friendly: start/end are interpreted as seconds from the
+            # start of the trace. Setting end=0 means "until the end".
+            abs_start = t_lo + max(0.0, start_s)
+            abs_end = t_lo + max(0.0, end_s) if end_s > 0 else float(np.nanmax(t_finite))
+            if abs_end <= abs_start:
+                return finite.copy(), "whole", f"window {start_s:g}->{end_s:g}s is empty; fell back to whole trace"
+            mask = finite & (t >= abs_start) & (t <= abs_end)
+            n = int(np.sum(mask))
+            if n < 3:
+                return finite.copy(), "whole", "window has too few samples; fell back to whole trace"
+            dur = float(abs_end - abs_start)
+            return mask, "window", f"window [{start_s:g}, {end_s:g}] s -> {n} samples ({dur:.1f} s)"
+
+        if source == "exclude":
+            intervals = self._signal_baseline_exclusion_intervals(file_id)
+            if not intervals:
+                return finite.copy(), "whole", "no behavior bouts ticked; baseline = whole trace"
+            pad = max(0.0, float(self.spin_signal_baseline_pad.value()))
+            mask = finite.copy()
+            total_excluded = 0.0
+            for lo, hi in intervals:
+                lo_p, hi_p = lo - pad, hi + pad
+                in_bout = (t >= lo_p) & (t <= hi_p)
+                mask &= ~in_bout
+                total_excluded += max(0.0, hi_p - lo_p)
+            if int(np.sum(mask)) < 3:
+                return finite.copy(), "whole", "behavior exclusion left too few samples; fell back to whole trace"
+            return mask, "exclude_behaviors", (
+                f"removed {len(intervals)} bout(s) (~{total_excluded:.1f} s with pad {pad:g} s) -> "
+                f"{int(np.sum(mask))} baseline samples"
+            )
+
+        # Whole recording.
+        return finite.copy(), "whole", "baseline = whole recording (MAD-noise fallback)"
+
+    def _signal_baseline_exclusion_intervals(self, file_id: str) -> List[Tuple[float, float]]:
+        """Return [(lo, hi), ...] intervals to remove from baseline, based on
+        the user's tick boxes in `list_signal_baseline_exclude` and the loaded
+        `_behavior_sources`. Handles both binary-state and timestamp behavior
+        files."""
+        intervals: List[Tuple[float, float]] = []
+        if not hasattr(self, "list_signal_baseline_exclude") or self.list_signal_baseline_exclude.count() == 0:
+            return intervals
+        if not getattr(self, "_behavior_sources", None):
+            return intervals
+
+        ticked: List[str] = []
+        for i in range(self.list_signal_baseline_exclude.count()):
+            item = self.list_signal_baseline_exclude.item(i)
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                ticked.append(item.data(QtCore.Qt.ItemDataRole.UserRole) or item.text())
+        if not ticked:
+            return intervals
+
+        # Resolve which behavior source to use.
+        info: Optional[Dict[str, Any]] = None
+        if hasattr(self, "combo_signal_baseline_behavior_file"):
+            stem = self.combo_signal_baseline_behavior_file.currentData()
+            if isinstance(stem, str) and stem and stem in self._behavior_sources:
+                info = self._behavior_sources[stem]
+        if info is None:
+            # Auto-match by file_id stem.
+            key = str(file_id or "").strip().lower()
+            for stem, val in self._behavior_sources.items():
+                if str(stem).strip().lower() in key or key in str(stem).strip().lower():
+                    info = val
+                    break
+            if info is None and self._behavior_sources:
+                info = next(iter(self._behavior_sources.values()))
+        if not isinstance(info, dict):
+            return intervals
+
+        kind = str(info.get("kind", _BEHAVIOR_PARSE_BINARY))
+        behaviors = info.get("behaviors") or {}
+        beh_time = np.asarray(info.get("time", np.array([], float)), float)
+
+        for name in ticked:
+            values = behaviors.get(name)
+            if values is None:
+                continue
+            if kind == _BEHAVIOR_PARSE_TIMESTAMPS:
+                # Timestamps style: each entry is a single event time.
+                arr = np.asarray(values, float)
+                arr = arr[np.isfinite(arr)]
+                for ts in arr:
+                    intervals.append((float(ts), float(ts)))
+                continue
+            # Binary states style: extract on/off intervals.
+            x = np.asarray(values, float)
+            if beh_time.size != x.size or beh_time.size < 2:
+                continue
+            b = x > 0.5
+            rising = np.where((~b[:-1]) & (b[1:]))[0] + 1
+            falling = np.where(b[:-1] & (~b[1:]))[0] + 1
+            if b.size and bool(b[0]):
+                rising = np.concatenate([[0], rising])
+            if b.size and bool(b[-1]):
+                falling = np.concatenate([falling, [b.size]])
+            n_pairs = min(rising.size, falling.size)
+            for i in range(n_pairs):
+                lo_i = int(rising[i])
+                hi_i = int(min(falling[i], beh_time.size - 1))
+                if 0 <= lo_i <= hi_i < beh_time.size:
+                    intervals.append((float(beh_time[lo_i]), float(beh_time[hi_i])))
+        return intervals
+
     def _signal_baseline_prominence_stats(
         self,
         t: np.ndarray,
         y: np.ndarray,
         min_prominence: float,
+        file_id: str = "",
     ) -> Dict[str, float]:
         t = np.asarray(t, float)
         y = np.asarray(y, float)
@@ -5913,14 +6478,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 "baseline_duration_s": 0.0,
                 "scale_source": "unavailable",
                 "mad_noise_sigma": np.nan,
+                "baseline_mask_source": "unavailable",
+                "baseline_explanation": "trace has no finite samples",
             }
 
-        t_finite = t[finite]
-        t0 = float(np.nanmin(t_finite))
-        baseline_window = max(0.1, float(self.spin_peak_baseline_window.value()))
-        keep = finite & (t <= t0 + baseline_window)
-        if np.sum(keep) < 3:
+        keep, mask_source, explanation = self._signal_baseline_mask(t, finite, file_id=file_id)
+        if int(np.sum(keep)) < 3:
             keep = finite
+            mask_source = "whole"
+            explanation = "fell back to whole recording"
 
         baseline = y[keep]
         baseline_median = float(np.nanmedian(baseline)) if baseline.size else np.nan
@@ -5932,6 +6498,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 "baseline_duration_s": 0.0,
                 "scale_source": "unavailable",
                 "mad_noise_sigma": np.nan,
+                "baseline_mask_source": mask_source,
+                "baseline_explanation": explanation,
             }
 
         centered_baseline = np.asarray(baseline, float) - baseline_median
@@ -5965,6 +6533,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "baseline_duration_s": duration,
             "scale_source": scale_source,
             "mad_noise_sigma": mad_sigma,
+            "baseline_mask_source": mask_source,
+            "baseline_explanation": explanation,
+            "baseline_n_samples": float(int(np.sum(keep))),
         }
 
     @staticmethod
@@ -6201,7 +6772,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             p_norm_scales = np.full(peaks.size, np.nan, float)
 
             if normalize_amplitude:
-                norm_stats = self._signal_baseline_prominence_stats(t, y, prominence)
+                norm_stats = self._signal_baseline_prominence_stats(t, y, prominence, file_id=str(file_id))
                 normalization_by_file[str(file_id)] = norm_stats
                 scale = float(norm_stats.get("scale", np.nan))
                 baseline_median = float(norm_stats.get("baseline_median", np.nan))
