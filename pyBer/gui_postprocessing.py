@@ -6860,11 +6860,45 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._queue_settings_save()
         if not self._processed:
             self.statusUpdate.emit("No processed data loaded.", 5000)
+            # Forget cached PSTH matrices so a stale heatmap doesn't reappear.
+            self._last_mat = None
+            self._last_tvec = None
             self._last_global_metrics = None
             self._last_events = np.array([], float)
             self._last_event_rows = []
+            self._per_file_mats = {}
+            self._per_file_labels = {} if hasattr(self, "_per_file_labels") else {}
+            self._group_mat = None
+            self._group_tvec = None
+            self._group_labels = []
+            self._all_file_ids = []
+            # Clear every PSTH-driven plot so the panel looks like a fresh launch.
+            for pw in (
+                getattr(self, "plot_heat", None),
+                getattr(self, "plot_avg", None),
+                getattr(self, "plot_metrics", None),
+                getattr(self, "plot_global", None),
+                getattr(self, "plot_dur", None),
+            ):
+                if pw is not None:
+                    try:
+                        pw.clear()
+                    except Exception:
+                        pass
             if hasattr(self, "lbl_global_metrics"):
                 self.lbl_global_metrics.setText("Global metrics: -")
+            if hasattr(self, "lbl_plot_file"):
+                try:
+                    self.lbl_plot_file.setText("File: (none)")
+                except Exception:
+                    pass
+            if hasattr(self, "combo_individual_file"):
+                try:
+                    self.combo_individual_file.blockSignals(True)
+                    self.combo_individual_file.clear()
+                    self.combo_individual_file.blockSignals(False)
+                except Exception:
+                    pass
             self._update_status_strip()
             self._sync_temporal_modeling_context()
             return
@@ -8455,8 +8489,39 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.lbl_beh.setText("(none)")
             self.lbl_behavior_msg.setText("")
             self.lbl_signal_msg.setText("")
-            self.lbl_status.setText("")
+            # Some legacy code expected a self.lbl_status that was never created
+            # in the modern UI; clear it defensively if a host adds one later.
+            _legacy_status = getattr(self, "lbl_status", None)
+            if _legacy_status is not None:
+                try:
+                    _legacy_status.setText("")
+                except Exception:
+                    pass
             self.tab_sources.setCurrentIndex(0)
+            # Drop cached behavior + signal-event analyses too.
+            self.last_signal_events = None
+            self.last_behavior_analysis = None
+            # Wipe cached temporal-modeling fits and group aggregates.
+            try:
+                if hasattr(self, "section_temporal"):
+                    self.section_temporal._on_clear_cached_fits()
+                    self.section_temporal._glm_result = None
+                    self.section_temporal._flmm_result = None
+                    if hasattr(self.section_temporal, "txt_summary"):
+                        self.section_temporal.txt_summary.clear()
+                    for plot_attr in (
+                        "plot_kernel", "plot_prediction", "plot_residuals",
+                        "plot_importance", "plot_illustration", "plot_coeff",
+                        "plot_group_kernels", "plot_group_importance",
+                    ):
+                        pw = getattr(self.section_temporal, plot_attr, None)
+                        if pw is not None:
+                            try:
+                                pw.clear()
+                            except Exception:
+                                pass
+            except Exception:
+                pass
             self._update_file_lists()
             self._refresh_behavior_list()
             self._update_trace_preview()

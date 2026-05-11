@@ -492,7 +492,7 @@ class CsvChannelMappingDialog(QtWidgets.QDialog):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Pyber - Fiber Photometry")
+        self.setWindowTitle("Pyber - Fiber Photometry Analysis")
         try:
             icon_path = _pyber_icon_path()
             if os.path.isfile(icon_path):
