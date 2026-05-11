@@ -276,6 +276,27 @@ def _qc_tier_for(score: float) -> Tuple[str, str]:
     return _QC_TIERS[-1][1], _QC_TIERS[-1][2]
 
 
+def _qc_float(qc: Dict[str, object], key: str, default: float = float("nan")) -> float:
+    try:
+        value = float(qc.get(key, default))
+    except Exception:
+        return default
+    return value if np.isfinite(value) else default
+
+
+def _qc_robust_sigma(values: np.ndarray) -> float:
+    arr = np.asarray(values, float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size < 3:
+        return float("nan")
+    med = float(np.nanmedian(arr))
+    mad = float(np.nanmedian(np.abs(arr - med)))
+    if np.isfinite(mad) and mad > 1e-12:
+        return float(1.4826 * mad)
+    std = float(np.nanstd(arr))
+    return std if np.isfinite(std) else float("nan")
+
+
 def _evaluate_qc(qc: Dict[str, object]) -> Tuple[float, str, str, List[Tuple[str, float, float, str]]]:
     """Score the quality of a fiber-photometry recording from its QC metrics.
 
@@ -283,98 +304,217 @@ def _evaluate_qc(qc: Dict[str, object]) -> Tuple[float, str, str, List[Tuple[str
     ``sub_metrics`` is a list of ``(name, score, weight, explanation)`` tuples
     that sum (weight) to 1.0.
 
-    Scoring is heuristic and tuned for GCaMP-style recordings with an
-    isosbestic 405 reference channel. Each sub-score is on [0, 100].
+    The verdict is intentionally not dominated by z-scored output statistics:
+    z-scoring normalizes away the absolute noise floor, so a very noisy trace
+    can look deceptively well behaved. The primary gates use raw dF/F noise,
+    sample-to-sample jitter, artifact burden, and usable signal-to-noise.
     """
-    art_frac_pct = float(qc.get("art_frac", 0.0)) * 100.0
-    r_abs = abs(float(qc.get("r", 0.0))) if np.isfinite(float(qc.get("r", 0.0))) else 1.0
-    frac_gt3 = float(qc.get("frac_gt3", 0.0))
-    frac_gt5 = float(qc.get("frac_gt5", 0.0))
-    r_roll_std = float(qc.get("r_roll_std", 0.0))
-    if not np.isfinite(r_roll_std):
-        r_roll_std = 0.0
-    kurt = float(qc.get("kurt", 0.0))
-    if not np.isfinite(kurt):
-        kurt = 0.0
-    bleach_pct = float(qc.get("bleach_pct", 0.0))
-    if not np.isfinite(bleach_pct):
-        bleach_pct = 0.0
-    median = abs(float(qc.get("q50", 0.0)))
-    if not np.isfinite(median):
-        median = 0.0
+    art_frac_pct = _qc_float(qc, "art_frac", 0.0) * 100.0
+    has_reference = bool(qc.get("has_reference", True))
+    hf_noise_pct = _qc_float(qc, "hf_noise_pct", float("nan"))
+    ref_hf_noise_pct = _qc_float(qc, "ref_hf_noise_pct", float("nan"))
+    jitter_ratio = _qc_float(qc, "jitter_ratio", float("nan"))
+    usable_snr = _qc_float(qc, "usable_snr", float("nan"))
+    frac_gt3 = _qc_float(qc, "frac_gt3", 0.0)
+    frac_gt5 = _qc_float(qc, "frac_gt5", 0.0)
+    r_abs = abs(_qc_float(qc, "r", 1.0))
+    r_roll_std = _qc_float(qc, "r_roll_std", 0.0)
+    bleach_pct = _qc_float(qc, "bleach_pct", 0.0)
+    median = abs(_qc_float(qc, "q50", 0.0))
+    kurt = _qc_float(qc, "kurt", 0.0)
 
     metrics: List[Tuple[str, float, float, str]] = []
 
-    # 1) Artifact fraction (weight 0.25)
+    # 1) Artifact fraction. This is a gate, not just a small cosmetic penalty.
     if art_frac_pct < 1.0:
-        s = 100; why = f"{art_frac_pct:.2f}% of samples flagged - very clean recording."
+        s = 100; why = f"{art_frac_pct:.2f}% flagged samples - very clean recording."
     elif art_frac_pct < 3.0:
-        s = 85;  why = f"{art_frac_pct:.2f}% artifacts - acceptable noise level."
-    elif art_frac_pct < 7.0:
-        s = 60;  why = f"{art_frac_pct:.2f}% artifacts - re-check detection thresholds."
+        s = 82;  why = f"{art_frac_pct:.2f}% artifacts - acceptable but worth checking."
+    elif art_frac_pct < 5.0:
+        s = 65;  why = f"{art_frac_pct:.2f}% artifacts - moderate contamination."
+    elif art_frac_pct < 10.0:
+        s = 42;  why = f"{art_frac_pct:.2f}% artifacts - cannot be called excellent."
     elif art_frac_pct < 15.0:
-        s = 35;  why = f"{art_frac_pct:.2f}% artifacts - the trace is heavily disturbed."
+        s = 28;  why = f"{art_frac_pct:.2f}% artifacts - trace is heavily disturbed."
     else:
         s = 12;  why = f"{art_frac_pct:.2f}% artifacts - recording is unusable as-is."
-    metrics.append(("Artifact load", float(s), 0.25, why))
+    artifact_score = float(s)
+    metrics.append(("Artifact load", artifact_score, 0.18, why))
 
-    # 2) Reference correlation - motion contamination (weight 0.25)
-    if r_abs < 0.20:
-        s = 100; why = f"|r| = {r_abs:.2f} - signal is independent of the reference."
-    elif r_abs < 0.40:
-        s = 85;  why = f"|r| = {r_abs:.2f} - low motion bleed; standard correction will work."
-    elif r_abs < 0.60:
-        s = 65;  why = f"|r| = {r_abs:.2f} - moderate motion bleed; correct before analysis."
-    elif r_abs < 0.80:
-        s = 35;  why = f"|r| = {r_abs:.2f} - heavy motion contamination."
+    # 2) Noise floor in raw dF/F after removing the slow biological envelope.
+    if not np.isfinite(hf_noise_pct):
+        s = 35; why = "Signal noise floor unavailable - inspect raw trace manually."
+    elif hf_noise_pct < 0.08:
+        s = 96; why = f"signal HF noise={hf_noise_pct:.3g}% dF/F - very quiet trace."
+    elif hf_noise_pct < 0.20:
+        s = 82; why = f"signal HF noise={hf_noise_pct:.3g}% dF/F - low noise."
+    elif hf_noise_pct < 0.45:
+        s = 62; why = f"signal HF noise={hf_noise_pct:.3g}% dF/F - usable, but noisy."
+    elif hf_noise_pct < 0.90:
+        s = 38; why = f"signal HF noise={hf_noise_pct:.3g}% dF/F - high noise floor."
     else:
-        s = 12;  why = f"|r| = {r_abs:.2f} - signal dominated by motion artifact."
-    metrics.append(("Motion bleed", float(s), 0.25, why))
+        s = 16; why = f"signal HF noise={hf_noise_pct:.3g}% dF/F - signal likely dominated by noise."
+    noise_score = float(s)
+    metrics.append(("Signal noise floor", noise_score, 0.20, why))
 
-    # 3) Transient activity from heavy tails (weight 0.18)
+    # 3) Isobestic/reference noise. A stable isobestic channel should have low
+    # high-frequency fluctuation; a noisy reference makes motion correction and
+    # quality interpretation less reliable even when the corrected signal looks ok.
+    if has_reference:
+        if not np.isfinite(ref_hf_noise_pct):
+            s = 35; why = "Isobestic noise floor unavailable - inspect reference trace manually."
+        elif ref_hf_noise_pct < 0.08:
+            s = 96; why = f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - very stable reference."
+        elif ref_hf_noise_pct < 0.20:
+            s = 82; why = f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - low reference noise."
+        elif ref_hf_noise_pct < 0.45:
+            s = 62; why = f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - moderate reference noise."
+        elif ref_hf_noise_pct < 0.90:
+            s = 35; why = f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - noisy reference channel."
+        else:
+            s = 15; why = f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - reference is unstable."
+        ref_noise_score = float(s)
+        metrics.append(("Isobestic noise", ref_noise_score, 0.12, why))
+
+    # 4) Sample-to-sample roughness. This catches traces that z-score well but
+    # are visually dominated by fast jitter and spikes.
+    if not np.isfinite(jitter_ratio):
+        s = 45; why = "Jitter ratio unavailable - check the trace manually."
+    elif jitter_ratio < 0.18:
+        s = 96; why = f"jitter/signal={jitter_ratio:.2f} - smooth recording."
+    elif jitter_ratio < 0.35:
+        s = 82; why = f"jitter/signal={jitter_ratio:.2f} - minor high-frequency roughness."
+    elif jitter_ratio < 0.60:
+        s = 58; why = f"jitter/signal={jitter_ratio:.2f} - visible roughness."
+    elif jitter_ratio < 1.0:
+        s = 35; why = f"jitter/signal={jitter_ratio:.2f} - rough trace, weak confidence."
+    else:
+        s = 15; why = f"jitter/signal={jitter_ratio:.2f} - sample noise overwhelms dynamics."
+    jitter_score = float(s)
+    metrics.append(("Trace roughness", jitter_score, 0.15, why))
+
+    # 5) Usable signal-to-noise from the slow dF/F envelope versus HF residuals.
+    if not np.isfinite(usable_snr):
+        s = 35; why = "Usable SNR unavailable - likely too short or invalid trace."
+    elif usable_snr >= 8.0:
+        s = 96; why = f"SNR~{usable_snr:.2f} - strong dynamics above noise."
+    elif usable_snr >= 4.0:
+        s = 82; why = f"SNR~{usable_snr:.2f} - good separation from noise."
+    elif usable_snr >= 2.0:
+        s = 60; why = f"SNR~{usable_snr:.2f} - usable but not robust."
+    elif usable_snr >= 1.0:
+        s = 38; why = f"SNR~{usable_snr:.2f} - weak biological signal."
+    else:
+        s = 18; why = f"SNR~{usable_snr:.2f} - dynamics are near the noise floor."
+    snr_score = float(s)
+    metrics.append(("Usable SNR", snr_score, 0.17, why))
+
+    # 6) Reference correlation remains useful for motion bleed, but low r alone
+    # does not make a recording good. Skip it for signal-only recordings.
+    if has_reference:
+        if r_abs < 0.25:
+            s = 90; why = f"|r|={r_abs:.2f} - low reference bleed."
+        elif r_abs < 0.45:
+            s = 78; why = f"|r|={r_abs:.2f} - mild motion/reference coupling."
+        elif r_abs < 0.65:
+            s = 55; why = f"|r|={r_abs:.2f} - moderate motion contamination."
+        elif r_abs < 0.80:
+            s = 32; why = f"|r|={r_abs:.2f} - heavy motion contamination."
+        else:
+            s = 12; why = f"|r|={r_abs:.2f} - signal dominated by reference movement."
+        if r_roll_std > 0.35:
+            s = min(s, 35)
+            why += f" Rolling r is unstable (std={r_roll_std:.2f})."
+        elif r_roll_std > 0.20:
+            s = min(s, 60)
+            why += f" Rolling r varies over time (std={r_roll_std:.2f})."
+        metrics.append(("Motion bleed", float(s), 0.08, why))
+
+    # 7) Output distribution is now a supporting diagnostic only.
     if frac_gt5 > 1.0:
-        s = 30; why = f"{frac_gt5:.2f}% |Z|>5 - extreme outliers suggest artifact residue."
+        s = 28; why = f"{frac_gt5:.2f}% |Z|>5 - extreme outliers remain after correction."
     elif frac_gt3 > 10.0:
-        s = 55; why = f"{frac_gt3:.2f}% |Z|>3 - very heavy tails; re-check artifact masking."
+        s = 42; why = f"{frac_gt3:.2f}% |Z|>3 - very heavy corrected tails."
     elif frac_gt3 > 0.5:
-        s = 95; why = f"{frac_gt3:.2f}% |Z|>3 - healthy transient activity, few outliers."
+        s = 78; why = f"{frac_gt3:.2f}% |Z|>3 - corrected trace has transient-like tails."
     else:
-        s = 65; why = f"{frac_gt3:.2f}% |Z|>3 - very flat distribution; expression may be low."
-    metrics.append(("Transients", float(s), 0.18, why))
+        s = 55; why = f"{frac_gt3:.2f}% |Z|>3 - flat corrected distribution; expression may be low."
+    if median > 0.35 or abs(kurt) > 10.0:
+        s = min(s, 45)
+        why += f" Distribution is biased/heavy-tailed (median={median:.2f}, kurt={kurt:+.1f})."
+    metrics.append(("Corrected output", float(s), 0.05, why))
 
-    # 4) Rolling-correlation stability (weight 0.15)
-    if r_roll_std < 0.10:
-        s = 95; why = f"rolling-r std = {r_roll_std:.2f} - motion artifact is stationary."
-    elif r_roll_std < 0.20:
-        s = 80; why = f"rolling-r std = {r_roll_std:.2f} - mild variability over time."
-    elif r_roll_std < 0.35:
-        s = 55; why = f"rolling-r std = {r_roll_std:.2f} - motion bursts at specific times."
-    else:
-        s = 30; why = f"rolling-r std = {r_roll_std:.2f} - intermittent disturbances, unstable r."
-    metrics.append(("Temporal stability", float(s), 0.15, why))
-
-    # 5) Distribution shape - median offset + kurtosis (weight 0.10)
-    if median < 0.10 and abs(kurt) < 4.0:
-        s = 95; why = f"median = {median:.2f}, excess kurt = {kurt:+.1f} - well-centered distribution."
-    elif median < 0.30 and abs(kurt) < 10.0:
-        s = 70; why = f"median = {median:.2f}, excess kurt = {kurt:+.1f} - slight bias / heavier tails."
-    else:
-        s = 40; why = f"median = {median:.2f}, excess kurt = {kurt:+.1f} - skewed or very heavy tails."
-    metrics.append(("Distribution shape", float(s), 0.10, why))
-
-    # 6) Photobleach over the recording (weight 0.07)
+    # 8) Photobleach over the recording.
     bleach_abs = abs(bleach_pct)
     if bleach_abs < 5.0:
-        s = 95; why = f"{bleach_pct:+.1f}% baseline drift - sensor stable across the recording."
+        s = 94; why = f"{bleach_pct:+.1f}% baseline drift - stable fluorescence."
     elif bleach_abs < 15.0:
-        s = 75; why = f"{bleach_pct:+.1f}% baseline drift - moderate photobleach."
+        s = 74; why = f"{bleach_pct:+.1f}% baseline drift - moderate photobleach."
     elif bleach_abs < 30.0:
-        s = 50; why = f"{bleach_pct:+.1f}% baseline drift - substantial bleach over time."
+        s = 48; why = f"{bleach_pct:+.1f}% baseline drift - substantial drift."
     else:
-        s = 25; why = f"{bleach_pct:+.1f}% baseline drift - severe bleach; signal may be saturating."
-    metrics.append(("Photobleach", float(s), 0.07, why))
+        s = 22; why = f"{bleach_pct:+.1f}% baseline drift - severe drift/saturation risk."
+    metrics.append(("Photobleach", float(s), 0.05, why))
 
-    overall = sum(score * weight for _, score, weight, _ in metrics)
+    weight_sum = sum(weight for _name, _score, weight, _why in metrics if weight > 0.0)
+    if weight_sum > 0:
+        weighted_score = sum(score * weight for _name, score, weight, _why in metrics if weight > 0.0) / weight_sum
+        metrics = [
+            (name, score, weight / weight_sum if weight > 0.0 else weight, why)
+            for name, score, weight, why in metrics
+        ]
+    else:
+        weighted_score = 0.0
+    overall = weighted_score
+
+    caps: List[Tuple[float, str]] = []
+    if art_frac_pct >= 20.0:
+        caps.append((25.0, f"{art_frac_pct:.1f}% artifacts"))
+    elif art_frac_pct >= 10.0:
+        caps.append((38.0, f"{art_frac_pct:.1f}% artifacts"))
+    elif art_frac_pct >= 5.0:
+        caps.append((55.0, f"{art_frac_pct:.1f}% artifacts"))
+    elif art_frac_pct >= 3.0:
+        caps.append((70.0, f"{art_frac_pct:.1f}% artifacts"))
+
+    if np.isfinite(hf_noise_pct):
+        if hf_noise_pct >= 1.25:
+            caps.append((42.0, f"signal HF noise {hf_noise_pct:.2g}% dF/F"))
+        elif hf_noise_pct >= 0.70:
+            caps.append((55.0, f"signal HF noise {hf_noise_pct:.2g}% dF/F"))
+    if has_reference and np.isfinite(ref_hf_noise_pct):
+        if ref_hf_noise_pct >= 1.25:
+            caps.append((42.0, f"isobestic HF noise {ref_hf_noise_pct:.2g}% dF/F"))
+        elif ref_hf_noise_pct >= 0.70:
+            caps.append((55.0, f"isobestic HF noise {ref_hf_noise_pct:.2g}% dF/F"))
+        elif ref_hf_noise_pct >= 0.45:
+            caps.append((70.0, f"isobestic HF noise {ref_hf_noise_pct:.2g}% dF/F"))
+    if np.isfinite(jitter_ratio):
+        if jitter_ratio >= 1.0:
+            caps.append((45.0, f"jitter/signal {jitter_ratio:.2f}"))
+        elif jitter_ratio >= 0.70:
+            caps.append((58.0, f"jitter/signal {jitter_ratio:.2f}"))
+    if np.isfinite(usable_snr):
+        if usable_snr < 1.0:
+            caps.append((50.0, f"SNR {usable_snr:.2f}"))
+        elif usable_snr < 1.5:
+            caps.append((62.0, f"SNR {usable_snr:.2f}"))
+
+    if caps:
+        cap_score = min(score for score, _reason in caps)
+        cap_reasons = [reason for score, reason in caps if abs(score - cap_score) < 1e-9]
+        cap_reason = "; ".join(cap_reasons)
+        if overall > cap_score:
+            metrics.append((
+                "Final score cap",
+                cap_score,
+                0.0,
+                f"Weighted score before cap: {weighted_score:.0f}/100. "
+                f"Final score capped at {cap_score:.0f}/100 by {cap_reason}.",
+            ))
+            overall = cap_score
+
+    overall = float(max(0.0, min(100.0, overall)))
     tier_name, tier_color = _qc_tier_for(overall)
     return overall, tier_name, tier_color, metrics
 
@@ -428,12 +568,34 @@ class QualityVerdictCard(QtWidgets.QFrame):
         head_lay.addWidget(score_lbl, 0, QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignRight)
         outer.addWidget(head)
 
+        cap_metrics = [m for m in metrics if m[2] <= 0.0]
+        regular_metrics = [m for m in metrics if m[2] > 0.0]
+        for name, sub_score, _weight, why in cap_metrics:
+            cap_color = _qc_tier_for(sub_score)[1]
+            note = QtWidgets.QFrame()
+            note.setStyleSheet(
+                f"QFrame {{ background: {cap_color}18; border: 1px solid {cap_color};"
+                " border-radius: 8px; }}"
+                "QLabel { background: transparent; }"
+            )
+            note_lay = QtWidgets.QVBoxLayout(note)
+            note_lay.setContentsMargins(10, 8, 10, 8)
+            note_lay.setSpacing(3)
+            title = QtWidgets.QLabel(f"{name}: {int(round(sub_score))}/100")
+            title.setStyleSheet(f"color: {cap_color}; font-size: 10pt; font-weight: 800;")
+            note_lay.addWidget(title)
+            detail = QtWidgets.QLabel(why)
+            detail.setWordWrap(True)
+            detail.setStyleSheet("color: #d8deea; font-size: 8.4pt;")
+            note_lay.addWidget(detail)
+            outer.addWidget(note)
+
         # Per-metric breakdown
-        breakdown_title = QtWidgets.QLabel("Why")
+        breakdown_title = QtWidgets.QLabel("Score drivers")
         breakdown_title.setStyleSheet("color: #aab4c5; font-size: 8.7pt; letter-spacing: 0.5px; text-transform: uppercase; padding-top: 2px;")
         outer.addWidget(breakdown_title)
 
-        for name, sub_score, weight, why in metrics:
+        for name, sub_score, weight, why in regular_metrics:
             metric_row = QtWidgets.QFrame()
             metric_row.setStyleSheet("QFrame { background: transparent; border: 0; }")
             mlay = QtWidgets.QVBoxLayout(metric_row)
@@ -442,7 +604,8 @@ class QualityVerdictCard(QtWidgets.QFrame):
             head_row = QtWidgets.QHBoxLayout()
             head_row.setContentsMargins(0, 0, 0, 0)
             head_row.setSpacing(6)
-            name_lbl = QtWidgets.QLabel(f"{name}  <span style='color:#6f7a8e; font-size:7.5pt;'>w={weight:.0%}</span>")
+            weight_html = f"  <span style='color:#6f7a8e; font-size:7.5pt;'>w={weight:.0%}</span>" if weight > 0 else ""
+            name_lbl = QtWidgets.QLabel(f"{name}{weight_html}")
             name_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
             name_lbl.setStyleSheet("color: #e9ecf3; font-size: 9.2pt; font-weight: 700;")
             head_row.addWidget(name_lbl, 1)
@@ -475,23 +638,69 @@ class QualityVerdictCard(QtWidgets.QFrame):
 class QcDialog(QtWidgets.QDialog):
     def __init__(self, qc: Dict[str, object], parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Quality Check (z-score)")
+        self.setWindowTitle("Quality Check (noise-aware)")
         self.resize(1280, 900)
         self._qc = qc
+        self._navigation_delta = 0
         layout = QtWidgets.QVBoxLayout(self)
 
-        self.plot_z = pg.PlotWidget(title="z_sig / z_ref")
-        self.plot_corr = pg.PlotWidget(title="Correlation (z_ref vs z_sig)")
-        self.plot_zdist = pg.PlotWidget(title="Z distribution")
-        self.plot_roll = pg.PlotWidget(title="Rolling corr(z_ref, z_sig)")
-        for w in (self.plot_z, self.plot_corr, self.plot_zdist, self.plot_roll):
+        self.plot_z = pg.PlotWidget(title="dF/F signal and reference")
+        self.plot_noise = pg.PlotWidget(title="Signal and isobestic high-frequency residuals")
+        self.plot_corr = pg.PlotWidget(title="Motion/reference coupling (dF/F)")
+        self.plot_zdist = pg.PlotWidget(title="Corrected output distribution (z-score, secondary)")
+        self.plot_roll = pg.PlotWidget(title="Rolling motion coupling (dF/F r)")
+        for w in (self.plot_z, self.plot_noise, self.plot_corr, self.plot_zdist, self.plot_roll):
             w.showGrid(x=True, y=True, alpha=0.25)
             w.showAxis("top", False)
             w.showAxis("right", False)
+            for axis_name in ("left", "bottom"):
+                axis = w.getAxis(axis_name)
+                try:
+                    axis.enableAutoSIPrefix(False)
+                except Exception:
+                    pass
+        self.plot_z.setMinimumHeight(220)
+        for w in (self.plot_noise, self.plot_corr, self.plot_zdist, self.plot_roll):
+            w.setMinimumHeight(155)
 
-        self.plot_z.plot(qc["t"], qc["z_sig"], pen=pg.mkPen((90, 190, 255), width=1.0), name="z_sig")
-        self.plot_z.plot(qc["t"], qc["z_ref"], pen=pg.mkPen((240, 180, 80), width=1.0), name="z_ref")
-        self.plot_z.setLabel("left", "z units")
+        has_reference = bool(qc.get("has_reference", True))
+        t = np.asarray(qc["t"], float)
+        dff_sig = np.asarray(qc.get("dff_sig_pct", qc["z_sig"]), float)
+        dff_ref = np.asarray(qc.get("dff_ref_pct", qc["z_ref"]), float)
+        dff_env = np.asarray(qc.get("dff_envelope_pct", dff_sig), float)
+        self.plot_z.addLegend(offset=(8, 8))
+        self.plot_z.plot(t, dff_sig, pen=pg.mkPen((90, 190, 255), width=1.0), name="signal")
+        if has_reference:
+            self.plot_z.plot(t, dff_ref, pen=pg.mkPen((240, 180, 80, 150), width=0.9), name="isobestic")
+        self.plot_z.plot(t, dff_env, pen=pg.mkPen((120, 245, 210), width=1.5), name="slow envelope")
+        self.plot_z.setLabel("left", "dF/F (%)")
+        self.plot_z.setLabel("bottom", "Time (s)")
+
+        hf_sig = np.asarray(qc.get("hf_sig_pct", np.zeros_like(t)), float)
+        hf_ref = np.asarray(qc.get("hf_ref_pct", np.zeros_like(t)), float)
+        self.plot_noise.plot(t, hf_sig, pen=pg.mkPen((90, 190, 255), width=0.9), name="signal residual")
+        if has_reference:
+            self.plot_noise.plot(t, hf_ref, pen=pg.mkPen((240, 180, 80, 110), width=0.7), name="isobestic residual")
+        noise_sigma = float(qc.get("hf_noise_pct", np.nan))
+        ref_noise_sigma = float(qc.get("ref_hf_noise_pct", np.nan))
+        if np.isfinite(noise_sigma):
+            self.plot_noise.addItem(pg.InfiniteLine(pos=noise_sigma, angle=0, pen=pg.mkPen((220, 220, 220), width=0.8, style=QtCore.Qt.PenStyle.DashLine)))
+            self.plot_noise.addItem(pg.InfiniteLine(pos=-noise_sigma, angle=0, pen=pg.mkPen((220, 220, 220), width=0.8, style=QtCore.Qt.PenStyle.DashLine)))
+            if has_reference and np.isfinite(ref_noise_sigma):
+                ref_pen = pg.mkPen((240, 180, 80), width=0.7, style=QtCore.Qt.PenStyle.DotLine)
+                self.plot_noise.addItem(pg.InfiniteLine(pos=ref_noise_sigma, angle=0, pen=ref_pen))
+                self.plot_noise.addItem(pg.InfiniteLine(pos=-ref_noise_sigma, angle=0, pen=ref_pen))
+            jitter_ratio = float(qc.get("jitter_ratio", np.nan))
+            note = f"signal noise={noise_sigma:.3g}% dF/F"
+            if has_reference and np.isfinite(ref_noise_sigma):
+                note += f"  isobestic={ref_noise_sigma:.3g}%"
+            elif not has_reference:
+                note += "  no isobestic channel"
+            if np.isfinite(jitter_ratio):
+                note += f"  jitter/signal={jitter_ratio:.2f}"
+            self._add_plot_text_topleft(self.plot_noise, note)
+        self.plot_noise.setLabel("left", "Residual (% dF/F)")
+        self.plot_noise.setLabel("bottom", "Time (s)")
 
         # Z distribution
         Zf = qc["Zf"]
@@ -511,37 +720,65 @@ class QcDialog(QtWidgets.QDialog):
             if np.isfinite(q50) and np.isfinite(iqr):
                 self._add_plot_text_topleft(self.plot_zdist, f"median={q50:.3g}  IQR={iqr:.3g}")
         self.plot_zdist.setLabel("left", "count")
+        self.plot_zdist.setLabel("bottom", "Corrected output (z)")
 
-        # Correlation scatter + fit
-        z_ref = qc["z_ref"]
-        z_sig = qc["z_sig"]
-        m = np.isfinite(z_ref) & np.isfinite(z_sig)
-        if np.sum(m) >= 10:
-            self.plot_corr.plot(z_ref[m], z_sig[m], pen=None, symbol="o", symbolSize=4, symbolBrush=(120, 180, 220, 80))
-            a, b = np.polyfit(z_ref[m], z_sig[m], 1)
-            xs = np.linspace(np.nanmin(z_ref[m]), np.nanmax(z_ref[m]), 200)
-            self.plot_corr.plot(xs, a * xs + b, pen=pg.mkPen((220, 120, 120), width=1.2))
-            r = float(qc.get("r", np.nan))
-            r2 = r * r if np.isfinite(r) else np.nan
-            if np.isfinite(r):
-                self._add_plot_text_topleft(self.plot_corr, f"r={r:.3g}  r2={r2:.3g}")
-        self.plot_corr.setLabel("left", "z_sig")
-        self.plot_corr.setLabel("bottom", "z_ref")
+        # Correlation scatter + fit, displayed in dF/F units so amplitude and
+        # reference coupling are interpretable without z-score scaling.
+        if has_reference:
+            z_ref = dff_ref
+            z_sig = dff_sig
+            m = np.isfinite(z_ref) & np.isfinite(z_sig)
+            if np.sum(m) >= 10:
+                idx = np.flatnonzero(m)
+                if idx.size > 12000:
+                    step = int(np.ceil(idx.size / 12000))
+                    idx = idx[::step]
+                self.plot_corr.plot(z_ref[idx], z_sig[idx], pen=None, symbol="o", symbolSize=3, symbolBrush=(120, 180, 220, 70))
+                a, b = np.polyfit(z_ref[m], z_sig[m], 1)
+                xs = np.linspace(np.nanmin(z_ref[m]), np.nanmax(z_ref[m]), 200)
+                self.plot_corr.plot(xs, a * xs + b, pen=pg.mkPen((220, 120, 120), width=1.2))
+                r = float(qc.get("r", np.nan))
+                r2 = r * r if np.isfinite(r) else np.nan
+                if np.isfinite(r):
+                    self._add_plot_text_topleft(self.plot_corr, f"r={r:.3g}  r2={r2:.3g}")
+            self.plot_corr.setLabel("left", "Signal dF/F (%)")
+            self.plot_corr.setLabel("bottom", "Isobestic dF/F (%)")
+        else:
+            self.plot_corr.setTitle("Motion/reference coupling unavailable")
+            self.plot_corr.setLabel("left", "")
+            self.plot_corr.setLabel("bottom", "")
+            self.plot_corr.setXRange(0.0, 1.0)
+            self.plot_corr.setYRange(0.0, 1.0)
+            item = pg.TextItem("No isobestic/reference channel.\nQC uses signal-only metrics.", color=(220, 220, 220), anchor=(0.5, 0.5))
+            item.setPos(0.5, 0.5)
+            self.plot_corr.addItem(item)
 
         # Rolling corr
-        if qc["r_roll"].size:
+        if has_reference and qc["r_roll"].size:
             t_cent = qc["t"][qc["r_centers"]]
             self.plot_roll.plot(t_cent, qc["r_roll"], pen=pg.mkPen((180, 200, 120), width=1.0))
-            self.plot_roll.addItem(pg.InfiniteLine(pos=0.5, angle=0, pen=pg.mkPen((200, 200, 200), width=1.0, style=QtCore.Qt.PenStyle.DashLine)))
+            self.plot_roll.addItem(pg.InfiniteLine(pos=0.0, angle=0, pen=pg.mkPen((200, 200, 200), width=0.8, style=QtCore.Qt.PenStyle.DashLine)))
+            self.plot_roll.addItem(pg.InfiniteLine(pos=0.5, angle=0, pen=pg.mkPen((180, 180, 180), width=0.6, style=QtCore.Qt.PenStyle.DotLine)))
+            self.plot_roll.addItem(pg.InfiniteLine(pos=-0.5, angle=0, pen=pg.mkPen((180, 180, 180), width=0.6, style=QtCore.Qt.PenStyle.DotLine)))
             r_avg = float(np.nanmean(qc["r_roll"])) if qc["r_roll"].size else np.nan
             if np.isfinite(r_avg):
                 self._add_plot_text_topleft(self.plot_roll, f"avg r={r_avg:.3g}")
         self.plot_roll.setLabel("left", "r")
+        self.plot_roll.setLabel("bottom", "Time (s)")
+        self.plot_roll.setYRange(-1.0, 1.0, padding=0.04)
+        if not has_reference:
+            self.plot_roll.setTitle("Rolling motion coupling unavailable")
 
         stats = qc["stats"]
         self.lbl_stats = QtWidgets.QLabel(stats)
         self.lbl_stats.setProperty("class", "hint")
         self.lbl_stats.setWordWrap(True)
+        self.lbl_method = QtWidgets.QLabel(
+            "Verdict uses dF/F artifact load, signal noise, isobestic noise when available, roughness, and SNR. "
+            "Z-score is shown only as a secondary corrected-output tail check."
+        )
+        self.lbl_method.setProperty("class", "hint")
+        self.lbl_method.setWordWrap(True)
 
         # Quality verdict (bottom-left, next to rolling-corr).
         score, tier_name, tier_color, sub_metrics = _evaluate_qc(qc)
@@ -549,33 +786,69 @@ class QcDialog(QtWidgets.QDialog):
         self._qc_tier = tier_name
         self._qc_sub_metrics = sub_metrics
         self.verdict_card = QualityVerdictCard(score, tier_name, tier_color, sub_metrics)
-        self.verdict_card.setFixedWidth(380)
+        self.verdict_card.setMinimumWidth(395)
+        self.verdict_card.setMaximumWidth(430)
 
         btn_row = QtWidgets.QHBoxLayout()
+        self.btn_prev_file = QtWidgets.QPushButton("Previous file")
+        self.btn_next_file = QtWidgets.QPushButton("Next file")
+        self.lbl_nav = QtWidgets.QLabel("")
+        self.lbl_nav.setProperty("class", "hint")
+        btn_row.addWidget(self.btn_prev_file)
+        btn_row.addWidget(self.btn_next_file)
+        btn_row.addWidget(self.lbl_nav)
         btn_row.addStretch(1)
         self.btn_save = QtWidgets.QPushButton("Save report images")
         self.btn_close = QtWidgets.QPushButton("Close")
         btn_row.addWidget(self.btn_save)
         btn_row.addWidget(self.btn_close)
 
-        layout.addWidget(self.plot_z, stretch=2)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.plot_corr, stretch=1)
-        row.addWidget(self.plot_zdist, stretch=1)
-        layout.addLayout(row, stretch=2)
+        content = QtWidgets.QHBoxLayout()
+        content.setSpacing(10)
+        content.addWidget(self.verdict_card)
 
-        # Bottom row: verdict card (fixed left) + rolling correlation (stretches).
+        plots_col = QtWidgets.QVBoxLayout()
+        plots_col.setSpacing(8)
+        plots_col.addWidget(self.lbl_method)
+        plots_col.addWidget(self.plot_z, stretch=3)
+        middle = QtWidgets.QHBoxLayout()
+        middle.setSpacing(8)
+        middle.addWidget(self.plot_noise, stretch=1)
+        middle.addWidget(self.plot_corr, stretch=1)
+        plots_col.addLayout(middle, stretch=2)
         bottom = QtWidgets.QHBoxLayout()
         bottom.setSpacing(8)
-        bottom.addWidget(self.verdict_card)
+        bottom.addWidget(self.plot_zdist, stretch=1)
         bottom.addWidget(self.plot_roll, stretch=1)
-        layout.addLayout(bottom, stretch=3)
+        plots_col.addLayout(bottom, stretch=2)
+        content.addLayout(plots_col, stretch=1)
+        layout.addLayout(content, stretch=1)
 
         layout.addWidget(self.lbl_stats)
         layout.addLayout(btn_row)
 
         self.btn_close.clicked.connect(self.close)
         self.btn_save.clicked.connect(self._save_images)
+        self.btn_prev_file.clicked.connect(lambda: self._request_navigation(-1))
+        self.btn_next_file.clicked.connect(lambda: self._request_navigation(1))
+        self.set_navigation_state("", False, False)
+
+    @property
+    def navigation_delta(self) -> int:
+        return self._navigation_delta
+
+    def set_navigation_state(self, label: str, can_prev: bool, can_next: bool) -> None:
+        has_navigation = can_prev or can_next or bool(label)
+        self.btn_prev_file.setVisible(has_navigation)
+        self.btn_next_file.setVisible(has_navigation)
+        self.lbl_nav.setVisible(has_navigation)
+        self.btn_prev_file.setEnabled(can_prev)
+        self.btn_next_file.setEnabled(can_next)
+        self.lbl_nav.setText(label)
+
+    def _request_navigation(self, delta: int) -> None:
+        self._navigation_delta = int(delta)
+        self.accept()
 
     def _add_plot_text_topleft(self, plot: pg.PlotWidget, text: str) -> None:
         if not text:
@@ -611,6 +884,14 @@ class QcDialog(QtWidgets.QDialog):
             pass
         try:
             with open(txt_path, "w") as f:
+                score, tier_name, _tier_color, metrics = _evaluate_qc(self._qc)
+                f.write(f"Overall quality: {tier_name} {score:.0f}/100\n")
+                for name, sub_score, weight, why in metrics:
+                    if weight > 0:
+                        f.write(f"- {name} ({weight:.0%}): {sub_score:.0f}/100 - {why}\n")
+                    else:
+                        f.write(f"- {name}: {sub_score:.0f}/100 - {why}\n")
+                f.write("\n")
                 f.write(str(self._qc.get("stats", "")))
         except Exception:
             pass
@@ -5407,23 +5688,82 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.finished.connect(_cleanup)
         dlg.show()
 
-    def _run_qc_dialog(self) -> None:
+    def _qc_file_paths(self) -> List[str]:
+        try:
+            paths = self.file_panel.all_paths()
+        except Exception:
+            paths = []
+        return [p for p in paths if p in self._loaded_files]
+
+    def _select_file_for_qc(self, path: str) -> None:
+        paths = self.file_panel.all_paths()
+        if path in paths:
+            row = paths.index(path)
+            lw = self.file_panel.list_files
+            old_block = lw.blockSignals(True)
+            try:
+                lw.clearSelection()
+                lw.setCurrentRow(row)
+                item = lw.item(row)
+                if item is not None:
+                    item.setSelected(True)
+            finally:
+                lw.blockSignals(old_block)
+        self._on_file_selection_changed()
+        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
+    def _compute_current_qc(self) -> Optional[Dict[str, object]]:
         if not self._current_path or not self._current_channel:
-            return
+            return None
         doric = self._loaded_files.get(self._current_path)
         if not doric:
-            return
+            return None
+        if self._current_channel not in doric.channels:
+            self._current_channel = doric.channels[0] if doric.channels else None
+            if self._current_channel:
+                self.file_panel.set_channel(self._current_channel)
+        if not self._current_channel:
+            return None
         trial = doric.make_trial(self._current_channel, trigger_name=self._current_trigger)
         trial = self._apply_time_window(trial)
         key = (self._current_path, self._current_channel)
         cutouts = self._cutout_regions_by_key.get(key, [])
         trial = self._apply_cutouts(trial, cutouts)
+        return self._compute_qc(trial)
 
-        qc = self._compute_qc(trial)
-        if qc is None:
+    def _run_qc_dialog(self) -> None:
+        paths = self._qc_file_paths()
+        if not paths:
             return
-        dlg = QcDialog(qc, self)
-        dlg.exec()
+        if self._current_path not in paths:
+            self._select_file_for_qc(paths[0])
+
+        while True:
+            qc = self._compute_current_qc()
+            if qc is None:
+                return
+            paths = self._qc_file_paths()
+            try:
+                index = paths.index(self._current_path) if self._current_path in paths else 0
+            except Exception:
+                index = 0
+            dlg = QcDialog(qc, self)
+            if len(paths) > 1:
+                label = f"File {index + 1}/{len(paths)}: {os.path.basename(self._current_path or '')}"
+                dlg.set_navigation_state(label, True, True)
+            dlg.exec()
+            delta = int(getattr(dlg, "navigation_delta", 0))
+            if not delta:
+                break
+            paths = self._qc_file_paths()
+            if not paths:
+                break
+            try:
+                index = paths.index(self._current_path) if self._current_path in paths else 0
+            except Exception:
+                index = 0
+            next_index = (index + delta) % len(paths)
+            self._select_file_for_qc(paths[next_index])
 
     def _run_batch_qc(self) -> None:
         paths = self._selected_paths()
@@ -5460,41 +5800,86 @@ class MainWindow(QtWidgets.QMainWindow):
         fs = float(trial.sampling_rate) if np.isfinite(trial.sampling_rate) else (
             1.0 / float(np.nanmedian(np.diff(t))) if t.size > 2 else np.nan
         )
-        m = np.isfinite(t) & np.isfinite(sig) & np.isfinite(ref)
-        t = t[m]; sig = sig[m]; ref = ref[m]
+        if ref.size != sig.size:
+            ref = np.full_like(sig, np.nan, dtype=float)
+        has_reference = bool(ref.size == sig.size and np.sum(np.isfinite(ref)) >= max(10, int(0.05 * sig.size)))
+        m = np.isfinite(t) & np.isfinite(sig)
+        if has_reference:
+            m = m & np.isfinite(ref)
+        t = t[m]; sig = sig[m]; ref = ref[m] if ref.size == m.size else np.full(int(np.sum(m)), np.nan, dtype=float)
         if t.size < 10:
             return None
 
         # Artifact removal (adaptive MAD)
         mask_sig = detect_artifacts_adaptive(t, sig, k=6.0, window_s=1.0, pad_s=0.2)
-        mask_ref = detect_artifacts_adaptive(t, ref, k=6.0, window_s=1.0, pad_s=0.2)
+        mask_ref = detect_artifacts_adaptive(t, ref, k=6.0, window_s=1.0, pad_s=0.2) if has_reference else np.zeros_like(mask_sig, dtype=bool)
         mask = mask_sig | mask_ref
         sig_clean = sig.copy()
         ref_clean = ref.copy()
         sig_clean[mask] = np.nan
-        ref_clean[mask] = np.nan
+        if has_reference:
+            ref_clean[mask] = np.nan
         sig_clean = interpolate_nans(sig_clean)
-        ref_clean = interpolate_nans(ref_clean)
+        ref_clean = interpolate_nans(ref_clean) if has_reference else np.full_like(sig_clean, np.nan, dtype=float)
         art_frac = float(np.mean(mask)) if mask.size else 0.0
 
         # Baseline + dff
         cutoff = 0.01
         sig_base = _lowpass_sos(sig_clean, fs, cutoff, 3)
-        ref_base = _lowpass_sos(ref_clean, fs, cutoff, 3)
+        ref_base = _lowpass_sos(ref_clean, fs, cutoff, 3) if has_reference else np.full_like(sig_base, np.nan, dtype=float)
         dff_sig = safe_divide(sig_clean - sig_base, sig_base)
-        dff_ref = safe_divide(ref_clean - ref_base, ref_base)
+        dff_ref = safe_divide(ref_clean - ref_base, ref_base) if has_reference else np.full_like(dff_sig, np.nan, dtype=float)
+
+        # Noise-aware metrics are computed on raw dF/F, before z-scoring can
+        # hide the absolute noise floor. A low-pass envelope captures slower
+        # transients; the residual and first-difference roughness capture fast
+        # jitter/spikes that make a trace visually and analytically unreliable.
+        def _metric_envelope(values: np.ndarray) -> np.ndarray:
+            vals = interpolate_nans(np.asarray(values, float))
+            if vals.size < 20:
+                return vals
+            if np.isfinite(fs) and fs > 1.0:
+                cutoff_hz = min(2.0, max(0.05, fs * 0.20))
+                if cutoff_hz < fs * 0.45:
+                    try:
+                        return _lowpass_sos(vals, fs, cutoff_hz, 3)
+                    except Exception:
+                        return vals
+            return vals
+
+        dff_sig_metric = interpolate_nans(np.asarray(dff_sig, float))
+        dff_ref_metric = interpolate_nans(np.asarray(dff_ref, float)) if has_reference else np.full_like(dff_sig_metric, np.nan, dtype=float)
+        sig_envelope = _metric_envelope(dff_sig_metric)
+        ref_envelope = _metric_envelope(dff_ref_metric) if has_reference else np.full_like(sig_envelope, np.nan, dtype=float)
+        sig_hf = dff_sig_metric - sig_envelope
+        ref_hf = dff_ref_metric - ref_envelope if has_reference else np.full_like(sig_hf, np.nan, dtype=float)
+        hf_noise_pct = _qc_robust_sigma(sig_hf) * 100.0
+        ref_hf_noise_pct = _qc_robust_sigma(ref_hf) * 100.0 if has_reference else float("nan")
+        env_centered = sig_envelope - float(np.nanmedian(sig_envelope)) if sig_envelope.size else sig_envelope
+        env_f = np.asarray(env_centered, float)
+        env_f = env_f[np.isfinite(env_f)]
+        event_amp_pct = float(np.nanpercentile(np.abs(env_f), 95) * 100.0) if env_f.size else float("nan")
+        dff_centered = dff_sig_metric - float(np.nanmedian(dff_sig_metric)) if dff_sig_metric.size else dff_sig_metric
+        dff_scale_pct = _qc_robust_sigma(dff_centered) * 100.0
+        jitter_pct = _qc_robust_sigma(np.diff(dff_sig_metric)) * 100.0 if dff_sig_metric.size > 2 else float("nan")
+        usable_snr = event_amp_pct / max(hf_noise_pct, 1e-12) if np.isfinite(event_amp_pct) and np.isfinite(hf_noise_pct) else float("nan")
+        jitter_ratio = jitter_pct / max(dff_scale_pct, 1e-12) if np.isfinite(jitter_pct) and np.isfinite(dff_scale_pct) else float("nan")
 
         # z-score
         z_sig = zscore_median_std(dff_sig)
-        z_ref = zscore_median_std(dff_ref)
-        Z = z_sig - z_ref
+        z_ref = zscore_median_std(dff_ref) if has_reference else np.full_like(z_sig, np.nan, dtype=float)
+        Z = z_sig - z_ref if has_reference else z_sig.copy()
         Zf = Z[np.isfinite(Z)]
 
-        # Correlation
-        m2 = np.isfinite(z_sig) & np.isfinite(z_ref)
-        r = float(np.corrcoef(z_ref[m2], z_sig[m2])[0, 1]) if np.sum(m2) >= 10 else np.nan
+        # Reference coupling is measured on dF/F, not on z-score, so the user
+        # can interpret the coupling in the same units as the raw noise metrics.
+        m2 = np.isfinite(dff_sig_metric) & np.isfinite(dff_ref_metric) if has_reference else np.zeros_like(dff_sig_metric, dtype=bool)
+        r = float(np.corrcoef(dff_ref_metric[m2], dff_sig_metric[m2])[0, 1]) if has_reference and np.sum(m2) >= 10 else np.nan
         win = int(max(10, round(fs * 10.0))) if np.isfinite(fs) and fs > 0 else 5000
-        r_roll, centers = _rolling_corr(z_ref, z_sig, win)
+        if has_reference:
+            r_roll, centers = _rolling_corr(dff_ref_metric, dff_sig_metric, win)
+        else:
+            r_roll, centers = np.array([], float), np.array([], int)
 
         # Distribution stats + new shape / stability metrics
         if Zf.size:
@@ -5540,7 +5925,10 @@ class MainWindow(QtWidgets.QMainWindow):
             bleach_pct = float("nan")
 
         stats = (
-            f"artifact_frac={art_frac*100:.2f}% | r={r:.3f} (avg roll r={r_roll_mean:.2f}, std={r_roll_std:.2f}) | "
+            f"artifact_frac={art_frac*100:.2f}% | HF noise={hf_noise_pct:.3g}% dF/F "
+            f"({'ref ' + format(ref_hf_noise_pct, '.3g') + '%' if has_reference else 'no isobestic'}) | event_amp={event_amp_pct:.3g}% | "
+            f"SNR~{usable_snr:.2f} | jitter/signal={jitter_ratio:.2f} | "
+            f"r={r:.3f} (avg roll r={r_roll_mean:.2f}, std={r_roll_std:.2f}) | "
             f"Z median={q50:.3g} IQR=({q25:.3g},{q75:.3g}) | "
             f"|Z|>3: {frac_gt3:.2f}% | |Z|>5: {frac_gt5:.2f}% | "
             f"skew={skew:.2f} kurt={kurt:.2f} | bleach={bleach_pct:.1f}%"
@@ -5549,7 +5937,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return {
             "path": trial.path,
             "channel": trial.channel_id,
+            "has_reference": has_reference,
             "t": t,
+            "dff_sig_pct": dff_sig_metric * 100.0,
+            "dff_ref_pct": dff_ref_metric * 100.0,
+            "dff_envelope_pct": sig_envelope * 100.0,
+            "hf_sig_pct": sig_hf * 100.0,
+            "hf_ref_pct": ref_hf * 100.0,
             "z_sig": z_sig,
             "z_ref": z_ref,
             "Z": Z,
@@ -5564,6 +5958,13 @@ class MainWindow(QtWidgets.QMainWindow):
             "frac_gt3": frac_gt3,
             "frac_gt5": frac_gt5,
             "art_frac": art_frac,
+            "hf_noise_pct": hf_noise_pct,
+            "ref_hf_noise_pct": ref_hf_noise_pct,
+            "event_amp_pct": event_amp_pct,
+            "dff_scale_pct": dff_scale_pct,
+            "jitter_pct": jitter_pct,
+            "usable_snr": usable_snr,
+            "jitter_ratio": jitter_ratio,
             "r_roll_std": r_roll_std,
             "r_roll_mean": r_roll_mean,
             "skew": skew,

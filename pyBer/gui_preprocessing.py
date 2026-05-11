@@ -1700,6 +1700,47 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_prominence_max.setRange(0.0, 1e12)
         self.spin_prominence_max.setValue(1e6)
 
+        # --- New: explicit baseline source controls --------------------------
+        self.combo_prominence_source = QtWidgets.QComboBox()
+        self.combo_prominence_source.addItem("Time window (e.g. 5 min before task)", "window")
+        self.combo_prominence_source.addItem("DIO trigger events", "events")
+        self.combo_prominence_source.addItem("Event file (CSV / XLSX)", "file")
+        self.combo_prominence_source.addItem("Whole recording (MAD fallback)", "whole")
+        self.combo_prominence_source.setCurrentIndex(0)  # default to Time window - what users want
+        self.combo_prominence_source.setToolTip(
+            "Where to look for 'quiet' baseline samples.\n\n"
+            "Time window  - an explicit [start, end] interval (ideal for pre-task baselines).\n"
+            "DIO events   - exclude windows around triggers on the selected DIO channel.\n"
+            "Event file   - load event times from a CSV/XLSX and exclude windows around them.\n"
+            "Whole record - use the whole trace; falls back to MAD noise if no peaks are found."
+        )
+
+        self.spin_prominence_win_start = mk_dspin(decimals=2)
+        self.spin_prominence_win_start.setRange(0.0, 1e6)
+        self.spin_prominence_win_start.setSuffix(" s")
+        self.spin_prominence_win_start.setValue(0.0)
+        self.spin_prominence_win_end = mk_dspin(decimals=2)
+        self.spin_prominence_win_end.setRange(0.0, 1e6)
+        self.spin_prominence_win_end.setSuffix(" s")
+        self.spin_prominence_win_end.setValue(300.0)  # 5 min default
+        self.spin_prominence_win_end.setToolTip("Set to 0 to extend until the end of the recording.")
+
+        self.btn_prominence_event_file = QtWidgets.QPushButton("Browse...")
+        self.btn_prominence_event_file.setProperty("class", "compactSmall")
+        self.lbl_prominence_event_file = QtWidgets.QLabel("(no file)")
+        self.lbl_prominence_event_file.setProperty("class", "hint")
+        self.lbl_prominence_event_file.setWordWrap(True)
+        self._prominence_event_file_path = ""
+
+        self.cb_prominence_show_peaks = QtWidgets.QCheckBox("Show detected baseline peaks")
+        self.cb_prominence_show_peaks.setChecked(True)
+        self.cb_prominence_show_peaks.setToolTip(
+            "Overlay the peaks used to estimate the prominence scale on the raw signal plot."
+        )
+        self.lbl_prominence_status = QtWidgets.QLabel("")
+        self.lbl_prominence_status.setProperty("class", "hint")
+        self.lbl_prominence_status.setWordWrap(True)
+
         self.output_params_stack = QtWidgets.QStackedWidget()
         page_none = QtWidgets.QWidget()
         self.output_params_stack.addWidget(page_none)
@@ -1720,12 +1761,49 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.output_params_stack.addWidget(page_rlm)
         self.prominence_params_group = QtWidgets.QGroupBox("Prominence normalization")
         prom_form = QtWidgets.QFormLayout(self.prominence_params_group)
+
+        # Baseline source row sits at the top.
+        prom_form.addRow(self._label_with_help("Baseline source", "prominence_params"), self.combo_prominence_source)
+
+        # Time-window inputs in one compact row.
+        win_row = QtWidgets.QWidget()
+        win_lay = QtWidgets.QHBoxLayout(win_row)
+        win_lay.setContentsMargins(0, 0, 0, 0)
+        win_lay.setSpacing(6)
+        self.spin_prominence_win_start.setPrefix("Start ")
+        self.spin_prominence_win_end.setPrefix("End ")
+        win_lay.addWidget(self.spin_prominence_win_start)
+        win_lay.addWidget(self.spin_prominence_win_end)
+        win_lay.addStretch(1)
+        self._prom_window_row = win_row
+        prom_form.addRow(self._label_with_help("Baseline window", "prominence_params"), win_row)
+
+        # Event-file picker row.
+        file_row = QtWidgets.QWidget()
+        file_lay = QtWidgets.QHBoxLayout(file_row)
+        file_lay.setContentsMargins(0, 0, 0, 0)
+        file_lay.setSpacing(6)
+        file_lay.addWidget(self.btn_prominence_event_file)
+        file_lay.addWidget(self.lbl_prominence_event_file, 1)
+        self._prom_file_row = file_row
+        prom_form.addRow(self._label_with_help("Event file", "prominence_params"), file_row)
+
         prom_form.addRow(self._label_with_help("Top peak fraction", "prominence_params"), self.spin_prominence_top)
         prom_form.addRow(self._label_with_help("Exclude before event (s)", "prominence_params"), self.spin_prominence_before)
         prom_form.addRow(self._label_with_help("Exclude after event (s)", "prominence_params"), self.spin_prominence_after)
         prom_form.addRow(self._label_with_help("Min peak prominence", "prominence_params"), self.spin_prominence_min)
         prom_form.addRow(self._label_with_help("Max peak prominence", "prominence_params"), self.spin_prominence_max)
+        prom_form.addRow(self.cb_prominence_show_peaks)
+        prom_form.addRow(self.lbl_prominence_status)
         self.prominence_params_group.setVisible(False)
+
+        # Save the layout so visibility helpers can find form labels.
+        self._prom_form = prom_form
+        self._update_prominence_source_visibility()
+        self.combo_prominence_source.currentIndexChanged.connect(
+            self._update_prominence_source_visibility
+        )
+        self.btn_prominence_event_file.clicked.connect(self._pick_prominence_event_file)
 
         out_content = QtWidgets.QWidget()
         out_form = QtWidgets.QFormLayout(out_content)
@@ -1961,6 +2039,76 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.output_params_stack.setVisible(idx != 0)
         self._update_section_summaries()
 
+    # ------------------------------------------------------------------
+    # Prominence baseline-source plumbing
+    # ------------------------------------------------------------------
+
+    def _prom_form_row_label(self, field: QtWidgets.QWidget) -> Optional[QtWidgets.QWidget]:
+        layout = getattr(self, "_prom_form", None)
+        if not isinstance(layout, QtWidgets.QFormLayout):
+            return None
+        for r in range(layout.rowCount()):
+            fi = layout.itemAt(r, QtWidgets.QFormLayout.ItemRole.FieldRole)
+            if fi is not None and fi.widget() is field:
+                li = layout.itemAt(r, QtWidgets.QFormLayout.ItemRole.LabelRole)
+                if li is not None:
+                    return li.widget()
+        return None
+
+    def _update_prominence_source_visibility(self, *_args: object) -> None:
+        if not hasattr(self, "combo_prominence_source"):
+            return
+        mode = self.combo_prominence_source.currentData() or "window"
+        is_window = (mode == "window")
+        is_events = (mode == "events")
+        is_file = (mode == "file")
+
+        # Time window inputs
+        win_row = getattr(self, "_prom_window_row", None)
+        if win_row is not None:
+            win_row.setVisible(is_window)
+            lbl = self._prom_form_row_label(win_row)
+            if lbl is not None:
+                lbl.setVisible(is_window)
+
+        # Event file inputs
+        file_row = getattr(self, "_prom_file_row", None)
+        if file_row is not None:
+            file_row.setVisible(is_file)
+            lbl = self._prom_form_row_label(file_row)
+            if lbl is not None:
+                lbl.setVisible(is_file)
+
+        # Exclude-before/after only make sense for event-driven modes
+        # (DIO events or external file).
+        excl_used = is_events or is_file
+        for sb in (self.spin_prominence_before, self.spin_prominence_after):
+            sb.setEnabled(excl_used)
+            lbl = self._prom_form_row_label(sb)
+            if lbl is not None:
+                lbl.setEnabled(excl_used)
+
+    def _pick_prominence_event_file(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load event timestamps",
+            "",
+            "Event files (*.csv *.tsv *.xlsx);;All files (*.*)",
+        )
+        if not path:
+            return
+        self._prominence_event_file_path = path
+        try:
+            from analysis_core import _load_event_times_csv
+            ev = _load_event_times_csv(path)
+        except Exception:
+            ev = np.array([], float)
+        n = int(ev.size)
+        self.lbl_prominence_event_file.setText(
+            f"{os.path.basename(path)}  -  {n} event{'s' if n != 1 else ''} parsed"
+            if n > 0 else f"{os.path.basename(path)}  -  no events parsed"
+        )
+
     def _fmt_num(self, value: float, decimals: int = 3) -> str:
         text = f"{float(value):.{int(decimals)}f}"
         text = text.rstrip("0").rstrip(".")
@@ -2052,12 +2200,19 @@ class ParameterPanel(QtWidgets.QGroupBox):
             self.spin_prominence_after,
             self.spin_prominence_min,
             self.spin_prominence_max,
+            self.combo_prominence_source,
+            self.spin_prominence_win_start,
+            self.spin_prominence_win_end,
         )
         for w in widgets:
             if isinstance(w, QtWidgets.QComboBox):
                 w.currentIndexChanged.connect(emit_noargs)
             else:
                 w.valueChanged.connect(emit_noargs)
+
+        # The Show-peaks toggle and file-path picker also trigger a refresh.
+        self.cb_prominence_show_peaks.toggled.connect(emit_noargs)
+        self.btn_prominence_event_file.clicked.connect(lambda *_: emit_noargs())
 
         self.spin_lam_x.valueChanged.connect(lambda *_: self._update_lambda_preview())
         self.spin_lam_y.valueChanged.connect(lambda *_: self._update_lambda_preview())
@@ -2366,6 +2521,11 @@ class ParameterPanel(QtWidgets.QGroupBox):
             prominence_exclude_after_s=float(self.spin_prominence_after.value()),
             prominence_min_peak=float(self.spin_prominence_min.value()),
             prominence_max_peak=float(self.spin_prominence_max.value()),
+            prominence_baseline_source=str(self.combo_prominence_source.currentData() or "window"),
+            prominence_baseline_start_s=float(self.spin_prominence_win_start.value()),
+            prominence_baseline_end_s=float(self.spin_prominence_win_end.value()),
+            prominence_event_file_path=str(self._prominence_event_file_path or ""),
+            prominence_show_peaks_overlay=bool(self.cb_prominence_show_peaks.isChecked()),
             invert_polarity=self.cb_invert.isChecked(),
         )
 
@@ -2411,6 +2571,18 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_prominence_after.setValue(float(getattr(params, "prominence_exclude_after_s", 0.0)))
         self.spin_prominence_min.setValue(float(getattr(params, "prominence_min_peak", 0.0)))
         self.spin_prominence_max.setValue(float(getattr(params, "prominence_max_peak", 1e6)))
+        baseline_source = str(getattr(params, "prominence_baseline_source", "window") or "window")
+        idx = self.combo_prominence_source.findData(baseline_source)
+        if idx >= 0:
+            self.combo_prominence_source.setCurrentIndex(idx)
+        self.spin_prominence_win_start.setValue(float(getattr(params, "prominence_baseline_start_s", 0.0)))
+        self.spin_prominence_win_end.setValue(float(getattr(params, "prominence_baseline_end_s", 300.0)))
+        self._prominence_event_file_path = str(getattr(params, "prominence_event_file_path", "") or "")
+        self.lbl_prominence_event_file.setText(
+            os.path.basename(self._prominence_event_file_path) if self._prominence_event_file_path else "(no file)"
+        )
+        self.cb_prominence_show_peaks.setChecked(bool(getattr(params, "prominence_show_peaks_overlay", True)))
+        self._update_prominence_source_visibility()
 
         self._update_lambda_preview()
         self._update_output_definition()
@@ -3332,6 +3504,76 @@ class PlotDashboard(QtWidgets.QWidget):
             preserve_view=preserve_view,
         )
         self._update_artifact_overlays(t, processed.raw_signal, processed.artifact_regions_sec)
+        self._update_prominence_overlay(processed)
         if kept_xrange is not None:
             self.set_xrange_all(*kept_xrange)
+
+    # ------------------------------------------------------------------
+    # Prominence overlay: peak markers + baseline-region shading
+    # ------------------------------------------------------------------
+
+    def _ensure_prominence_overlay_items(self) -> None:
+        if hasattr(self, "_prom_peak_scatter") and self._prom_peak_scatter is not None:
+            return
+        self._prom_peak_scatter = pg.ScatterPlotItem(
+            size=8, pen=pg.mkPen("#ee6471", width=1.2),
+            brush=pg.mkBrush(238, 100, 113, 220), symbol="o",
+        )
+        self._prom_peak_scatter.setZValue(20)
+        self.plot_raw.addItem(self._prom_peak_scatter)
+        self._prom_peak_scatter.setVisible(False)
+        self._prom_baseline_regions: List[pg.LinearRegionItem] = []
+
+    def _clear_prominence_overlay(self) -> None:
+        if hasattr(self, "_prom_peak_scatter") and self._prom_peak_scatter is not None:
+            self._prom_peak_scatter.setVisible(False)
+            try:
+                self._prom_peak_scatter.setData([], [])
+            except Exception:
+                pass
+        for region in getattr(self, "_prom_baseline_regions", []) or []:
+            try:
+                self.plot_raw.removeItem(region)
+            except Exception:
+                pass
+        self._prom_baseline_regions = []
+
+    def _update_prominence_overlay(self, processed) -> None:  # type: ignore[no-untyped-def]
+        self._ensure_prominence_overlay_items()
+        self._clear_prominence_overlay()
+        if processed is None:
+            return
+        show = bool(getattr(self, "cb_prominence_show_peaks", None) and self.cb_prominence_show_peaks.isChecked())
+        if not show:
+            return
+        label = str(getattr(processed, "output_label", "") or "")
+        if not label.startswith("prominence normalized"):
+            return  # overlay is only meaningful when prominence mode is active
+
+        # Peak markers
+        peak_times = getattr(processed, "prominence_peak_times", None)
+        peak_values = getattr(processed, "prominence_peak_values", None)
+        if peak_times is not None and peak_values is not None:
+            pt = np.asarray(peak_times, float)
+            pv = np.asarray(peak_values, float)
+            m = np.isfinite(pt) & np.isfinite(pv)
+            if np.any(m):
+                self._prom_peak_scatter.setData(pt[m], pv[m])
+                self._prom_peak_scatter.setVisible(True)
+
+        # Baseline intervals as soft-tinted regions
+        intervals = getattr(processed, "prominence_baseline_intervals", None) or []
+        for lo, hi in intervals:
+            try:
+                region = pg.LinearRegionItem(
+                    values=(float(lo), float(hi)),
+                    brush=pg.mkBrush(95, 211, 158, 35),  # green-tinted
+                    pen=pg.mkPen("#5dd39e", width=0, style=QtCore.Qt.PenStyle.SolidLine),
+                    movable=False,
+                )
+                region.setZValue(-5)
+                self.plot_raw.addItem(region)
+                self._prom_baseline_regions.append(region)
+            except Exception:
+                continue
 

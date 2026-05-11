@@ -141,14 +141,22 @@ class ProcessingParams:
     rlm_max_iter: int = 50
     rlm_tol: float = 1e-6
 
-    # Prominence normalization options. The selected trigger channel defines
-    # events; samples inside [event - before, event + after] are excluded when
-    # estimating the baseline peak-prominence scale.
+    # Prominence normalization options. The "baseline" is the segment used
+    # to estimate the peak-prominence scale. Multiple sources are supported:
+    #   - "events": exclude windows around DIO trigger rising edges
+    #   - "window": use an explicit [start, end] interval (e.g. 5 min before task)
+    #   - "file":   exclude windows around event times loaded from a CSV/XLSX
+    #   - "whole":  the entire trace
+    prominence_baseline_source: str = "events"
+    prominence_baseline_start_s: float = 0.0
+    prominence_baseline_end_s: float = 0.0  # 0 means "extend to end of trace"
+    prominence_event_file_path: str = ""
     prominence_percent_top: float = 0.10
     prominence_exclude_before_s: float = 0.0
     prominence_exclude_after_s: float = 0.0
     prominence_min_peak: float = 0.0
     prominence_max_peak: float = 1e6
+    prominence_show_peaks_overlay: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -193,7 +201,11 @@ class LoadedDoricFile:
     def make_trial(self, channel: str, trigger_name: Optional[str] = None, trigger_names: Optional[List[str]] = None) -> LoadedTrial:
         t = self.time_by_channel[channel]
         sig = self.signal_by_channel[channel]
-        ref = self.reference_by_channel[channel]
+        ref = self.reference_by_channel.get(channel)
+        if ref is None or np.asarray(ref).size == 0:
+            ref = np.full_like(np.asarray(sig, float), np.nan, dtype=float)
+        else:
+            ref = np.asarray(ref, float)
 
         trig_t = None
         trig = None
@@ -220,7 +232,10 @@ class LoadedDoricFile:
                 # Align analog signals to selected trigger time base for overlays/event alignment.
                 if trig_t is not None and trig_t.size and t.size and trig_t.size != t.size:
                     sig = np.interp(trig_t, t, sig)
-                    ref = np.interp(trig_t, t, ref)
+                    if np.isfinite(ref).any():
+                        ref = np.interp(trig_t, t, ref)
+                    else:
+                        ref = np.full_like(sig, np.nan, dtype=float)
                     t = trig_t
             elif self.digital_time is not None and trigger_name in self.digital_by_name:
                 # Backward compatibility for sessions loaded before trigger map support.
@@ -297,6 +312,14 @@ class ProcessedTrial:
 
     artifact_regions_sec: Optional[List[Tuple[float, float]]] = None
     artifact_regions_auto_sec: Optional[List[Tuple[float, float]]] = None
+
+    # Overlay data for the prominence-normalized output mode (None when the
+    # active output mode does not use prominence normalization).
+    prominence_peak_times: Optional[np.ndarray] = None
+    prominence_peak_values: Optional[np.ndarray] = None
+    prominence_baseline_intervals: Optional[List[Tuple[float, float]]] = None
+    prominence_threshold: float = float("nan")
+    prominence_baseline_source: str = ""
 
     fs_actual: float = np.nan
     fs_target: float = np.nan
@@ -1080,6 +1103,73 @@ def _baseline_mask_excluding_events(
     return keep
 
 
+def _load_event_times_csv(path: str) -> np.ndarray:
+    """Load event timestamps (seconds) from a CSV / XLSX. Returns a flat sorted array."""
+    if not path or not os.path.isfile(path):
+        return np.array([], float)
+    try:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".csv", ".tsv"):
+            import pandas as pd
+            sep = "\t" if ext == ".tsv" else ","
+            df = pd.read_csv(path, sep=sep)
+        elif ext == ".xlsx":
+            import pandas as pd
+            df = pd.read_excel(path, engine="openpyxl")
+        else:
+            return np.array([], float)
+    except Exception:
+        return np.array([], float)
+
+    # Prefer a column that looks like an event-time column; fall back to the
+    # first numeric column.
+    name_hint = re.compile(r"(time|event|onset|start|sec)", re.IGNORECASE)
+    chosen = None
+    for col in df.columns:
+        if name_hint.search(str(col)):
+            chosen = col
+            break
+    if chosen is None:
+        for col in df.columns:
+            try:
+                import pandas as pd
+                arr = pd.to_numeric(df[col], errors="coerce")
+                if np.isfinite(arr).any():
+                    chosen = col
+                    break
+            except Exception:
+                continue
+    if chosen is None:
+        return np.array([], float)
+    try:
+        import pandas as pd
+        arr = pd.to_numeric(df[chosen], errors="coerce")
+        out = np.asarray(arr, float)
+        out = out[np.isfinite(out)]
+        return np.sort(np.unique(out))
+    except Exception:
+        return np.array([], float)
+
+
+def _baseline_intervals_from_mask(time: np.ndarray, mask: np.ndarray) -> List[Tuple[float, float]]:
+    """Convert a boolean baseline mask to a list of (start_s, end_s) intervals."""
+    t = np.asarray(time, float)
+    m = np.asarray(mask, bool)
+    if t.size != m.size or t.size == 0:
+        return []
+    rising = np.where((~m[:-1]) & m[1:])[0] + 1
+    falling = np.where(m[:-1] & (~m[1:]))[0]
+    if m[0]:
+        rising = np.concatenate([[0], rising])
+    if m[-1]:
+        falling = np.concatenate([falling, [m.size - 1]])
+    out: List[Tuple[float, float]] = []
+    for s, e in zip(rising, falling):
+        if 0 <= s <= e < t.size:
+            out.append((float(t[s]), float(t[e])))
+    return out
+
+
 def prominence_peaks_detection(
     temp: np.ndarray,
     percent_top: float,
@@ -1167,12 +1257,37 @@ def prominence_normalize(
             "baseline_median": np.nan,
         }
 
-    keep = _baseline_mask_excluding_events(
-        t,
-        np.asarray(event_times, float),
-        float(getattr(params, "prominence_exclude_before_s", 0.0)),
-        float(getattr(params, "prominence_exclude_after_s", 0.0)),
-    )
+    source = str(getattr(params, "prominence_baseline_source", "events") or "events").lower()
+    before = float(getattr(params, "prominence_exclude_before_s", 0.0))
+    after = float(getattr(params, "prominence_exclude_after_s", 0.0))
+    if source == "window":
+        # Explicit baseline window [start, end]; end=0 means "to end of trace".
+        start_s = float(getattr(params, "prominence_baseline_start_s", 0.0))
+        end_s = float(getattr(params, "prominence_baseline_end_s", 0.0))
+        finite_t = np.isfinite(t)
+        if not np.any(finite_t):
+            keep = np.zeros_like(t, dtype=bool)
+        else:
+            t_lo = float(np.nanmin(t[finite_t]))
+            abs_start = t_lo + max(0.0, start_s)
+            abs_end = t_lo + max(0.0, end_s) if end_s > 0 else float(np.nanmax(t[finite_t]))
+            if abs_end <= abs_start:
+                # User configured an empty window - fall back to whole trace.
+                keep = finite_t.copy()
+            else:
+                keep = finite_t & (t >= abs_start) & (t <= abs_end)
+    elif source == "file":
+        file_events = _load_event_times_csv(str(getattr(params, "prominence_event_file_path", "") or ""))
+        # If the file produced no events, fall back to whatever event_times the
+        # caller supplied (typically DIO rising edges) so we never silently use
+        # the whole trace.
+        if file_events.size == 0:
+            file_events = np.asarray(event_times, float)
+        keep = _baseline_mask_excluding_events(t, file_events, before, after)
+    elif source == "whole":
+        keep = np.isfinite(t)
+    else:  # "events" (legacy DIO-driven)
+        keep = _baseline_mask_excluding_events(t, np.asarray(event_times, float), before, after)
     finite_keep = keep & np.isfinite(y)
     baseline_median = float(np.nanmedian(y[finite_keep])) if np.any(finite_keep) else float(np.nanmedian(y))
 
@@ -1184,7 +1299,7 @@ def prominence_normalize(
     max_peak = float(getattr(params, "prominence_max_peak", 1e6))
     top_fraction = float(getattr(params, "prominence_percent_top", 0.10))
 
-    amplitudes, _idx_peak, _top_peaks = prominence_peaks_detection(
+    amplitudes, idx_peak, _top_peaks = prominence_peaks_detection(
         y_centered,
         top_fraction,
         keep,
@@ -1193,17 +1308,20 @@ def prominence_normalize(
     )
     scale_source = "baseline_peak_prominence"
     n_peaks = int(amplitudes.size)
+    effective_min_peak = float(min_peak)
 
     # Fallback 1: retry without the user's min-prominence floor in case the
     # configured threshold is too aggressive for this trace.
     if n_peaks == 0 and min_peak > 0.0:
-        amplitudes_retry, _i2, _t2 = prominence_peaks_detection(
+        amplitudes_retry, idx_peak_retry, _t2 = prominence_peaks_detection(
             y_centered, top_fraction, keep, 0.0, max_peak,
         )
         if amplitudes_retry.size:
             amplitudes = amplitudes_retry
+            idx_peak = idx_peak_retry
             n_peaks = int(amplitudes.size)
             scale_source = "baseline_peak_prominence_no_min_floor"
+            effective_min_peak = 0.0
 
     mean_amp = float(np.nanmean(amplitudes)) if n_peaks else np.nan
 
@@ -1244,6 +1362,18 @@ def prominence_normalize(
     else:
         out = (y - baseline_median) / mean_amp
 
+    # Peak times / values for the raw-signal overlay.
+    if idx_peak is not None and len(idx_peak) > 0:
+        idx_arr = np.asarray(idx_peak, int)
+        idx_arr = idx_arr[(idx_arr >= 0) & (idx_arr < t.size)]
+        peak_times = t[idx_arr].astype(float)
+        peak_values = y[idx_arr].astype(float)
+    else:
+        peak_times = np.array([], float)
+        peak_values = np.array([], float)
+
+    baseline_intervals = _baseline_intervals_from_mask(t, keep)
+
     return out, {
         "duration_s": duration,
         "mean_amplitude": mean_amp,
@@ -1252,6 +1382,11 @@ def prominence_normalize(
         "baseline_median": baseline_median,
         "scale_source": scale_source,
         "mad_noise_sigma": mad_sigma,
+        "peak_times": peak_times,
+        "peak_values": peak_values,
+        "baseline_intervals": baseline_intervals,
+        "effective_min_peak": effective_min_peak,
+        "baseline_source": source,
     }
 
 
@@ -1463,8 +1598,12 @@ class PhotometryProcessor:
                 sig = np.asarray(base["LockInAOUT02"][ch][()], float)
                 t_sig = _read_time("LockInAOUT02")
 
-                ref = np.asarray(base["LockInAOUT01"][ch][()], float)
-                t_ref = _read_time("LockInAOUT01")
+                if "LockInAOUT01" in base and ch in base["LockInAOUT01"]:
+                    ref = np.asarray(base["LockInAOUT01"][ch][()], float)
+                    t_ref = _read_time("LockInAOUT01")
+                else:
+                    ref = np.full_like(sig, np.nan, dtype=float)
+                    t_ref = np.array([], float)
 
                 # Best-effort time vector selection (Doric exports can vary)
                 if t_sig.size == sig.size:
@@ -1597,17 +1736,30 @@ class PhotometryProcessor:
         )
 
         # ---------------------------------------------------------------------
-        # 3) Artifact detection on raw 465, then apply manual regions
+        # 3) Artifact detection on BOTH the signal (465) and reference (405)
+        #    channels, then OR the masks. A spike in either channel - even one
+        #    that only shows up in the isosbestic reference - is a real motion
+        #    artefact and must be cut from both channels together so the cut
+        #    boundary stays aligned. The QC dialog already does this; the
+        #    processing pipeline used to look only at the signal channel,
+        #    leaving reference-side spikes untouched.
         # ---------------------------------------------------------------------
         if bool(getattr(params, "artifact_detection_enabled", True)):
             if str(params.artifact_mode).startswith("Adaptive"):
-                mask = detect_artifacts_adaptive(
+                mask_sig = detect_artifacts_adaptive(
                     t, sig, float(params.mad_k), float(params.adaptive_window_s), float(params.artifact_pad_s)
                 )
+                mask_ref = detect_artifacts_adaptive(
+                    t, ref, float(params.mad_k), float(params.adaptive_window_s), float(params.artifact_pad_s)
+                )
             else:
-                mask = detect_artifacts_global_dx(
+                mask_sig = detect_artifacts_global_dx(
                     t, sig, float(params.mad_k), float(params.artifact_pad_s)
                 )
+                mask_ref = detect_artifacts_global_dx(
+                    t, ref, float(params.mad_k), float(params.artifact_pad_s)
+                )
+            mask = np.asarray(mask_sig, bool) | np.asarray(mask_ref, bool)
         else:
             mask = np.zeros_like(t, dtype=bool)
 
@@ -1818,6 +1970,26 @@ class PhotometryProcessor:
             outputs={mode: np.asarray(out, float)} if out is not None else {},
             artifact_regions_sec=regions_from_mask(t, mask),
             artifact_regions_auto_sec=auto_regions,
+            prominence_peak_times=(
+                np.asarray(prominence_stats.get("peak_times", np.array([], float)), float)
+                if prominence_stats is not None else None
+            ),
+            prominence_peak_values=(
+                np.asarray(prominence_stats.get("peak_values", np.array([], float)), float)
+                if prominence_stats is not None else None
+            ),
+            prominence_baseline_intervals=(
+                list(prominence_stats.get("baseline_intervals", []) or [])
+                if prominence_stats is not None else None
+            ),
+            prominence_threshold=(
+                float(prominence_stats.get("effective_min_peak", float("nan")))
+                if prominence_stats is not None else float("nan")
+            ),
+            prominence_baseline_source=(
+                str(prominence_stats.get("baseline_source", ""))
+                if prominence_stats is not None else ""
+            ),
             fs_actual=float(fs),
             fs_target=float(target_fs),
             fs_used=float(fs_used),
