@@ -86,7 +86,7 @@ class ProcessingParams:
     # Artifact detection
     # -------------------------
     artifact_detection_enabled: bool = True
-    artifact_mode: str = "Global MAD (dx)"  # or "Adaptive MAD (windowed)"
+    artifact_mode: str = "Global MAD (raw)"  # or "Adaptive MAD (windowed)"
     artifact_handling: str = "Interpolate"
     mad_k: float = 8.0
     adaptive_window_s: float = 5.0
@@ -961,24 +961,32 @@ def _compute_signal_envelope(
     return hi, lo
 
 
-def detect_artifacts_global_dx(time: np.ndarray, x: np.ndarray, k: float, pad_s: float) -> np.ndarray:
-    """
-    Artifact detection via derivative thresholding:
-    - Compute dx
-    - Threshold |dx| > k * MAD(dx)
-    - Optionally pad around detections (pad_s)
-    """
-    t = np.asarray(time, float)
-    y = np.asarray(x, float)
-    dx = np.diff(y, prepend=y[0])
-    m = _mad(dx)
-    thr = k * m if np.isfinite(m) else np.nan
-    mask = np.zeros_like(y, dtype=bool)
-    if np.isfinite(thr) and thr > 0:
-        mask = np.abs(dx) > thr
-
-    if pad_s > 0 and t.size > 1:
-        dt = float(np.nanmedian(np.diff(t)))
+def _mask_outside_signal_envelope(t: np.ndarray, y: np.ndarray, hi: np.ndarray, lo: np.ndarray, pad_s: float) -> np.ndarray:
+    """Return samples outside the displayed raw-signal MAD envelope, with optional time padding."""
+    tt = np.asarray(t, float)
+    yy = np.asarray(y, float)
+    upper = np.asarray(hi, float)
+    lower = np.asarray(lo, float)
+    n = min(tt.size, yy.size, upper.size, lower.size)
+    if n <= 0:
+        return np.zeros_like(yy, dtype=bool)
+    tt = tt[:n]
+    yy = yy[:n]
+    upper = upper[:n]
+    lower = lower[:n]
+    spread = 0.5 * np.abs(upper - lower)
+    core = (
+        np.isfinite(tt)
+        & np.isfinite(yy)
+        & np.isfinite(upper)
+        & np.isfinite(lower)
+        & (spread > 1e-12)
+        & ((yy > upper) | (yy < lower))
+    )
+    mask = np.zeros_like(yy, dtype=bool)
+    mask[:n] = core
+    if pad_s > 0 and tt.size > 1:
+        dt = float(np.nanmedian(np.diff(tt)))
         pad_n = int(max(0, round(pad_s / max(dt, 1e-12))))
         if pad_n > 0:
             idx = np.where(mask)[0]
@@ -986,44 +994,39 @@ def detect_artifacts_global_dx(time: np.ndarray, x: np.ndarray, k: float, pad_s:
                 a = max(0, i - pad_n)
                 b = min(mask.size, i + pad_n + 1)
                 mask[a:b] = True
+    if y.size != mask.size:
+        out = np.zeros_like(y, dtype=bool)
+        out[: min(out.size, mask.size)] = mask[: min(out.size, mask.size)]
+        return out
     return mask
+
+
+def detect_artifacts_global_dx(time: np.ndarray, x: np.ndarray, k: float, pad_s: float) -> np.ndarray:
+    """
+    Artifact detection via the same raw-signal MAD envelope shown in the GUI:
+    - Compute median +/- k * MAD(signal)
+    - Flag samples outside that visible envelope
+    - Optionally pad around detections (pad_s)
+    """
+    t = np.asarray(time, float)
+    y = np.asarray(x, float)
+    hi, lo = _compute_signal_envelope(t, y, float(k), "Global MAD", 0.0)
+    return _mask_outside_signal_envelope(t, y, hi, lo, pad_s)
 
 
 def detect_artifacts_adaptive(time: np.ndarray, x: np.ndarray, k: float, window_s: float, pad_s: float) -> np.ndarray:
     """
-    Artifact detection via windowed derivative thresholding:
-    - For each window: threshold |dx| > k * MAD(dx_window)
+    Artifact detection via the same adaptive raw-signal MAD envelope shown in the GUI:
+    - For each window: median +/- k * MAD(signal_window)
+    - Flag samples outside that visible envelope
     - Optionally pad around detections (pad_s)
     """
     t = np.asarray(time, float)
     y = np.asarray(x, float)
-    dx = np.diff(y, prepend=y[0])
-
     if t.size < 3:
         return np.zeros_like(y, dtype=bool)
-
-    dt = float(np.nanmedian(np.diff(t)))
-    wN = int(max(10, round(window_s / max(dt, 1e-12))))
-    stride = max(10, wN // 4)
-
-    mask = np.zeros_like(y, dtype=bool)
-    for start in range(0, y.size, stride):
-        end = min(y.size, start + wN)
-        m = _mad(dx[start:end])
-        if not np.isfinite(m) or m <= 1e-12:
-            continue
-        thr = k * m
-        mask[start:end] |= (np.abs(dx[start:end]) > thr)
-
-    if pad_s > 0:
-        pad_n = int(max(0, round(pad_s / max(dt, 1e-12))))
-        if pad_n > 0:
-            idx = np.where(mask)[0]
-            for i in idx:
-                a = max(0, i - pad_n)
-                b = min(mask.size, i + pad_n + 1)
-                mask[a:b] = True
-    return mask
+    hi, lo = _compute_signal_envelope(t, y, float(k), "Adaptive MAD", float(window_s))
+    return _mask_outside_signal_envelope(t, y, hi, lo, pad_s)
 
 
 def zscore_median_std(x: np.ndarray) -> np.ndarray:

@@ -1342,7 +1342,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
     def _build_help_texts(self) -> Dict[str, str]:
         return {
             "artifact_mode": (
-                "Artifact detection mode uses the 465 signal derivative (dx).\n"
+                "Artifact detection mode uses the raw-signal MAD envelope shown on the plot.\n"
                 "- Global MAD: single threshold for the full trace (fast, stable).\n"
                 "- Adaptive MAD: threshold computed in sliding windows (handles drift)."
             ),
@@ -1354,7 +1354,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 "- Do nothing: keep the samples unchanged; overlays still show detected artifacts."
             ),
             "mad_k": (
-                "MAD threshold (k) scales the derivative threshold.\n"
+                "MAD threshold (k) scales the visible raw-signal envelope.\n"
                 "Higher k = fewer artifacts flagged; lower k = more sensitive."
             ),
             "adaptive_window_s": (
@@ -1527,7 +1527,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
             "Toggle detected artifact interval overlays on the raw plot."
         )
         self.combo_artifact = QtWidgets.QComboBox()
-        self.combo_artifact.addItems(["Global MAD (dx)", "Adaptive MAD (windowed)"])
+        self.combo_artifact.addItems(["Global MAD (raw)", "Adaptive MAD (windowed)"])
         _compact_combo(self.combo_artifact, min_chars=6)
         self.combo_artifact_handling = QtWidgets.QComboBox()
         self.combo_artifact_handling.addItems(ARTIFACT_HANDLING_MODES)
@@ -2533,7 +2533,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
         if not params:
             return
         self.cb_artifact.setChecked(bool(getattr(params, "artifact_detection_enabled", True)))
-        self.combo_artifact.setCurrentText(str(params.artifact_mode))
+        artifact_mode = str(params.artifact_mode)
+        if artifact_mode == "Global MAD (dx)":
+            artifact_mode = "Global MAD (raw)"
+        self.combo_artifact.setCurrentText(artifact_mode)
         self.combo_artifact_handling.setCurrentText(str(getattr(params, "artifact_handling", "Interpolate")))
         self.spin_mad.setValue(float(params.mad_k))
         self.spin_adapt_win.setValue(float(params.adaptive_window_s))
