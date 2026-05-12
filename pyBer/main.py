@@ -1762,8 +1762,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for key, btn in self._section_buttons.items():
             btn.toggled.connect(lambda checked, section_key=key: self._toggle_section_popup(section_key, checked))
 
-        # Plot sync
-        self.plots.xRangeChanged.connect(self.plots.set_xrange_all)
+        # Plot sync — range propagation is handled inside the plots widget
+        # (sigXRangeChanged → _emit_xrange_from_any). The self-connection here
+        # would double-call set_xrange_all and corrupt PanMode drag state.
 
         # Manual artifacts
         self.plots.manualRegionFromSelectorRequested.connect(self._add_manual_region_from_selector)
