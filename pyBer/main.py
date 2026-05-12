@@ -3976,6 +3976,9 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             default_bg = "white" if self._app_theme_mode == "light" else "dark"
             plot_bg = self.settings.value("pre_plot_background", default_bg, type=str)
+            if self._app_theme_mode == "dark" and self._normalize_pre_plot_background(plot_bg) == "white":
+                plot_bg = "dark"
+                self.settings.setValue("pre_plot_background", "dark")
         except Exception:
             plot_bg = "dark"
         try:
@@ -7411,13 +7414,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if not data_rows:
             return None
 
-        header = [h.strip().lower() for h in data_rows[0]]
+        raw_header = [str(h).strip() for h in data_rows[0]]
+        header = [h.lower() for h in raw_header]
 
         def _find_col(names: List[str]) -> Optional[int]:
             for name in names:
                 if name in header:
                     return header.index(name)
             return None
+
+        def _looks_like_photometry_sync_col(name: str) -> bool:
+            key = str(name or "").strip().lower().replace(" ", "").replace("_", "")
+            return (
+                key == "dio"
+                or key.startswith("dio")
+                or key.startswith("ttl")
+                or key.startswith("trigger")
+                or "sync" in key
+                or "barcode" in key
+            )
 
         time_idx = header.index("time") if "time" in header else None
         output_idx = _find_col([
@@ -7445,6 +7460,22 @@ class MainWindow(QtWidgets.QMainWindow):
         iso_idx = _find_col(["isobestic", "isosbestic", "raw_405", "reference", "reference_405", "ref"]) if has_header else None
         dio_idx = _find_col(["dio"]) if has_header else None
         aligned_idx = _find_col(["time_aligned", "aligned_time", "sync_aligned_time"]) if has_header else None
+        trigger_cols: List[Tuple[int, str]] = []
+        if has_header:
+            seen_trigger_names: set[str] = set()
+            for idx, name in enumerate(raw_header):
+                if idx == time_idx:
+                    continue
+                label = str(name or header[idx] or f"column_{idx + 1}").strip()
+                if not _looks_like_photometry_sync_col(label):
+                    continue
+                key = label.lower()
+                if key in seen_trigger_names:
+                    continue
+                seen_trigger_names.add(key)
+                trigger_cols.append((idx, label))
+            if dio_idx is None and len(trigger_cols) == 1:
+                dio_idx = trigger_cols[0][0]
 
         data_rows = data_rows[1:] if has_header else data_rows
 
@@ -7454,6 +7485,7 @@ class MainWindow(QtWidgets.QMainWindow):
         iso_vals = []
         dio_vals = []
         aligned_vals = []
+        trigger_vals: Dict[str, List[float]] = {name: [] for _, name in trigger_cols}
 
         for r in data_rows:
             if time_idx is None or output_idx is None:
@@ -7490,6 +7522,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     aligned_vals.append(float(r[aligned_idx]) if len(r) > aligned_idx else np.nan)
                 except Exception:
                     aligned_vals.append(np.nan)
+            for trig_idx, trig_name in trigger_cols:
+                try:
+                    trigger_vals[trig_name].append(float(r[trig_idx]) if len(r) > trig_idx else np.nan)
+                except Exception:
+                    trigger_vals[trig_name].append(np.nan)
 
         if not time:
             return None
@@ -7499,6 +7536,16 @@ class MainWindow(QtWidgets.QMainWindow):
         raw = np.asarray(raw_vals, float) if raw_idx is not None and len(raw_vals) == len(time) else np.full_like(t, np.nan)
         iso = np.asarray(iso_vals, float) if iso_idx is not None and len(iso_vals) == len(time) else np.full_like(t, np.nan)
         dio_arr = np.asarray(dio_vals, float) if dio_idx is not None and len(dio_vals) == len(time) else None
+        dio_name = ""
+        if dio_arr is not None and dio_idx is not None and 0 <= dio_idx < len(raw_header):
+            dio_name = str(raw_header[dio_idx] or "DIO").strip() or "DIO"
+        triggers: Dict[str, np.ndarray] = {}
+        for trig_name, vals in trigger_vals.items():
+            arr = np.asarray(vals, float)
+            if arr.size == t.size and int(np.sum(np.isfinite(arr))) >= 2:
+                triggers[str(trig_name)] = arr
+        if dio_arr is not None and int(np.sum(np.isfinite(dio_arr))) >= 2:
+            triggers.setdefault(dio_name or "DIO", dio_arr)
         sync_aligned = (
             np.asarray(aligned_vals, float)
             if aligned_idx is not None and len(aligned_vals) == len(time)
@@ -7526,7 +7573,8 @@ class MainWindow(QtWidgets.QMainWindow):
             raw_signal=raw,
             raw_reference=iso,
             dio=dio_arr,
-            dio_name="",
+            dio_name=dio_name,
+            triggers=triggers,
             sig_f=None,
             ref_f=None,
             baseline_sig=None,

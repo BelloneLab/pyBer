@@ -2729,11 +2729,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 temporal.set_app_theme_mode(self._app_theme_mode)
             except Exception:
                 pass
-        self._style["plot_bg"] = (248, 250, 255) if self._app_theme_mode == "light" else (36, 42, 52)
+        self._style["plot_bg"] = self._theme_plot_background()
         try:
             self._apply_plot_style()
         except Exception:
             pass
+
+    def _theme_plot_background(self) -> Tuple[int, int, int]:
+        if self._app_theme_mode == "light":
+            return (248, 250, 255)
+        return (36, 42, 52)
 
     def _section_widget_map(self) -> Dict[str, Tuple[str, QtWidgets.QWidget]]:
         return {
@@ -5289,13 +5294,25 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not data_rows:
             return None
 
-        header = [h.strip().lower() for h in data_rows[0]]
+        raw_header = [str(h).strip() for h in data_rows[0]]
+        header = [h.lower() for h in raw_header]
 
         def _find_col(names: List[str]) -> Optional[int]:
             for name in names:
                 if name in header:
                     return header.index(name)
             return None
+
+        def _looks_like_photometry_sync_col(name: str) -> bool:
+            key = str(name or "").strip().lower().replace(" ", "").replace("_", "")
+            return (
+                key == "dio"
+                or key.startswith("dio")
+                or key.startswith("ttl")
+                or key.startswith("trigger")
+                or "sync" in key
+                or "barcode" in key
+            )
 
         time_idx = header.index("time") if "time" in header else None
         output_idx = _find_col(["dff", "z-score", "zscore", "z score", "output", "raw_signal", "raw_465"])
@@ -5305,6 +5322,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
         iso_idx = _find_col(["isobestic", "isosbestic", "raw_405", "reference", "reference_405", "ref"]) if has_header else None
         dio_idx = _find_col(["dio"]) if has_header else None
         aligned_idx = _find_col(["time_aligned", "aligned_time", "sync_aligned_time"]) if has_header else None
+        trigger_cols: List[Tuple[int, str]] = []
+        if has_header:
+            seen_trigger_names: set[str] = set()
+            for idx, name in enumerate(raw_header):
+                if idx == time_idx:
+                    continue
+                label = str(name or header[idx] or f"column_{idx + 1}").strip()
+                if not _looks_like_photometry_sync_col(label):
+                    continue
+                key = label.lower()
+                if key in seen_trigger_names:
+                    continue
+                seen_trigger_names.add(key)
+                trigger_cols.append((idx, label))
+            if dio_idx is None and len(trigger_cols) == 1:
+                dio_idx = trigger_cols[0][0]
 
         data_rows = data_rows[1:] if has_header else data_rows
 
@@ -5314,6 +5347,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         iso_vals = []
         dio_vals = []
         aligned_vals = []
+        trigger_vals: Dict[str, List[float]] = {name: [] for _, name in trigger_cols}
 
         for r in data_rows:
             if time_idx is None or output_idx is None:
@@ -5350,6 +5384,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     aligned_vals.append(float(r[aligned_idx]) if len(r) > aligned_idx else np.nan)
                 except Exception:
                     aligned_vals.append(np.nan)
+            for trig_idx, trig_name in trigger_cols:
+                try:
+                    trigger_vals[trig_name].append(float(r[trig_idx]) if len(r) > trig_idx else np.nan)
+                except Exception:
+                    trigger_vals[trig_name].append(np.nan)
 
         if not time:
             return None
@@ -5359,6 +5398,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         raw = np.asarray(raw_vals, float) if raw_idx is not None and len(raw_vals) == len(time) else np.full_like(t, np.nan)
         iso = np.asarray(iso_vals, float) if iso_idx is not None and len(iso_vals) == len(time) else np.full_like(t, np.nan)
         dio_arr = np.asarray(dio_vals, float) if dio_idx is not None and len(dio_vals) == len(time) else None
+        dio_name = ""
+        if dio_arr is not None and dio_idx is not None and 0 <= dio_idx < len(raw_header):
+            dio_name = str(raw_header[dio_idx] or "DIO").strip() or "DIO"
+        triggers: Dict[str, np.ndarray] = {}
+        for trig_name, vals in trigger_vals.items():
+            arr = np.asarray(vals, float)
+            if arr.size == t.size and int(np.sum(np.isfinite(arr))) >= 2:
+                triggers[str(trig_name)] = arr
+        if dio_arr is not None and int(np.sum(np.isfinite(dio_arr))) >= 2:
+            triggers.setdefault(dio_name or "DIO", dio_arr)
         sync_aligned = (
             np.asarray(aligned_vals, float)
             if aligned_idx is not None and len(aligned_vals) == len(time)
@@ -5384,7 +5433,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             raw_signal=raw,
             raw_reference=iso,
             dio=dio_arr,
-            dio_name="",
+            dio_name=dio_name,
+            triggers=triggers,
             sig_f=None,
             ref_f=None,
             baseline_sig=None,
@@ -6532,20 +6582,49 @@ class PostProcessingPanel(QtWidgets.QWidget):
         try:
             self.combo_sync_fiber_source.clear()
             self.combo_sync_fiber_source.addItem("Embedded DIO in processed file", "__embedded__")
+            embedded_available = any(
+                getattr(proc, "dio", None) is not None
+                and np.asarray(getattr(proc, "dio"), float).size >= 2
+                for proc in self._processed
+            )
+            entries: List[Tuple[str, str]] = []
+            seen_data: set[str] = set()
+
+            def _add_entry(label: str, name: str) -> None:
+                name = str(name or "").strip()
+                if not name:
+                    return
+                data = f"dio::{name}"
+                if data in seen_data:
+                    return
+                seen_data.add(data)
+                entries.append((label, data))
+
             names = list(getattr(self, "_known_dio_channels", []) or [])
+            for name in names:
+                _add_entry(f"A/D channel: {name}", str(name))
             for proc in self._processed:
                 name = str(getattr(proc, "dio_name", "") or "").strip()
-                if name and name not in names:
-                    names.append(name)
+                if name:
+                    _add_entry(f"Embedded DIO: {name}", name)
                 for trig_name in (getattr(proc, "triggers", {}) or {}).keys():
-                    if str(trig_name) and str(trig_name) not in names:
-                        names.append(str(trig_name))
-            for name in names:
-                self.combo_sync_fiber_source.addItem(f"A/D channel: {name}", f"dio::{name}")
+                    _add_entry(f"Processed column: {trig_name}", str(trig_name))
+            for label, data in entries:
+                self.combo_sync_fiber_source.addItem(label, data)
             if isinstance(prev, str):
                 idx = self.combo_sync_fiber_source.findData(prev)
                 if idx >= 0:
                     self.combo_sync_fiber_source.setCurrentIndex(idx)
+                elif prev == "__embedded__" and not embedded_available and entries:
+                    self.combo_sync_fiber_source.setCurrentIndex(1)
+                elif (
+                    prev == "__embedded__"
+                    and len(entries) == 1
+                    and str(entries[0][0]).startswith(("Embedded DIO:", "Processed column:"))
+                ):
+                    self.combo_sync_fiber_source.setCurrentIndex(1)
+            elif not embedded_available and entries:
+                self.combo_sync_fiber_source.setCurrentIndex(1)
         finally:
             self.combo_sync_fiber_source.blockSignals(False)
 
@@ -6594,6 +6673,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
             t = np.asarray(getattr(proc, "time", np.array([], float)), float)
             x = getattr(proc, "dio", None)
             if x is None:
+                triggers = getattr(proc, "triggers", {}) or {}
+                usable: List[Tuple[str, np.ndarray]] = []
+                for name, vals in triggers.items():
+                    arr = np.asarray(vals, float)
+                    if arr.size == t.size and int(np.sum(np.isfinite(arr))) >= 2:
+                        usable.append((str(name), arr))
+                if len(usable) == 1:
+                    return t, usable[0][1]
+                if usable:
+                    names = ", ".join(name for name, _vals in usable[:6])
+                    raise ValueError(
+                        "Choose the photometry sync column for this CSV "
+                        f"(available: {names})."
+                    )
                 raise ValueError("This processed file has no embedded DIO sync trace.")
             return t, np.asarray(x, float)
         if source.startswith("dio::"):
@@ -7073,24 +7166,87 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         return times, durations
 
+    def _clear_trace_preview(self) -> None:
+        self.curve_trace.setData([], [])
+        self.curve_behavior.setData([], [])
+        self.curve_peak_markers.setData([], [])
+        for ln in list(self.event_lines):
+            try:
+                self.plot_trace.removeItem(ln)
+            except Exception:
+                pass
+        self.event_lines = []
+        for lab in list(self._event_labels):
+            try:
+                self.plot_trace.removeItem(lab)
+            except Exception:
+                pass
+        self._event_labels = []
+        for reg in list(self._event_regions):
+            try:
+                self.plot_trace.removeItem(reg)
+            except Exception:
+                pass
+        self._event_regions = []
+        for ln in list(self._signal_peak_lines):
+            try:
+                self.plot_trace.removeItem(ln)
+            except Exception:
+                pass
+        self._signal_peak_lines = []
+        try:
+            self.plot_trace.setXRange(0.0, 1.0, padding=0)
+            self.plot_trace.setYRange(0.0, 1.0, padding=0)
+        except Exception:
+            pass
+
+    def _clear_psth_cache(self) -> None:
+        self._last_mat = None
+        self._last_tvec = None
+        self._last_global_metrics = None
+        self._last_events = np.array([], float)
+        self._last_event_rows = []
+        self._per_file_mats = {}
+        self._per_file_labels = {}
+        self._group_mat = None
+        self._group_tvec = None
+        self._group_labels = []
+        self._group_trial_mat = None
+        self._group_trial_tvec = None
+        self._group_trial_labels = []
+        self._all_file_ids = []
+        self._last_display_labels = []
+        self._last_psth_display_level = "trials"
+        self._psth_excluded_files = {}
+
+    def _clear_psth_visuals(self) -> None:
+        self._clear_trace_preview()
+        self._render_heatmap(np.zeros((0, 0), dtype=float), np.array([], dtype=float), labels=[])
+        self._render_avg(np.zeros((0, 0), dtype=float), np.array([], dtype=float))
+        self._render_metrics(np.zeros((0, 0), dtype=float), np.array([], dtype=float))
+        self._render_duration_hist(np.array([], dtype=float))
+        self._render_global_metrics()
+        if hasattr(self, "lbl_global_metrics"):
+            self.lbl_global_metrics.setText("Global metrics: -")
+        if hasattr(self, "lbl_plot_file"):
+            self.lbl_plot_file.setText("File: (none)")
+        if hasattr(self, "combo_individual_file"):
+            try:
+                self.combo_individual_file.blockSignals(True)
+                self.combo_individual_file.clear()
+            finally:
+                self.combo_individual_file.blockSignals(False)
+        try:
+            self.plot_avg.setXRange(0.0, 1.0, padding=0)
+            self.plot_metrics.setYRange(0.0, 1.0, padding=0)
+            self.plot_global.setYRange(0.0, 1.0, padding=0)
+        except Exception:
+            pass
+
     def _update_trace_preview(self) -> None:
         # show first processed trace
         if not self._processed:
-            self.curve_trace.setData([], [])
-            self.curve_behavior.setData([], [])
-            self.curve_peak_markers.setData([], [])
-            for ln in self.event_lines:
-                self.plot_trace.removeItem(ln)
-            self.event_lines = []
-            for lab in self._event_labels:
-                self.plot_trace.removeItem(lab)
-            self._event_labels = []
-            for reg in self._event_regions:
-                self.plot_trace.removeItem(reg)
-            self._event_regions = []
-            for ln in self._signal_peak_lines:
-                self.plot_trace.removeItem(ln)
-            self._signal_peak_lines = []
+            self._clear_trace_preview()
             return
 
         # In individual mode, show the selected file's trace
@@ -8332,51 +8488,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._queue_settings_save()
         if not self._processed:
             self.statusUpdate.emit("No processed data loaded.", 5000)
-            # Forget cached PSTH matrices so a stale heatmap doesn't reappear.
-            self._last_mat = None
-            self._last_tvec = None
-            self._last_global_metrics = None
-            self._last_events = np.array([], float)
-            self._last_event_rows = []
-            self._per_file_mats = {}
-            self._per_file_labels = {} if hasattr(self, "_per_file_labels") else {}
-            self._group_mat = None
-            self._group_tvec = None
-            self._group_labels = []
-            self._group_trial_mat = None
-            self._group_trial_tvec = None
-            self._group_trial_labels = []
-            self._all_file_ids = []
-            self._last_display_labels = []
-            self._last_psth_display_level = "trials"
-            self._psth_excluded_files = {}
-            # Clear every PSTH-driven plot so the panel looks like a fresh launch.
-            for pw in (
-                getattr(self, "plot_heat", None),
-                getattr(self, "plot_avg", None),
-                getattr(self, "plot_metrics", None),
-                getattr(self, "plot_global", None),
-                getattr(self, "plot_dur", None),
-            ):
-                if pw is not None:
-                    try:
-                        pw.clear()
-                    except Exception:
-                        pass
-            if hasattr(self, "lbl_global_metrics"):
-                self.lbl_global_metrics.setText("Global metrics: -")
-            if hasattr(self, "lbl_plot_file"):
-                try:
-                    self.lbl_plot_file.setText("File: (none)")
-                except Exception:
-                    pass
-            if hasattr(self, "combo_individual_file"):
-                try:
-                    self.combo_individual_file.blockSignals(True)
-                    self.combo_individual_file.clear()
-                    self.combo_individual_file.blockSignals(False)
-                except Exception:
-                    pass
+            self._clear_psth_cache()
+            self._clear_psth_visuals()
             self._update_status_strip()
             self._sync_temporal_modeling_context()
             return
@@ -8642,6 +8755,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             try:
                 self.img.setImage(np.zeros((1, 1)), autoLevels=False)
                 self.img.setLevels([0.0, 1.0])
+                self.img.setRect(QtCore.QRectF(0.0, 0.0, 1.0, 1.0))
                 if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
                     try:
                         self.heat_lut.item.setLevels(0.0, 1.0)
@@ -8650,6 +8764,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             finally:
                 self._suppress_heatmap_level_store = False
             self.heat_zero_line.setVisible(False)
+            self.plot_heat.setXRange(0.0, 1.0, padding=0)
+            self.plot_heat.setYRange(0.0, 1.0, padding=0)
+            self.plot_heat.setLabel("left", "Trials")
+            try:
+                self.plot_heat.getAxis("left").setTicks([[]])
+            except Exception:
+                pass
             return
 
         # ImageItem maps axis-0 -> x and axis-1 -> y; transpose so time is x, trials are y.
@@ -9294,7 +9415,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._style = dlg.get_style()
         self._apply_plot_style()
         self._record_history_change()
-        self._render_heatmap(self._last_mat if self._last_mat is not None else np.zeros((1, 1)), self._last_tvec if self._last_tvec is not None else np.array([0.0, 1.0]))
+        if self._last_mat is not None and self._last_tvec is not None:
+            self._render_heatmap(self._last_mat, self._last_tvec, labels=self._last_display_labels)
+        else:
+            self._render_heatmap(np.zeros((0, 0), dtype=float), np.array([], dtype=float), labels=[])
         self._render_spatial_heatmap(
             self._last_spatial_occupancy_map,
             self._last_spatial_activity_map,
@@ -9668,6 +9792,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if sync_report:
                     self._write_h5_json_any(entry, "sync_report_json", sync_report)
 
+                triggers = getattr(proc, "triggers", {}) or {}
+                if isinstance(triggers, dict) and triggers:
+                    trig_group = entry.create_group("triggers")
+                    for trig_idx, (trig_name, trig_values) in enumerate(triggers.items()):
+                        arr = np.asarray(trig_values, float).reshape(-1)
+                        if arr.size == 0:
+                            continue
+                        ds = trig_group.create_dataset(f"trigger_{trig_idx:04d}", data=arr)
+                        ds.attrs["name"] = str(trig_name)
+
                 artifact_regions = getattr(proc, "artifact_regions_sec", None)
                 if artifact_regions:
                     arr = np.asarray(artifact_regions, float).reshape(-1, 2)
@@ -9788,6 +9922,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     raw_signal = _aligned(self._read_h5_numeric(entry, "raw_signal"), fill_nan=True)
                     raw_reference = _aligned(self._read_h5_numeric(entry, "raw_reference"), fill_nan=True)
                     output_arr = _aligned(self._read_h5_numeric(entry, "output"), fill_nan=True)
+                    triggers: Dict[str, np.ndarray] = {}
+                    trig_group = entry.get("triggers")
+                    if isinstance(trig_group, h5py.Group):
+                        for trig_key in sorted(trig_group.keys()):
+                            ds = trig_group.get(trig_key)
+                            if ds is None:
+                                continue
+                            trig_name = self._h5_text(getattr(ds, "attrs", {}).get("name", trig_key), trig_key)
+                            trig_arr = _aligned(np.asarray(ds[()], float), fill_nan=False)
+                            if trig_arr.size:
+                                triggers[str(trig_name)] = trig_arr
 
                     trial = ProcessedTrial(
                         path=self._h5_text(entry.attrs.get("path", ""), ""),
@@ -9803,6 +9948,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         else None,
                         dio=_aligned(self._read_h5_numeric(entry, "dio"), fill_nan=False) if "dio" in entry else None,
                         dio_name=self._h5_text(entry.attrs.get("dio_name", ""), ""),
+                        triggers=triggers,
                         sig_f=_aligned(self._read_h5_numeric(entry, "sig_f"), fill_nan=False) if "sig_f" in entry else None,
                         ref_f=_aligned(self._read_h5_numeric(entry, "ref_f"), fill_nan=False) if "ref_f" in entry else None,
                         baseline_sig=_aligned(self._read_h5_numeric(entry, "baseline_sig"), fill_nan=False)
@@ -9953,6 +10099,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             _LOG.exception("Failed to autosave postprocessing project to cache")
 
     def _restore_project_autosave_if_needed(self) -> None:
+        restore_on_startup = bool(
+            self._settings.value("postprocess_restore_autosave_on_startup", False, type=bool)
+        )
+        if not restore_on_startup:
+            self._clear_project_autosave_cache(delete_file=True)
+            return
         available = bool(self._settings.value("postprocess_autosave_project_available", False, type=bool))
         path = self._settings.value("postprocess_autosave_project_path", "", type=str).strip()
         if not path:
@@ -10722,6 +10874,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if raw:
                 data = json.loads(raw)
                 self._apply_settings(data)
+            if self._app_theme_mode == "dark":
+                bg = self._style_color_tuple("plot_bg", self._theme_plot_background())
+                if (sum(bg[:3]) / 3.0) >= 180.0:
+                    self._style["plot_bg"] = self._theme_plot_background()
+                    self._apply_plot_style()
         except Exception:
             pass
         finally:
@@ -12395,23 +12552,27 @@ class StyleDialog(QtWidgets.QDialog):
             current_vals = list(current)
         else:
             current_vals = [255, 255, 255, 255] if with_alpha else [255, 255, 255]
+        clean_vals: List[int] = []
+        for idx, default in enumerate(([255, 255, 255, 255] if with_alpha else [255, 255, 255])):
+            try:
+                raw = current_vals[idx] if idx < len(current_vals) else default
+                val = int(float(raw))
+            except Exception:
+                val = int(default)
+            clean_vals.append(max(0, min(255, val)))
         if with_alpha:
-            while len(current_vals) < 4:
-                current_vals.append(255)
-            qcol = QtGui.QColor(
-                int(current_vals[0]),
-                int(current_vals[1]),
-                int(current_vals[2]),
-                int(current_vals[3]),
-            )
+            qcol = QtGui.QColor(clean_vals[0], clean_vals[1], clean_vals[2], clean_vals[3])
         else:
-            qcol = QtGui.QColor(
-                int(current_vals[0]) if len(current_vals) > 0 else 255,
-                int(current_vals[1]) if len(current_vals) > 1 else 255,
-                int(current_vals[2]) if len(current_vals) > 2 else 255,
-            )
-        options = QtWidgets.QColorDialog.ColorDialogOption.ShowAlphaChannel if with_alpha else QtWidgets.QColorDialog.ColorDialogOption(0)
-        col = QtWidgets.QColorDialog.getColor(qcol, self, "Select color", options)
+            qcol = QtGui.QColor(clean_vals[0], clean_vals[1], clean_vals[2])
+        dlg = QtWidgets.QColorDialog(self)
+        dlg.setWindowTitle("Select color")
+        dlg.setCurrentColor(qcol)
+        dlg.setOption(QtWidgets.QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+        if with_alpha:
+            dlg.setOption(QtWidgets.QColorDialog.ColorDialogOption.ShowAlphaChannel, True)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        col = dlg.selectedColor()
         if not col.isValid():
             return
         if with_alpha:
