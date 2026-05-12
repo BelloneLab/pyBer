@@ -24,7 +24,7 @@ from analysis_core import (
 def _optimize_plot(w: pg.PlotWidget) -> None:
     w.setMenuEnabled(True)
     w.showGrid(x=True, y=True, alpha=0.25)
-    w.setMouseEnabled(x=True, y=False)
+    w.setMouseEnabled(x=True, y=True)
     pi = w.getPlotItem()
     pi.getViewBox().setMouseMode(pg.ViewBox.PanMode)
     pi.setClipToView(True)
