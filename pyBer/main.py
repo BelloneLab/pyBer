@@ -254,32 +254,127 @@ def _set_windows_app_user_model_id() -> None:
         return
     try:
         import ctypes
+        from ctypes import wintypes
         app_id = "BelloneLab.pyBer.FiberPhotometry"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
-    except Exception:
-        pass
+        func = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        func.argtypes = [wintypes.LPCWSTR]
+        func.restype = ctypes.HRESULT
+        hr = func(app_id)
+        if hr != 0:
+            logging.warning("SetCurrentProcessExplicitAppUserModelID returned HRESULT 0x%08x", hr & 0xFFFFFFFF)
+        else:
+            logging.info("Windows AppUserModelID set to %s", app_id)
+    except Exception as exc:
+        logging.warning("Could not set Windows AppUserModelID: %s", exc)
+
+
+def _build_pyber_icon() -> Optional["QtGui.QIcon"]:
+    """Build a QIcon backed by every embedded size of pyBer.ico.
+
+    On some Windows configurations Qt fails to render small taskbar icons
+    when only the multi-image .ico file is given to QIcon. Explicitly pulling
+    each pixmap out and re-adding it guarantees the 16/24/32/.../256 set is
+    available to Windows shell.
+    """
+    icon_path = _pyber_icon_path()
+    if not os.path.isfile(icon_path):
+        logging.warning("App icon not found at %s", icon_path)
+        return None
+    try:
+        from_file = QtGui.QIcon(icon_path)
+        if from_file.isNull():
+            logging.warning("QIcon failed to load %s", icon_path)
+            return None
+        icon = QtGui.QIcon()
+        sizes = from_file.availableSizes()
+        if not sizes:
+            sizes = [QtCore.QSize(s, s) for s in (16, 24, 32, 48, 64, 128, 256)]
+        for size in sizes:
+            pixmap = from_file.pixmap(size)
+            if not pixmap.isNull():
+                icon.addPixmap(pixmap)
+        if icon.isNull():
+            # Last-resort fallback: use whatever QIcon parsed from the file.
+            icon = from_file
+        logging.info("pyBer icon built from %s (sizes: %s)",
+                     icon_path, [s.width() for s in sizes])
+        return icon
+    except Exception as exc:
+        logging.warning("Failed to build pyBer icon: %s", exc)
+        return None
 
 
 def _set_qt_application_icon(app: QtWidgets.QApplication) -> None:
+    icon = _build_pyber_icon()
+    if icon is None:
+        return
     try:
-        icon_path = _pyber_icon_path()
-        if os.path.isfile(icon_path):
-            app_icon = QtGui.QIcon(icon_path)
-            if not app_icon.isNull():
-                app.setWindowIcon(app_icon)
-    except Exception:
-        pass
+        app.setWindowIcon(icon)
+    except Exception as exc:
+        logging.warning("setWindowIcon (app) failed: %s", exc)
 
 
 def _set_qt_window_icon(window: QtWidgets.QWidget) -> None:
+    icon = _build_pyber_icon()
+    if icon is None:
+        return
     try:
-        icon_path = _pyber_icon_path()
-        if os.path.isfile(icon_path):
-            icon = QtGui.QIcon(icon_path)
-            if not icon.isNull():
-                window.setWindowIcon(icon)
+        window.setWindowIcon(icon)
     except Exception:
         pass
+
+
+def _force_windows_taskbar_icon(window: QtWidgets.QWidget) -> None:
+    """Send WM_SETICON to the HWND so the Windows taskbar picks up the icon.
+
+    Required when running under python.exe in dev mode: Qt's setWindowIcon
+    updates the title bar but Windows often keeps the taskbar entry's icon
+    pointing at the python.exe resource. WM_SETICON tells the OS to use a
+    specific HICON for this window's taskbar entry and alt-tab thumbnail.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        hwnd = int(window.winId())
+        if not hwnd:
+            return
+        ico_path = _pyber_icon_path()
+        if not os.path.isfile(ico_path):
+            return
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x00000010
+        ICON_SMALL = 0
+        ICON_BIG = 1
+        WM_SETICON = 0x0080
+        LoadImageW = ctypes.windll.user32.LoadImageW
+        LoadImageW.argtypes = [
+            wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT,
+        ]
+        LoadImageW.restype = wintypes.HANDLE
+        SendMessageW = ctypes.windll.user32.SendMessageW
+        SendMessageW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+        ]
+        SendMessageW.restype = wintypes.LPARAM
+        h_big = LoadImageW(
+            None, ico_path, IMAGE_ICON, 32, 32, LR_LOADFROMFILE,
+        )
+        h_small = LoadImageW(
+            None, ico_path, IMAGE_ICON, 16, 16, LR_LOADFROMFILE,
+        )
+        if h_big:
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG, h_big)
+        if h_small:
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, h_small)
+        logging.info(
+            "WM_SETICON applied to HWND 0x%X (big=%s small=%s)",
+            hwnd, bool(h_big), bool(h_small),
+        )
+    except Exception as exc:
+        logging.warning("WM_SETICON path failed: %s", exc)
 
 
 def _rolling_corr(x: np.ndarray, y: np.ndarray, win: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -1187,6 +1282,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Pyber - Fiber Photometry Analysis")
         _set_qt_window_icon(self)
+        self.setAcceptDrops(True)
         self._set_initial_window_size()
         self.setDockOptions(
             QtWidgets.QMainWindow.DockOption.AllowNestedDocks
@@ -4816,6 +4912,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._push_recent_preprocessing_files(paths)
         self._add_files(paths)
 
+    _SUPPORTED_DATA_EXTS = (".doric", ".h5", ".hdf5", ".csv")
+
     def _open_folder_dialog(self) -> None:
         start_dir = self.file_panel.current_dir_hint() or self.settings.value("last_open_dir", "", type=str) or os.getcwd()
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Add folder with data files", start_dir)
@@ -4825,11 +4923,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
         paths: List[str] = []
         for fn in os.listdir(folder):
-            if fn.lower().endswith((".doric", ".h5", ".hdf5", ".csv")):
+            if fn.lower().endswith(self._SUPPORTED_DATA_EXTS):
                 paths.append(os.path.join(folder, fn))
         paths.sort()
         self._push_recent_preprocessing_files(paths)
         self._add_files(paths)
+
+    def _expand_dropped_url_paths(self, urls: List[QtCore.QUrl]) -> List[str]:
+        """Resolve a list of dropped URLs into supported file paths.
+        Folders are scanned at top level (non-recursive, matching the
+        Add-folder dialog). Files are passed through if their extension is
+        supported. Duplicates are dropped, order is preserved."""
+        paths: List[str] = []
+        seen: set[str] = set()
+        for url in urls:
+            if not url.isLocalFile():
+                continue
+            local = url.toLocalFile()
+            if not local:
+                continue
+            if os.path.isdir(local):
+                try:
+                    entries = sorted(os.listdir(local))
+                except OSError:
+                    continue
+                for fn in entries:
+                    if fn.lower().endswith(self._SUPPORTED_DATA_EXTS):
+                        full = os.path.join(local, fn)
+                        if full not in seen:
+                            seen.add(full)
+                            paths.append(full)
+            elif os.path.isfile(local) and local.lower().endswith(self._SUPPORTED_DATA_EXTS):
+                if local not in seen:
+                    seen.add(local)
+                    paths.append(local)
+        return paths
 
     def _add_files(self, paths: List[str], select_after: bool = True) -> None:
         for p in paths:
@@ -7181,24 +7309,43 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------------- Drag and drop ----------------
 
     def dragEnterEvent(self, event) -> None:
-        if event.mimeData().hasUrls():
-            paths = [u.toLocalFile() for u in event.mimeData().urls()]
-            if self._can_accept_drop(paths):
-                event.acceptProposedAction()
-                return
-        event.ignore()
+        mime = event.mimeData()
+        if mime and mime.hasUrls() and any(u.isLocalFile() for u in mime.urls()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        mime = event.mimeData()
+        if mime and mime.hasUrls() and any(u.isLocalFile() for u in mime.urls()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def dropEvent(self, event) -> None:
-        if not event.mimeData().hasUrls():
+        mime = event.mimeData()
+        if not mime or not mime.hasUrls():
             event.ignore()
             return
-        paths = [u.toLocalFile() for u in event.mimeData().urls()]
-        self._handle_drop(paths)
+        paths = self._expand_dropped_url_paths(list(mime.urls()))
+        if not paths:
+            event.ignore()
+            self._show_status_message(
+                "Drop ignored: no .doric / .h5 / .hdf5 / .csv files found in the dropped item(s).",
+                6000,
+            )
+            return
         event.acceptProposedAction()
-
-    def _can_accept_drop(self, paths: List[str]) -> bool:
-        known_ext = (".doric", ".h5", ".hdf5", ".csv")
-        return any(p.lower().endswith(known_ext) for p in paths)
+        first_dir = next(
+            (os.path.dirname(p) for p in paths if os.path.isfile(p)), ""
+        )
+        if first_dir:
+            self.settings.setValue("last_open_dir", first_dir)
+        self._push_recent_preprocessing_files(paths)
+        self._handle_drop(paths)
+        self._show_status_message(
+            f"Loaded {len(paths)} file(s) via drag-and-drop.", 5000,
+        )
 
     def _handle_drop(self, paths: List[str]) -> None:
         doric_paths: List[str] = []
@@ -7591,6 +7738,7 @@ def main() -> None:
                 pix = QtGui.QPixmap(icon_path)
                 if not pix.isNull():
                     splash = QtWidgets.QSplashScreen(pix, QtCore.Qt.WindowType.WindowStaysOnTopHint)
+                    _set_qt_window_icon(splash)
                     splash.show()
                     app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
         except Exception:
@@ -7624,6 +7772,14 @@ def main() -> None:
         return
 
     w.show()
+    # On Windows, re-applying the icon after show() forces the taskbar entry
+    # to refresh - the OS otherwise caches whatever icon was active at the
+    # moment the window was first realized.
+    _set_qt_window_icon(w)
+    # Belt-and-suspenders: send WM_SETICON directly to the HWND so the Windows
+    # taskbar and alt-tab thumbnail definitely pick up pyBer.ico even when
+    # running under python.exe in dev mode.
+    _force_windows_taskbar_icon(w)
     if splash is not None:
         splash.finish(w)
     app.exec()

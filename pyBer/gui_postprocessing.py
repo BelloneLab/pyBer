@@ -506,6 +506,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._last_spatial_velocity_map: Optional[np.ndarray] = None
         self._last_spatial_extent: Optional[Tuple[float, float, float, float]] = None
         self._last_event_rows: List[Dict[str, object]] = []
+        self._last_display_labels: List[str] = []
+        self._last_psth_display_level: str = "trials"
+        self._psth_excluded_files: Dict[str, Dict[str, object]] = {}
         self._sync_results_by_file: Dict[str, Dict[str, object]] = {}
         self._last_sync_preview: Optional[SyncResult] = None
         self._known_dio_channels: List[str] = []
@@ -515,6 +518,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._group_mat: Optional[np.ndarray] = None
         self._group_tvec: Optional[np.ndarray] = None
         self._group_labels: List[str] = []
+        self._group_trial_mat: Optional[np.ndarray] = None
+        self._group_trial_tvec: Optional[np.ndarray] = None
+        self._group_trial_labels: List[str] = []
         self._all_file_ids: List[str] = []
         self.last_signal_events: Optional[Dict[str, object]] = None
         self.last_behavior_analysis: Optional[Dict[str, object]] = None
@@ -821,6 +827,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_group_window = QtWidgets.QDoubleSpinBox(); self.spin_group_window.setRange(0.0, 1e6); self.spin_group_window.setValue(0.0); self.spin_group_window.setDecimals(3)
         self.spin_dur_min = QtWidgets.QDoubleSpinBox(); self.spin_dur_min.setRange(0, 1e6); self.spin_dur_min.setValue(0.0); self.spin_dur_min.setDecimals(2)
         self.spin_dur_max = QtWidgets.QDoubleSpinBox(); self.spin_dur_max.setRange(0, 1e6); self.spin_dur_max.setValue(0.0); self.spin_dur_max.setDecimals(2)
+        self.cb_exclude_low_event_animals = QtWidgets.QCheckBox("Exclude animals below minimum")
+        self.cb_exclude_low_event_animals.setChecked(False)
+        self.cb_exclude_low_event_animals.setToolTip(
+            "When Group mode is used, omit animals/files with fewer accepted events than the threshold below."
+        )
+        self.spin_min_events_per_animal = QtWidgets.QSpinBox()
+        self.spin_min_events_per_animal.setRange(1, 1000000)
+        self.spin_min_events_per_animal.setValue(5)
+        self.spin_min_events_per_animal.setToolTip(
+            "Minimum number of accepted events required for an animal/file to enter grouped PSTH analysis."
+        )
+        self.cb_group_keep_trials = QtWidgets.QCheckBox("Keep trial rows in Group view")
+        self.cb_group_keep_trials.setToolTip(
+            "When Group is selected, show every accepted trial/event row instead of one averaged row per animal."
+        )
 
         self.cb_metrics = QtWidgets.QCheckBox("Enable PSTH metrics")
         self.cb_metrics.setChecked(True)
@@ -850,7 +871,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_pre, self.spin_post, self.spin_b0, self.spin_b1,
             self.spin_resample, self.spin_smooth,
             self.spin_event_start, self.spin_event_end, self.spin_group_window,
-            self.spin_dur_min, self.spin_dur_max,
+            self.spin_dur_min, self.spin_dur_max, self.spin_min_events_per_animal,
             self.spin_metric_pre0, self.spin_metric_pre1,
             self.spin_metric_post0, self.spin_metric_post1,
             self.spin_global_start, self.spin_global_end,
@@ -916,6 +937,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # ═══════════════════════════════════════════════════════
         # Section 3 — PSTH metrics
         # ═══════════════════════════════════════════════════════
+        grp_include = QtWidgets.QGroupBox("Animal inclusion")
+        grp_include.setStyleSheet(_psth_section_qss)
+        fi = QtWidgets.QFormLayout(grp_include)
+        fi.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        fi.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        fi.addRow("", self.cb_exclude_low_event_animals)
+        fi.addRow("Min events / animal", self.spin_min_events_per_animal)
+        fi.addRow("", self.cb_group_keep_trials)
+
         grp_met = QtWidgets.QGroupBox("PSTH metrics")
         grp_met.setStyleSheet(_psth_section_qss)
         fm = QtWidgets.QFormLayout(grp_met)
@@ -960,6 +990,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _psth_vbox.setSpacing(4)
         _psth_vbox.addWidget(grp_window)
         _psth_vbox.addWidget(grp_filt)
+        _psth_vbox.addWidget(grp_include)
         _psth_vbox.addWidget(grp_met)
         _psth_vbox.addWidget(grp_global)
 
@@ -2569,6 +2600,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_group_window,
             self.spin_dur_min,
             self.spin_dur_max,
+            self.spin_min_events_per_animal,
             self.spin_metric_pre0,
             self.spin_metric_pre1,
             self.spin_metric_post0,
@@ -2578,6 +2610,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         ):
             w.valueChanged.connect(self._compute_psth)
         self.combo_metric.currentIndexChanged.connect(self._compute_psth)
+        self.cb_exclude_low_event_animals.toggled.connect(self._update_psth_inclusion_controls)
+        self.cb_exclude_low_event_animals.toggled.connect(self._compute_psth)
+        self.cb_group_keep_trials.toggled.connect(self._compute_psth)
         self.cb_global_amp.stateChanged.connect(self._compute_psth)
         self.cb_global_freq.stateChanged.connect(self._compute_psth)
         for w in (self.spin_metric_pre0, self.spin_metric_pre1, self.spin_metric_post0, self.spin_metric_post1):
@@ -2613,6 +2648,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._apply_plot_style()
         self._update_align_ui()
         self._update_event_filter_enabled()
+        self._update_psth_inclusion_controls()
         self._update_metrics_enabled()
         self._update_global_metrics_enabled()
         self._toggle_filter_panel(False)
@@ -2870,9 +2906,70 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if dock is None:
             return
         if visible:
+            self._ensure_dock_in_stack(key)
             dock.show()
         else:
             dock.hide()
+
+    # Section docks that intentionally live outside the main tab stack and
+    # open as floating top-level windows when their side-rail button is
+    # clicked. _ensure_dock_in_stack must skip these so we don't pull them
+    # back into the drawer.
+    _FLOATING_DOCKAREA_SECTIONS = frozenset({"temporal"})
+
+    def _ensure_dock_in_stack(self, key: str) -> None:
+        """Reattach a section dock to the main tab stack if pyqtgraph orphaned it.
+
+        Calling dock.hide() on a tabbed pyqtgraph Dock removes the widget from
+        its TabContainer; a subsequent show() returns visibility=True but
+        leaves the dock in a VContainer / stray splitter with zero height. We
+        detect that state and moveDock() the section back into the tab stack
+        with another fixed section as the anchor.
+
+        Floating sections (see _FLOATING_DOCKAREA_SECTIONS) are exempt: they
+        live as separate top-level windows by design.
+        """
+        if key in self._FLOATING_DOCKAREA_SECTIONS:
+            return
+        dock = self._dockarea_dock(key)
+        if dock is None or self._dockarea is None:
+            return
+        try:
+            parent_cls = type(dock.parent()).__name__ if dock.parent() else ""
+        except Exception:
+            parent_cls = ""
+        if parent_cls == "StackedWidget":
+            return
+        anchor = None
+        for other_key in _FIXED_POST_RIGHT_TAB_ORDER:
+            if other_key == key:
+                continue
+            other = self._dockarea_dock(other_key)
+            if other is None:
+                continue
+            try:
+                if type(other.parent()).__name__ == "StackedWidget":
+                    anchor = other
+                    break
+            except Exception:
+                continue
+        if anchor is None:
+            for other_key, other in self._dockarea_docks.items():
+                if other_key == key or other is None:
+                    continue
+                try:
+                    if type(other.parent()).__name__ == "StackedWidget":
+                        anchor = other
+                        break
+                except Exception:
+                    continue
+        try:
+            if anchor is not None:
+                self._dockarea.moveDock(dock, "above", anchor)
+            else:
+                self._dockarea.addDock(dock, "left")
+        except Exception as exc:
+            _LOG.debug("ensure_dock_in_stack(%s) failed: %s", key, exc)
 
     def _arrange_dockarea_default(self) -> None:
         if self._dockarea is None:
@@ -4273,18 +4370,86 @@ class PostProcessingPanel(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _psth_min_events_per_animal(self) -> int:
+        spin = getattr(self, "spin_min_events_per_animal", None)
+        if spin is None:
+            return 1
+        try:
+            return max(1, int(spin.value()))
+        except Exception:
+            return 1
+
+    def _psth_exclude_low_event_animals_enabled(self) -> bool:
+        chk = getattr(self, "cb_exclude_low_event_animals", None)
+        return bool(chk is not None and chk.isChecked())
+
+    def _psth_group_trial_view_enabled(self) -> bool:
+        chk = getattr(self, "cb_group_keep_trials", None)
+        return bool(chk is not None and chk.isChecked())
+
+    def _stack_psth_trial_rows(
+        self,
+        per_file_mats: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None,
+        per_file_labels: Optional[Dict[str, List[str]]] = None,
+        file_ids_order: Optional[List[str]] = None,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[str]]:
+        mats_by_file = per_file_mats if per_file_mats is not None else self._per_file_mats
+        labels_by_file = per_file_labels if per_file_labels is not None else self._per_file_labels
+        ordered_ids = list(file_ids_order or self._all_file_ids or mats_by_file.keys())
+        rows: List[np.ndarray] = []
+        labels: List[str] = []
+        tvec_ref: Optional[np.ndarray] = None
+        min_cols: Optional[int] = None
+
+        for file_id in ordered_ids:
+            if file_id not in mats_by_file:
+                continue
+            tvec, mat = mats_by_file[file_id]
+            arr = np.asarray(mat, float)
+            if arr.ndim != 2 or arr.shape[0] == 0 or arr.shape[1] == 0:
+                continue
+            if tvec_ref is None:
+                tvec_ref = np.asarray(tvec, float).copy()
+            min_cols = arr.shape[1] if min_cols is None else min(min_cols, arr.shape[1])
+            base_labels = labels_by_file.get(file_id, [])
+            for row_idx in range(arr.shape[0]):
+                label = base_labels[row_idx] if row_idx < len(base_labels) else f"Trial {row_idx + 1}"
+                labels.append(f"{file_id} | {label}")
+            rows.append(arr)
+
+        if not rows or tvec_ref is None or min_cols is None or min_cols <= 0:
+            return None, None, []
+        stacked = np.vstack([row[:, :min_cols] for row in rows])
+        return stacked, tvec_ref[:min_cols], labels[: stacked.shape[0]]
+
     def _rerender_visual_from_cache(self) -> None:
         visual_mode = self.tab_visual_mode.currentIndex()
         if visual_mode == 1:
             # Group view
-            if self._group_mat is not None and self._group_tvec is not None:
+            if self._psth_group_trial_view_enabled():
+                mat = self._group_trial_mat
+                tvec = self._group_trial_tvec
+                labels = list(self._group_trial_labels)
+                if mat is None or tvec is None:
+                    mat, tvec, labels = self._stack_psth_trial_rows()
+                if mat is not None and tvec is not None:
+                    self._last_psth_display_level = "trials"
+                    self._last_display_labels = labels
+                    self._render_heatmap(mat, tvec, labels=labels)
+                    self._render_avg(mat, tvec)
+                    self._render_metrics(mat, tvec)
+                    self._last_mat = mat
+                    self._last_tvec = tvec
+                    self.lbl_plot_file.setText(f"Group trials: {mat.shape[0]} trial(s)")
+            elif self._group_mat is not None and self._group_tvec is not None:
+                self._last_psth_display_level = "animals"
+                self._last_display_labels = list(self._group_labels)
                 self._render_heatmap(self._group_mat, self._group_tvec, labels=self._group_labels)
                 self._render_avg(self._group_mat, self._group_tvec)
                 self._render_metrics(self._group_mat, self._group_tvec)
                 self._last_mat = self._group_mat
                 self._last_tvec = self._group_tvec
                 self.lbl_plot_file.setText(f"Group: {len(self._group_labels)} animal(s)")
-                self.plot_avg.setTitle("Average across animals +/- SEM")
         else:
             # Individual view
             sel_id = self.combo_individual_file.currentText().strip()
@@ -4293,6 +4458,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if sel_id and sel_id in self._per_file_mats:
                 tvec, mat = self._per_file_mats[sel_id]
                 labels = self._per_file_labels.get(sel_id, [])
+                self._last_psth_display_level = "trials"
+                self._last_display_labels = list(labels)
                 self._render_heatmap(mat, tvec, labels=labels)
                 self._render_avg(mat, tvec)
                 self._render_metrics(mat, tvec)
@@ -4440,6 +4607,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         enabled = self.cb_filter_events.isChecked()
         for w in (self.spin_event_start, self.spin_event_end, self.spin_group_window, self.spin_dur_min, self.spin_dur_max):
             w.setEnabled(enabled)
+        self._queue_settings_save()
+
+    def _update_psth_inclusion_controls(self, *_args: object) -> None:
+        enabled = self._psth_exclude_low_event_animals_enabled()
+        self.spin_min_events_per_animal.setEnabled(enabled)
         self._queue_settings_save()
 
     def _update_metrics_enabled(self) -> None:
@@ -4946,6 +5118,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_group_window,
             self.spin_dur_min,
             self.spin_dur_max,
+            self.spin_min_events_per_animal,
             self.spin_metric_pre0,
             self.spin_metric_pre1,
             self.spin_metric_post0,
@@ -4973,10 +5146,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         for chk in (
             self.cb_filter_events,
+            self.cb_group_keep_trials,
             self.cb_sync_auto_threshold,
             self.cb_sync_use_aligned,
             self.cb_sync_auto_recompute,
             self.cb_metrics,
+            self.cb_exclude_low_event_animals,
             self.cb_global_metrics,
             self.cb_global_amp,
             self.cb_global_freq,
@@ -8166,7 +8341,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._group_mat = None
             self._group_tvec = None
             self._group_labels = []
+            self._group_trial_mat = None
+            self._group_trial_tvec = None
+            self._group_trial_labels = []
             self._all_file_ids = []
+            self._last_display_labels = []
+            self._last_psth_display_level = "trials"
+            self._psth_excluded_files = {}
             # Clear every PSTH-driven plot so the panel looks like a fresh launch.
             for pw in (
                 getattr(self, "plot_heat", None),
@@ -8218,24 +8399,54 @@ class PostProcessingPanel(QtWidgets.QWidget):
             animal_labels: List[str] = []
             per_file_mats: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
             per_file_labels: Dict[str, List[str]] = {}
+            group_per_file_mats: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+            group_per_file_labels: Dict[str, List[str]] = {}
             file_ids_order: List[str] = []
+            group_file_ids_order: List[str] = []
             all_dur = []
             all_events: List[float] = []
             event_rows: List[Dict[str, object]] = []
             total_events = 0
             tvec = None
+            min_events = self._psth_min_events_per_animal()
+            exclude_low_events = bool(group_mode and self._psth_exclude_low_event_animals_enabled())
+            excluded_files: Dict[str, Dict[str, object]] = {}
 
             for proc in self._processed:
                 ev, dur = self._get_events_for_proc(proc)
                 ev, dur = self._filter_events(ev, dur)
-                if ev.size == 0:
-                    continue
                 file_id = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
-                all_events.extend(np.asarray(ev, float).tolist())
+                if ev.size == 0:
+                    if exclude_low_events:
+                        excluded_files[file_id] = {
+                            "event_count": 0,
+                            "min_events": int(min_events),
+                        }
+                    continue
+                if exclude_low_events and ev.size < min_events:
+                    excluded_files[file_id] = {
+                        "event_count": int(ev.size),
+                        "min_events": int(min_events),
+                    }
                 if dur is None or len(dur) != ev.size:
                     dur_row = np.full(ev.shape, np.nan, dtype=float)
                 else:
                     dur_row = np.asarray(dur, float)
+                tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, ev, window, baseline, res_hz, smooth_sigma_s=smooth)
+                if mat.size == 0:
+                    continue
+                # Keep all per-file matrices so Individual view can inspect excluded animals.
+                per_file_mats[file_id] = (tvec.copy(), mat.copy())
+                per_file_labels[file_id] = [f"Trial {j + 1}" for j in range(mat.shape[0])]
+                if file_id not in file_ids_order:
+                    file_ids_order.append(file_id)
+                if exclude_low_events and mat.shape[0] < min_events:
+                    excluded_files[file_id] = {
+                        "event_count": int(mat.shape[0]),
+                        "min_events": int(min_events),
+                    }
+                    continue
+                all_events.extend(np.asarray(ev, float).tolist())
                 for i in range(ev.size):
                     event_rows.append(
                         {
@@ -8244,16 +8455,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                             "duration_sec": float(dur_row[i]) if i < dur_row.size else np.nan,
                         }
                     )
-                tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, ev, window, baseline, res_hz, smooth_sigma_s=smooth)
-                if mat.size == 0:
-                    continue
                 mats.append(mat)
                 total_events += mat.shape[0]
-                # Store per-file matrix for individual view
-                per_file_mats[file_id] = (tvec.copy(), mat.copy())
-                per_file_labels[file_id] = [f"Trial {j + 1}" for j in range(mat.shape[0])]
-                if file_id not in file_ids_order:
-                    file_ids_order.append(file_id)
+                group_per_file_mats[file_id] = (tvec.copy(), mat.copy())
+                group_per_file_labels[file_id] = per_file_labels[file_id]
+                if file_id not in group_file_ids_order:
+                    group_file_ids_order.append(file_id)
                 # Build group (animal-level) row
                 row = np.nanmean(mat, axis=0)
                 if np.any(np.isfinite(row)):
@@ -8266,6 +8473,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._per_file_mats = per_file_mats
             self._per_file_labels = per_file_labels
             self._all_file_ids = file_ids_order
+            self._psth_excluded_files = excluded_files
             if animal_rows:
                 self._group_mat = np.vstack(animal_rows)
                 self._group_tvec = tvec.copy() if tvec is not None else None
@@ -8274,12 +8482,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._group_mat = None
                 self._group_tvec = None
                 self._group_labels = []
+            self._group_trial_mat, self._group_trial_tvec, self._group_trial_labels = self._stack_psth_trial_rows(
+                per_file_mats=group_per_file_mats,
+                per_file_labels=group_per_file_labels,
+                file_ids_order=group_file_ids_order,
+            )
             self._refresh_individual_file_combo()
 
             self._render_global_metrics()
 
-            if not mats or tvec is None:
-                self.statusUpdate.emit("No events found for the current alignment.", 5000)
+            if (not mats or tvec is None) and not per_file_mats:
+                msg = "No events found for the current alignment."
+                if excluded_files:
+                    msg = f"No animal/file met the minimum event criterion ({min_events} event(s))."
+                self.statusUpdate.emit(msg, 5000)
                 self._last_events = np.array([], float)
                 self._last_event_rows = []
                 self._last_durations = np.array([], float)
@@ -8287,21 +8503,43 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._sync_temporal_modeling_context()
                 return
 
-            mat_events = np.vstack(mats)
+            if tvec is None and per_file_mats:
+                first_tvec, _first_mat = next(iter(per_file_mats.values()))
+                tvec = first_tvec
+            mat_events = np.vstack(mats) if mats else np.empty((0, int(np.asarray(tvec).size) if tvec is not None else 0), dtype=float)
             # Determine what to display based on visual mode tab
             visual_mode = self.tab_visual_mode.currentIndex()  # 0=Individual, 1=Group
+            display_level = "trials"
             if visual_mode == 1 and group_mode:
-                # Group view: each row = animal
-                if not animal_rows:
-                    self.statusUpdate.emit("No events found for the current alignment.", 5000)
+                if self._psth_group_trial_view_enabled():
+                    trial_mat = self._group_trial_mat
+                    trial_tvec = self._group_trial_tvec
+                    trial_labels = list(self._group_trial_labels)
+                    if trial_mat is None or trial_tvec is None:
+                        self.statusUpdate.emit(f"No animal/file met the minimum event criterion ({min_events} event(s)).", 5000)
+                        self._last_events = np.array([], float)
+                        self._last_event_rows = []
+                        self._last_durations = np.array([], float)
+                        self._update_status_strip()
+                        self._sync_temporal_modeling_context()
+                        return
+                    mat_display = trial_mat
+                    tvec = trial_tvec
+                    display_labels = trial_labels
+                    display_level = "trials"
+                elif not animal_rows:
+                    self.statusUpdate.emit(f"No animal/file met the minimum event criterion ({min_events} event(s)).", 5000)
                     self._last_events = np.array([], float)
                     self._last_event_rows = []
                     self._last_durations = np.array([], float)
                     self._update_status_strip()
                     self._sync_temporal_modeling_context()
                     return
-                mat_display = self._group_mat
-                display_labels = self._group_labels
+                else:
+                    # Group view: each row = animal
+                    mat_display = self._group_mat
+                    display_labels = self._group_labels
+                    display_level = "animals"
             elif visual_mode == 0 and per_file_mats:
                 # Individual view: show selected file's trials
                 sel_id = self.combo_individual_file.currentText().strip()
@@ -8320,10 +8558,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             elif group_mode:
                 mat_display = np.vstack(animal_rows) if animal_rows else mat_events
                 display_labels = animal_labels if animal_rows else [f"Trial {j + 1}" for j in range(mat_events.shape[0])]
+                display_level = "animals" if animal_rows else "trials"
             else:
                 mat_display = mat_events
                 display_labels = [f"Trial {j + 1}" for j in range(mat_events.shape[0])]
 
+            self._last_display_labels = list(display_labels)
+            self._last_psth_display_level = display_level
             self._render_heatmap(mat_display, tvec, labels=display_labels)
             self._render_avg(mat_display, tvec)
             dur_all = np.concatenate(all_dur) if all_dur else np.array([], float)
@@ -8334,15 +8575,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._last_events = np.asarray(all_events, float) if all_events else np.array([], float)
             self._last_durations = dur_all
             self._last_event_rows = event_rows
-            if visual_mode == 1 and group_mode:
+            excluded_suffix = ""
+            if excluded_files:
+                excluded_suffix = f" Excluded {len(excluded_files)} animal/file(s) below {min_events} event(s)."
+            if visual_mode == 1 and group_mode and display_level == "animals":
                 self.statusUpdate.emit(
-                    f"Group view: {total_events} event(s) across {mat_display.shape[0]} animal(s).", 5000)
+                    f"Group view: {total_events} event(s) across {mat_display.shape[0]} animal(s).{excluded_suffix}", 5000)
+            elif visual_mode == 1 and group_mode:
+                self.statusUpdate.emit(
+                    f"Group trial view: {mat_display.shape[0]} trial(s) from {len(group_per_file_mats)} animal/file(s).{excluded_suffix}", 5000)
             elif visual_mode == 0:
                 sel = self.combo_individual_file.currentText().strip() or "(first)"
                 self.statusUpdate.emit(
-                    f"Individual view [{sel}]: {mat_display.shape[0]} trial(s), {total_events} total event(s).", 5000)
+                    f"Individual view [{sel}]: {mat_display.shape[0]} trial(s) displayed, {total_events} included event(s).{excluded_suffix}", 5000)
             else:
-                self.statusUpdate.emit(f"Computed PSTH for {total_events} event(s).", 5000)
+                self.statusUpdate.emit(f"Computed PSTH for {total_events} event(s).{excluded_suffix}", 5000)
             self._update_metric_regions()
             self._update_status_strip()
             self._save_settings()
@@ -8462,9 +8709,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # Keep row labels readable: show all only for small heatmaps, otherwise
         # use a sparse trial/animal ruler rather than overprinting every row.
         y_axis = self.plot_heat.getAxis("left")
-        visual_mode = self.tab_visual_mode.currentIndex()
+        display_level = str(getattr(self, "_last_psth_display_level", "trials") or "trials")
+        is_animal_level = display_level == "animals"
         has_labels = bool(labels and len(labels) == n_rows)
-        show_names = bool(has_labels and (visual_mode == 1 or n_rows <= 12))
+        show_names = bool(has_labels and (is_animal_level or n_rows <= 12))
         ticks = self._build_heatmap_y_ticks(labels if has_labels else None, n_rows, show_names)
         y_axis.setTicks([ticks])
         try:
@@ -8472,7 +8720,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             y_axis.setWidth(58 if n_rows > 12 else 76)
         except Exception:
             pass
-        label_kind = "Animals" if visual_mode == 1 else "Trials"
+        label_kind = "Animals" if is_animal_level else "Trials"
         self.plot_heat.setLabel("left", f"{label_kind} (n={n_rows})")
         if n_rows > 12:
             self.plot_heat.setToolTip(
@@ -8523,8 +8771,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.curve_sem_hi.setData(tvec, avg + sem, connect="finite", skipFiniteCheck=True)
         self.curve_sem_lo.setData(tvec, avg - sem, connect="finite", skipFiniteCheck=True)
         self.plot_avg.setXRange(float(tvec[0]), float(tvec[-1]), padding=0)
-        visual_mode = self.tab_visual_mode.currentIndex() if hasattr(self, "tab_visual_mode") else 0
-        if visual_mode == 1:
+        display_level = str(getattr(self, "_last_psth_display_level", "trials") or "trials")
+        if display_level == "animals":
             self.plot_avg.setTitle("Average across animals \u00b1 SEM")
         else:
             self.plot_avg.setTitle("Average across trials \u00b1 SEM")
@@ -10039,6 +10287,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "group_window_s": 0.0,
             "dur_min": 0.0,
             "dur_max": 0.0,
+            "psth_exclude_low_event_animals": False,
+            "psth_min_events_per_animal": 5,
+            "psth_group_keep_trials": False,
             "metrics_enabled": True,
             "metric": "AUC",
             "metric_pre0": -1.0,
@@ -10189,6 +10440,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "group_window_s": float(self.spin_group_window.value()),
             "dur_min": float(self.spin_dur_min.value()),
             "dur_max": float(self.spin_dur_max.value()),
+            "psth_exclude_low_event_animals": self.cb_exclude_low_event_animals.isChecked(),
+            "psth_min_events_per_animal": int(self.spin_min_events_per_animal.value()),
+            "psth_group_keep_trials": self.cb_group_keep_trials.isChecked(),
             "metrics_enabled": self.cb_metrics.isChecked(),
             "metric": self.combo_metric.currentText(),
             "metric_pre0": float(self.spin_metric_pre0.value()),
@@ -10320,6 +10574,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_dur_min.setValue(float(data["dur_min"]))
         if "dur_max" in data:
             self.spin_dur_max.setValue(float(data["dur_max"]))
+        if "psth_exclude_low_event_animals" in data:
+            self.cb_exclude_low_event_animals.setChecked(bool(data["psth_exclude_low_event_animals"]))
+        if "psth_min_events_per_animal" in data:
+            self.spin_min_events_per_animal.setValue(max(1, int(data["psth_min_events_per_animal"])))
+        if "psth_group_keep_trials" in data:
+            self.cb_group_keep_trials.setChecked(bool(data["psth_group_keep_trials"]))
+        self._update_psth_inclusion_controls()
         self.cb_metrics.setChecked(bool(data.get("metrics_enabled", True)))
         _set_combo(self.combo_metric, data.get("metric"))
         if "metric_pre0" in data:
@@ -10596,6 +10857,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             ("group_events_within_s", data.get("group_window_s", 0.0)),
             ("event_duration_min_s", data.get("dur_min", 0.0)),
             ("event_duration_max_s", data.get("dur_max", 0.0)),
+            ("exclude_animals_below_min_events", data.get("psth_exclude_low_event_animals", False)),
+            ("min_events_per_animal", data.get("psth_min_events_per_animal", 1)),
+            ("group_view_keeps_trial_rows", data.get("psth_group_keep_trials", False)),
+            ("excluded_animals_or_files", len(getattr(self, "_psth_excluded_files", {}) or {})),
             ("metrics_enabled", data.get("metrics_enabled", False)),
             ("metric", data.get("metric", "")),
             ("metric_pre_start_s", data.get("metric_pre0", 0.0)),
@@ -10742,7 +11007,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _export_results(self) -> None:
         if self._last_mat is None or self._last_tvec is None:
             return
-        is_group = self.tab_visual_mode.currentIndex() == 1 and bool(self._group_labels)
+        is_group = (
+            self.tab_visual_mode.currentIndex() == 1
+            and str(getattr(self, "_last_psth_display_level", "trials")) == "animals"
+            and bool(self._group_labels)
+        )
         dlg = ExportDialog(self, group_labels=self._group_labels if is_group else None)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
@@ -10759,7 +11028,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         do_pdf = bool(choices.get("pdf", True))
 
         # Determine row labels for heatmap columns
-        if is_group and self._group_labels:
+        display_labels = list(getattr(self, "_last_display_labels", []) or [])
+        if display_labels and len(display_labels) == int(self._last_mat.shape[0]):
+            row_labels = display_labels
+        elif is_group and self._group_labels:
             row_labels = self._group_labels
         else:
             row_labels = [f"trial_{i + 1}" for i in range(self._last_mat.shape[0])]
@@ -10909,9 +11181,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         window = (-pre, post)
         baseline = (b0, b1)
         is_group = self.tab_visual_mode.currentIndex() == 1 and len(self._processed) > 1
+        keep_trial_rows = bool(is_group and self._psth_group_trial_view_enabled())
+        min_events = self._psth_min_events_per_animal()
+        exclude_low_events = bool(is_group and self._psth_exclude_low_event_animals_enabled())
         animal_rows: List[np.ndarray] = []
         animal_labels: List[str] = []
         all_mats: List[np.ndarray] = []
+        all_labels: List[str] = []
         tvec = None
         for proc in self._processed:
             info = self._match_behavior_source(proc)
@@ -10926,23 +11202,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
             else:
                 events = on
             events, dur = self._filter_events(events, dur)
-            if events.size == 0:
-                continue
             file_id = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
+            if exclude_low_events and events.size < min_events:
+                continue
             tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, events, window, baseline, res_hz, smooth_sigma_s=smooth)
             if mat.size == 0:
                 continue
             all_mats.append(mat)
+            all_labels.extend([f"{file_id} | Trial {i + 1}" for i in range(mat.shape[0])])
             row = np.nanmean(mat, axis=0)
             if np.any(np.isfinite(row)):
                 animal_rows.append(row)
                 animal_labels.append(file_id)
         if not all_mats or tvec is None:
             return None, None, []
-        if is_group and animal_rows:
+        if is_group and animal_rows and not keep_trial_rows:
             return np.vstack(animal_rows), tvec, animal_labels
         mat_all = np.vstack(all_mats)
-        labels = [f"Trial {i + 1}" for i in range(mat_all.shape[0])]
+        labels = all_labels[: mat_all.shape[0]] if all_labels else [f"Trial {i + 1}" for i in range(mat_all.shape[0])]
         return mat_all, tvec, labels
 
     def _export_publication_figure(self, out_dir: str, prefix: str, pub_content: str) -> None:
