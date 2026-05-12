@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: v0.23
+  RELEASE_VERSION: v0.29
 
 jobs:
   build-windows:

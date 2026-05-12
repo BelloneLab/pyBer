@@ -336,6 +336,11 @@ class ProcessedTrial:
     prominence_threshold: float = float("nan")
     prominence_baseline_source: str = ""
 
+    # Optional synchronized timebase. When present, postprocessing can use this
+    # camera/behavior-aligned time column instead of the original photometry time.
+    sync_aligned_time: Optional[np.ndarray] = None
+    sync_report: Dict[str, Any] = field(default_factory=dict)
+
     fs_actual: float = np.nan
     fs_target: float = np.nan
     fs_used: float = np.nan
@@ -510,12 +515,23 @@ def export_processed_csv(
         w.writerow([f"# output_label: {processed.output_label}"])
         if processed.output_context:
             w.writerow([f"# output_context: {processed.output_context}"])
+        sync_report = getattr(processed, "sync_report", {}) or {}
+        if sync_report:
+            try:
+                w.writerow([f"# sync_report_json: {json.dumps(sync_report)}"])
+            except Exception:
+                pass
         if output_items:
             w.writerow([f"# output_modes: {json.dumps([label for label, _ in output_items])}"])
         if metadata:
             for k, v in metadata.items():
                 w.writerow([f"# {k}: {v}"])
         columns = [("time", t)]
+        aligned = getattr(processed, "sync_aligned_time", None)
+        if aligned is not None:
+            aligned_arr = np.asarray(aligned, float)
+            if aligned_arr.size == t.size:
+                columns.append(("time_aligned", aligned_arr))
         if selection.raw:
             columns.append(("raw", raw))
         if selection.isobestic:
@@ -565,6 +581,15 @@ def export_processed_h5(
     with h5py.File(path, "w") as f:
         g = f.create_group("data")
         g.create_dataset("time", data=np.asarray(processed.time, float), compression="gzip")
+        aligned = getattr(processed, "sync_aligned_time", None)
+        if aligned is not None:
+            aligned_arr = np.asarray(aligned, float)
+            if aligned_arr.size == np.asarray(processed.time, float).size:
+                g.create_dataset("time_aligned", data=aligned_arr, compression="gzip")
+                try:
+                    g.attrs["sync_report_json"] = json.dumps(getattr(processed, "sync_report", {}) or {})
+                except Exception:
+                    pass
         out_type = output_label_type(processed.output_label)
         output_items = _output_items_for_export(processed, selection) if selection.output else []
         g.attrs["output_label"] = str(processed.output_label)

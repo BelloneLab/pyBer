@@ -119,6 +119,37 @@ pyBer can align to:
 - Behavior transitions.
 - Signal events detected from the processed trace.
 
+### Time synchronization
+
+Use the `Sync` postprocessing panel when camera/behavior time and photometry
+time are not already in the same clock.
+
+1. Load processed photometry files.
+2. Load behavior or EthoVision CSV/XLSX files that contain camera time and a
+   sync column, such as a 1 Hz TTL or barcode/value column.
+3. Open `Sync`.
+4. Choose the behavior/camera file, or keep `Auto-match behavior file` for
+   batch queues where each behavior file corresponds to one recording.
+5. Choose the camera sync behavior/column and its extraction mode.
+6. Choose the photometry sync source: embedded DIO from the processed file, or a
+   raw A/D channel from the Doric file.
+7. Choose `Linear regression` for one global clock-drift estimate, or
+   `Interpolation` when you want pulse-to-pulse timing correction.
+8. Click `Preview selected file` and inspect the event mapping and residual lag.
+9. Click `Apply selected` or `Apply batch`.
+
+The panel reports matched pulse count, median lag, residual RMS, maximum
+residual, and clock drift in ppm. When `Use aligned time for postprocessing` is
+enabled, PSTH, signal-event analysis, and spatial activity interpolation use the
+new aligned timebase.
+
+`Export aligned files` writes CSV/HDF5 files with both:
+
+- `time`: original photometry time.
+- `time_aligned`: camera/behavior-aligned time.
+
+This makes the synchronization explicit and keeps the original trace unchanged.
+
 ### Group mode
 
 Use Group mode when each processed file represents one animal. pyBer keeps

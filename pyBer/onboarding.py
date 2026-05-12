@@ -632,6 +632,7 @@ def build_default_tutorial(window: QtWidgets.QMainWindow) -> List[TutorialStep]:
 
     for key, title, body in [
         ("setup", "Postprocessing setup", "Load processed traces, behavior files, and alignment sources."),
+        ("sync", "Time synchronization", "Align photometry time to camera or behavior time from TTL/barcode pulses, inspect lag diagnostics, and export an aligned time column."),
         ("psth", "PSTH panel", "Set event windows, baselines, filtering, rate bins, and pre/post metrics."),
         ("spatial", "Spatial panel", "Build occupancy, activity, and velocity maps from behavior trajectories."),
         ("signal", "Signal events", "Detect peaks/transients, compare amplitude metrics, and overlay detected events/noise."),
@@ -949,6 +950,7 @@ def _keyboard_cheatsheet_html() -> str:
 # (badge_letter, badge_color, title, subtitle)
 _POST_SECTION_META: Dict[str, Tuple[str, str, str, str]] = {
     "setup":    ("S", "#4b9df8", "Setup",         "Load processed traces and behavior / events"),
+    "sync":     ("Y", "#94e2d5", "Time synchronization", "Align camera / behavior time to photometry DIO"),
     "psth":     ("P", "#7d4df2", "PSTH analysis", "Trial windows, baselines and metrics"),
     "spatial":  ("X", "#5dd39e", "Spatial maps",  "Occupancy, activity and velocity heatmaps"),
     "temporal": ("T", "#2d8cff", "Temporal Modeling", "Continuous GLM and trial-level FLMM"),

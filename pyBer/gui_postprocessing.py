@@ -19,6 +19,7 @@ import h5py
 
 from analysis_core import ProcessedTrial, coerce_time_value
 from ethovision_process_gui import clean_sheet
+from time_sync import SyncResult, align_timebase, extract_sync_events
 from temporal_modeling import TemporalModelingWidget
 from onboarding import (
     PanelHeader as _PyberPanelHeader,
@@ -505,6 +506,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._last_spatial_velocity_map: Optional[np.ndarray] = None
         self._last_spatial_extent: Optional[Tuple[float, float, float, float]] = None
         self._last_event_rows: List[Dict[str, object]] = []
+        self._sync_results_by_file: Dict[str, Dict[str, object]] = {}
+        self._last_sync_preview: Optional[SyncResult] = None
+        self._known_dio_channels: List[str] = []
         # Per-file / group data for Individual vs Group visual modes
         self._per_file_mats: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}  # file_id -> (tvec, mat)
         self._per_file_labels: Dict[str, List[str]] = {}  # file_id -> trial labels
@@ -1670,6 +1674,142 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 pass
         self.lbl_spatial_msg.setText = _set_text_with_banner  # type: ignore[assignment]
 
+        # ---- Time synchronization panel ----
+        self.combo_sync_behavior_file = QtWidgets.QComboBox()
+        self.combo_sync_behavior_file.addItem("Auto-match behavior file", "")
+        _compact_combo(self.combo_sync_behavior_file, min_chars=12)
+        self.combo_sync_camera_column = QtWidgets.QComboBox()
+        _compact_combo(self.combo_sync_camera_column, min_chars=12)
+        self.combo_sync_camera_mode = QtWidgets.QComboBox()
+        self.combo_sync_camera_mode.addItems(["TTL rising edges", "TTL falling edges", "Barcode / value changes"])
+        _compact_combo(self.combo_sync_camera_mode, min_chars=12)
+        self.combo_sync_fiber_source = QtWidgets.QComboBox()
+        self.combo_sync_fiber_source.addItem("Embedded DIO in processed file", "__embedded__")
+        _compact_combo(self.combo_sync_fiber_source, min_chars=12)
+        self.combo_sync_fiber_mode = QtWidgets.QComboBox()
+        self.combo_sync_fiber_mode.addItems(["TTL rising edges", "TTL falling edges", "Barcode / value changes"])
+        _compact_combo(self.combo_sync_fiber_mode, min_chars=12)
+        self.combo_sync_method = QtWidgets.QComboBox()
+        self.combo_sync_method.addItems(["Linear regression", "Interpolation"])
+        _compact_combo(self.combo_sync_method, min_chars=12)
+        self.cb_sync_auto_threshold = QtWidgets.QCheckBox("Auto threshold")
+        self.cb_sync_auto_threshold.setChecked(True)
+        self.spin_sync_threshold = QtWidgets.QDoubleSpinBox()
+        self.spin_sync_threshold.setRange(-1e9, 1e9)
+        self.spin_sync_threshold.setDecimals(4)
+        self.spin_sync_threshold.setValue(0.5)
+        self.spin_sync_threshold.setEnabled(False)
+        self.spin_sync_min_interval = QtWidgets.QDoubleSpinBox()
+        self.spin_sync_min_interval.setRange(0.0, 3600.0)
+        self.spin_sync_min_interval.setDecimals(3)
+        self.spin_sync_min_interval.setValue(0.2)
+        self.spin_sync_min_interval.setSuffix(" s")
+        self.spin_sync_max_offset = QtWidgets.QSpinBox()
+        self.spin_sync_max_offset.setRange(0, 1000)
+        self.spin_sync_max_offset.setValue(5)
+        self.cb_sync_use_aligned = QtWidgets.QCheckBox("Use aligned time for postprocessing")
+        self.cb_sync_use_aligned.setChecked(False)
+        self.cb_sync_auto_recompute = QtWidgets.QCheckBox("Recompute PSTH after apply")
+        self.cb_sync_auto_recompute.setChecked(True)
+        self.combo_sync_export_format = QtWidgets.QComboBox()
+        self.combo_sync_export_format.addItems(["CSV + H5", "CSV only", "H5 only"])
+        _compact_combo(self.combo_sync_export_format, min_chars=8)
+        self.btn_sync_refresh = QtWidgets.QPushButton("Refresh sources")
+        self.btn_sync_refresh.setProperty("class", "compactSmall")
+        self.btn_sync_preview = QtWidgets.QPushButton("Preview selected file")
+        self.btn_sync_preview.setProperty("class", "compactSmall")
+        self.btn_sync_apply_selected = QtWidgets.QPushButton("Apply selected")
+        self.btn_sync_apply_selected.setProperty("class", "compactPrimarySmall")
+        self.btn_sync_apply_batch = QtWidgets.QPushButton("Apply batch")
+        self.btn_sync_apply_batch.setProperty("class", "compactPrimarySmall")
+        self.btn_sync_export = QtWidgets.QPushButton("Export aligned files")
+        self.btn_sync_export.setProperty("class", "compactSmall")
+        self.sync_status = _PyberInlineStatus("", "info")
+        self.txt_sync_report = QtWidgets.QTextEdit()
+        self.txt_sync_report.setReadOnly(True)
+        self.txt_sync_report.setMinimumHeight(92)
+        self.txt_sync_report.setPlaceholderText("Preview or apply time synchronization to see fit diagnostics.")
+        self.tbl_sync_results = QtWidgets.QTableWidget(0, 6)
+        self.tbl_sync_results.setHorizontalHeaderLabels(["File", "Pairs", "RMS ms", "Median lag ms", "Drift ppm", "Status"])
+        self.tbl_sync_results.verticalHeader().setVisible(False)
+        self.tbl_sync_results.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_sync_results.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_sync_results.setMinimumHeight(120)
+        try:
+            self.tbl_sync_results.horizontalHeader().setStretchLastSection(True)
+            self.tbl_sync_results.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        except Exception:
+            pass
+        self.plot_sync_map = pg.PlotWidget(title="Sync event mapping")
+        self.plot_sync_residual = pg.PlotWidget(title="Residual lag")
+        for pw in (self.plot_sync_map, self.plot_sync_residual):
+            _opt_plot(pw)
+            pw.setMinimumHeight(150)
+        self.plot_sync_map.setLabel("bottom", "Photometry sync time (s)")
+        self.plot_sync_map.setLabel("left", "Camera / behavior sync time (s)")
+        self.plot_sync_residual.setLabel("bottom", "Matched pulse")
+        self.plot_sync_residual.setLabel("left", "Residual (ms)")
+
+        grp_sync = QtWidgets.QGroupBox("Time synchronization")
+        sync_layout = QtWidgets.QVBoxLayout(grp_sync)
+        sync_layout.setContentsMargins(8, 8, 8, 8)
+        sync_layout.setSpacing(8)
+
+        sub_sync_sources = _PyberSubsection(
+            "Sources",
+            "Pair an external camera/behavior TTL or barcode column with the photometry DIO sync signal.",
+        )
+        f_sync_sources = _form()
+        _add_row(f_sync_sources, "Behavior file", self.combo_sync_behavior_file)
+        _add_row(f_sync_sources, "Camera sync", self.combo_sync_camera_column)
+        _add_row(f_sync_sources, "Camera mode", self.combo_sync_camera_mode)
+        _add_row(f_sync_sources, "Photometry sync", self.combo_sync_fiber_source)
+        _add_row(f_sync_sources, "Photometry mode", self.combo_sync_fiber_mode)
+        sub_sync_sources.add_layout(f_sync_sources)
+
+        sub_sync_fit = _PyberSubsection(
+            "Alignment",
+            "Linear regression estimates global clock drift; interpolation follows pulse-to-pulse timing.",
+        )
+        f_sync_fit = _form()
+        _add_row(f_sync_fit, "Method", self.combo_sync_method)
+        _add_row(f_sync_fit, "Threshold", self.cb_sync_auto_threshold)
+        _add_row(f_sync_fit, "Manual level", self.spin_sync_threshold)
+        _add_row(f_sync_fit, "Min interval", self.spin_sync_min_interval)
+        _add_row(f_sync_fit, "Pulse offset", self.spin_sync_max_offset)
+        _add_row(f_sync_fit, "Use result", self.cb_sync_use_aligned)
+        _add_row(f_sync_fit, "Auto recompute", self.cb_sync_auto_recompute)
+        sub_sync_fit.add_layout(f_sync_fit)
+
+        sub_sync_batch = _PyberSubsection(
+            "Batch and export",
+            "The selected settings are reused across matched files in the queue and saved in the project.",
+        )
+        sync_btn_grid = QtWidgets.QGridLayout()
+        sync_btn_grid.setContentsMargins(0, 0, 0, 0)
+        sync_btn_grid.setHorizontalSpacing(6)
+        sync_btn_grid.setVerticalSpacing(6)
+        sync_btn_grid.addWidget(self.btn_sync_refresh, 0, 0)
+        sync_btn_grid.addWidget(self.btn_sync_preview, 0, 1)
+        sync_btn_grid.addWidget(self.btn_sync_apply_selected, 1, 0)
+        sync_btn_grid.addWidget(self.btn_sync_apply_batch, 1, 1)
+        sync_export_row = QtWidgets.QHBoxLayout()
+        sync_export_row.setContentsMargins(0, 0, 0, 0)
+        sync_export_row.setSpacing(6)
+        sync_export_row.addWidget(self.combo_sync_export_format, 1)
+        sync_export_row.addWidget(self.btn_sync_export, 1)
+        sub_sync_batch.add_layout(sync_btn_grid)
+        sub_sync_batch.add_layout(sync_export_row)
+
+        sync_layout.addWidget(sub_sync_sources)
+        sync_layout.addWidget(sub_sync_fit)
+        sync_layout.addWidget(sub_sync_batch)
+        sync_layout.addWidget(self.sync_status)
+        sync_layout.addWidget(self.txt_sync_report)
+        sync_layout.addWidget(self.tbl_sync_results)
+        sync_layout.addWidget(self.plot_sync_map)
+        sync_layout.addWidget(self.plot_sync_residual)
+
         self.section_setup = QtWidgets.QWidget()
         setup_layout = QtWidgets.QVBoxLayout(self.section_setup)
         setup_layout.setContentsMargins(6, 6, 6, 6)
@@ -1721,6 +1861,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         behavior_layout.addWidget(self.tbl_behavior_metrics, 1)
         behavior_layout.addWidget(self.lbl_behavior_summary)
         behavior_layout.addWidget(self.behavior_footer)
+
+        self.section_sync = QtWidgets.QWidget()
+        sync_section_layout = QtWidgets.QVBoxLayout(self.section_sync)
+        sync_section_layout.setContentsMargins(6, 6, 6, 6)
+        sync_section_layout.setSpacing(8)
+        sync_section_layout.addWidget(grp_sync)
 
         self.section_temporal = TemporalModelingWidget()
         self.section_temporal.statusMessage.connect(
@@ -1810,6 +1956,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_panel_export = QtWidgets.QToolButton(); self.btn_panel_export.setText("Export")
         self.btn_panel_signal = QtWidgets.QToolButton(); self.btn_panel_signal.setText("Signal")
         self.btn_panel_behavior = QtWidgets.QToolButton(); self.btn_panel_behavior.setText("Behavior")
+        self.btn_panel_sync = QtWidgets.QToolButton(); self.btn_panel_sync.setText("Sync")
         self.btn_panel_temporal = QtWidgets.QToolButton(); self.btn_panel_temporal.setText("Temporal")
         self._section_buttons = {
             "setup": self.btn_panel_setup,
@@ -1818,6 +1965,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "export": self.btn_panel_export,
             "signal": self.btn_panel_signal,
             "behavior": self.btn_panel_behavior,
+            "sync": self.btn_panel_sync,
             "temporal": self.btn_panel_temporal,
         }
         for b in self._section_buttons.values():
@@ -1837,6 +1985,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "export":   ("Export",    "Export PSTH, peaks, behavior", _paint_export),
             "signal":   ("Events",    "Peak / event detection", _paint_pulse),
             "behavior": ("Behavior",  "Behavior alignment and per-state analysis", _paint_paw),
+            "sync":     ("Sync",      "Align photometry time to camera or behavior time", _paint_temporal),
             "temporal": ("Temporal",  "GLM / FLMM modeling", _paint_temporal),
         }
         self._post_rail_icon_painters = {key: meta[2] for key, meta in _post_rail_meta.items()}
@@ -1858,7 +2007,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         rail_layout = QtWidgets.QVBoxLayout(self._post_side_rail)
         rail_layout.setContentsMargins(8, 10, 8, 10)
         rail_layout.setSpacing(6)
-        for key in ("setup", "psth", "spatial", "temporal", "signal", "behavior", "export"):
+        for key in ("setup", "sync", "psth", "spatial", "temporal", "signal", "behavior", "export"):
             rail_layout.addWidget(self._section_buttons[key], 0,
                                   QtCore.Qt.AlignmentFlag.AlignHCenter)
         rail_layout.addStretch(1)
@@ -2334,6 +2483,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_load_beh.clicked.connect(self._load_behavior_files)
         self.btn_load_processed.clicked.connect(self._load_processed_files)
         self.btn_load_processed_single.clicked.connect(self._load_processed_files_single)
+        self.btn_sync_refresh.clicked.connect(self._refresh_sync_sources)
+        self.btn_sync_preview.clicked.connect(lambda _checked=False: self._preview_time_sync())
+        self.btn_sync_apply_selected.clicked.connect(lambda _checked=False: self._apply_time_sync_selected())
+        self.btn_sync_apply_batch.clicked.connect(lambda _checked=False: self._apply_time_sync_batch())
+        self.btn_sync_export.clicked.connect(lambda _checked=False: self._export_sync_aligned_files())
+        self.cb_sync_auto_threshold.toggled.connect(self._on_sync_auto_threshold_toggled)
+        self.combo_sync_behavior_file.currentIndexChanged.connect(self._refresh_sync_camera_columns)
+        self.cb_sync_use_aligned.toggled.connect(lambda _checked=False: self._on_sync_use_aligned_changed())
         self.list_preprocessed.filesDropped.connect(self._on_preprocessed_files_dropped)
         self.list_preprocessed.orderChanged.connect(self._sync_processed_order_from_list)
         self.list_preprocessed.itemSelectionChanged.connect(self._compute_spatial_heatmap)
@@ -2543,6 +2700,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _section_widget_map(self) -> Dict[str, Tuple[str, QtWidgets.QWidget]]:
         return {
             "setup": ("Setup", self.section_setup),
+            "sync": ("Time Synchronization", self.section_sync),
             "psth": ("PSTH", self.section_psth),
             "spatial": ("Spatial", self.section_spatial),
             "temporal": ("Temporal Modeling", self.section_temporal),
@@ -2722,6 +2880,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         setup = self._dockarea_dock("setup")
         psth = self._dockarea_dock("psth")
         spatial = self._dockarea_dock("spatial")
+        sync = self._dockarea_dock("sync")
         signal = self._dockarea_dock("signal")
         behavior = self._dockarea_dock("behavior")
         export = self._dockarea_dock("export")
@@ -2731,6 +2890,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # Keep section panels in one tab stack to avoid layout churn/floating glitches.
         if psth is not None:
             self._dockarea.addDock(psth, "above", setup)
+        if sync is not None:
+            self._dockarea.addDock(sync, "above", setup)
         if spatial is not None:
             self._dockarea.addDock(spatial, "above", setup)
         if export is not None:
@@ -2896,6 +3057,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._dock_host = host
         section_map: Dict[str, Tuple[str, QtWidgets.QWidget]] = {
             "setup": ("Setup", self.section_setup),
+            "sync": ("Time Synchronization", self.section_sync),
             "psth": ("PSTH", self.section_psth),
             "signal": ("Signal Event Analyzer", self.section_signal),
             "behavior": ("Behavior Analysis", self.section_behavior),
@@ -3213,6 +3375,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _default_popup_size(self, key: str) -> Tuple[int, int]:
         size_map = {
             "setup": (420, 620),
+            "sync": (620, 820),
             "psth": (420, 640),
             "signal": (420, 640),
             "behavior": (500, 620),
@@ -3549,6 +3712,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._project_dirty = True
         # update trace preview with first entry
         self._refresh_behavior_list()
+        self._refresh_sync_sources()
         self._set_resample_from_processed()
         self._update_trace_preview()
         self._compute_spatial_heatmap()
@@ -3566,6 +3730,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not self._autosave_restoring:
             self._project_dirty = True
         self._refresh_behavior_list()
+        self._refresh_sync_sources()
         self._set_resample_from_processed()
         self._update_trace_preview()
         self._compute_spatial_heatmap()
@@ -3574,9 +3739,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     @QtCore.Slot(list)
     def receive_dio_list(self, dio_list: List[str]) -> None:
+        self._known_dio_channels = [str(d) for d in (dio_list or []) if str(d)]
         self.combo_dio.clear()
         for d in dio_list or []:
             self.combo_dio.addItem(d)
+        self._refresh_sync_fiber_sources()
         self._update_status_strip()
 
     @QtCore.Slot(str, str, object, object)
@@ -3762,6 +3929,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_data_availability()
         self._update_status_strip()
         self._sync_temporal_modeling_context()
+        self._refresh_sync_sources()
 
     def _sync_temporal_modeling_context(self) -> None:
         if not hasattr(self, "section_temporal"):
@@ -3814,6 +3982,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_group.setText(f"{len(self._processed)} file(s) loaded")
         self._push_recent_paths("postprocess_recent_processed_paths", paths)
         self._update_file_lists()
+        self._refresh_sync_sources()
         self._set_resample_from_processed()
         self._compute_psth()
         self._compute_spatial_heatmap()
@@ -4206,6 +4375,34 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_spatial_clip_enabled()
         self._update_spatial_time_filter_enabled()
         self._refresh_signal_file_combo()
+        has_aligned_time = any(
+            getattr(proc, "sync_aligned_time", None) is not None
+            and np.asarray(getattr(proc, "sync_aligned_time"), float).size == np.asarray(getattr(proc, "time", []), float).size
+            for proc in (self._processed or [])
+        )
+        sync_ready = has_processed and has_behavior
+        for w in (
+            self.combo_sync_behavior_file,
+            self.combo_sync_camera_column,
+            self.combo_sync_camera_mode,
+            self.combo_sync_fiber_source,
+            self.combo_sync_fiber_mode,
+            self.combo_sync_method,
+            self.cb_sync_auto_threshold,
+            self.spin_sync_threshold,
+            self.spin_sync_min_interval,
+            self.spin_sync_max_offset,
+            self.cb_sync_auto_recompute,
+            self.btn_sync_preview,
+            self.btn_sync_apply_selected,
+            self.btn_sync_apply_batch,
+        ):
+            w.setEnabled(sync_ready)
+        self.cb_sync_use_aligned.setEnabled(has_aligned_time)
+        self.combo_sync_export_format.setEnabled(has_aligned_time)
+        self.btn_sync_export.setEnabled(has_aligned_time)
+        self.btn_sync_refresh.setEnabled(True)
+        self._on_sync_auto_threshold_toggled(self.cb_sync_auto_threshold.isChecked())
 
     def _update_status_strip(self) -> None:
         if not hasattr(self, "lbl_status"):
@@ -4476,9 +4673,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             try:
                 output = np.asarray(getattr(proc, "output", np.array([], float)), float)
                 time = np.asarray(getattr(proc, "time", np.array([], float)), float)
+                sync_raw = getattr(proc, "sync_aligned_time", None)
+                sync_time = np.asarray(sync_raw, float) if sync_raw is not None else np.array([], float)
             except Exception:
                 output = np.array([], float)
                 time = np.array([], float)
+                sync_time = np.array([], float)
+            sync_report = getattr(proc, "sync_report", {}) or {}
             processed.append(
                 {
                     "path": str(getattr(proc, "path", "") or ""),
@@ -4491,6 +4692,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     "fs_used": float(getattr(proc, "fs_used", np.nan)),
                     "n_time": int(time.size),
                     "n_output": int(output.size),
+                    "sync_n": int(sync_time.size),
+                    "sync_start": float(sync_time[0]) if sync_time.size else None,
+                    "sync_end": float(sync_time[-1]) if sync_time.size else None,
+                    "sync_report": sync_report if isinstance(sync_report, dict) else {},
                 }
             )
 
@@ -4704,6 +4909,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.combo_behavior_align,
             self.combo_behavior_from,
             self.combo_behavior_to,
+            self.combo_sync_behavior_file,
+            self.combo_sync_camera_column,
+            self.combo_sync_camera_mode,
+            self.combo_sync_fiber_source,
+            self.combo_sync_fiber_mode,
+            self.combo_sync_method,
+            self.combo_sync_export_format,
             self.combo_metric,
             self.combo_signal_source,
             self.combo_signal_scope,
@@ -4720,6 +4932,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         for spin in (
             self.spin_transition_gap,
+            self.spin_sync_threshold,
+            self.spin_sync_min_interval,
+            self.spin_sync_max_offset,
             self.spin_pre,
             self.spin_post,
             self.spin_b0,
@@ -4758,6 +4973,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         for chk in (
             self.cb_filter_events,
+            self.cb_sync_auto_threshold,
+            self.cb_sync_use_aligned,
+            self.cb_sync_auto_recompute,
             self.cb_metrics,
             self.cb_global_metrics,
             self.cb_global_amp,
@@ -4909,6 +5127,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         raw_idx = _find_col(["raw", "raw_465", "signal", "signal_465"]) if has_header else None
         iso_idx = _find_col(["isobestic", "isosbestic", "raw_405", "reference", "reference_405", "ref"]) if has_header else None
         dio_idx = _find_col(["dio"]) if has_header else None
+        aligned_idx = _find_col(["time_aligned", "aligned_time", "sync_aligned_time"]) if has_header else None
 
         data_rows = data_rows[1:] if has_header else data_rows
 
@@ -4917,6 +5136,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         raw_vals = []
         iso_vals = []
         dio_vals = []
+        aligned_vals = []
 
         for r in data_rows:
             if time_idx is None or output_idx is None:
@@ -4948,6 +5168,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     dio_vals.append(float(r[dio_idx]) if len(r) > dio_idx else np.nan)
                 except Exception:
                     dio_vals.append(np.nan)
+            if aligned_idx is not None:
+                try:
+                    aligned_vals.append(float(r[aligned_idx]) if len(r) > aligned_idx else np.nan)
+                except Exception:
+                    aligned_vals.append(np.nan)
 
         if not time:
             return None
@@ -4957,6 +5182,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         raw = np.asarray(raw_vals, float) if raw_idx is not None and len(raw_vals) == len(time) else np.full_like(t, np.nan)
         iso = np.asarray(iso_vals, float) if iso_idx is not None and len(iso_vals) == len(time) else np.full_like(t, np.nan)
         dio_arr = np.asarray(dio_vals, float) if dio_idx is not None and len(dio_vals) == len(time) else None
+        sync_aligned = (
+            np.asarray(aligned_vals, float)
+            if aligned_idx is not None and len(aligned_vals) == len(time)
+            else None
+        )
 
         output_label = "Imported CSV"
         if has_header and output_idx is not None:
@@ -4985,6 +5215,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             output=out,
             output_label=output_label,
             output_context=output_context,
+            sync_aligned_time=sync_aligned,
+            sync_report={"status": "imported", "method": "imported time_aligned"} if sync_aligned is not None else {},
             artifact_regions_sec=None,
             fs_actual=np.nan,
             fs_target=np.nan,
@@ -5023,6 +5255,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 fs_actual = float(g.attrs.get("fs_actual", np.nan)) if hasattr(g, "attrs") else np.nan
                 fs_target = float(g.attrs.get("fs_target", np.nan)) if hasattr(g, "attrs") else np.nan
                 fs_used = float(g.attrs.get("fs_used", np.nan)) if hasattr(g, "attrs") else np.nan
+                sync_aligned = None
+                if "time_aligned" in g:
+                    sync_aligned = np.asarray(g["time_aligned"][()], float)
+                elif "sync_aligned_time" in g:
+                    sync_aligned = np.asarray(g["sync_aligned_time"][()], float)
+                sync_report = {}
+                raw_report = g.attrs.get("sync_report_json", "") if hasattr(g, "attrs") else ""
+                if raw_report:
+                    try:
+                        sync_report = json.loads(str(raw_report))
+                    except Exception:
+                        sync_report = {}
         except Exception:
             return None
 
@@ -5041,6 +5285,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             output=out,
             output_label=output_label,
             output_context=output_context,
+            sync_aligned_time=sync_aligned,
+            sync_report=sync_report if isinstance(sync_report, dict) else {},
             artifact_regions_sec=None,
             fs_actual=fs_actual,
             fs_target=fs_target,
@@ -5511,8 +5757,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         if not np.isfinite(sd) or sd <= 1e-12:
                             sd = 1.0
                         yy_z = (yy_z - mu) / sd
-                if proc.time is not None and np.asarray(proc.time, float).size == yy_out.size and t.size >= n:
-                    tt_proc = np.asarray(proc.time, float)
+                tt_candidate = self._proc_time(proc)
+                if tt_candidate is not None and np.asarray(tt_candidate, float).size == yy_out.size and t.size >= n:
+                    tt_proc = np.asarray(tt_candidate, float)
                     act_full = np.interp(t[:n], tt_proc, yy_z, left=np.nan, right=np.nan)
                     act_vals = np.asarray(act_full[finite], float)
                 elif yy_z.size >= n:
@@ -5991,6 +6238,479 @@ class PostProcessingPanel(QtWidgets.QWidget):
             info = next(iter(self._behavior_sources.values()))
         return info
 
+    def _file_id_for_proc(self, proc: ProcessedTrial) -> str:
+        return os.path.splitext(os.path.basename(getattr(proc, "path", "") or ""))[0] or "import"
+
+    def _proc_time(self, proc: ProcessedTrial) -> np.ndarray:
+        base = np.asarray(getattr(proc, "time", np.array([], float)), float)
+        if hasattr(self, "cb_sync_use_aligned") and self.cb_sync_use_aligned.isChecked():
+            aligned = getattr(proc, "sync_aligned_time", None)
+            if aligned is not None:
+                arr = np.asarray(aligned, float)
+                if arr.size == base.size and arr.size > 0 and np.any(np.isfinite(arr)):
+                    return arr
+        return base
+
+    def _map_photometry_times_for_proc(self, proc: ProcessedTrial, values: np.ndarray) -> np.ndarray:
+        vals = np.asarray(values, float)
+        if not (hasattr(self, "cb_sync_use_aligned") and self.cb_sync_use_aligned.isChecked()):
+            return vals
+        base = np.asarray(getattr(proc, "time", np.array([], float)), float)
+        aligned = getattr(proc, "sync_aligned_time", None)
+        if aligned is None:
+            return vals
+        mapped = np.asarray(aligned, float)
+        if base.size != mapped.size or base.size < 2:
+            return vals
+        finite = np.isfinite(base) & np.isfinite(mapped)
+        if np.sum(finite) < 2:
+            return vals
+        return np.interp(vals, base[finite], mapped[finite], left=np.nan, right=np.nan)
+
+    def _sync_mode_key(self, combo_text: str) -> str:
+        text = str(combo_text or "").lower()
+        if "barcode" in text or "value" in text:
+            return "barcode"
+        if "fall" in text:
+            return "ttl_falling"
+        return "ttl_rising"
+
+    def _on_sync_auto_threshold_toggled(self, checked: bool) -> None:
+        ready = bool(getattr(self, "_processed", None)) and bool(getattr(self, "_behavior_sources", None))
+        self.spin_sync_threshold.setEnabled(ready and not bool(checked))
+
+    def _on_sync_use_aligned_changed(self) -> None:
+        if self._is_restoring_settings:
+            return
+        self._queue_settings_save()
+        self._update_trace_preview()
+        self._compute_spatial_heatmap()
+        if self.cb_sync_auto_recompute.isChecked():
+            self._compute_psth()
+        self._update_status_strip()
+
+    def _refresh_sync_sources(self) -> None:
+        if not hasattr(self, "combo_sync_behavior_file"):
+            return
+        prev_beh = self.combo_sync_behavior_file.currentData()
+        self.combo_sync_behavior_file.blockSignals(True)
+        try:
+            self.combo_sync_behavior_file.clear()
+            self.combo_sync_behavior_file.addItem("Auto-match behavior file", "")
+            for stem in (self._behavior_sources or {}).keys():
+                self.combo_sync_behavior_file.addItem(str(stem), str(stem))
+            if isinstance(prev_beh, str):
+                idx = self.combo_sync_behavior_file.findData(prev_beh)
+                if idx >= 0:
+                    self.combo_sync_behavior_file.setCurrentIndex(idx)
+        finally:
+            self.combo_sync_behavior_file.blockSignals(False)
+        self._refresh_sync_camera_columns()
+        self._refresh_sync_fiber_sources()
+        self._refresh_sync_results_table()
+
+    def _refresh_sync_camera_columns(self) -> None:
+        if not hasattr(self, "combo_sync_camera_column"):
+            return
+        prev = self.combo_sync_camera_column.currentData()
+        self.combo_sync_camera_column.blockSignals(True)
+        try:
+            self.combo_sync_camera_column.clear()
+            selected_stem = self.combo_sync_behavior_file.currentData() if hasattr(self, "combo_sync_behavior_file") else ""
+            sources: Dict[str, Dict[str, Any]] = {}
+            if isinstance(selected_stem, str) and selected_stem and selected_stem in self._behavior_sources:
+                sources[selected_stem] = self._behavior_sources[selected_stem]
+            else:
+                sources = dict(self._behavior_sources or {})
+            names: List[Tuple[str, str, str]] = []
+            seen = set()
+            for info in sources.values():
+                for name in (info.get("behaviors") or {}).keys():
+                    key = ("behavior", str(name))
+                    if key not in seen:
+                        seen.add(key)
+                        names.append((f"Behavior: {name}", "behavior", str(name)))
+                for name in (info.get("trajectory") or {}).keys():
+                    key = ("trajectory", str(name))
+                    if key not in seen:
+                        seen.add(key)
+                        names.append((f"Column: {name}", "trajectory", str(name)))
+            if not names:
+                self.combo_sync_camera_column.addItem("Load behavior or camera CSV/XLSX first", "")
+            else:
+                for label, kind, name in names:
+                    self.combo_sync_camera_column.addItem(label, f"{kind}::{name}")
+                if isinstance(prev, str):
+                    idx = self.combo_sync_camera_column.findData(prev)
+                    if idx >= 0:
+                        self.combo_sync_camera_column.setCurrentIndex(idx)
+        finally:
+            self.combo_sync_camera_column.blockSignals(False)
+
+    def _refresh_sync_fiber_sources(self) -> None:
+        if not hasattr(self, "combo_sync_fiber_source"):
+            return
+        prev = self.combo_sync_fiber_source.currentData()
+        self.combo_sync_fiber_source.blockSignals(True)
+        try:
+            self.combo_sync_fiber_source.clear()
+            self.combo_sync_fiber_source.addItem("Embedded DIO in processed file", "__embedded__")
+            names = list(getattr(self, "_known_dio_channels", []) or [])
+            for proc in self._processed:
+                name = str(getattr(proc, "dio_name", "") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+                for trig_name in (getattr(proc, "triggers", {}) or {}).keys():
+                    if str(trig_name) and str(trig_name) not in names:
+                        names.append(str(trig_name))
+            for name in names:
+                self.combo_sync_fiber_source.addItem(f"A/D channel: {name}", f"dio::{name}")
+            if isinstance(prev, str):
+                idx = self.combo_sync_fiber_source.findData(prev)
+                if idx >= 0:
+                    self.combo_sync_fiber_source.setCurrentIndex(idx)
+        finally:
+            self.combo_sync_fiber_source.blockSignals(False)
+
+    def _sync_behavior_source_for_proc(self, proc: ProcessedTrial) -> Optional[Dict[str, Any]]:
+        stem = self.combo_sync_behavior_file.currentData() if hasattr(self, "combo_sync_behavior_file") else ""
+        if isinstance(stem, str) and stem and stem in self._behavior_sources:
+            return self._behavior_sources.get(stem)
+        return self._match_behavior_source(proc)
+
+    def _sync_camera_events_for_proc(self, proc: ProcessedTrial) -> np.ndarray:
+        info = self._sync_behavior_source_for_proc(proc)
+        if not info:
+            raise ValueError("No behavior/camera file matched this recording.")
+        data = self.combo_sync_camera_column.currentData() if hasattr(self, "combo_sync_camera_column") else ""
+        if not isinstance(data, str) or "::" not in data:
+            raise ValueError("Choose a camera sync behavior or column.")
+        kind, name = data.split("::", 1)
+        min_interval = float(self.spin_sync_min_interval.value())
+        mode = self._sync_mode_key(self.combo_sync_camera_mode.currentText())
+        threshold = None if self.cb_sync_auto_threshold.isChecked() else float(self.spin_sync_threshold.value())
+        if kind == "behavior":
+            behaviors = info.get("behaviors") or {}
+            if name not in behaviors:
+                raise ValueError(f"Behavior sync column not found: {name}")
+            if str(info.get("kind", _BEHAVIOR_PARSE_BINARY)) == _BEHAVIOR_PARSE_TIMESTAMPS:
+                return extract_sync_events(np.asarray(behaviors[name], float), None, min_interval_s=min_interval)
+            t = np.asarray(info.get("time", np.array([], float)), float)
+            x = np.asarray(behaviors[name], float)
+            return extract_sync_events(t, x, mode=mode, threshold=threshold, min_interval_s=min_interval)
+        if kind == "trajectory":
+            traj = info.get("trajectory") or {}
+            if name not in traj:
+                raise ValueError(f"Camera sync column not found: {name}")
+            t = np.asarray(info.get("trajectory_time", np.array([], float)), float)
+            if t.size == 0:
+                t = np.asarray(info.get("time", np.array([], float)), float)
+            x = np.asarray(traj[name], float)
+            return extract_sync_events(t, x, mode=mode, threshold=threshold, min_interval_s=min_interval)
+        raise ValueError(f"Unsupported camera sync source: {kind}")
+
+    def _sync_fiber_trace_for_proc(self, proc: ProcessedTrial) -> Tuple[np.ndarray, np.ndarray]:
+        source = self.combo_sync_fiber_source.currentData() if hasattr(self, "combo_sync_fiber_source") else "__embedded__"
+        if not isinstance(source, str):
+            source = "__embedded__"
+        if source == "__embedded__":
+            t = np.asarray(getattr(proc, "time", np.array([], float)), float)
+            x = getattr(proc, "dio", None)
+            if x is None:
+                raise ValueError("This processed file has no embedded DIO sync trace.")
+            return t, np.asarray(x, float)
+        if source.startswith("dio::"):
+            name = source.split("::", 1)[1]
+            triggers = getattr(proc, "triggers", {}) or {}
+            if name in triggers and getattr(proc, "time", None) is not None:
+                return np.asarray(proc.time, float), np.asarray(triggers[name], float)
+            if getattr(proc, "dio", None) is not None and name == str(getattr(proc, "dio_name", "") or ""):
+                return np.asarray(proc.time, float), np.asarray(proc.dio, float)
+            key = (proc.path, name)
+            if key not in self._dio_cache:
+                self.requestDioData.emit(proc.path, name)
+                raise RuntimeError(f"Requested A/D channel '{name}'. Click Preview/Apply again after it loads.")
+            return self._dio_cache[key]
+        raise ValueError(f"Unsupported photometry sync source: {source}")
+
+    def _compute_time_sync_for_proc(self, proc: ProcessedTrial) -> SyncResult:
+        camera_events = self._sync_camera_events_for_proc(proc)
+        fiber_time, fiber_sync = self._sync_fiber_trace_for_proc(proc)
+        mode = self._sync_mode_key(self.combo_sync_fiber_mode.currentText())
+        threshold = None if self.cb_sync_auto_threshold.isChecked() else float(self.spin_sync_threshold.value())
+        fiber_events = extract_sync_events(
+            fiber_time,
+            fiber_sync,
+            mode=mode,
+            threshold=threshold,
+            min_interval_s=float(self.spin_sync_min_interval.value()),
+        )
+        method = "interpolation" if "interp" in self.combo_sync_method.currentText().lower() else "linear"
+        return align_timebase(
+            np.asarray(getattr(proc, "time", np.array([], float)), float),
+            camera_events,
+            fiber_events,
+            method=method,
+            max_offset=int(self.spin_sync_max_offset.value()),
+            min_pairs=2,
+        )
+
+    def _selected_proc_for_sync(self) -> Optional[ProcessedTrial]:
+        if not self._processed:
+            return None
+        file_id = ""
+        if hasattr(self, "combo_individual_file"):
+            file_id = self.combo_individual_file.currentText().strip()
+        if file_id:
+            for proc in self._processed:
+                if self._file_id_for_proc(proc) == file_id:
+                    return proc
+        return self._processed[0]
+
+    def _sync_report_text(self, proc: ProcessedTrial, result: SyncResult) -> str:
+        rep = result.summary_dict()
+        file_id = self._file_id_for_proc(proc)
+        lines = [
+            f"File: {file_id}",
+            f"Status: {rep.get('status')} | method: {rep.get('method')}",
+            f"Matched pulses: {rep.get('n_matched')} / camera {rep.get('n_camera_events')} / photometry {rep.get('n_fiber_events')}",
+            f"Clock mapping: camera_time = {float(rep.get('slope', np.nan)):.9g} * photometry_time + {float(rep.get('intercept', np.nan)):.9g}",
+            f"Median lag: {float(rep.get('median_lag_s', np.nan)) * 1000:.3f} ms",
+            f"Residual RMS: {float(rep.get('rms_error_s', np.nan)) * 1000:.3f} ms",
+            f"Max residual: {float(rep.get('max_abs_error_s', np.nan)) * 1000:.3f} ms",
+            f"Clock drift: {float(rep.get('drift_ppm', np.nan)):.3f} ppm",
+        ]
+        warnings = rep.get("warnings", [])
+        if isinstance(warnings, list) and warnings:
+            lines.append("Warnings:")
+            lines.extend(f"- {w}" for w in warnings)
+        lines.append("")
+        lines.append("Interpretation:")
+        if str(rep.get("status")) == "ok":
+            lines.append("The shared sync events support a usable camera-time column for this photometry trace.")
+        else:
+            lines.append("Inspect the pulse pairing and residual plot before using this alignment for analysis.")
+        return "\n".join(lines)
+
+    def _render_sync_result(self, proc: ProcessedTrial, result: SyncResult) -> None:
+        self._last_sync_preview = result
+        self.txt_sync_report.setPlainText(self._sync_report_text(proc, result))
+        self.plot_sync_map.clear()
+        self.plot_sync_residual.clear()
+        self.plot_sync_map.setLabel("bottom", "Photometry sync time (s)")
+        self.plot_sync_map.setLabel("left", "Camera / behavior sync time (s)")
+        self.plot_sync_residual.setLabel("bottom", "Matched pulse")
+        self.plot_sync_residual.setLabel("left", "Residual (ms)")
+        cam = np.asarray(result.matched_camera_events, float)
+        fib = np.asarray(result.matched_fiber_events, float)
+        fit = np.asarray(result.fitted_camera_events, float)
+        resid = np.asarray(result.residuals, float)
+        if cam.size and fib.size:
+            self.plot_sync_map.plot(fib, cam, pen=None, symbol="o", symbolSize=7,
+                                    symbolBrush=pg.mkBrush(90, 190, 255, 220),
+                                    symbolPen=pg.mkPen((90, 190, 255), width=1.0))
+        if fib.size and fit.size:
+            order = np.argsort(fib)
+            self.plot_sync_map.plot(fib[order], fit[order], pen=pg.mkPen((255, 190, 90), width=1.5))
+        if resid.size:
+            x = np.arange(1, resid.size + 1, dtype=float)
+            self.plot_sync_residual.plot(x, resid * 1000.0, pen=pg.mkPen((245, 210, 80), width=1.2),
+                                         symbol="o", symbolSize=5,
+                                         symbolBrush=pg.mkBrush(245, 210, 80, 180))
+            self.plot_sync_residual.addLine(y=0.0, pen=pg.mkPen((180, 190, 210), style=QtCore.Qt.PenStyle.DashLine))
+        sev = "ok" if result.status == "ok" else ("error" if result.status == "failed" else "warn")
+        self.sync_status.set(
+            f"{self._file_id_for_proc(proc)}: {result.status}, {cam.size} matched sync event(s), "
+            f"RMS {result.rms_error_s * 1000:.2f} ms",
+            sev,
+        )
+
+    def _store_sync_result(self, proc: ProcessedTrial, result: SyncResult) -> None:
+        base = np.asarray(getattr(proc, "time", np.array([], float)), float)
+        aligned = np.asarray(result.aligned_time, float)
+        if aligned.size != base.size or aligned.size == 0 or not np.any(np.isfinite(aligned)):
+            raise ValueError("Alignment did not produce a valid aligned time vector.")
+        proc.sync_aligned_time = aligned
+        report = result.summary_dict()
+        report["camera_source"] = self.combo_sync_camera_column.currentText()
+        report["fiber_source"] = self.combo_sync_fiber_source.currentText()
+        report["created_utc"] = datetime.now(timezone.utc).isoformat()
+        proc.sync_report = report
+        self._sync_results_by_file[self._file_id_for_proc(proc)] = report
+
+    def _preview_time_sync(self) -> None:
+        proc = self._selected_proc_for_sync()
+        if proc is None:
+            self.sync_status.set("Load a processed recording first.", "warn")
+            return
+        try:
+            result = self._compute_time_sync_for_proc(proc)
+            self._render_sync_result(proc, result)
+        except RuntimeError as exc:
+            self.sync_status.set(str(exc), "info")
+            self.statusUpdate.emit(str(exc), 5000)
+        except Exception as exc:
+            self.sync_status.set(f"Sync preview failed: {exc}", "error")
+            self.statusUpdate.emit(f"Sync preview failed: {exc}", 5000)
+
+    def _apply_time_sync_selected(self) -> None:
+        proc = self._selected_proc_for_sync()
+        if proc is None:
+            self.sync_status.set("Load a processed recording first.", "warn")
+            return
+        try:
+            result = self._compute_time_sync_for_proc(proc)
+            self._store_sync_result(proc, result)
+            self._render_sync_result(proc, result)
+            self._refresh_sync_results_table()
+            self._update_data_availability()
+            if not self._autosave_restoring:
+                self._project_dirty = True
+            self._save_settings()
+            if self.cb_sync_auto_recompute.isChecked():
+                self._compute_psth()
+                self._compute_spatial_heatmap()
+            self.statusUpdate.emit(f"Aligned time saved for {self._file_id_for_proc(proc)}.", 5000)
+        except RuntimeError as exc:
+            self.sync_status.set(str(exc), "info")
+            self.statusUpdate.emit(str(exc), 5000)
+        except Exception as exc:
+            self.sync_status.set(f"Sync apply failed: {exc}", "error")
+            self.statusUpdate.emit(f"Sync apply failed: {exc}", 5000)
+
+    def _apply_time_sync_batch(self) -> None:
+        if not self._processed:
+            self.sync_status.set("Load processed recordings first.", "warn")
+            return
+        progress = QtWidgets.QProgressDialog("Synchronizing files...", "Cancel", 0, len(self._processed), self)
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)
+        ok_count = 0
+        errors: List[str] = []
+        for idx, proc in enumerate(self._processed, start=1):
+            progress.setValue(idx - 1)
+            progress.setLabelText(f"Synchronizing {self._file_id_for_proc(proc)}...")
+            QtWidgets.QApplication.processEvents()
+            if progress.wasCanceled():
+                break
+            try:
+                result = self._compute_time_sync_for_proc(proc)
+                self._store_sync_result(proc, result)
+                ok_count += 1
+                if proc is self._selected_proc_for_sync():
+                    self._render_sync_result(proc, result)
+            except RuntimeError as exc:
+                errors.append(f"{self._file_id_for_proc(proc)}: {exc}")
+            except Exception as exc:
+                errors.append(f"{self._file_id_for_proc(proc)}: {exc}")
+        progress.setValue(len(self._processed))
+        self._refresh_sync_results_table()
+        self._update_data_availability()
+        if ok_count:
+            if not self._autosave_restoring:
+                self._project_dirty = True
+            self._save_settings()
+            if self.cb_sync_auto_recompute.isChecked():
+                self._compute_psth()
+                self._compute_spatial_heatmap()
+        if errors:
+            self.sync_status.set(f"Aligned {ok_count} file(s); {len(errors)} file(s) need attention.", "warn")
+            self.txt_sync_report.setPlainText("Batch synchronization warnings:\n" + "\n".join(errors[:30]))
+        else:
+            self.sync_status.set(f"Aligned {ok_count} file(s).", "ok")
+        self.statusUpdate.emit(f"Time synchronization batch finished: {ok_count} file(s).", 5000)
+
+    def _refresh_sync_results_table(self) -> None:
+        if not hasattr(self, "tbl_sync_results"):
+            return
+        rows: List[Tuple[str, Dict[str, object]]] = []
+        self._sync_results_by_file = {}
+        for proc in self._processed:
+            fid = self._file_id_for_proc(proc)
+            report = getattr(proc, "sync_report", {}) or {}
+            if report:
+                self._sync_results_by_file[fid] = dict(report)
+            rows.append((fid, dict(report)))
+        self.tbl_sync_results.setRowCount(len(rows))
+        for r, (fid, report) in enumerate(rows):
+            values = [
+                fid,
+                str(report.get("n_matched", "")) if report else "",
+                f"{float(report.get('rms_error_s', np.nan)) * 1000:.2f}" if report else "",
+                f"{float(report.get('median_lag_s', np.nan)) * 1000:.2f}" if report else "",
+                f"{float(report.get('drift_ppm', np.nan)):.2f}" if report else "",
+                str(report.get("status", "")) if report else "not aligned",
+            ]
+            for c, val in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(val)
+                if c == 5 and str(val).lower() == "ok":
+                    item.setForeground(QtGui.QBrush(QtGui.QColor("#5ee0a1")))
+                elif c == 5 and str(val).lower() not in ("ok", "not aligned"):
+                    item.setForeground(QtGui.QBrush(QtGui.QColor("#ffd166")))
+                self.tbl_sync_results.setItem(r, c, item)
+        try:
+            self.tbl_sync_results.resizeColumnsToContents()
+            self.tbl_sync_results.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        except Exception:
+            pass
+
+    def _export_sync_aligned_files(self) -> None:
+        ready = [
+            proc for proc in self._processed
+            if getattr(proc, "sync_aligned_time", None) is not None
+            and np.asarray(getattr(proc, "sync_aligned_time"), float).size == np.asarray(getattr(proc, "time", []), float).size
+        ]
+        if not ready:
+            self.sync_status.set("No aligned time columns to export. Apply synchronization first.", "warn")
+            return
+        out_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Select aligned export folder", self._export_start_dir())
+        if not out_dir:
+            return
+        self._remember_export_dir(out_dir)
+        fmt = self.combo_sync_export_format.currentText().lower()
+        do_csv = "csv" in fmt
+        do_h5 = "h5" in fmt
+        if "csv + h5" in fmt:
+            do_csv = do_h5 = True
+        import csv
+        count = 0
+        for proc in ready:
+            fid = re.sub(r"[^A-Za-z0-9_\\-]+", "_", self._file_id_for_proc(proc)).strip("_") or "aligned"
+            t = np.asarray(proc.time, float)
+            aligned = np.asarray(proc.sync_aligned_time, float)
+            out = np.asarray(proc.output if proc.output is not None else np.full_like(t, np.nan), float)
+            raw = np.asarray(proc.raw_signal if proc.raw_signal is not None else np.full_like(t, np.nan), float)
+            ref = np.asarray(proc.raw_reference if proc.raw_reference is not None else np.full_like(t, np.nan), float)
+            dio = np.asarray(proc.dio if proc.dio is not None else np.full_like(t, np.nan), float)
+            n = min(t.size, aligned.size, out.size, raw.size, ref.size, dio.size)
+            report = getattr(proc, "sync_report", {}) or {}
+            if do_csv:
+                csv_path = os.path.join(out_dir, f"{fid}_time_aligned.csv")
+                with open(csv_path, "w", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(["# sync_report_json", json.dumps(report, default=str)])
+                    w.writerow(["time", "time_aligned", "output", "raw_465", "raw_405", "dio"])
+                    for i in range(n):
+                        w.writerow([float(t[i]), float(aligned[i]), float(out[i]), float(raw[i]), float(ref[i]), float(dio[i])])
+            if do_h5:
+                h5_path = os.path.join(out_dir, f"{fid}_time_aligned.h5")
+                with h5py.File(h5_path, "w") as h5:
+                    h5.attrs["project_type"] = "pyber_time_aligned_processed"
+                    g = h5.create_group("data")
+                    g.attrs["output_label"] = str(getattr(proc, "output_label", "") or "")
+                    g.attrs["output_context"] = str(getattr(proc, "output_context", "") or "")
+                    g.attrs["dio_name"] = str(getattr(proc, "dio_name", "") or "")
+                    g.attrs["sync_report_json"] = json.dumps(report, default=str)
+                    self._write_h5_numeric(g, "time", t[:n])
+                    self._write_h5_numeric(g, "time_aligned", aligned[:n])
+                    self._write_h5_numeric(g, "output", out[:n])
+                    self._write_h5_numeric(g, "raw_465", raw[:n])
+                    self._write_h5_numeric(g, "raw_405", ref[:n])
+                    self._write_h5_numeric(g, "dio", dio[:n])
+            count += 1
+        self.sync_status.set(f"Exported aligned time files for {count} recording(s).", "ok")
+        self.statusUpdate.emit(f"Aligned time export complete: {out_dir}", 5000)
+
     def _extract_behavior_events(self, info: Dict[str, Any], behavior_name: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         behaviors = info.get("behaviors") or {}
         if behavior_name not in behaviors:
@@ -6040,6 +6760,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if polarity.startswith("Event low"):
                 sig = 1.0 - sig
             on, off, dur = _extract_onsets_offsets(t, sig, threshold=0.5)
+            on = self._map_photometry_times_for_proc(proc, on)
+            off = self._map_photometry_times_for_proc(proc, off)
+            if on.size and off.size and on.size == off.size:
+                dur = off - on
             if align_edge.endswith("offset"):
                 return off, dur
             return on, dur
@@ -6202,7 +6926,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     if fid == sel_id:
                         proc = p
                         break
-        t = proc.time
+        t = self._proc_time(proc)
         y = proc.output if proc.output is not None else np.full_like(t, np.nan)
 
         self.curve_trace.setData(t, y, connect="finite", skipFiniteCheck=True)
@@ -6266,7 +6990,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if proc.time is None or proc.output is None:
                     continue
                 file_id = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
-                targets.append((file_id, np.asarray(proc.time, float), np.asarray(proc.output, float)))
+                targets.append((file_id, np.asarray(self._proc_time(proc), float), np.asarray(proc.output, float)))
             return targets
 
         if self.combo_signal_file.count() == 0:
@@ -6277,7 +7001,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if proc.time is None or proc.output is None:
             return []
         file_id = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
-        targets.append((file_id, np.asarray(proc.time, float), np.asarray(proc.output, float)))
+        targets.append((file_id, np.asarray(self._proc_time(proc), float), np.asarray(proc.output, float)))
         return targets
 
     def _preprocess_signal_for_peaks(self, t: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -7520,7 +8244,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                             "duration_sec": float(dur_row[i]) if i < dur_row.size else np.nan,
                         }
                     )
-                tvec, mat = _compute_psth_matrix(proc.time, proc.output, ev, window, baseline, res_hz, smooth_sigma_s=smooth)
+                tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, ev, window, baseline, res_hz, smooth_sigma_s=smooth)
                 if mat.size == 0:
                     continue
                 mats.append(mat)
@@ -8086,7 +8810,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for proc in self._processed:
             if proc.output is None or proc.time is None:
                 continue
-            res = self._compute_global_metrics_for_trace(proc.time, proc.output, start_s, end_s)
+            res = self._compute_global_metrics_for_trace(self._proc_time(proc), proc.output, start_s, end_s)
             if not res:
                 continue
             amps.append(res["amp"])
@@ -8684,11 +9408,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     "baseline_sig",
                     "baseline_ref",
                     "output",
+                    "sync_aligned_time",
                 ):
                     value = getattr(proc, field, None)
                     if value is None:
                         continue
                     self._write_h5_numeric(entry, field, np.asarray(value, float))
+                sync_report = getattr(proc, "sync_report", {}) or {}
+                if sync_report:
+                    self._write_h5_json_any(entry, "sync_report_json", sync_report)
 
                 artifact_regions = getattr(proc, "artifact_regions_sec", None)
                 if artifact_regions:
@@ -8836,6 +9564,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         output=output_arr,
                         output_label=self._h5_text(entry.attrs.get("output_label", "output"), "output"),
                         output_context=self._h5_text(entry.attrs.get("output_context", ""), ""),
+                        sync_aligned_time=_aligned(self._read_h5_numeric(entry, "sync_aligned_time"), fill_nan=False)
+                        if "sync_aligned_time" in entry
+                        else None,
+                        sync_report=self._read_h5_json_any(entry, "sync_report_json", {})
+                        if "sync_report_json" in entry
+                        else {},
                         artifact_regions_sec=None,
                         artifact_regions_auto_sec=None,
                         fs_actual=float(entry.attrs.get("fs_actual", np.nan)),
@@ -9054,12 +9788,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._clear_cached_analysis_outputs()
             self._processed = []
             self._behavior_sources = {}
+            self._sync_results_by_file = {}
+            self._last_sync_preview = None
             self._pending_project_recompute_from_current = False
             self._dio_cache.clear()
             self.lbl_group.setText("(none)")
             self.lbl_beh.setText("(none)")
             self.lbl_behavior_msg.setText("")
             self.lbl_signal_msg.setText("")
+            if hasattr(self, "txt_sync_report"):
+                self.txt_sync_report.clear()
+            if hasattr(self, "tbl_sync_results"):
+                self.tbl_sync_results.setRowCount(0)
+            if hasattr(self, "plot_sync_map"):
+                self.plot_sync_map.clear()
+            if hasattr(self, "plot_sync_residual"):
+                self.plot_sync_residual.clear()
             # Some legacy code expected a self.lbl_status that was never created
             # in the modern UI; clear it defensively if a host adds one later.
             _legacy_status = getattr(self, "lbl_status", None)
@@ -9187,6 +9931,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
             self._update_file_lists()
             self._refresh_behavior_list()
+            self._refresh_sync_sources()
             self._set_resample_from_processed()
             if isinstance(settings_data, dict) and settings_data:
                 self._apply_settings(settings_data)
@@ -9262,6 +10007,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "dio_channel": self.combo_dio.currentText(),
             "dio_polarity": "Event high (0->1)",
             "dio_align": "Align to onset",
+            "sync_behavior_file": "",
+            "sync_camera_column": "",
+            "sync_camera_mode": "TTL rising edges",
+            "sync_fiber_source": "__embedded__",
+            "sync_fiber_mode": "TTL rising edges",
+            "sync_method": "Linear regression",
+            "sync_auto_threshold": True,
+            "sync_threshold": 0.5,
+            "sync_min_interval": 0.2,
+            "sync_max_offset": 5,
+            "sync_use_aligned": False,
+            "sync_auto_recompute": True,
+            "sync_export_format": "CSV + H5",
             "behavior_file_type": "Binary states (time + 0/1 columns)",
             "behavior_time_fps": 30.0,
             "behavior": self.combo_behavior_name.currentText(),
@@ -9399,6 +10157,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "dio_channel": self.combo_dio.currentText(),
             "dio_polarity": self.combo_dio_polarity.currentText(),
             "dio_align": self.combo_dio_align.currentText(),
+            "sync_behavior_file": self.combo_sync_behavior_file.currentData(),
+            "sync_camera_column": self.combo_sync_camera_column.currentData(),
+            "sync_camera_mode": self.combo_sync_camera_mode.currentText(),
+            "sync_fiber_source": self.combo_sync_fiber_source.currentData(),
+            "sync_fiber_mode": self.combo_sync_fiber_mode.currentText(),
+            "sync_method": self.combo_sync_method.currentText(),
+            "sync_auto_threshold": self.cb_sync_auto_threshold.isChecked(),
+            "sync_threshold": float(self.spin_sync_threshold.value()),
+            "sync_min_interval": float(self.spin_sync_min_interval.value()),
+            "sync_max_offset": int(self.spin_sync_max_offset.value()),
+            "sync_use_aligned": self.cb_sync_use_aligned.isChecked(),
+            "sync_auto_recompute": self.cb_sync_auto_recompute.isChecked(),
+            "sync_export_format": self.combo_sync_export_format.currentText(),
             "behavior_file_type": self.combo_behavior_file_type.currentText(),
             "behavior_time_fps": float(self.spin_behavior_fps.value()),
             "behavior": self.combo_behavior_name.currentText(),
@@ -9481,10 +10252,42 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if idx >= 0:
                 combo.setCurrentIndex(idx)
 
+        def _set_combo_data(combo: QtWidgets.QComboBox, val: object) -> None:
+            if val is None:
+                return
+            idx = combo.findData(val)
+            if idx < 0:
+                idx = combo.findText(str(val))
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+
         _set_combo(self.combo_align, data.get("align"))
         _set_combo(self.combo_dio, data.get("dio_channel"))
         _set_combo(self.combo_dio_polarity, data.get("dio_polarity"))
         _set_combo(self.combo_dio_align, data.get("dio_align"))
+        self._refresh_sync_sources()
+        _set_combo_data(self.combo_sync_behavior_file, data.get("sync_behavior_file"))
+        self._refresh_sync_camera_columns()
+        _set_combo_data(self.combo_sync_camera_column, data.get("sync_camera_column"))
+        _set_combo(self.combo_sync_camera_mode, data.get("sync_camera_mode"))
+        self._refresh_sync_fiber_sources()
+        _set_combo_data(self.combo_sync_fiber_source, data.get("sync_fiber_source"))
+        _set_combo(self.combo_sync_fiber_mode, data.get("sync_fiber_mode"))
+        _set_combo(self.combo_sync_method, data.get("sync_method"))
+        if "sync_auto_threshold" in data:
+            self.cb_sync_auto_threshold.setChecked(bool(data["sync_auto_threshold"]))
+        if "sync_threshold" in data:
+            self.spin_sync_threshold.setValue(float(data["sync_threshold"]))
+        if "sync_min_interval" in data:
+            self.spin_sync_min_interval.setValue(float(data["sync_min_interval"]))
+        if "sync_max_offset" in data:
+            self.spin_sync_max_offset.setValue(int(data["sync_max_offset"]))
+        if "sync_use_aligned" in data:
+            self.cb_sync_use_aligned.setChecked(bool(data["sync_use_aligned"]))
+        if "sync_auto_recompute" in data:
+            self.cb_sync_auto_recompute.setChecked(bool(data["sync_auto_recompute"]))
+        _set_combo(self.combo_sync_export_format, data.get("sync_export_format"))
+        self._on_sync_auto_threshold_toggled(self.cb_sync_auto_threshold.isChecked())
         _set_combo(self.combo_behavior_file_type, data.get("behavior_file_type"))
         if "behavior_time_fps" in data:
             self.spin_behavior_fps.setValue(float(data["behavior_time_fps"]))
@@ -9631,6 +10434,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_metric_regions()
         self._apply_view_layout()
         self._refresh_signal_file_combo()
+        self._refresh_sync_sources()
         self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
@@ -10125,7 +10929,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if events.size == 0:
                 continue
             file_id = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
-            tvec, mat = _compute_psth_matrix(proc.time, proc.output, events, window, baseline, res_hz, smooth_sigma_s=smooth)
+            tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, events, window, baseline, res_hz, smooth_sigma_s=smooth)
             if mat.size == 0:
                 continue
             all_mats.append(mat)

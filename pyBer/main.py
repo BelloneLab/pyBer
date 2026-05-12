@@ -217,21 +217,69 @@ _PRE_PROJECT_VERSION = 1
 _LOG = logging.getLogger(__name__)
 
 
-def _pyber_icon_path() -> str:
+def _asset_candidates(filename: str) -> List[str]:
     if getattr(sys, "frozen", False):
         base_dir = str(getattr(sys, "_MEIPASS", "")) or os.path.dirname(sys.executable)
-        candidates = [
-            os.path.join(base_dir, "assets", "pyBer_logo_big.png"),
-            os.path.join(os.path.dirname(sys.executable), "assets", "pyBer_logo_big.png"),
+        return [
+            os.path.join(base_dir, "assets", filename),
+            os.path.join(os.path.dirname(sys.executable), "assets", filename),
         ]
-    else:
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        candidates = [os.path.join(base_dir, "assets", "pyBer_logo_big.png")]
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return [os.path.join(base_dir, "assets", filename)]
 
+
+def _first_existing_asset(filename: str) -> str:
+    candidates = _asset_candidates(filename)
     for path in candidates:
         if os.path.isfile(path):
             return path
-    return candidates[0]
+    return candidates[0] if candidates else filename
+
+
+def _pyber_icon_path() -> str:
+    for filename in ("pyBer.ico", "pyBer_logo_big.png"):
+        path = _first_existing_asset(filename)
+        if os.path.isfile(path):
+            return path
+    return _first_existing_asset("pyBer.ico")
+
+
+def _pyber_splash_path() -> str:
+    return _first_existing_asset("pyBer_logo_big.png")
+
+
+def _set_windows_app_user_model_id() -> None:
+    """Give Windows a stable app identity so Qt's app icon is used on the taskbar."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        app_id = "BelloneLab.pyBer.FiberPhotometry"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+
+def _set_qt_application_icon(app: QtWidgets.QApplication) -> None:
+    try:
+        icon_path = _pyber_icon_path()
+        if os.path.isfile(icon_path):
+            app_icon = QtGui.QIcon(icon_path)
+            if not app_icon.isNull():
+                app.setWindowIcon(app_icon)
+    except Exception:
+        pass
+
+
+def _set_qt_window_icon(window: QtWidgets.QWidget) -> None:
+    try:
+        icon_path = _pyber_icon_path()
+        if os.path.isfile(icon_path):
+            icon = QtGui.QIcon(icon_path)
+            if not icon.isNull():
+                window.setWindowIcon(icon)
+    except Exception:
+        pass
 
 
 def _rolling_corr(x: np.ndarray, y: np.ndarray, win: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -1138,14 +1186,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Pyber - Fiber Photometry Analysis")
-        try:
-            icon_path = _pyber_icon_path()
-            if os.path.isfile(icon_path):
-                icon = QtGui.QIcon(icon_path)
-                if not icon.isNull():
-                    self.setWindowIcon(icon)
-        except Exception:
-            pass
+        _set_qt_window_icon(self)
         self._set_initial_window_size()
         self.setDockOptions(
             QtWidgets.QMainWindow.DockOption.AllowNestedDocks
@@ -7255,6 +7296,7 @@ class MainWindow(QtWidgets.QMainWindow):
         raw_idx = _find_col(["raw", "raw_465", "signal", "signal_465"]) if has_header else None
         iso_idx = _find_col(["isobestic", "isosbestic", "raw_405", "reference", "reference_405", "ref"]) if has_header else None
         dio_idx = _find_col(["dio"]) if has_header else None
+        aligned_idx = _find_col(["time_aligned", "aligned_time", "sync_aligned_time"]) if has_header else None
 
         data_rows = data_rows[1:] if has_header else data_rows
 
@@ -7263,6 +7305,7 @@ class MainWindow(QtWidgets.QMainWindow):
         raw_vals = []
         iso_vals = []
         dio_vals = []
+        aligned_vals = []
 
         for r in data_rows:
             if time_idx is None or output_idx is None:
@@ -7294,6 +7337,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     dio_vals.append(float(r[dio_idx]) if len(r) > dio_idx else np.nan)
                 except Exception:
                     dio_vals.append(np.nan)
+            if aligned_idx is not None:
+                try:
+                    aligned_vals.append(float(r[aligned_idx]) if len(r) > aligned_idx else np.nan)
+                except Exception:
+                    aligned_vals.append(np.nan)
 
         if not time:
             return None
@@ -7303,6 +7351,11 @@ class MainWindow(QtWidgets.QMainWindow):
         raw = np.asarray(raw_vals, float) if raw_idx is not None and len(raw_vals) == len(time) else np.full_like(t, np.nan)
         iso = np.asarray(iso_vals, float) if iso_idx is not None and len(iso_vals) == len(time) else np.full_like(t, np.nan)
         dio_arr = np.asarray(dio_vals, float) if dio_idx is not None and len(dio_vals) == len(time) else None
+        sync_aligned = (
+            np.asarray(aligned_vals, float)
+            if aligned_idx is not None and len(aligned_vals) == len(time)
+            else None
+        )
 
         output_label = "Imported CSV"
         if has_header and output_idx is not None:
@@ -7333,6 +7386,8 @@ class MainWindow(QtWidgets.QMainWindow):
             output=out,
             output_label=output_label,
             output_context=output_context,
+            sync_aligned_time=sync_aligned,
+            sync_report={"status": "imported", "method": "imported time_aligned"} if sync_aligned is not None else {},
             artifact_regions_sec=None,
             fs_actual=np.nan,
             fs_target=np.nan,
@@ -7387,6 +7442,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 fs_actual = float(g.attrs.get("fs_actual", np.nan)) if hasattr(g, "attrs") else np.nan
                 fs_target = float(g.attrs.get("fs_target", np.nan)) if hasattr(g, "attrs") else np.nan
                 fs_used = float(g.attrs.get("fs_used", np.nan)) if hasattr(g, "attrs") else np.nan
+                sync_aligned = None
+                if "time_aligned" in g:
+                    sync_aligned = np.asarray(g["time_aligned"][()], float)
+                elif "sync_aligned_time" in g:
+                    sync_aligned = np.asarray(g["sync_aligned_time"][()], float)
+                sync_report = {}
+                raw_report = g.attrs.get("sync_report_json", "") if hasattr(g, "attrs") else ""
+                if raw_report:
+                    try:
+                        sync_report = json.loads(str(raw_report))
+                    except Exception:
+                        sync_report = {}
         except Exception:
             return None
 
@@ -7405,6 +7472,8 @@ class MainWindow(QtWidgets.QMainWindow):
             output=out,
             output_label=output_label,
             output_context=output_context,
+            sync_aligned_time=sync_aligned,
+            sync_report=sync_report if isinstance(sync_report, dict) else {},
             artifact_regions_sec=None,
             fs_actual=fs_actual,
             fs_target=fs_target,
@@ -7509,20 +7578,15 @@ class MainWindow(QtWidgets.QMainWindow):
 def main() -> None:
     pg.setConfigOptions(antialias=False)
     smoke_test = str(os.environ.get("PYBER_SMOKE_TEST", "")).strip().lower() in {"1", "true", "yes", "on"}
+    _set_windows_app_user_model_id()
     app = QtWidgets.QApplication([])
     apply_app_palette(app, "dark")
     spinbox_scrubber = install_spinbox_scrubbers(app)
-    icon_path = _pyber_icon_path()
-    try:
-        if os.path.isfile(icon_path):
-            app_icon = QtGui.QIcon(icon_path)
-            if not app_icon.isNull():
-                app.setWindowIcon(app_icon)
-    except Exception:
-        pass
+    _set_qt_application_icon(app)
     splash = None
     if not smoke_test:
         try:
+            icon_path = _pyber_splash_path()
             if os.path.isfile(icon_path):
                 pix = QtGui.QPixmap(icon_path)
                 if not pix.isNull():

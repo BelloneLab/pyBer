@@ -49,6 +49,8 @@ the environment created from `environment.yml`.
 - Export processed CSV or HDF5 files with selectable fields and metadata.
 - Align processed signals to DIO, behavior states, behavior onsets, or behavior
   transitions.
+- Synchronize photometry time to camera or behavior time from shared TTL/barcode
+  columns and export a `time_aligned` column for downstream postprocessing.
 - Detect signal events and compare transient amplitude with baseline-prominence
   normalized metrics.
 - Build individual or group PSTHs, heatmaps, event duration plots, and metrics.
