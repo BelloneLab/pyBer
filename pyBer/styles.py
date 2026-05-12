@@ -154,6 +154,35 @@ def _paint_target(p, r, c):
     p.drawLine(cx, cy + 2, cx, cy + rad + 2)
 
 
+def _paint_sync(p, r, c):
+    """Sync icon — two aligned waves with a center timing marker."""
+    from PySide6 import QtCore, QtGui
+    import math
+    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+
+    cx = r.center().x()
+    top_mid = r.top() + int(r.height() * 0.34)
+    bottom_mid = r.top() + int(r.height() * 0.68)
+    amplitude = max(2, int(r.height() * 0.12))
+    width = max(1, r.width())
+
+    def _wave_path(mid_y: int) -> QtGui.QPainterPath:
+        path = QtGui.QPainterPath()
+        path.moveTo(r.left(), mid_y)
+        for i in range(width + 1):
+            x = r.left() + i
+            y = mid_y - math.sin(i / width * 2.0 * math.pi) * amplitude
+            path.lineTo(x, y)
+        return path
+
+    p.setPen(_pen(c, 1.9))
+    p.drawPath(_wave_path(top_mid))
+    p.drawPath(_wave_path(bottom_mid))
+
+    p.setPen(_pen(QtGui.QColor(c).lighter(140), 2.1))
+    p.drawLine(cx, r.top() + 1, cx, r.bottom() - 1)
+
+
 def _paint_pulse(p, r, c):
     from PySide6 import QtCore
     p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)

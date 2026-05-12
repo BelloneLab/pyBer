@@ -45,7 +45,7 @@ _FIXED_POST_RIGHT_TAB_TITLES: Dict[str, str] = {
     "setup": "Setup",
     "psth": "PSTH",
     "spatial": "Spatial",
-    "temporal": "Temporal",
+    "temporal": "Modeling",
     "export": "Export",
 }
 _USE_PG_DOCKAREA_POST_LAYOUT = True
@@ -2008,6 +2008,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         from styles import (
             _make_icon, _paint_sliders, _paint_chart, _paint_grid,
             _paint_export, _paint_pulse, _paint_paw, _paint_temporal,
+            _paint_sync,
         )
         _post_rail_meta = {
             "setup":    ("Setup",     "Load processed traces and behavior", _paint_sliders),
@@ -2016,8 +2017,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "export":   ("Export",    "Export PSTH, peaks, behavior", _paint_export),
             "signal":   ("Events",    "Peak / event detection", _paint_pulse),
             "behavior": ("Behavior",  "Behavior alignment and per-state analysis", _paint_paw),
-            "sync":     ("Sync",      "Align photometry time to camera or behavior time", _paint_temporal),
-            "temporal": ("Temporal",  "GLM / FLMM modeling", _paint_temporal),
+            "sync":     ("Sync",      "Align photometry time to camera or behavior time", _paint_sync),
+            "temporal": ("Modeling",  "GLM / FLMM modeling", _paint_temporal),
         }
         self._post_rail_icon_painters = {key: meta[2] for key, meta in _post_rail_meta.items()}
         for key, btn in self._section_buttons.items():
