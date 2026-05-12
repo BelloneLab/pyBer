@@ -24,8 +24,9 @@ from analysis_core import (
 def _optimize_plot(w: pg.PlotWidget) -> None:
     w.setMenuEnabled(True)
     w.showGrid(x=True, y=True, alpha=0.25)
-    w.setMouseEnabled(x=True, y=True)
+    w.setMouseEnabled(x=True, y=False)
     pi = w.getPlotItem()
+    pi.getViewBox().setMouseMode(pg.ViewBox.PanMode)
     pi.setClipToView(True)
     pi.setDownsampling(auto=True, mode="peak")
     pi.setAutoVisible(y=True)
@@ -2970,8 +2971,10 @@ class PlotDashboard(QtWidgets.QWidget):
                     pass
 
     def _link_stacked_x_axes(self) -> None:
-        # Keep interactive pan/zoom aligned even when a user starts the gesture on
-        # the processing or output plot instead of the raw plot.
+        # proc and out stay visually aligned to raw via pyqtgraph's native link.
+        # _emit_xrange_from_any only emits the external xRangeChanged signal and
+        # no longer calls setXRange on any plot, so there is no re-entrant
+        # call that could corrupt PanMode drag state.
         try:
             self.plot_proc.setXLink(self.plot_raw)
             self.plot_out.setXLink(self.plot_raw)
@@ -3028,7 +3031,7 @@ class PlotDashboard(QtWidgets.QWidget):
         _update()
         return vb, curve
 
-    def _emit_xrange_from_any(self, _vb, x_range) -> None:
+    def _emit_xrange_from_any(self, source_vb, x_range) -> None:
         if self._sync_guard:
             return
         try:
@@ -3037,7 +3040,10 @@ class PlotDashboard(QtWidgets.QWidget):
             x1 = float(x1)
             if not np.isfinite(x0) or not np.isfinite(x1) or x1 <= x0:
                 return
-            self.set_xrange_all(x0, x1)
+            self._last_xrange = (x0, x1)
+            # setXLink already propagates range changes to proc/out natively.
+            # Do NOT call setXRange here — doing so mid-drag re-enters pyqtgraph's
+            # pan state and produces the runaway negative-time jump.
             self.xRangeChanged.emit(x0, x1)
         except Exception:
             pass

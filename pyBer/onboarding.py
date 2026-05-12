@@ -1154,6 +1154,7 @@ class FooterActions(QtWidgets.QFrame):
         self._status = QtWidgets.QLabel("")
         self._status.setProperty("class", "muted")
         self._status.setWordWrap(True)
+        self._status.hide()
         lay.addWidget(self._status, 1)
 
         self._right = QtWidgets.QHBoxLayout()
@@ -1161,7 +1162,9 @@ class FooterActions(QtWidgets.QFrame):
         lay.addLayout(self._right)
 
     def set_status(self, text: str) -> None:
-        self._status.setText(str(text or ""))
+        status_text = str(text or "")
+        self._status.setText(status_text)
+        self._status.setVisible(bool(status_text))
 
     def add_primary(self, button: QtWidgets.QPushButton) -> None:
         button.setProperty("class", "primary")
