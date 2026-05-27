@@ -525,6 +525,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._all_file_ids: List[str] = []
         self.last_signal_events: Optional[Dict[str, object]] = None
         self.last_behavior_analysis: Optional[Dict[str, object]] = None
+        self._trace_preview_events = np.array([], float)
+        self._trace_preview_durations = np.array([], float)
+        self._trace_preview_y_bounds: Tuple[float, float] = (-1.0, 1.0)
         self._event_labels: List[pg.TextItem] = []
         self._event_regions: List[pg.LinearRegionItem] = []
         self._signal_peak_lines: List[pg.InfiniteLine] = []
@@ -2176,7 +2179,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             symbolBrush=pg.mkBrush(240, 120, 80),
             symbolPen=pg.mkPen((240, 120, 80), width=1.0),
         )
+        self.curve_event_markers = self.plot_trace.plot(
+            pen=pg.mkPen((235, 218, 80, 150), width=1.0)
+        )
+        self.curve_event_markers.setZValue(4)
         self.event_lines: List[pg.InfiniteLine] = []
+        self.plot_trace.getViewBox().sigXRangeChanged.connect(self._render_visible_event_annotations)
 
         self.img = pg.ImageItem()
         self.plot_heat.addItem(self.img)
@@ -5315,7 +5323,25 @@ class PostProcessingPanel(QtWidgets.QWidget):
             )
 
         time_idx = header.index("time") if "time" in header else None
-        output_idx = _find_col(["dff", "z-score", "zscore", "z score", "output", "raw_signal", "raw_465"])
+        output_idx = _find_col([
+            "dff",
+            "z-score",
+            "zscore",
+            "z score",
+            "prominence",
+            "output",
+            "raw_signal",
+            "raw_465",
+            "raw",
+            "isobestic",
+            "raw_405",
+            "reference",
+            "reference_405",
+            "ref",
+            "dio",
+            "baseline_465",
+            "baseline_405",
+        ])
         has_header = time_idx is not None and output_idx is not None
 
         raw_idx = _find_col(["raw", "raw_465", "signal", "signal_465"]) if has_header else None
@@ -5424,6 +5450,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     col = "dFF"
                 elif col == "raw_signal":
                     col = "Raw signal (465)"
+                elif col == "prominence":
+                    col = "Prominence normalized"
                 output_label = f"Imported CSV ({col})"
 
         return ProcessedTrial(
@@ -7166,10 +7194,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         return times, durations
 
-    def _clear_trace_preview(self) -> None:
-        self.curve_trace.setData([], [])
-        self.curve_behavior.setData([], [])
-        self.curve_peak_markers.setData([], [])
+    def _clear_event_annotations(self) -> None:
         for ln in list(self.event_lines):
             try:
                 self.plot_trace.removeItem(ln)
@@ -7188,6 +7213,51 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
         self._event_regions = []
+
+    def _render_visible_event_annotations(self, *_args: object) -> None:
+        self._clear_event_annotations()
+        ev = np.asarray(getattr(self, "_trace_preview_events", np.array([], float)), float)
+        if ev.size == 0:
+            return
+        dur = np.asarray(getattr(self, "_trace_preview_durations", np.array([], float)), float)
+        if dur.size != ev.size:
+            dur = np.full(ev.shape, np.nan, dtype=float)
+        min_y, max_y = getattr(self, "_trace_preview_y_bounds", (-1.0, 1.0))
+        try:
+            x0, x1 = self.plot_trace.getViewBox().viewRange()[0]
+        except Exception:
+            x0, x1 = float(np.nanmin(ev)), float(np.nanmax(ev))
+        if x1 < x0:
+            x0, x1 = x1, x0
+        finite_ev = np.isfinite(ev)
+        finite_dur = np.isfinite(dur)
+        overlaps = finite_ev & (ev <= x1) & (
+            (ev >= x0) | (finite_dur & ((ev + np.maximum(dur, 0.0)) >= x0))
+        )
+        visible_idx = np.where(overlaps)[0]
+        for idx in visible_idx:
+            et = float(ev[idx])
+            label = pg.TextItem(str(int(idx) + 1), color=(200, 200, 200))
+            label.setPos(et, float(max_y))
+            self.plot_trace.addItem(label)
+            self._event_labels.append(label)
+            if idx < dur.size and np.isfinite(dur[idx]):
+                t1 = et + max(0.0, float(dur[idx]))
+                if t1 > et:
+                    reg = pg.LinearRegionItem(values=(et, t1), brush=(200, 200, 200, 40), movable=False)
+                    reg.setZValue(1)
+                    self.plot_trace.addItem(reg)
+                    self._event_regions.append(reg)
+
+    def _clear_trace_preview(self) -> None:
+        self.curve_trace.setData([], [])
+        self.curve_behavior.setData([], [])
+        self.curve_peak_markers.setData([], [])
+        if hasattr(self, "curve_event_markers"):
+            self.curve_event_markers.setData([], [])
+        self._trace_preview_events = np.array([], float)
+        self._trace_preview_durations = np.array([], float)
+        self._clear_event_annotations()
         for ln in list(self._signal_peak_lines):
             try:
                 self.plot_trace.removeItem(ln)
@@ -7197,6 +7267,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         try:
             self.plot_trace.setXRange(0.0, 1.0, padding=0)
             self.plot_trace.setYRange(0.0, 1.0, padding=0)
+            self.plot_trace.setTitle("Trace preview")
         except Exception:
             pass
 
@@ -7266,36 +7337,48 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_behavior_overlay(proc)
 
         # draw event lines if possible
-        for ln in self.event_lines:
-            self.plot_trace.removeItem(ln)
-        self.event_lines = []
-        for lab in self._event_labels:
-            self.plot_trace.removeItem(lab)
-        self._event_labels = []
-        for reg in self._event_regions:
-            self.plot_trace.removeItem(reg)
-        self._event_regions = []
+        self._clear_event_annotations()
+        if hasattr(self, "curve_event_markers"):
+            self.curve_event_markers.setData([], [])
+        self._trace_preview_events = np.array([], float)
+        self._trace_preview_durations = np.array([], float)
 
         ev, dur = self._get_events_for_proc(proc)
         ev, dur = self._filter_events(ev, dur)
         if ev.size:
-            # limit lines to a reasonable amount for UI
-            ev = ev[:200]
-            max_y = float(np.nanmax(y)) if np.isfinite(np.nanmax(y)) else 0.0
-            for i, et in enumerate(ev, start=1):
-                ln = pg.InfiniteLine(pos=float(et), angle=90, pen=pg.mkPen((220, 220, 220), width=1.0, style=QtCore.Qt.PenStyle.DashLine))
-                self.plot_trace.addItem(ln)
-                self.event_lines.append(ln)
-                label = pg.TextItem(str(i), color=(200, 200, 200))
-                label.setPos(float(et), max_y)
-                self.plot_trace.addItem(label)
-                self._event_labels.append(label)
-                if dur is not None and i - 1 < dur.size and np.isfinite(dur[i - 1]):
-                    t0 = float(et)
-                    t1 = float(et + dur[i - 1])
-                    reg = pg.LinearRegionItem(values=(t0, t1), brush=(200, 200, 200, 40), movable=False)
-                    self.plot_trace.addItem(reg)
-                    self._event_regions.append(reg)
+            dur = np.asarray(dur, float) if dur is not None else np.array([], float)
+            if dur.size != ev.size:
+                dur = np.full(ev.shape, np.nan, dtype=float)
+            y_arr = np.asarray(y, float)
+            finite_y = y_arr[np.isfinite(y_arr)]
+            if finite_y.size:
+                min_y = float(np.nanmin(finite_y))
+                max_y = float(np.nanmax(finite_y))
+                pad = 0.03 * max(1e-12, max_y - min_y)
+                min_y -= pad
+                max_y += pad
+            else:
+                min_y, max_y = -1.0, 1.0
+            ev_arr = np.asarray(ev, float)
+            line_x = np.empty(ev_arr.size * 3, dtype=float)
+            line_y = np.empty(ev_arr.size * 3, dtype=float)
+            line_x[0::3] = ev_arr
+            line_x[1::3] = ev_arr
+            line_x[2::3] = np.nan
+            line_y[0::3] = min_y
+            line_y[1::3] = max_y
+            line_y[2::3] = np.nan
+            if hasattr(self, "curve_event_markers"):
+                self.curve_event_markers.setData(line_x, line_y, connect="finite")
+            self._trace_preview_events = ev_arr
+            self._trace_preview_durations = dur
+            self._trace_preview_y_bounds = (float(min_y), float(max_y))
+            self._render_visible_event_annotations()
+            self.plot_trace.setTitle(f"Trace preview ({int(ev.size)} events)")
+        else:
+            self._trace_preview_events = np.array([], float)
+            self._trace_preview_durations = np.array([], float)
+            self.plot_trace.setTitle("Trace preview")
         self._refresh_signal_overlay()
 
     def _update_behavior_overlay(self, proc: ProcessedTrial) -> None:
