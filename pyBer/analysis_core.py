@@ -354,6 +354,7 @@ class ExportSelection:
     dio: bool = True
     baseline_sig: bool = True
     baseline_ref: bool = True
+    csv_metadata: bool = True
     output_modes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -364,6 +365,7 @@ class ExportSelection:
             "dio": bool(self.dio),
             "baseline_sig": bool(self.baseline_sig),
             "baseline_ref": bool(self.baseline_ref),
+            "csv_metadata": bool(self.csv_metadata),
             "output_modes": list(self.output_modes or []),
         }
 
@@ -381,6 +383,7 @@ class ExportSelection:
             dio=bool(data.get("dio", True)),
             baseline_sig=bool(data.get("baseline_sig", True)),
             baseline_ref=bool(data.get("baseline_ref", True)),
+            csv_metadata=bool(data.get("csv_metadata", True)),
             output_modes=[str(m).strip() for m in modes if str(m or "").strip()],
         )
 
@@ -512,20 +515,21 @@ def export_processed_csv(
 
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow([f"# output_label: {processed.output_label}"])
-        if processed.output_context:
-            w.writerow([f"# output_context: {processed.output_context}"])
-        sync_report = getattr(processed, "sync_report", {}) or {}
-        if sync_report:
-            try:
-                w.writerow([f"# sync_report_json: {json.dumps(sync_report)}"])
-            except Exception:
-                pass
-        if output_items:
-            w.writerow([f"# output_modes: {json.dumps([label for label, _ in output_items])}"])
-        if metadata:
-            for k, v in metadata.items():
-                w.writerow([f"# {k}: {v}"])
+        if bool(getattr(selection, "csv_metadata", True)):
+            w.writerow([f"# output_label: {processed.output_label}"])
+            if processed.output_context:
+                w.writerow([f"# output_context: {processed.output_context}"])
+            sync_report = getattr(processed, "sync_report", {}) or {}
+            if sync_report:
+                try:
+                    w.writerow([f"# sync_report_json: {json.dumps(sync_report)}"])
+                except Exception:
+                    pass
+            if output_items:
+                w.writerow([f"# output_modes: {json.dumps([label for label, _ in output_items])}"])
+            if metadata:
+                for k, v in metadata.items():
+                    w.writerow([f"# {k}: {v}"])
         columns = [("time", t)]
         aligned = getattr(processed, "sync_aligned_time", None)
         if aligned is not None:

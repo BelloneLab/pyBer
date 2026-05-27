@@ -1507,6 +1507,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 "Choose one or more DIO channels to export.\n"
                 "If none are checked, export uses the current overlay trigger."
             ),
+            "csv_metadata": (
+                "Write pyBer metadata comment lines at the top of CSV files.\n"
+                "Turn this off when you need the first CSV row to be the column header for Excel, MATLAB, R, or other tools."
+            ),
             "auto_export": (
                 "When enabled, the Export button writes selected files directly beside their source raw data.\n"
                 "All available analog channels are exported with the current analysis parameters."
@@ -1902,6 +1906,11 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.chk_export_baseline_sig.setChecked(True)
         self.chk_export_baseline_ref = QtWidgets.QCheckBox("Baseline 405")
         self.chk_export_baseline_ref.setChecked(True)
+        self.chk_csv_metadata = QtWidgets.QCheckBox("CSV metadata comment lines")
+        self.chk_csv_metadata.setChecked(True)
+        self.chk_csv_metadata.setToolTip(
+            "Include # output_label / output_context / output_modes metadata rows at the top of CSV exports."
+        )
         self.list_export_channels = CheckableListWidget()
         self.list_export_channels.setMaximumHeight(84)
         self.list_export_channels.setMinimumHeight(54)
@@ -1939,6 +1948,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         export_checks.addWidget(self.chk_export_baseline_ref, 2, 1)
         export_form.addRow(export_checks)
         export_form.addRow(self._label_with_help("Auto export", "auto_export"), self.chk_auto_export)
+        export_form.addRow(self._label_with_help("CSV metadata", "csv_metadata"), self.chk_csv_metadata)
         export_form.addRow(self._label_with_help("Output traces", "output_mode"), self.list_export_outputs)
         export_form.addRow(self._label_with_help("AN channels", "export_analog_channels"), self.list_export_channels)
         export_form.addRow(self._label_with_help("DIO channels", "export_dio_channels"), self.list_export_dio)
@@ -2286,6 +2296,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
             self.chk_export_dio,
             self.chk_export_baseline_sig,
             self.chk_export_baseline_ref,
+            self.chk_csv_metadata,
         ):
             cb.toggled.connect(emit_noargs)
 
@@ -2316,6 +2327,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
             dio=self.chk_export_dio.isChecked(),
             baseline_sig=self.chk_export_baseline_sig.isChecked(),
             baseline_ref=self.chk_export_baseline_ref.isChecked(),
+            csv_metadata=self.chk_csv_metadata.isChecked(),
             output_modes=self.export_output_modes(),
         )
 
@@ -2347,6 +2359,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 parts.append("baseline465")
             else:
                 parts.append("baseline405")
+        if not selection.csv_metadata:
+            parts.append("clean CSV")
         if not parts:
             parts.append("time only")
         return "CSV/H5: " + " + ".join(parts)
@@ -2359,6 +2373,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.chk_export_dio.setChecked(bool(selection.dio))
         self.chk_export_baseline_sig.setChecked(bool(selection.baseline_sig))
         self.chk_export_baseline_ref.setChecked(bool(selection.baseline_ref))
+        self.chk_csv_metadata.setChecked(bool(getattr(selection, "csv_metadata", True)))
         if selection.output_modes:
             self.set_export_output_modes(selection.output_modes, follow_current=False)
         else:

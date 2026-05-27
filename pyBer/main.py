@@ -3974,6 +3974,13 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         try:
+            raw_export_selection = self.settings.value("pre_export_selection_json", "", type=str)
+            if raw_export_selection:
+                self.param_panel.set_export_selection(ExportSelection.from_dict(json.loads(raw_export_selection)))
+                self._update_export_summary_label()
+        except Exception:
+            pass
+        try:
             default_bg = "white" if self._app_theme_mode == "light" else "dark"
             plot_bg = self.settings.value("pre_plot_background", default_bg, type=str)
             if self._app_theme_mode == "dark" and self._normalize_pre_plot_background(plot_bg) == "white":
@@ -4097,6 +4104,13 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         try:
             self.settings.setValue("auto_export_to_source_dir", bool(self.param_panel.auto_export_enabled()))
+        except Exception:
+            pass
+        try:
+            self.settings.setValue(
+                "pre_export_selection_json",
+                json.dumps(self.param_panel.export_selection().to_dict()),
+            )
         except Exception:
             pass
         try:
