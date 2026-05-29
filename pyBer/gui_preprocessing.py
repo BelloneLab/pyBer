@@ -4,6 +4,8 @@ from __future__ import annotations
 from typing import Callable, Dict, List, Optional, Tuple
 import json
 import os
+import subprocess
+import sys
 
 import numpy as np
 from PySide6 import QtCore, QtWidgets, QtGui
@@ -549,6 +551,8 @@ class ArtifactPanel(QtWidgets.QDialog):
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(10)
         table_min_height = 260
 
         auto_group = QtWidgets.QGroupBox("Auto-detected (threshold)")
@@ -557,22 +561,31 @@ class ArtifactPanel(QtWidgets.QDialog):
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
         auto_layout = QtWidgets.QVBoxLayout(auto_group)
+        auto_layout.setContentsMargins(8, 16, 8, 8)
         self.table_auto = QtWidgets.QTableWidget(0, 6)
         self.table_auto.setMinimumHeight(table_min_height)
         self.table_auto.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
-        self.table_auto.setHorizontalHeaderLabels(["ID", "Remove", "Source", "Core (s)", "Cut start", "Cut end"])
-        self.table_auto.horizontalHeader().setStretchLastSection(True)
+        self.table_auto.setHorizontalHeaderLabels(["ID", "Use", "Src", "Core", "Start", "End"])
+        auto_header = self.table_auto.horizontalHeader()
+        auto_header.setStretchLastSection(False)
+        auto_header.setHighlightSections(False)
+        auto_header.setMinimumSectionSize(28)
         self.table_auto.verticalHeader().setVisible(False)
+        self.table_auto.verticalHeader().setDefaultSectionSize(26)
         self.table_auto.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_auto.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.table_auto.setColumnWidth(0, 42)
-        self.table_auto.setColumnWidth(1, 72)
-        self.table_auto.setColumnWidth(2, 66)
-        self.table_auto.setColumnWidth(3, 132)
-        self.table_auto.setColumnWidth(4, 82)
+        self.table_auto.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table_auto.setAlternatingRowColors(True)
+        self.table_auto.setShowGrid(False)
+        self.table_auto.setWordWrap(False)
+        for col, width in ((0, 36), (1, 44), (2, 48)):
+            auto_header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self.table_auto.setColumnWidth(col, width)
+        for col in (3, 4, 5):
+            auto_header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Stretch)
         auto_layout.addWidget(self.table_auto, 1)
         layout.addWidget(auto_group, 1)
 
@@ -582,17 +595,30 @@ class ArtifactPanel(QtWidgets.QDialog):
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
         manual_layout = QtWidgets.QVBoxLayout(manual_group)
+        manual_layout.setContentsMargins(8, 16, 8, 8)
         self.table = QtWidgets.QTableWidget(0, 3)
         self.table.setMinimumHeight(table_min_height)
         self.table.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
-        self.table.setHorizontalHeaderLabels(["ID", "Start (s)", "End (s)"])
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setHorizontalHeaderLabels(["ID", "Start", "End"])
+        manual_header = self.table.horizontalHeader()
+        manual_header.setStretchLastSection(False)
+        manual_header.setHighlightSections(False)
+        manual_header.setMinimumSectionSize(32)
+        manual_header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        manual_header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        manual_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(0, 42)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(26)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.setWordWrap(False)
 
         manual_layout.addWidget(self.table)
 
@@ -603,7 +629,8 @@ class ArtifactPanel(QtWidgets.QDialog):
             ed.setDecimals(3)
             ed.setRange(-1e9, 1e9)
             ed.setKeyboardTracking(False)
-            ed.setMinimumWidth(140)
+            ed.setMinimumWidth(96)
+            ed.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
 
         self.btn_add = QtWidgets.QPushButton("Add")
         self.btn_update = QtWidgets.QPushButton("Update selected")
@@ -851,6 +878,7 @@ class FileQueuePanel(QtWidgets.QGroupBox):
     openFileRequested = QtCore.Signal()
     openFolderRequested = QtCore.Signal()
     selectionChanged = QtCore.Signal()
+    sendToPostprocessingRequested = QtCore.Signal(list)
 
     channelChanged = QtCore.Signal(str)
     triggerChanged = QtCore.Signal(str)
@@ -918,6 +946,8 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         self.list_files.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list_files.setMinimumHeight(210)
         self.list_files.setUniformItemSizes(True)
+        self.list_files.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_files.customContextMenuRequested.connect(self._show_file_context_menu)
 
         self.btn_remove_file = QtWidgets.QPushButton("Remove selected")
         self.btn_remove_file.setProperty("class", "blueSecondarySmall")
@@ -1147,6 +1177,50 @@ class FileQueuePanel(QtWidgets.QGroupBox):
 
     def _update_remove_button(self) -> None:
         self.btn_remove_file.setEnabled(len(self.list_files.selectedItems()) > 0)
+
+    def _show_file_context_menu(self, pos: QtCore.QPoint) -> None:
+        item = self.list_files.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self.list_files.clearSelection()
+            item.setSelected(True)
+            self.list_files.setCurrentItem(item)
+        paths = self.selected_paths()
+        if not paths:
+            return
+
+        menu = QtWidgets.QMenu(self)
+        act_reveal = menu.addAction("Reveal in Explorer")
+        act_send = menu.addAction("Load in postprocessing")
+        menu.addSeparator()
+        act_remove = menu.addAction("Remove from list")
+        chosen = menu.exec(self.list_files.viewport().mapToGlobal(pos))
+        if chosen is act_reveal:
+            self._reveal_path_in_file_manager(paths[0])
+        elif chosen is act_send:
+            self.sendToPostprocessingRequested.emit(paths)
+        elif chosen is act_remove:
+            self._remove_selected_files()
+
+    def _reveal_path_in_file_manager(self, path: str) -> None:
+        target = os.path.normpath(str(path or ""))
+        if not target:
+            return
+        folder = target if os.path.isdir(target) else os.path.dirname(target)
+        try:
+            if sys.platform.startswith("win"):
+                if os.path.exists(target):
+                    subprocess.Popen(["explorer", "/select,", target])
+                elif folder and os.path.isdir(folder):
+                    subprocess.Popen(["explorer", folder])
+                return
+            if sys.platform == "darwin" and os.path.exists(target):
+                subprocess.Popen(["open", "-R", target])
+                return
+            if folder and os.path.isdir(folder):
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder))
+        except Exception:
+            if folder and os.path.isdir(folder):
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder))
 
 
 class SectionParamsDialog(QtWidgets.QDialog):

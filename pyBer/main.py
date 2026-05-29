@@ -1750,6 +1750,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_panel.advancedOptionsRequested.connect(self._open_advanced_options)
         self.file_panel.qcRequested.connect(self._run_qc_dialog)
         self.file_panel.batchQcRequested.connect(self._run_batch_qc)
+        self.file_panel.sendToPostprocessingRequested.connect(self._send_preprocessing_paths_to_postprocessing)
 
         # Parameters: changes and actions
         self.param_panel.paramsChanged.connect(self._on_params_changed)
@@ -2411,11 +2412,16 @@ class MainWindow(QtWidgets.QMainWindow):
             sizes = splitter.sizes()
             if len(sizes) >= 2:
                 if any_checked:
-                    if sizes[0] < 60:
-                        total = sum(sizes) or 1
-                        drawer_w = max(420, int(total * 0.28))
+                    total = sum(sizes) or 1
+                    if active_key == "artifacts":
+                        target_w = max(520, int(total * 0.34))
+                    else:
+                        target_w = max(420, int(total * 0.28))
+                    drawer_w = min(target_w, max(420, total - 640))
+                    if sizes[0] < 60 or (active_key == "artifacts" and sizes[0] < drawer_w - 20):
+                        delta_w = max(0, drawer_w - max(0, sizes[0]))
                         sizes[0] = drawer_w
-                        sizes[1] = max(400, sizes[1] - drawer_w)
+                        sizes[1] = max(400, sizes[1] - delta_w)
                         splitter.setSizes(sizes)
                 else:
                     if sizes[0] > 0:
@@ -5725,6 +5731,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 _LOG.exception("Failed to handle main tab switch")
         finally:
             self._restore_window_state_after_tab_switch(was_fullscreen, was_maximized)
+            try:
+                if self.tabs.currentWidget() is self.post_tab:
+                    QtCore.QTimer.singleShot(0, self._post_get_current_dio_list)
+            except Exception:
+                pass
             self._handling_main_tab_change = False
             if self._force_fixed_dock_layouts:
                 QtCore.QTimer.singleShot(0, self._enforce_fixed_layout_for_active_tab)
@@ -5962,6 +5973,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_channel = None
                 self._current_trigger = None
                 self.plots.set_title("No file loaded")
+                self._post_get_current_dio_list()
                 self._update_plot_status()
             return
 
@@ -5998,6 +6010,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # update post tab selection context
         self.post_tab.set_current_source_label(os.path.basename(path), self._current_channel or "")
+        self._post_get_current_dio_list()
         self._update_plot_status()
 
     def _on_channel_changed(self, ch: str) -> None:
@@ -7306,19 +7319,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------- Postprocessing bridge ----------------
 
-    @QtCore.Slot()
-    def _post_get_current_processed(self):
-        # Determine selection context: if multiple selected, provide multiple processed outputs if available
-        paths = self._selected_paths()
-        if not paths:
-            paths = [self._current_path] if self._current_path else []
+    def _postprocessing_bridge_paths(self, paths: Optional[List[str]] = None) -> List[str]:
+        raw_paths = [str(p or "") for p in (paths or []) if str(p or "")]
+        if not raw_paths:
+            raw_paths = self._selected_paths()
+        if not raw_paths:
+            raw_paths = [self._current_path] if self._current_path else []
+        out: List[str] = []
+        seen: set[str] = set()
+        for path in raw_paths:
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            out.append(path)
+        return out
 
+    def _processed_trials_for_postprocessing_paths(self, paths: List[str]) -> List[ProcessedTrial]:
         out: List[ProcessedTrial] = []
+        try:
+            params = self.param_panel.get_params()
+        except Exception:
+            params = ProcessingParams()
+        start_s, end_s = self._time_window_bounds()
         for p in paths:
             doric = self._loaded_files.get(p)
             if not doric:
                 continue
-            # Use current channel when available for all selected files
             if self._current_channel and self._current_channel in doric.channels:
                 ch = self._current_channel
             else:
@@ -7326,44 +7352,68 @@ class MainWindow(QtWidgets.QMainWindow):
             key = (p, ch)
             if key in self._last_processed:
                 out.append(self._last_processed[key])
-            else:
-                # compute on-demand (fast due to decimation), using current params
-                try:
-                    params = self.param_panel.get_params()
-                    trial = doric.make_trial(ch, trigger_name=self._current_trigger)
-                    trial = self._apply_time_window(trial)
-                    start_s, end_s = self._time_window_bounds()
-                    manual = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
-                    manual_exclude = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
-                    proc = self.processor.process_trial(
-                        trial,
-                        params,
-                        manual_regions_sec=manual,
-                        manual_exclude_regions_sec=manual_exclude,
-                        preview_mode=False,
-                    )
-                    cutouts = self._cutout_regions_by_key.get(key, [])
-                    proc = self._apply_cutouts_to_processed(proc, cutouts)
-                    self._last_processed[key] = proc
-                    out.append(proc)
-                except Exception:
-                    pass
+                continue
+            try:
+                trial = doric.make_trial(ch, trigger_name=self._current_trigger)
+                trial = self._apply_time_window(trial)
+                manual = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
+                manual_exclude = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
+                proc = self.processor.process_trial(
+                    trial,
+                    params,
+                    manual_regions_sec=manual,
+                    manual_exclude_regions_sec=manual_exclude,
+                    preview_mode=False,
+                )
+                cutouts = self._cutout_regions_by_key.get(key, [])
+                proc = self._apply_cutouts_to_processed(proc, cutouts)
+                self._last_processed[key] = proc
+                out.append(proc)
+            except Exception:
+                pass
+        return out
 
-        self.post_tab.receive_current_processed(out)
-
-    @QtCore.Slot()
-    def _post_get_current_dio_list(self):
-        # Analog/digital channel list for current/selected files: union.
-        paths = self._selected_paths()
-        if not paths:
-            paths = [self._current_path] if self._current_path else []
-
-        dio = set()
+    def _send_dio_list_for_paths_to_postprocessing(self, paths: List[str]) -> None:
+        dio: set[str] = set()
         for p in paths:
             f = self._loaded_files.get(p)
             if f:
                 dio |= set(f.trigger_by_name.keys())
         self.post_tab.receive_dio_list(sorted(dio))
+
+    @QtCore.Slot(list)
+    def _send_preprocessing_paths_to_postprocessing(self, paths: List[str]) -> None:
+        source_paths = self._postprocessing_bridge_paths(paths)
+        processed = self._processed_trials_for_postprocessing_paths(source_paths)
+        if not processed:
+            self._show_status_message("No selected preprocessing file could be loaded into postprocessing.", 6000)
+            return
+        self.post_tab.receive_current_processed(processed)
+        self._send_dio_list_for_paths_to_postprocessing(source_paths)
+        first = processed[0]
+        self.post_tab.set_current_source_label(
+            os.path.basename(getattr(first, "path", "") or ""),
+            str(getattr(first, "channel_id", "") or ""),
+        )
+        try:
+            idx = self.tabs.indexOf(self.post_tab)
+            if idx >= 0:
+                self.tabs.setCurrentIndex(idx)
+        except Exception:
+            pass
+        self._show_status_message(f"Loaded {len(processed)} preprocessing file(s) into postprocessing.", 6000)
+
+    @QtCore.Slot()
+    def _post_get_current_processed(self):
+        paths = self._postprocessing_bridge_paths()
+        out = self._processed_trials_for_postprocessing_paths(paths)
+        self.post_tab.receive_current_processed(out)
+        self._send_dio_list_for_paths_to_postprocessing(paths)
+
+    @QtCore.Slot()
+    def _post_get_current_dio_list(self):
+        paths = self._postprocessing_bridge_paths()
+        self._send_dio_list_for_paths_to_postprocessing(paths)
 
     @QtCore.Slot(str, str)
     def _post_get_dio_data_for_path(self, path: str, dio_name: str):
