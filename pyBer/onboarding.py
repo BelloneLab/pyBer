@@ -602,8 +602,7 @@ def build_default_tutorial(window: QtWidgets.QMainWindow) -> List[TutorialStep]:
     ]
 
     for key, title, body in [
-        ("artifacts_list", "Artifact list", "Inspect detected and manual artifact windows, jump to them, and remove entries."),
-        ("artifacts", "Artifact setup", "Choose artifact thresholds and how artifacts are handled: interpolate, cut, low-pass locally, or leave unchanged."),
+        ("artifacts", "Artifacts", "Choose artifact thresholds, set artifact handling, and inspect detected or manual artifact windows."),
         ("filtering", "Filtering", "Set low-pass and smoothing options for signal and reference traces."),
         ("baseline", "Baseline", "Configure baseline estimation before computing dF/F, dF, or z-score outputs."),
         ("output", "Output", "Choose the processed trace formula and preview the resulting channel."),
@@ -960,8 +959,7 @@ _POST_SECTION_META: Dict[str, Tuple[str, str, str, str]] = {
 }
 
 _PRE_SECTION_META: Dict[str, Tuple[str, str, str, str]] = {
-    "artifacts_list": ("L", "#f5c542", "Artifact list",   "Inspect and edit detected / manual artifacts"),
-    "artifacts":      ("A", "#ee6471", "Artifact setup",  "Detection thresholds and manual selection"),
+    "artifacts":      ("A", "#ee6471", "Artifacts",       "Detection thresholds and detected / manual artifact list"),
     "filtering":      ("F", "#7d4df2", "Filtering",       "Low-pass + smoothing for the photometry trace"),
     "baseline":       ("B", "#4b9df8", "Baseline",        "Baseline estimation across the recording"),
     "output":         ("O", "#5dd39e", "Output",          "Choose dFF / dF / z-score formula"),

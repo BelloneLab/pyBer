@@ -549,10 +549,20 @@ class ArtifactPanel(QtWidgets.QDialog):
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
+        table_min_height = 260
 
         auto_group = QtWidgets.QGroupBox("Auto-detected (threshold)")
+        auto_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         auto_layout = QtWidgets.QVBoxLayout(auto_group)
         self.table_auto = QtWidgets.QTableWidget(0, 6)
+        self.table_auto.setMinimumHeight(table_min_height)
+        self.table_auto.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         self.table_auto.setHorizontalHeaderLabels(["ID", "Remove", "Source", "Core (s)", "Cut start", "Cut end"])
         self.table_auto.horizontalHeader().setStretchLastSection(True)
         self.table_auto.verticalHeader().setVisible(False)
@@ -563,12 +573,21 @@ class ArtifactPanel(QtWidgets.QDialog):
         self.table_auto.setColumnWidth(2, 66)
         self.table_auto.setColumnWidth(3, 132)
         self.table_auto.setColumnWidth(4, 82)
-        auto_layout.addWidget(self.table_auto)
-        layout.addWidget(auto_group)
+        auto_layout.addWidget(self.table_auto, 1)
+        layout.addWidget(auto_group, 1)
 
         manual_group = QtWidgets.QGroupBox("Manual artifacts")
+        manual_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         manual_layout = QtWidgets.QVBoxLayout(manual_group)
         self.table = QtWidgets.QTableWidget(0, 3)
+        self.table.setMinimumHeight(table_min_height)
+        self.table.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         self.table.setHorizontalHeaderLabels(["ID", "Start (s)", "End (s)"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
@@ -608,7 +627,7 @@ class ArtifactPanel(QtWidgets.QDialog):
         self.btn_close = QtWidgets.QPushButton("Close")
         btnrow.addWidget(self.btn_close)
         manual_layout.addLayout(btnrow)
-        layout.addWidget(manual_group)
+        layout.addWidget(manual_group, 1)
 
         self.btn_add.clicked.connect(self._on_add)
         self.btn_update.clicked.connect(self._on_update_selected)
@@ -1933,7 +1952,6 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.btn_load_config = QtWidgets.QPushButton("Load config")
         self.btn_reset_defaults = QtWidgets.QPushButton("Reset defaults")
         for b in (
-            self.btn_artifacts_panel,
             self.btn_qc,
             self.btn_qc_batch,
             self.btn_export,
@@ -1946,6 +1964,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
             b.setProperty("class", "compactSmall")
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_export.setProperty("class", "compactPrimarySmall")
+        self.btn_artifacts_panel.setVisible(False)
         self.btn_save_config.clicked.connect(self._save_config)
         self.btn_load_config.clicked.connect(self._load_config)
         self.btn_reset_defaults.clicked.connect(self._reset_defaults)
@@ -2026,8 +2045,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         qc_grid.setHorizontalSpacing(6)
         qc_grid.setVerticalSpacing(6)
         qc_grid.addWidget(self.btn_export, 0, 0, 1, 2)
-        qc_grid.addWidget(self.btn_artifacts_panel, 1, 0)
-        qc_grid.addWidget(self.btn_advanced, 1, 1)
+        qc_grid.addWidget(self.btn_advanced, 1, 0, 1, 2)
         qc_grid.addWidget(self.btn_qc, 2, 0)
         qc_grid.addWidget(self.btn_qc_batch, 2, 1)
         qc_grid.addWidget(self.btn_metadata, 3, 0)
@@ -2869,6 +2887,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.btn_redo.setToolTip("Redo last undone preprocessing action (Ctrl+Y)")
         self.btn_redo.setFixedSize(34, 30)
         self.btn_artifacts = QtWidgets.QPushButton("Artifacts")
+        self.btn_artifacts.setVisible(False)
         self.btn_box_select = QtWidgets.QPushButton("Box select")
         self.btn_box_select.setCheckable(True)
         self.btn_thresholds = QtWidgets.QPushButton("Thresholds: ON")
@@ -2878,7 +2897,6 @@ class PlotDashboard(QtWidgets.QWidget):
         for b in (
             self.btn_add_region,
             self.btn_clear_regions,
-            self.btn_artifacts,
             self.btn_box_select,
             self.btn_thresholds,
         ):
@@ -2887,7 +2905,6 @@ class PlotDashboard(QtWidgets.QWidget):
         tools.addWidget(self.btn_clear_regions)
         tools.addWidget(self.btn_undo)
         tools.addWidget(self.btn_redo)
-        tools.addWidget(self.btn_artifacts)
         tools.addWidget(self.btn_box_select)
         tools.addWidget(self.btn_thresholds)
         tools.addStretch(1)
