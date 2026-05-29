@@ -130,7 +130,6 @@ from styles import (
     app_qss,
     _make_icon,
     _paint_database,
-    _paint_list,
     _paint_sliders,
     _paint_filter,
     _paint_wave,
@@ -207,7 +206,7 @@ _PRE_DOCK_PREFIX = "pre."
 _POST_DOCK_PREFIX = "post."
 _FORCE_FIXED_DOCK_LAYOUTS = False
 _USE_PG_DOCKAREA_PRE_LAYOUT = True
-_PRE_DOCKAREA_PRIMARY_ORDER = ("artifacts_list", "artifacts", "filtering", "baseline", "output", "export")
+_PRE_DOCKAREA_PRIMARY_ORDER = ("artifacts", "filtering", "baseline", "output", "export")
 _PRE_DOCKAREA_OPTIONAL_ORDER = ("qc", "config")
 _PRE_DOCKAREA_DEFAULT_VISIBLE = frozenset(_PRE_DOCKAREA_PRIMARY_ORDER)
 _CSV_NONE_LABEL = "(none)"
@@ -967,7 +966,14 @@ class QcDialog(QtWidgets.QDialog):
                 r = float(qc.get("r", np.nan))
                 r2 = r * r if np.isfinite(r) else np.nan
                 if np.isfinite(r):
-                    self._add_plot_text_topleft(self.plot_corr, f"r={r:.3g}  r2={r2:.3g}")
+                    self._add_plot_text_topleft(
+                        self.plot_corr,
+                        f"r={r:.3g}  r2={r2:.3g}",
+                        color=(255, 213, 95),
+                        corner="topright",
+                        fill=(12, 16, 24, 205),
+                        border=(255, 213, 95, 150),
+                    )
             self.plot_corr.setLabel("left", "Signal dF/F (%)")
             self.plot_corr.setLabel("bottom", "Isobestic dF/F (%)")
         else:
@@ -1114,19 +1120,42 @@ class QcDialog(QtWidgets.QDialog):
         plot.addItem(upper_curve)
         plot.addItem(lower_curve)
 
-    def _add_plot_text_topleft(self, plot: pg.PlotWidget, text: str) -> None:
+    def _add_plot_text_topleft(
+        self,
+        plot: pg.PlotWidget,
+        text: str,
+        *,
+        color: Tuple[int, int, int] = (220, 220, 220),
+        corner: str = "topleft",
+        fill: Optional[Tuple[int, int, int, int]] = None,
+        border: Optional[Tuple[int, int, int, int]] = None,
+    ) -> None:
         if not text:
             return
         vb = plot.getViewBox()
         if not vb:
             return
         (x0, x1), (y0, y1) = vb.viewRange()
-        if not np.isfinite(x0) or not np.isfinite(y1):
+        if not all(np.isfinite(v) for v in (x0, x1, y0, y1)):
             return
-        pad_x = (x1 - x0) * 0.02
-        pad_y = (y1 - y0) * 0.05
-        item = pg.TextItem(text, color=(220, 220, 220), anchor=(0, 1))
-        item.setPos(x0 + pad_x, y1 - pad_y)
+        pad_x = (x1 - x0) * 0.03
+        pad_y = (y1 - y0) * 0.08
+        corner_norm = str(corner or "topleft").strip().lower()
+        if corner_norm == "topright":
+            anchor = (1, 1)
+            pos = (x1 - pad_x, y1 - pad_y)
+        else:
+            anchor = (0, 1)
+            pos = (x0 + pad_x, y1 - pad_y)
+        item = pg.TextItem(
+            text,
+            color=color,
+            anchor=anchor,
+            fill=pg.mkBrush(fill) if fill is not None else None,
+            border=pg.mkPen(border, width=1.0) if border is not None else None,
+        )
+        item.setZValue(50)
+        item.setPos(*pos)
         plot.addItem(item)
 
     def _save_images(self) -> None:
@@ -1470,7 +1499,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.artifact_panel.installEventFilter(self)
             self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.art_dock)
 
-        # Left pane: data browser
+        # Data browser: mounted immediately to the right of the toolbar rail.
         self.file_panel.setMinimumWidth(260)
         self.file_panel.setMaximumWidth(340)
         self.file_panel.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
@@ -1530,8 +1559,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_plot_style.setMenu(self.menu_plot_style)
 
         # Inline parameter section buttons (same row as workflow actions).
-        self.btn_section_artifacts_list = QtWidgets.QToolButton(); self.btn_section_artifacts_list.setText("Artifact list")
-        self.btn_section_artifacts = QtWidgets.QToolButton(); self.btn_section_artifacts.setText("Artifact setup")
+        self.btn_section_artifacts = QtWidgets.QToolButton(); self.btn_section_artifacts.setText("Artifacts")
         self.btn_section_filtering = QtWidgets.QToolButton(); self.btn_section_filtering.setText("Filtering")
         self.btn_section_baseline = QtWidgets.QToolButton(); self.btn_section_baseline.setText("Baseline")
         self.btn_section_output = QtWidgets.QToolButton(); self.btn_section_output.setText("Output")
@@ -1539,7 +1567,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_section_export = QtWidgets.QToolButton(); self.btn_section_export.setText("Export")
         self.btn_section_config = QtWidgets.QToolButton(); self.btn_section_config.setText("Configuration")
         self._section_buttons: Dict[str, QtWidgets.QPushButton] = {
-            "artifacts_list": self.btn_section_artifacts_list,
             "artifacts": self.btn_section_artifacts,
             "filtering": self.btn_section_filtering,
             "baseline": self.btn_section_baseline,
@@ -1557,8 +1584,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # ----- Modern shell: vertical icon rail + thin transport bar ------
         # Configure section buttons as icon-only rail buttons.
         _rail_section_meta = {
-            "artifacts_list": ("Artifacts",  "Detected and manual artifacts list", _paint_list),
-            "artifacts":      ("Artifact",   "Artifact detection thresholds",      _paint_sliders),
+            "artifacts":      ("Artifacts",  "Detection thresholds and artifact list", _paint_sliders),
             "filtering":      ("Filtering",  "Low-pass and smoothing options",     _paint_filter),
             "baseline":       ("Baseline",   "Baseline estimation across recording", _paint_wave),
             "output":         ("Output",     "Choose dFF / dF / z-score formula",  _paint_chart),
@@ -1603,7 +1629,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sep.setObjectName("railSeparator")
         sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
         rail_layout.addWidget(sep)
-        for key in ("artifacts_list", "artifacts", "filtering", "baseline",
+        for key in ("artifacts", "filtering", "baseline",
                     "output", "qc", "export", "config"):
             rail_layout.addWidget(self._section_buttons[key], 0,
                                   QtCore.Qt.AlignmentFlag.AlignHCenter)
@@ -1669,24 +1695,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self._pre_drawer_splitter.setStretchFactor(0, 0)
             self._pre_drawer_splitter.setStretchFactor(1, 1)
             self._pre_drawer_splitter.setSizes([0, 1400])
-            center_h.addWidget(self._pre_drawer_splitter, stretch=1)
+            content_widget = self._pre_drawer_splitter
         else:
-            center_h.addWidget(center_panel, stretch=1)
+            content_widget = center_panel
 
-        # Main splitter: data panel + visuals. Parameter popups are floating by default.
+        # Main splitter: data browser + visuals, both to the right of the toolbar rail.
         self.pre_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self.pre_splitter.setObjectName("preprocessing_splitter")
         self.pre_splitter.addWidget(self.file_panel)
-        self.pre_splitter.addWidget(center_widget)
+        self.pre_splitter.addWidget(content_widget)
         self.pre_splitter.setChildrenCollapsible(False)
         self.pre_splitter.setStretchFactor(0, 0)
         self.pre_splitter.setStretchFactor(1, 1)
         self.pre_splitter.setSizes([350, 1350])
         self.pre_splitter.splitterMoved.connect(self._save_splitter_sizes)
+        center_h.addWidget(self.pre_splitter, stretch=1)
 
         pre_layout = QtWidgets.QVBoxLayout(self.pre_tab)
         pre_layout.setContentsMargins(10, 10, 10, 10)
-        pre_layout.addWidget(self.pre_splitter)
+        pre_layout.addWidget(center_widget)
 
         # Postprocessing tab
         self.post_tab = PostProcessingPanel()
@@ -1723,6 +1750,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_panel.advancedOptionsRequested.connect(self._open_advanced_options)
         self.file_panel.qcRequested.connect(self._run_qc_dialog)
         self.file_panel.batchQcRequested.connect(self._run_batch_qc)
+        self.file_panel.sendToPostprocessingRequested.connect(self._send_preprocessing_paths_to_postprocessing)
 
         # Parameters: changes and actions
         self.param_panel.paramsChanged.connect(self._on_params_changed)
@@ -1858,8 +1886,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.param_panel.card_actions.setVisible(False)
 
         section_widgets: Dict[str, QtWidgets.QWidget] = {
-            "artifacts_list": self.artifact_panel,
-            "artifacts": self.param_panel.card_artifacts,
+            "artifacts": self._build_artifacts_section_widget(),
             "filtering": self.param_panel.card_filtering,
             "baseline": self.param_panel.card_baseline,
             "output": self.param_panel.card_output,
@@ -1868,8 +1895,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "config": self._build_config_actions_widget(),
         }
         section_titles: Dict[str, str] = {
-            "artifacts_list": "Artifact list",
-            "artifacts": "Artifact setup",
+            "artifacts": "Artifacts",
             "filtering": "Filtering",
             "baseline": "Baseline",
             "output": "Output",
@@ -1937,6 +1963,45 @@ class MainWindow(QtWidgets.QMainWindow):
             dock.installEventFilter(self)
             widget.installEventFilter(self)
             self._section_docks[key] = dock
+
+    def _build_artifacts_section_widget(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        self.param_panel.card_artifacts.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        layout.addWidget(self.param_panel.card_artifacts)
+
+        try:
+            self.artifact_panel.btn_close.setVisible(False)
+        except Exception:
+            pass
+        table_min_heights = {
+            "table_auto": 260,
+            "table": 260,
+        }
+        for table_name, min_height in table_min_heights.items():
+            try:
+                table = getattr(self.artifact_panel, table_name)
+                table.setMinimumHeight(min_height)
+                table.setSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                )
+            except Exception:
+                pass
+        self.artifact_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        self.artifact_panel.show()
+        layout.addWidget(self.artifact_panel, 1)
+
+        return panel
 
     def _pre_dockarea_dock(self, key: str) -> Optional[Dock]:
         return self._pre_dockarea_docks.get(key)
@@ -2036,7 +2101,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._pre_dockarea is None:
             return
         ordered = self._pre_dockarea_ordered_keys()
-        root = self._pre_dockarea_dock("artifacts_list")
+        root = self._pre_dockarea_dock("artifacts")
         if root is None and ordered:
             root = self._pre_dockarea_dock(ordered[0])
         if root is None:
@@ -2062,6 +2127,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if dock is None:
             return
         if visible:
+            if key == "artifacts":
+                self.artifact_panel.show()
             self._arrange_pre_dockarea_default()
             dock.show()
             try:
@@ -2091,8 +2158,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         left_i = _dock_area_to_int(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, 1)
         for key, dock in self._pre_dockarea_docks.items():
-            if key == "artifacts_list":
-                continue
             try:
                 base = f"pre_section_docks/{key}"
                 self.settings.setValue(f"{base}/visible", bool(dock.isVisible()))
@@ -2102,7 +2167,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
         try:
             art_base = "pre_artifact_dock_state"
-            art_vis = bool(visible.get("artifacts_list", False))
+            art_vis = bool(visible.get("artifacts", False))
             self.settings.setValue(f"{art_base}/visible", art_vis)
             self.settings.setValue(f"{art_base}/floating", False)
             self.settings.setValue(f"{art_base}/area", left_i)
@@ -2127,20 +2192,25 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             visible_map = {}
 
+        legacy_artifacts_visible = visible_map.pop("artifacts_list", None)
+        if legacy_artifacts_visible is not None and "artifacts" in self._pre_dockarea_docks:
+            visible_map["artifacts"] = bool(visible_map.get("artifacts", False) or legacy_artifacts_visible)
+
         if not visible_map:
             for key in self._pre_dockarea_docks.keys():
-                if key == "artifacts_list":
-                    raw = self.settings.value("pre_artifact_dock_state/visible", None)
-                    if raw is not None:
-                        visible_map[key] = _to_bool(raw, False)
-                    continue
                 raw = self.settings.value(f"pre_section_docks/{key}/visible", None)
                 if raw is not None:
                     visible_map[key] = _to_bool(raw, False)
+                if key == "artifacts":
+                    legacy_raw = self.settings.value("pre_artifact_dock_state/visible", None)
+                    if legacy_raw is not None:
+                        visible_map[key] = bool(visible_map.get(key, False) or _to_bool(legacy_raw, False))
         if not visible_map:
             visible_map = self._pre_dockarea_default_visible_map()
 
-        active = str(self.settings.value(_PRE_DOCKAREA_ACTIVE_KEY, "artifacts_list") or "artifacts_list")
+        active = str(self.settings.value(_PRE_DOCKAREA_ACTIVE_KEY, "artifacts") or "artifacts")
+        if active == "artifacts_list":
+            active = "artifacts"
         if not bool(visible_map.get(active, False)):
             active = next((key for key in self._pre_dockarea_ordered_keys() if bool(visible_map.get(key, False))), "")
 
@@ -2212,10 +2282,8 @@ class MainWindow(QtWidgets.QMainWindow):
         v.setSpacing(6)
         self.param_panel.btn_qc.setProperty("class", "blueSecondarySmall")
         self.param_panel.btn_qc_batch.setProperty("class", "blueSecondarySmall")
-        self.param_panel.btn_artifacts_panel.setProperty("class", "blueSecondarySmall")
         v.addWidget(self.param_panel.btn_qc)
         v.addWidget(self.param_panel.btn_qc_batch)
-        v.addWidget(self.param_panel.btn_artifacts_panel)
         v.addWidget(self.param_panel.lbl_fs)
         v.addStretch(1)
         return panel
@@ -2309,8 +2377,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
 
     _PRE_SECTION_TITLES = {
-        "artifacts_list": "Artifact list",
-        "artifacts": "Artifact setup",
+        "artifacts": "Artifacts",
         "filtering": "Filtering",
         "baseline": "Baseline",
         "output": "Output",
@@ -2345,11 +2412,16 @@ class MainWindow(QtWidgets.QMainWindow):
             sizes = splitter.sizes()
             if len(sizes) >= 2:
                 if any_checked:
-                    if sizes[0] < 60:
-                        total = sum(sizes) or 1
-                        drawer_w = max(420, int(total * 0.28))
+                    total = sum(sizes) or 1
+                    if active_key == "artifacts":
+                        target_w = max(520, int(total * 0.34))
+                    else:
+                        target_w = max(420, int(total * 0.28))
+                    drawer_w = min(target_w, max(420, total - 640))
+                    if sizes[0] < 60 or (active_key == "artifacts" and sizes[0] < drawer_w - 20):
+                        delta_w = max(0, drawer_w - max(0, sizes[0]))
                         sizes[0] = drawer_w
-                        sizes[1] = max(400, sizes[1] - drawer_w)
+                        sizes[1] = max(400, sizes[1] - delta_w)
                         splitter.setSizes(sizes)
                 else:
                     if sizes[0] > 0:
@@ -2384,6 +2456,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         except Exception:
                             pass
                 dock.show()
+                if key == "artifacts":
+                    self.artifact_panel.show()
                 try:
                     dock.raiseDock()
                 except Exception:
@@ -3417,7 +3491,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return out
 
         if self._use_pg_dockarea_pre_layout and self._pre_dockarea_docks:
-            pre_sections = [k for k in self._pre_dockarea_docks.keys() if k != "artifacts_list"]
+            pre_sections = list(self._pre_dockarea_docks.keys())
         else:
             pre_sections = list(self._section_docks.keys())
         post_sections = []
@@ -3906,7 +3980,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
             keys = list(self._section_docks.keys())
             if self._use_pg_dockarea_pre_layout and self._pre_dockarea_docks:
-                keys = [k for k in self._pre_dockarea_docks.keys() if k != "artifacts_list"]
+                keys = list(self._pre_dockarea_docks.keys())
             for key in keys:
                 if self.settings.contains(f"pre_section_docks/{key}/visible"):
                     return True
@@ -3997,7 +4071,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._force_fixed_dock_layouts:
             # Fixed mode: always enforce deterministic defaults.
             try:
-                self.pre_splitter.setSizes([300, 1200])
+                self._set_pre_splitter_sizes(data_width=300, center_width=1200)
             except Exception:
                 pass
             try:
@@ -4008,15 +4082,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     vals = [int(x) for x in splitter_sizes]
                     if self._use_pg_dockarea_pre_layout:
                         if len(vals) >= 3:
-                            self.pre_splitter.setSizes([vals[0], max(640, vals[1] + vals[2])])
+                            self._set_pre_splitter_sizes(vals[0], max(640, vals[1] + vals[2]))
                         elif len(vals) == 2:
-                            self.pre_splitter.setSizes(vals[:2])
+                            self._set_pre_splitter_sizes(vals[0], vals[1])
                     elif len(vals) >= 3:
                         left = max(260, vals[0])
                         center = max(640, vals[1] + vals[2])
-                        self.pre_splitter.setSizes([left, center])
+                        self._set_pre_splitter_sizes(left, center)
                     elif len(vals) == 2:
-                        self.pre_splitter.setSizes(vals[:2])
+                        self._set_pre_splitter_sizes(vals[0], vals[1])
             except Exception:
                 pass
             try:
@@ -4045,16 +4119,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     vals = [int(x) for x in splitter_sizes]
                     if self._use_pg_dockarea_pre_layout:
                         if len(vals) >= 3:
-                            self.pre_splitter.setSizes([vals[0], max(640, vals[1] + vals[2])])
+                            self._set_pre_splitter_sizes(vals[0], max(640, vals[1] + vals[2]))
                         elif len(vals) == 2:
-                            self.pre_splitter.setSizes(vals[:2])
+                            self._set_pre_splitter_sizes(vals[0], vals[1])
                     elif len(vals) >= 3:
                         # Migrate old 3-pane [left, center, right] into [left, center+right].
                         left = max(260, vals[0])
                         center = max(640, vals[1] + vals[2])
-                        self.pre_splitter.setSizes([left, center])
+                        self._set_pre_splitter_sizes(left, center)
                     elif len(vals) == 2:
-                        self.pre_splitter.setSizes(vals[:2])
+                        self._set_pre_splitter_sizes(vals[0], vals[1])
             except Exception:
                 pass
 
@@ -4133,6 +4207,15 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         try:
             self.settings.sync()
+        except Exception:
+            pass
+
+    def _set_pre_splitter_sizes(self, data_width: int, center_width: int) -> None:
+        """Apply logical [data, center] sizes to the preprocessing splitter."""
+        try:
+            data = max(0, int(data_width))
+            center = max(640, int(center_width))
+            self.pre_splitter.setSizes([data, center])
         except Exception:
             pass
 
@@ -5648,6 +5731,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 _LOG.exception("Failed to handle main tab switch")
         finally:
             self._restore_window_state_after_tab_switch(was_fullscreen, was_maximized)
+            try:
+                if self.tabs.currentWidget() is self.post_tab:
+                    QtCore.QTimer.singleShot(0, self._post_get_current_dio_list)
+            except Exception:
+                pass
             self._handling_main_tab_change = False
             if self._force_fixed_dock_layouts:
                 QtCore.QTimer.singleShot(0, self._enforce_fixed_layout_for_active_tab)
@@ -5885,6 +5973,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_channel = None
                 self._current_trigger = None
                 self.plots.set_title("No file loaded")
+                self._post_get_current_dio_list()
                 self._update_plot_status()
             return
 
@@ -5921,6 +6010,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # update post tab selection context
         self.post_tab.set_current_source_label(os.path.basename(path), self._current_channel or "")
+        self._post_get_current_dio_list()
         self._update_plot_status()
 
     def _on_channel_changed(self, ch: str) -> None:
@@ -6932,19 +7022,31 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_artifacts_panel(self) -> None:
         if self._use_pg_dockarea_pre_layout:
             self._setup_section_popups()
-            dock = self._pre_dockarea_dock("artifacts_list")
+            dock = self._pre_dockarea_dock("artifacts")
             if dock is None:
                 return
             if dock.isVisible():
                 dock.hide()
             else:
+                self.artifact_panel.show()
                 dock.show()
                 try:
                     dock.raiseDock()
                 except Exception:
                     pass
-                self._last_opened_section = "artifacts_list"
+                self._last_opened_section = "artifacts"
             self._sync_section_button_states_from_docks()
+            self._save_panel_layout_state()
+            return
+
+        section_dock = self._section_docks.get("artifacts")
+        if isinstance(section_dock, QtWidgets.QDockWidget):
+            if section_dock.isVisible():
+                section_dock.setVisible(False)
+            else:
+                self.artifact_panel.show()
+                section_dock.setVisible(True)
+                section_dock.raise_()
             self._save_panel_layout_state()
             return
 
@@ -7217,19 +7319,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------- Postprocessing bridge ----------------
 
-    @QtCore.Slot()
-    def _post_get_current_processed(self):
-        # Determine selection context: if multiple selected, provide multiple processed outputs if available
-        paths = self._selected_paths()
-        if not paths:
-            paths = [self._current_path] if self._current_path else []
+    def _postprocessing_bridge_paths(self, paths: Optional[List[str]] = None) -> List[str]:
+        raw_paths = [str(p or "") for p in (paths or []) if str(p or "")]
+        if not raw_paths:
+            raw_paths = self._selected_paths()
+        if not raw_paths:
+            raw_paths = [self._current_path] if self._current_path else []
+        out: List[str] = []
+        seen: set[str] = set()
+        for path in raw_paths:
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            out.append(path)
+        return out
 
+    def _processed_trials_for_postprocessing_paths(self, paths: List[str]) -> List[ProcessedTrial]:
         out: List[ProcessedTrial] = []
+        try:
+            params = self.param_panel.get_params()
+        except Exception:
+            params = ProcessingParams()
+        start_s, end_s = self._time_window_bounds()
         for p in paths:
             doric = self._loaded_files.get(p)
             if not doric:
                 continue
-            # Use current channel when available for all selected files
             if self._current_channel and self._current_channel in doric.channels:
                 ch = self._current_channel
             else:
@@ -7237,44 +7352,68 @@ class MainWindow(QtWidgets.QMainWindow):
             key = (p, ch)
             if key in self._last_processed:
                 out.append(self._last_processed[key])
-            else:
-                # compute on-demand (fast due to decimation), using current params
-                try:
-                    params = self.param_panel.get_params()
-                    trial = doric.make_trial(ch, trigger_name=self._current_trigger)
-                    trial = self._apply_time_window(trial)
-                    start_s, end_s = self._time_window_bounds()
-                    manual = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
-                    manual_exclude = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
-                    proc = self.processor.process_trial(
-                        trial,
-                        params,
-                        manual_regions_sec=manual,
-                        manual_exclude_regions_sec=manual_exclude,
-                        preview_mode=False,
-                    )
-                    cutouts = self._cutout_regions_by_key.get(key, [])
-                    proc = self._apply_cutouts_to_processed(proc, cutouts)
-                    self._last_processed[key] = proc
-                    out.append(proc)
-                except Exception:
-                    pass
+                continue
+            try:
+                trial = doric.make_trial(ch, trigger_name=self._current_trigger)
+                trial = self._apply_time_window(trial)
+                manual = self._clip_regions_to_window(self._manual_regions_by_key.get(key, []), start_s, end_s)
+                manual_exclude = self._clip_regions_to_window(self._manual_exclude_by_key.get(key, []), start_s, end_s)
+                proc = self.processor.process_trial(
+                    trial,
+                    params,
+                    manual_regions_sec=manual,
+                    manual_exclude_regions_sec=manual_exclude,
+                    preview_mode=False,
+                )
+                cutouts = self._cutout_regions_by_key.get(key, [])
+                proc = self._apply_cutouts_to_processed(proc, cutouts)
+                self._last_processed[key] = proc
+                out.append(proc)
+            except Exception:
+                pass
+        return out
 
-        self.post_tab.receive_current_processed(out)
-
-    @QtCore.Slot()
-    def _post_get_current_dio_list(self):
-        # Analog/digital channel list for current/selected files: union.
-        paths = self._selected_paths()
-        if not paths:
-            paths = [self._current_path] if self._current_path else []
-
-        dio = set()
+    def _send_dio_list_for_paths_to_postprocessing(self, paths: List[str]) -> None:
+        dio: set[str] = set()
         for p in paths:
             f = self._loaded_files.get(p)
             if f:
                 dio |= set(f.trigger_by_name.keys())
         self.post_tab.receive_dio_list(sorted(dio))
+
+    @QtCore.Slot(list)
+    def _send_preprocessing_paths_to_postprocessing(self, paths: List[str]) -> None:
+        source_paths = self._postprocessing_bridge_paths(paths)
+        processed = self._processed_trials_for_postprocessing_paths(source_paths)
+        if not processed:
+            self._show_status_message("No selected preprocessing file could be loaded into postprocessing.", 6000)
+            return
+        self.post_tab.receive_current_processed(processed)
+        self._send_dio_list_for_paths_to_postprocessing(source_paths)
+        first = processed[0]
+        self.post_tab.set_current_source_label(
+            os.path.basename(getattr(first, "path", "") or ""),
+            str(getattr(first, "channel_id", "") or ""),
+        )
+        try:
+            idx = self.tabs.indexOf(self.post_tab)
+            if idx >= 0:
+                self.tabs.setCurrentIndex(idx)
+        except Exception:
+            pass
+        self._show_status_message(f"Loaded {len(processed)} preprocessing file(s) into postprocessing.", 6000)
+
+    @QtCore.Slot()
+    def _post_get_current_processed(self):
+        paths = self._postprocessing_bridge_paths()
+        out = self._processed_trials_for_postprocessing_paths(paths)
+        self.post_tab.receive_current_processed(out)
+        self._send_dio_list_for_paths_to_postprocessing(paths)
+
+    @QtCore.Slot()
+    def _post_get_current_dio_list(self):
+        paths = self._postprocessing_bridge_paths()
+        self._send_dio_list_for_paths_to_postprocessing(paths)
 
     @QtCore.Slot(str, str)
     def _post_get_dio_data_for_path(self, path: str, dio_name: str):

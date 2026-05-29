@@ -4,6 +4,8 @@ from __future__ import annotations
 from typing import Callable, Dict, List, Optional, Tuple
 import json
 import os
+import subprocess
+import sys
 
 import numpy as np
 from PySide6 import QtCore, QtWidgets, QtGui
@@ -549,31 +551,74 @@ class ArtifactPanel(QtWidgets.QDialog):
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(10)
+        table_min_height = 260
 
         auto_group = QtWidgets.QGroupBox("Auto-detected (threshold)")
+        auto_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         auto_layout = QtWidgets.QVBoxLayout(auto_group)
+        auto_layout.setContentsMargins(8, 16, 8, 8)
         self.table_auto = QtWidgets.QTableWidget(0, 6)
-        self.table_auto.setHorizontalHeaderLabels(["ID", "Remove", "Source", "Core (s)", "Cut start", "Cut end"])
-        self.table_auto.horizontalHeader().setStretchLastSection(True)
+        self.table_auto.setMinimumHeight(table_min_height)
+        self.table_auto.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        self.table_auto.setHorizontalHeaderLabels(["ID", "Use", "Src", "Core", "Start", "End"])
+        auto_header = self.table_auto.horizontalHeader()
+        auto_header.setStretchLastSection(False)
+        auto_header.setHighlightSections(False)
+        auto_header.setMinimumSectionSize(28)
         self.table_auto.verticalHeader().setVisible(False)
+        self.table_auto.verticalHeader().setDefaultSectionSize(26)
         self.table_auto.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_auto.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.table_auto.setColumnWidth(0, 42)
-        self.table_auto.setColumnWidth(1, 72)
-        self.table_auto.setColumnWidth(2, 66)
-        self.table_auto.setColumnWidth(3, 132)
-        self.table_auto.setColumnWidth(4, 82)
-        auto_layout.addWidget(self.table_auto)
-        layout.addWidget(auto_group)
+        self.table_auto.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table_auto.setAlternatingRowColors(True)
+        self.table_auto.setShowGrid(False)
+        self.table_auto.setWordWrap(False)
+        for col, width in ((0, 36), (1, 44), (2, 48)):
+            auto_header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self.table_auto.setColumnWidth(col, width)
+        for col in (3, 4, 5):
+            auto_header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        auto_layout.addWidget(self.table_auto, 1)
+        layout.addWidget(auto_group, 1)
 
         manual_group = QtWidgets.QGroupBox("Manual artifacts")
+        manual_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         manual_layout = QtWidgets.QVBoxLayout(manual_group)
+        manual_layout.setContentsMargins(8, 16, 8, 8)
         self.table = QtWidgets.QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["ID", "Start (s)", "End (s)"])
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setMinimumHeight(table_min_height)
+        self.table.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        self.table.setHorizontalHeaderLabels(["ID", "Start", "End"])
+        manual_header = self.table.horizontalHeader()
+        manual_header.setStretchLastSection(False)
+        manual_header.setHighlightSections(False)
+        manual_header.setMinimumSectionSize(32)
+        manual_header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        manual_header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        manual_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(0, 42)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(26)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.setWordWrap(False)
 
         manual_layout.addWidget(self.table)
 
@@ -584,7 +629,8 @@ class ArtifactPanel(QtWidgets.QDialog):
             ed.setDecimals(3)
             ed.setRange(-1e9, 1e9)
             ed.setKeyboardTracking(False)
-            ed.setMinimumWidth(140)
+            ed.setMinimumWidth(96)
+            ed.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
 
         self.btn_add = QtWidgets.QPushButton("Add")
         self.btn_update = QtWidgets.QPushButton("Update selected")
@@ -608,7 +654,7 @@ class ArtifactPanel(QtWidgets.QDialog):
         self.btn_close = QtWidgets.QPushButton("Close")
         btnrow.addWidget(self.btn_close)
         manual_layout.addLayout(btnrow)
-        layout.addWidget(manual_group)
+        layout.addWidget(manual_group, 1)
 
         self.btn_add.clicked.connect(self._on_add)
         self.btn_update.clicked.connect(self._on_update_selected)
@@ -832,6 +878,7 @@ class FileQueuePanel(QtWidgets.QGroupBox):
     openFileRequested = QtCore.Signal()
     openFolderRequested = QtCore.Signal()
     selectionChanged = QtCore.Signal()
+    sendToPostprocessingRequested = QtCore.Signal(list)
 
     channelChanged = QtCore.Signal(str)
     triggerChanged = QtCore.Signal(str)
@@ -847,13 +894,41 @@ class FileQueuePanel(QtWidgets.QGroupBox):
 
     def __init__(self, parent=None) -> None:
         super().__init__("Data", parent)
+        self.setObjectName("fileQueuePanel")
         self._current_dir_hint: str = ""
         self._build_ui()
 
     def _build_ui(self) -> None:
         v = QtWidgets.QVBoxLayout(self)
-        v.setSpacing(8)
-        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(10)
+        v.setContentsMargins(10, 10, 10, 10)
+        self.setStyleSheet(
+            """
+            #fileQueuePanel QLabel[class="fieldLabel"] {
+                color: #d7e2f2;
+                font-weight: 650;
+                padding: 0 0 2px 1px;
+            }
+            #fileQueuePanel QLabel[class="pathHint"] {
+                color: #a9b7cb;
+                padding: 2px 1px 0 1px;
+            }
+            #fileQueuePanel QGroupBox#fileQueueSelectionBox {
+                margin-top: 12px;
+            }
+            #fileQueuePanel QGroupBox#fileQueueSelectionBox::title {
+                left: 10px;
+                padding: 0 8px;
+            }
+            #fileQueuePanel QListWidget {
+                padding: 6px;
+            }
+            #fileQueuePanel QListWidget::item {
+                min-height: 22px;
+                padding: 4px 6px;
+            }
+            """
+        )
 
         # Top actions
         top_row = QtWidgets.QHBoxLayout()
@@ -867,9 +942,12 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         top_row.addWidget(self.btn_folder)
 
         # File list fills available height
-        self.list_files = PlaceholderListWidget("Drop files here or click Open File")
+        self.list_files = PlaceholderListWidget("Drop Doric/HDF5/CSV files here\nor click Open File")
         self.list_files.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.list_files.setMinimumHeight(180)
+        self.list_files.setMinimumHeight(210)
+        self.list_files.setUniformItemSizes(True)
+        self.list_files.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_files.customContextMenuRequested.connect(self._show_file_context_menu)
 
         self.btn_remove_file = QtWidgets.QPushButton("Remove selected")
         self.btn_remove_file.setProperty("class", "blueSecondarySmall")
@@ -879,46 +957,69 @@ class FileQueuePanel(QtWidgets.QGroupBox):
 
         # Selection block
         self.grp_sel = QtWidgets.QGroupBox("Selection")
-        form = QtWidgets.QGridLayout(self.grp_sel)
-        form.setContentsMargins(8, 8, 8, 8)
-        form.setHorizontalSpacing(6)
-        form.setVerticalSpacing(6)
+        self.grp_sel.setObjectName("fileQueueSelectionBox")
+        form = QtWidgets.QVBoxLayout(self.grp_sel)
+        form.setContentsMargins(12, 14, 12, 12)
+        form.setSpacing(8)
 
         self.combo_channel = QtWidgets.QComboBox()
-        self.combo_channel.setMinimumWidth(60)
-        _compact_combo(self.combo_channel, min_chars=6)
+        self.combo_channel.setMinimumWidth(180)
+        _compact_combo(self.combo_channel, min_chars=18)
 
         self.combo_trigger = QtWidgets.QComboBox()
-        self.combo_trigger.setMinimumWidth(60)
-        _compact_combo(self.combo_trigger, min_chars=6)
+        self.combo_trigger.setMinimumWidth(180)
+        _compact_combo(self.combo_trigger, min_chars=18)
         self.combo_trigger.addItem("")
 
         self.edit_time_start = QtWidgets.QLineEdit()
         self.edit_time_end = QtWidgets.QLineEdit()
         for ed in (self.edit_time_start, self.edit_time_end):
-            ed.setPlaceholderText("Start (s)" if ed is self.edit_time_start else "End (s)")
+            ed.setPlaceholderText("Start" if ed is self.edit_time_start else "End")
             val = QtGui.QDoubleValidator(0.0, 1e9, 3, ed)
             val.setLocale(_system_locale())
             ed.setValidator(val)
+            ed.setMinimumWidth(82)
             ed.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
 
-        form.addWidget(QtWidgets.QLabel("Channel"), 0, 0)
-        form.addWidget(self.combo_channel, 0, 1, 1, 3)
-        form.addWidget(QtWidgets.QLabel("Analog/Digital channel"), 1, 0)
-        form.addWidget(self.combo_trigger, 1, 1, 1, 3)
-        form.addWidget(QtWidgets.QLabel("Time window"), 2, 0)
-        form.addWidget(self.edit_time_start, 2, 1)
-        form.addWidget(QtWidgets.QLabel("to"), 2, 2)
-        form.addWidget(self.edit_time_end, 2, 3)
+        self.combo_channel.setToolTip("Signal channel to preprocess.")
+        self.combo_trigger.setToolTip("Optional trigger channel used for overlay and export alignment.")
+        self.edit_time_start.setToolTip("Optional window start in seconds.")
+        self.edit_time_end.setToolTip("Optional window end in seconds.")
+
+        def _field(label_text: str, field: QtWidgets.QWidget) -> QtWidgets.QWidget:
+            box = QtWidgets.QWidget()
+            lay = QtWidgets.QVBoxLayout(box)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(3)
+            lab = QtWidgets.QLabel(label_text)
+            lab.setProperty("class", "fieldLabel")
+            lay.addWidget(lab)
+            lay.addWidget(field)
+            return box
+
+        time_row = QtWidgets.QWidget()
+        time_lay = QtWidgets.QHBoxLayout(time_row)
+        time_lay.setContentsMargins(0, 0, 0, 0)
+        time_lay.setSpacing(6)
+        to_label = QtWidgets.QLabel("to")
+        to_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        to_label.setMinimumWidth(20)
+        time_lay.addWidget(self.edit_time_start, 1)
+        time_lay.addWidget(to_label, 0)
+        time_lay.addWidget(self.edit_time_end, 1)
+
+        form.addWidget(_field("Signal channel", self.combo_channel))
+        form.addWidget(_field("Trigger channel", self.combo_trigger))
+        form.addWidget(_field("Time window (s)", time_row))
         self.btn_cutting = QtWidgets.QPushButton("Cutting / Sectioning")
         self.btn_cutting.setProperty("class", "blueSecondarySmall")
         self.btn_cutting.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-        form.addWidget(self.btn_cutting, 3, 0, 1, 4)
-        form.setColumnStretch(1, 1)
-        form.setColumnStretch(3, 1)
+        form.addWidget(self.btn_cutting)
 
         self.lbl_hint = QtWidgets.QLabel("")
-        self.lbl_hint.setProperty("class", "hint")
+        self.lbl_hint.setProperty("class", "pathHint")
+        self.lbl_hint.setWordWrap(True)
+        self.lbl_hint.setMaximumHeight(42)
         self.lbl_hint.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
 
         v.addLayout(top_row)
@@ -966,20 +1067,35 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         self.btn_qc_batch.clicked.connect(self.batchQcRequested.emit)
 
     def set_path_hint(self, text: str) -> None:
-        self.lbl_hint.setText(text)
+        self.lbl_hint.setText(self._format_path_hint(text))
+        self.lbl_hint.setToolTip(text or "")
         if text and os.path.isdir(text):
             self._current_dir_hint = text
 
     def path_hint(self) -> str:
-        return self.lbl_hint.text()
+        return self.lbl_hint.toolTip() or self.lbl_hint.text()
 
     def set_current_dir_hint(self, dir_path: str) -> None:
         self._current_dir_hint = dir_path or ""
         if dir_path:
-            self.lbl_hint.setText(dir_path)
+            self.lbl_hint.setText(self._format_path_hint(dir_path))
+            self.lbl_hint.setToolTip(dir_path)
 
     def current_dir_hint(self) -> str:
         return self._current_dir_hint
+
+    def _format_path_hint(self, path: str) -> str:
+        text = str(path or "").strip()
+        if not text:
+            return ""
+        try:
+            parent = os.path.basename(os.path.dirname(text))
+            name = os.path.basename(text)
+            if name and parent:
+                return f"Folder: {parent}/{name}"
+            return f"Folder: {name or text}"
+        except Exception:
+            return text
 
     def add_file(self, path: str) -> None:
         item = QtWidgets.QListWidgetItem(os.path.basename(path))
@@ -1061,6 +1177,50 @@ class FileQueuePanel(QtWidgets.QGroupBox):
 
     def _update_remove_button(self) -> None:
         self.btn_remove_file.setEnabled(len(self.list_files.selectedItems()) > 0)
+
+    def _show_file_context_menu(self, pos: QtCore.QPoint) -> None:
+        item = self.list_files.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self.list_files.clearSelection()
+            item.setSelected(True)
+            self.list_files.setCurrentItem(item)
+        paths = self.selected_paths()
+        if not paths:
+            return
+
+        menu = QtWidgets.QMenu(self)
+        act_reveal = menu.addAction("Reveal in Explorer")
+        act_send = menu.addAction("Load in postprocessing")
+        menu.addSeparator()
+        act_remove = menu.addAction("Remove from list")
+        chosen = menu.exec(self.list_files.viewport().mapToGlobal(pos))
+        if chosen is act_reveal:
+            self._reveal_path_in_file_manager(paths[0])
+        elif chosen is act_send:
+            self.sendToPostprocessingRequested.emit(paths)
+        elif chosen is act_remove:
+            self._remove_selected_files()
+
+    def _reveal_path_in_file_manager(self, path: str) -> None:
+        target = os.path.normpath(str(path or ""))
+        if not target:
+            return
+        folder = target if os.path.isdir(target) else os.path.dirname(target)
+        try:
+            if sys.platform.startswith("win"):
+                if os.path.exists(target):
+                    subprocess.Popen(["explorer", "/select,", target])
+                elif folder and os.path.isdir(folder):
+                    subprocess.Popen(["explorer", folder])
+                return
+            if sys.platform == "darwin" and os.path.exists(target):
+                subprocess.Popen(["open", "-R", target])
+                return
+            if folder and os.path.isdir(folder):
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder))
+        except Exception:
+            if folder and os.path.isdir(folder):
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder))
 
 
 class SectionParamsDialog(QtWidgets.QDialog):
@@ -1866,7 +2026,6 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.btn_load_config = QtWidgets.QPushButton("Load config")
         self.btn_reset_defaults = QtWidgets.QPushButton("Reset defaults")
         for b in (
-            self.btn_artifacts_panel,
             self.btn_qc,
             self.btn_qc_batch,
             self.btn_export,
@@ -1879,6 +2038,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
             b.setProperty("class", "compactSmall")
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_export.setProperty("class", "compactPrimarySmall")
+        self.btn_artifacts_panel.setVisible(False)
         self.btn_save_config.clicked.connect(self._save_config)
         self.btn_load_config.clicked.connect(self._load_config)
         self.btn_reset_defaults.clicked.connect(self._reset_defaults)
@@ -1959,8 +2119,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         qc_grid.setHorizontalSpacing(6)
         qc_grid.setVerticalSpacing(6)
         qc_grid.addWidget(self.btn_export, 0, 0, 1, 2)
-        qc_grid.addWidget(self.btn_artifacts_panel, 1, 0)
-        qc_grid.addWidget(self.btn_advanced, 1, 1)
+        qc_grid.addWidget(self.btn_advanced, 1, 0, 1, 2)
         qc_grid.addWidget(self.btn_qc, 2, 0)
         qc_grid.addWidget(self.btn_qc_batch, 2, 1)
         qc_grid.addWidget(self.btn_metadata, 3, 0)
@@ -2802,6 +2961,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.btn_redo.setToolTip("Redo last undone preprocessing action (Ctrl+Y)")
         self.btn_redo.setFixedSize(34, 30)
         self.btn_artifacts = QtWidgets.QPushButton("Artifacts")
+        self.btn_artifacts.setVisible(False)
         self.btn_box_select = QtWidgets.QPushButton("Box select")
         self.btn_box_select.setCheckable(True)
         self.btn_thresholds = QtWidgets.QPushButton("Thresholds: ON")
@@ -2811,7 +2971,6 @@ class PlotDashboard(QtWidgets.QWidget):
         for b in (
             self.btn_add_region,
             self.btn_clear_regions,
-            self.btn_artifacts,
             self.btn_box_select,
             self.btn_thresholds,
         ):
@@ -2820,7 +2979,6 @@ class PlotDashboard(QtWidgets.QWidget):
         tools.addWidget(self.btn_clear_regions)
         tools.addWidget(self.btn_undo)
         tools.addWidget(self.btn_redo)
-        tools.addWidget(self.btn_artifacts)
         tools.addWidget(self.btn_box_select)
         tools.addWidget(self.btn_thresholds)
         tools.addStretch(1)

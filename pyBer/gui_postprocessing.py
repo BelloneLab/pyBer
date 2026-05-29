@@ -428,6 +428,319 @@ def _load_behavior_ethovision(
     }
 
 
+_RULE_NUMBER_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+
+
+def _parse_rule_float(text: str) -> Optional[float]:
+    raw = str(text or "").strip()
+    if not re.fullmatch(_RULE_NUMBER_RE, raw):
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _compare_rule_values(values: np.ndarray, op: str, threshold: float) -> np.ndarray:
+    if op == ">":
+        return values > threshold
+    if op == ">=":
+        return values >= threshold
+    if op == "<":
+        return values < threshold
+    if op == "<=":
+        return values <= threshold
+    raise ValueError(f"Unsupported threshold operator: {op}")
+
+
+def _invert_rule_operator(op: str) -> str:
+    return {">": "<", ">=": "<=", "<": ">", "<=": ">="}.get(op, op)
+
+
+def _continuous_rule_mask(values: np.ndarray, variable_name: str, rule_text: str) -> np.ndarray:
+    """Return a boolean mask for a simple threshold rule without using eval."""
+    values = np.asarray(values, float)
+    rule = str(rule_text or "").strip()
+    if not rule:
+        raise ValueError("Enter a threshold rule.")
+
+    and_parts = re.split(r"\s+(?:and|&&)\s+", rule, flags=re.IGNORECASE)
+    if len(and_parts) > 1:
+        mask = np.ones(values.shape, dtype=bool)
+        for part in and_parts:
+            mask &= _continuous_rule_mask(values, variable_name, part)
+        return mask
+
+    or_parts = re.split(r"\s+(?:or|\|\|)\s+", rule, flags=re.IGNORECASE)
+    if len(or_parts) > 1:
+        mask = np.zeros(values.shape, dtype=bool)
+        for part in or_parts:
+            mask |= _continuous_rule_mask(values, variable_name, part)
+        return mask
+
+    ops = list(re.finditer(r"(>=|<=|>|<)", rule))
+    numbers = [float(m.group(0)) for m in re.finditer(_RULE_NUMBER_RE, rule)]
+
+    if len(ops) >= 2 and len(numbers) >= 2:
+        # Users often type band rules as either a < x < b or a > x > b.
+        low, high = sorted(numbers[:2])
+        inclusive = any(m.group(1) in {">=", "<="} for m in ops[:2])
+        if inclusive:
+            return (values >= low) & (values <= high)
+        return (values > low) & (values < high)
+
+    if len(ops) == 1:
+        match = ops[0]
+        left = rule[:match.start()].strip()
+        right = rule[match.end():].strip()
+        left_num = _parse_rule_float(left)
+        right_num = _parse_rule_float(right)
+        op = match.group(1)
+        if left_num is None and right_num is not None:
+            return _compare_rule_values(values, op, right_num)
+        if left_num is not None and right_num is None:
+            return _compare_rule_values(values, _invert_rule_operator(op), left_num)
+        if left_num is not None and right_num is not None:
+            return np.full(values.shape, bool(_compare_rule_values(np.asarray([left_num]), op, right_num)[0]), dtype=bool)
+
+    if len(numbers) >= 2:
+        low, high = sorted(numbers[:2])
+        return (values > low) & (values < high)
+    if len(numbers) == 1:
+        return values > numbers[0]
+
+    raise ValueError(f"Could not parse threshold rule for {variable_name}.")
+
+
+def _continuous_threshold_events(
+    time: np.ndarray,
+    values: np.ndarray,
+    rule_text: str,
+    variable_name: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    values = np.asarray(values, float).reshape(-1)
+    time = np.asarray(time, float).reshape(-1)
+    if time.size == 0 and values.size:
+        time = np.arange(values.size, dtype=float)
+    n = min(time.size, values.size)
+    if n <= 0:
+        return np.array([], float), np.array([], float), np.array([], float), np.array([], bool)
+    time = time[:n]
+    values = values[:n]
+    finite = np.isfinite(time) & np.isfinite(values)
+    mask = np.zeros(n, dtype=bool)
+    if np.any(finite):
+        mask[finite] = _continuous_rule_mask(values[finite], variable_name, rule_text)
+    prev_high = np.r_[False, mask[:-1]]
+    next_high = np.r_[mask[1:], False]
+    on_idx = np.where(mask & ~prev_high)[0]
+    off_idx = np.where(mask & ~next_high)[0]
+    on = time[on_idx]
+    off = time[off_idx]
+    m = min(on.size, off.size)
+    dur = off[:m] - on[:m] if m else np.array([], float)
+    if on.size != off.size:
+        dur = np.full(on.shape, np.nan, dtype=float)
+    else:
+        dur = np.maximum(dur, 0.0)
+    return on, off, dur, mask
+
+
+def _continuous_behavior_name(variable_name: str, rule_text: str, align_text: str) -> str:
+    suffix = "offset" if str(align_text).strip().lower().endswith("offset") else "onset"
+    compact_rule = re.sub(r"\s+", " ", str(rule_text or "").strip())
+    if len(compact_rule) > 42:
+        compact_rule = compact_rule[:39] + "..."
+    base = f"{variable_name} [{compact_rule}] {suffix}".strip()
+    return base or f"continuous {suffix}"
+
+
+class ContinuousAlignDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        behavior_sources: Dict[str, Dict[str, Any]],
+        parent: Optional[QtWidgets.QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Align to continuous")
+        self.resize(760, 560)
+        self._sources = {
+            str(k): v
+            for k, v in (behavior_sources or {}).items()
+            if isinstance(v, dict) and bool(v.get("trajectory") or {})
+        }
+        self._rule_touched = False
+        self._name_touched = False
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+
+        self.combo_source = QtWidgets.QComboBox()
+        self.combo_variable = QtWidgets.QComboBox()
+        self.edit_rule = QtWidgets.QLineEdit()
+        self.edit_rule.setPlaceholderText("velocity > 6 or 2.1 < velocity < 5.5")
+        self.combo_align = QtWidgets.QComboBox()
+        self.combo_align.addItems(["Align to onset", "Align to offset"])
+        self.edit_name = QtWidgets.QLineEdit()
+        self.cb_apply_all = QtWidgets.QCheckBox("Apply to all loaded files with this variable")
+        self.cb_apply_all.setChecked(True)
+        self.lbl_status = QtWidgets.QLabel("")
+        self.lbl_status.setProperty("class", "hint")
+        self.lbl_status.setWordWrap(True)
+
+        _compact_combo(self.combo_source, min_chars=18)
+        _compact_combo(self.combo_variable, min_chars=18)
+        _compact_combo(self.combo_align, min_chars=10)
+
+        form.addRow("Behavior file", self.combo_source)
+        form.addRow("Continuous variable", self.combo_variable)
+        form.addRow("Threshold rule", self.edit_rule)
+        form.addRow("Align to", self.combo_align)
+        form.addRow("Behavior name", self.edit_name)
+        form.addRow("", self.cb_apply_all)
+        root.addLayout(form)
+
+        self.plot = pg.PlotWidget(title="Continuous threshold preview")
+        _opt_plot(self.plot)
+        self.plot.setMinimumHeight(260)
+        self.plot.setLabel("bottom", "Time (s)")
+        self.plot.setLabel("left", "Value")
+        root.addWidget(self.plot, stretch=1)
+        root.addWidget(self.lbl_status)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        self.btn_ok = buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
+        if self.btn_ok is not None:
+            self.btn_ok.setText("Create alignment")
+            self.btn_ok.setProperty("class", "compactPrimary")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self._populate_sources()
+        self.combo_source.currentIndexChanged.connect(self._populate_variables)
+        self.combo_source.currentIndexChanged.connect(self._update_default_rule)
+        self.combo_variable.currentIndexChanged.connect(self._update_default_rule)
+        self.combo_variable.currentIndexChanged.connect(self._update_preview)
+        self.combo_align.currentIndexChanged.connect(self._update_default_name)
+        self.combo_align.currentIndexChanged.connect(self._update_preview)
+        self.edit_rule.textEdited.connect(self._on_rule_edited)
+        self.edit_name.textEdited.connect(self._on_name_edited)
+        self._populate_variables()
+        self._update_default_rule()
+        self._update_preview()
+
+    def _populate_sources(self) -> None:
+        self.combo_source.clear()
+        for stem in sorted(self._sources.keys()):
+            self.combo_source.addItem(stem, stem)
+
+    def _selected_source(self) -> Tuple[str, Dict[str, Any]]:
+        key = str(self.combo_source.currentData() or self.combo_source.currentText() or "")
+        return key, self._sources.get(key, {})
+
+    def _populate_variables(self) -> None:
+        current = self.combo_variable.currentText()
+        self.combo_variable.blockSignals(True)
+        try:
+            self.combo_variable.clear()
+            _key, info = self._selected_source()
+            for name in sorted(str(k) for k in (info.get("trajectory") or {}).keys()):
+                self.combo_variable.addItem(name, name)
+            idx = self.combo_variable.findText(current)
+            if idx >= 0:
+                self.combo_variable.setCurrentIndex(idx)
+        finally:
+            self.combo_variable.blockSignals(False)
+        self._update_preview()
+
+    def _selected_variable_data(self) -> Tuple[str, np.ndarray, np.ndarray]:
+        _key, info = self._selected_source()
+        variable = str(self.combo_variable.currentData() or self.combo_variable.currentText() or "")
+        trajectory = info.get("trajectory") or {}
+        values = np.asarray(trajectory.get(variable, np.array([], float)), float)
+        time = np.asarray(info.get("trajectory_time", np.array([], float)), float)
+        if time.size == 0 and values.size:
+            time = np.arange(values.size, dtype=float)
+        return variable, time, values
+
+    def _update_default_rule(self) -> None:
+        variable, _time, values = self._selected_variable_data()
+        if not variable:
+            return
+        if not self._rule_touched or not self.edit_rule.text().strip():
+            finite = values[np.isfinite(values)]
+            threshold = float(np.nanmedian(finite)) if finite.size else 0.0
+            self.edit_rule.setText(f"{variable} > {threshold:.4g}")
+        self._update_default_name()
+        self._update_preview()
+
+    def _update_default_name(self) -> None:
+        variable = str(self.combo_variable.currentData() or self.combo_variable.currentText() or "continuous")
+        if not self.edit_name.text().strip() or not getattr(self, "_name_touched", False):
+            self.edit_name.setText(_continuous_behavior_name(variable, self.edit_rule.text(), self.combo_align.currentText()))
+
+    def _on_rule_edited(self, _text: str) -> None:
+        self._rule_touched = True
+        self._name_touched = False
+        self._update_default_name()
+        self._update_preview()
+
+    def _on_name_edited(self, _text: str) -> None:
+        self._name_touched = True
+
+    def _update_preview(self) -> None:
+        variable, time, values = self._selected_variable_data()
+        rule = self.edit_rule.text().strip()
+        self.plot.clear()
+        if self.btn_ok is not None:
+            self.btn_ok.setEnabled(False)
+        if not variable:
+            self.lbl_status.setText("Load a CSV or EthoVision file with continuous numeric columns first.")
+            return
+        n = min(time.size, values.size)
+        if n <= 0:
+            self.lbl_status.setText("Selected variable has no numeric samples.")
+            return
+        time = time[:n]
+        values = values[:n]
+        try:
+            on, off, dur, mask = _continuous_threshold_events(time, values, rule, variable)
+        except Exception as exc:
+            self.plot.plot(time, values, pen=pg.mkPen((120, 170, 220), width=1))
+            self.lbl_status.setText(str(exc))
+            return
+        self.plot.plot(time, values, pen=pg.mkPen((100, 190, 255), width=1))
+        if mask.size == values.size and np.any(mask):
+            masked = np.where(mask, values, np.nan)
+            self.plot.plot(time, masked, pen=pg.mkPen((255, 180, 70), width=2))
+        event_count = int(on.size if self.combo_align.currentText().endswith("onset") else off.size)
+        sample_count = int(np.sum(mask)) if mask.size else 0
+        self.lbl_status.setText(
+            f"{sample_count} sample(s) pass the rule. {event_count} event(s) will be created."
+        )
+        if self.btn_ok is not None:
+            self.btn_ok.setEnabled(event_count > 0)
+
+    def config(self) -> Dict[str, object]:
+        source_key, _info = self._selected_source()
+        return {
+            "source_key": source_key,
+            "variable": str(self.combo_variable.currentData() or self.combo_variable.currentText() or ""),
+            "rule": self.edit_rule.text().strip(),
+            "align": self.combo_align.currentText(),
+            "name": self.edit_name.text().strip(),
+            "apply_all": self.cb_apply_all.isChecked(),
+        }
+
+
 def _compute_psth_matrix(
     t: np.ndarray,
     y: np.ndarray,
@@ -496,6 +809,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._processed: List[ProcessedTrial] = []
         self._dio_cache: Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]] = {}  # (path,dio)->(t,x)
         self._behavior_sources: Dict[str, Dict[str, Any]] = {}  # stem->behavior data
+        self._continuous_align_rules: Dict[str, Dict[str, object]] = {}
         self._last_mat: Optional[np.ndarray] = None
         self._last_tvec: Optional[np.ndarray] = None
         self._last_events: Optional[np.ndarray] = None
@@ -632,6 +946,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_use_current = QtWidgets.QPushButton("Use current preprocessed selection")
         self.btn_use_current.setProperty("class", "compactPrimary")
         self.btn_use_current.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_use_current.setVisible(False)
         self.btn_load_processed_single = QtWidgets.QPushButton("Load processed file (CSV/H5)")
         self.btn_load_processed_single.setProperty("class", "compactSmall")
         self.btn_load_processed_single.setSizePolicy(
@@ -639,7 +954,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         single_layout.addWidget(self.lbl_current)
-        single_layout.addWidget(self.btn_use_current)
         single_layout.addWidget(self.btn_load_processed_single)
 
         group_layout = QtWidgets.QVBoxLayout(tab_group)
@@ -654,9 +968,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_refresh_dio = QtWidgets.QPushButton("Refresh A/D channel list")
         self.btn_refresh_dio.setProperty("class", "compactSmall")
         self.btn_refresh_dio.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_refresh_dio.setVisible(False)
 
         vsrc.addWidget(self.tab_sources)
-        vsrc.addWidget(self.btn_refresh_dio)
 
         grp_align = QtWidgets.QGroupBox("Behavior / Events")
         grp_align.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Expanding)
@@ -721,7 +1035,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         # Preprocessed files list
         self.list_preprocessed = FileDropList()
-        self.list_preprocessed.setMinimumHeight(180)
+        self.list_preprocessed.setMinimumHeight(260)
         self.list_preprocessed.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -730,7 +1044,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         # Behaviors list
         self.list_behaviors = FileDropList()
-        self.list_behaviors.setMinimumHeight(180)
+        self.list_behaviors.setMinimumHeight(260)
         self.list_behaviors.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -800,14 +1114,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_transition_gap.setValue(1.0)
         self.spin_transition_gap.setDecimals(2)
 
+        self.lbl_behavior_name = QtWidgets.QLabel("Behavior name")
+        self.lbl_behavior_align = QtWidgets.QLabel("Behavior align")
         self.lbl_trans_from = QtWidgets.QLabel("Transition from")
         self.lbl_trans_to = QtWidgets.QLabel("Transition to")
         self.lbl_trans_gap = QtWidgets.QLabel("Transition gap (s)")
-        fal.addRow("Behavior name", self.combo_behavior_name)
-        fal.addRow("Behavior align", self.combo_behavior_align)
-        fal.addRow(self.lbl_trans_from, self.combo_behavior_from)
-        fal.addRow(self.lbl_trans_to, self.combo_behavior_to)
-        fal.addRow(self.lbl_trans_gap, self.spin_transition_gap)
+        self.lbl_continuous_align = QtWidgets.QLabel("Continuous")
+        self.btn_continuous_align = QtWidgets.QPushButton("Align to continuous")
+        self.btn_continuous_align.setProperty("class", "compactSmall")
+        self.lbl_continuous_align_status = QtWidgets.QLabel("No continuous rule")
+        self.lbl_continuous_align_status.setProperty("class", "hint")
+        self.lbl_continuous_align_status.setWordWrap(True)
 
 
         # ── Shared QSS for PSTH subsection headers ──
@@ -901,6 +1218,29 @@ class PostProcessingPanel(QtWidgets.QWidget):
         global_widget = _dual_row("Start:", self.spin_global_start, "End:", self.spin_global_end)
 
         # ═══════════════════════════════════════════════════════
+        # Section 0: Alignment
+        # ═══════════════════════════════════════════════════════
+        grp_align_psth = QtWidgets.QGroupBox("Alignment")
+        grp_align_psth.setStyleSheet(_psth_section_qss)
+        fa_psth = QtWidgets.QFormLayout(grp_align_psth)
+        fa_psth.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        fa_psth.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        fa_psth.addRow(self.lbl_behavior_name, self.combo_behavior_name)
+        fa_psth.addRow(self.lbl_behavior_align, self.combo_behavior_align)
+        fa_psth.addRow(self.lbl_trans_from, self.combo_behavior_from)
+        fa_psth.addRow(self.lbl_trans_to, self.combo_behavior_to)
+        fa_psth.addRow(self.lbl_trans_gap, self.spin_transition_gap)
+        continuous_row = QtWidgets.QHBoxLayout()
+        continuous_row.setContentsMargins(0, 0, 0, 0)
+        continuous_row.setSpacing(6)
+        continuous_row.addWidget(self.btn_continuous_align, 0)
+        continuous_row.addWidget(self.lbl_continuous_align_status, 1)
+        continuous_widget = QtWidgets.QWidget()
+        continuous_widget.setLayout(continuous_row)
+        fa_psth.addRow(self.lbl_continuous_align, continuous_widget)
+        self._continuous_align_widget = continuous_widget
+
+        # ═══════════════════════════════════════════════════════
         # Section 1 — Window & Baseline
         # ═══════════════════════════════════════════════════════
         grp_window = QtWidgets.QGroupBox("Window && baseline")
@@ -992,6 +1332,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _psth_vbox = QtWidgets.QVBoxLayout(grp_opt)
         _psth_vbox.setContentsMargins(0, 0, 0, 0)
         _psth_vbox.setSpacing(4)
+        _psth_vbox.addWidget(grp_align_psth)
         _psth_vbox.addWidget(grp_window)
         _psth_vbox.addWidget(grp_filt)
         _psth_vbox.addWidget(grp_include)
@@ -1856,8 +2197,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_setup_load.setProperty("class", "compactPrimarySmall")
         self.btn_setup_refresh = QtWidgets.QPushButton("Refresh A/D")
         self.btn_setup_refresh.setProperty("class", "compactSmall")
+        self.btn_setup_refresh.setVisible(False)
         setup_btn_row.addWidget(self.btn_setup_load)
-        setup_btn_row.addWidget(self.btn_setup_refresh)
         setup_btn_row.addStretch(1)
         setup_wrap = QtWidgets.QWidget()
         setup_wrap.setLayout(setup_btn_row)
@@ -1954,6 +2295,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.menu_recent_projects = self.menu_action_recent.addMenu("Projects")
         self.menu_action_recent.aboutToShow.connect(self._refresh_recent_postprocessing_menus)
         self.act_refresh_dio = self.menu_action_load.addAction("Refresh A/D channel list")
+        self.act_load_current.setVisible(False)
+        self.act_refresh_dio.setVisible(False)
         self.menu_action_load.addSeparator()
         self.act_open_plot_style = self.menu_action_load.addAction("Plot style...")
         self.btn_action_load.setMenu(self.menu_action_load)
@@ -2591,6 +2934,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_align.currentIndexChanged.connect(self._update_align_ui)
         self.combo_behavior_file_type.currentIndexChanged.connect(self._update_align_ui)
         self.combo_behavior_align.currentIndexChanged.connect(self._update_align_ui)
+        self.btn_continuous_align.clicked.connect(self._open_continuous_align_dialog)
         self.combo_align.currentIndexChanged.connect(self._refresh_behavior_list)
         self.combo_align.currentIndexChanged.connect(self._compute_psth)
         for w in (
@@ -3817,12 +4161,30 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_resample.setValue(fs)
         self._update_status_strip()
 
+    def _refresh_dio_channels_from_processed(self) -> None:
+        names: List[str] = []
+        seen: set[str] = set()
+        for proc in self._processed:
+            name = str(getattr(proc, "dio_name", "") or "").strip()
+            if not name or name in seen:
+                continue
+            dio = getattr(proc, "dio", None)
+            try:
+                has_data = dio is not None and np.asarray(dio).size > 0
+            except Exception:
+                has_data = dio is not None
+            if has_data:
+                seen.add(name)
+                names.append(name)
+        self.receive_dio_list(names)
+
     @QtCore.Slot(list)
     def receive_current_processed(self, processed_list: List[ProcessedTrial]) -> None:
         self._processed = processed_list or []
         if not self._autosave_restoring:
             self._project_dirty = True
-        # update trace preview with first entry
+        self._update_file_lists()
+        self._refresh_dio_channels_from_processed()
         self._refresh_behavior_list()
         self._refresh_sync_sources()
         self._set_resample_from_processed()
@@ -3841,6 +4203,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._processed.extend(processed_list)
         if not self._autosave_restoring:
             self._project_dirty = True
+        self._update_file_lists()
+        self._refresh_dio_channels_from_processed()
         self._refresh_behavior_list()
         self._refresh_sync_sources()
         self._set_resample_from_processed()
@@ -4022,6 +4386,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         "Behavior load warning",
                         f"No behavior or trajectory numeric columns detected in {os.path.basename(p)} for the selected file type.",
                     )
+                info.setdefault("event_behaviors", {})
                 info["source_path"] = str(p)
                 self._behavior_sources[stem] = info
                 loaded_any = True
@@ -4042,6 +4407,95 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_status_strip()
         self._sync_temporal_modeling_context()
         self._refresh_sync_sources()
+
+    def _open_continuous_align_dialog(self) -> None:
+        has_continuous = any(bool((info or {}).get("trajectory") or {}) for info in (self._behavior_sources or {}).values())
+        if not has_continuous:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Align to continuous",
+                "Load a behavior CSV or EthoVision file with continuous numeric columns first.",
+            )
+            return
+        dlg = ContinuousAlignDialog(self._behavior_sources, self)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        try:
+            count = self._apply_continuous_alignment_rule(dlg.config())
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Align to continuous", str(exc))
+            return
+        self.statusUpdate.emit(f"Created continuous alignment for {count} behavior file(s).", 5000)
+
+    def _apply_continuous_alignment_rule(self, config: Dict[str, object]) -> int:
+        source_key = str(config.get("source_key") or "").strip()
+        variable = str(config.get("variable") or "").strip()
+        rule = str(config.get("rule") or "").strip()
+        align = str(config.get("align") or "Align to onset").strip()
+        name = str(config.get("name") or "").strip() or _continuous_behavior_name(variable, rule, align)
+        apply_all = bool(config.get("apply_all", True))
+        if not variable:
+            raise ValueError("Choose a continuous variable.")
+        if not rule:
+            raise ValueError("Enter a threshold rule.")
+
+        targets: List[Tuple[str, Dict[str, Any]]] = []
+        if apply_all:
+            for stem, info in (self._behavior_sources or {}).items():
+                if variable in (info.get("trajectory") or {}):
+                    targets.append((stem, info))
+        elif source_key in self._behavior_sources:
+            targets.append((source_key, self._behavior_sources[source_key]))
+        if not targets:
+            raise ValueError(f"No loaded behavior file contains '{variable}'.")
+
+        total_events = 0
+        updated = 0
+        first_align_index = self.combo_behavior_align.findText(align)
+        for stem, info in targets:
+            trajectory = info.get("trajectory") or {}
+            values = np.asarray(trajectory.get(variable, np.array([], float)), float)
+            time = np.asarray(info.get("trajectory_time", np.array([], float)), float)
+            on, off, dur, _mask = _continuous_threshold_events(time, values, rule, variable)
+            events = off if align.endswith("offset") else on
+            if events.size == 0:
+                continue
+            event_store = info.setdefault("event_behaviors", {})
+            event_store[name] = {
+                "on": np.asarray(on, float),
+                "off": np.asarray(off, float),
+                "dur": np.asarray(dur, float),
+                "rule": rule,
+                "variable": variable,
+                "align": align,
+                "source": stem,
+            }
+            self._continuous_align_rules[name] = {
+                "source_key": stem,
+                "variable": variable,
+                "rule": rule,
+                "align": align,
+                "name": name,
+                "apply_all": apply_all,
+            }
+            total_events += int(events.size)
+            updated += 1
+
+        if updated == 0:
+            raise ValueError("The threshold rule did not create any onset or offset events.")
+
+        self._refresh_behavior_list()
+        idx_name = self.combo_behavior_name.findText(name)
+        if idx_name >= 0:
+            self.combo_behavior_name.setCurrentIndex(idx_name)
+        if first_align_index >= 0:
+            self.combo_behavior_align.setCurrentIndex(first_align_index)
+        self.lbl_continuous_align_status.setText(f"{name}: {total_events} event(s)")
+        if not self._autosave_restoring:
+            self._project_dirty = True
+        self._compute_psth()
+        self._refresh_sync_sources()
+        return updated
 
     def _sync_temporal_modeling_context(self) -> None:
         if not hasattr(self, "section_temporal"):
@@ -4094,6 +4548,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_group.setText(f"{len(self._processed)} file(s) loaded")
         self._push_recent_paths("postprocess_recent_processed_paths", paths)
         self._update_file_lists()
+        self._refresh_dio_channels_from_processed()
         self._refresh_sync_sources()
         self._set_resample_from_processed()
         self._compute_psth()
@@ -4140,6 +4595,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_behavior_file_type.setVisible(use_beh)
         self.btn_load_beh.setEnabled(use_beh)
         self.btn_load_beh.setVisible(use_beh)
+        self.lbl_behavior_name.setEnabled(use_beh)
+        self.lbl_behavior_name.setVisible(use_beh)
         self.combo_behavior_name.setEnabled(use_beh)
         self.combo_behavior_name.setVisible(use_beh)
         show_time_panel = bool(use_beh and self._behavior_sources_need_generated_time())
@@ -4147,8 +4604,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.grp_behavior_time.setVisible(show_time_panel)
 
         # Behavior align combo + transition settings
+        self.lbl_behavior_align.setEnabled(use_beh)
+        self.lbl_behavior_align.setVisible(use_beh)
         self.combo_behavior_align.setEnabled(use_beh)
         self.combo_behavior_align.setVisible(use_beh)
+        for w in (
+            self.lbl_continuous_align,
+            self.btn_continuous_align,
+            self.lbl_continuous_align_status,
+            getattr(self, "_continuous_align_widget", None),
+        ):
+            if w is None:
+                continue
+            w.setEnabled(use_beh)
+            w.setVisible(use_beh)
         is_transition = use_beh and self.combo_behavior_align.currentText().startswith("Transition")
         for w in (
             self.combo_behavior_from,
@@ -4896,6 +5365,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     "kind": str(data.get("kind", "") or ""),
                     "row_count": int(data.get("row_count", 0) or 0),
                     "behaviors": sorted(str(k) for k in (data.get("behaviors", {}) or {}).keys()),
+                    "event_behaviors": sorted(str(k) for k in (data.get("event_behaviors", {}) or {}).keys()),
                     "trajectory": sorted(str(k) for k in (data.get("trajectory", {}) or {}).keys()),
                 }
             )
@@ -5549,6 +6019,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
 
     def _refresh_behavior_list(self) -> None:
+        prev_name = self.combo_behavior_name.currentText().strip()
+        prev_analysis = self.combo_behavior_analysis.currentText().strip() if hasattr(self, "combo_behavior_analysis") else ""
+        prev_from = self.combo_behavior_from.currentText().strip()
+        prev_to = self.combo_behavior_to.currentText().strip()
         self.combo_behavior_name.clear()
         if hasattr(self, "combo_behavior_analysis"):
             self.combo_behavior_analysis.clear()
@@ -5560,6 +6034,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         except Exception:
             pass
         if not self._behavior_sources:
+            self.combo_behavior_from.clear()
+            self.combo_behavior_to.clear()
             self._refresh_spatial_columns()
             self._compute_spatial_heatmap()
             self._update_data_availability()
@@ -5569,6 +6045,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for info in self._behavior_sources.values():
             behaviors = info.get("behaviors") or {}
             behavior_names.update(str(k) for k in behaviors.keys())
+            event_behaviors = info.get("event_behaviors") or {}
+            behavior_names.update(str(k) for k in event_behaviors.keys())
         behaviors = sorted(list(behavior_names))
         for name in behaviors:
             self.combo_behavior_name.addItem(name)
@@ -5579,6 +6057,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for name in behaviors:
             self.combo_behavior_from.addItem(name)
             self.combo_behavior_to.addItem(name)
+        for combo, previous in (
+            (self.combo_behavior_name, prev_name),
+            (self.combo_behavior_from, prev_from),
+            (self.combo_behavior_to, prev_to),
+        ):
+            idx = combo.findText(previous)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        if hasattr(self, "combo_behavior_analysis"):
+            idx = self.combo_behavior_analysis.findText(prev_analysis)
+            if idx >= 0:
+                self.combo_behavior_analysis.setCurrentIndex(idx)
 
         # Update the lists with numbered items
         self._update_file_lists()
@@ -7010,6 +7500,26 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.statusUpdate.emit(f"Aligned time export complete: {out_dir}", 5000)
 
     def _extract_behavior_events(self, info: Dict[str, Any], behavior_name: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        event_behaviors = info.get("event_behaviors") or {}
+        if behavior_name in event_behaviors:
+            event_info = event_behaviors.get(behavior_name) or {}
+            if isinstance(event_info, dict):
+                on = np.asarray(event_info.get("on", np.array([], float)), float)
+                off = np.asarray(event_info.get("off", on), float)
+                dur = np.asarray(event_info.get("dur", np.array([], float)), float)
+            else:
+                on = np.asarray(event_info, float)
+                off = on.copy()
+                dur = np.full(on.shape, np.nan, dtype=float)
+            on = on[np.isfinite(on)]
+            off = off[np.isfinite(off)]
+            on = np.sort(np.unique(on))
+            off = np.sort(np.unique(off)) if off.size else on.copy()
+            if dur.size != on.size:
+                m = min(on.size, off.size)
+                dur = off[:m] - on[:m] if m else np.array([], float)
+            return on, off, np.asarray(dur, float)
+
         behaviors = info.get("behaviors") or {}
         if behavior_name not in behaviors:
             return np.array([], float), np.array([], float), np.array([], float)
@@ -9924,6 +10434,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     ds = behaviors_group.create_dataset(f"item_{b_idx:04d}", data=data, **kwargs)
                     ds.attrs["name"] = str(name)
 
+                event_behaviors_group = entry.create_group("event_behaviors")
+                event_behaviors = source.get("event_behaviors") or {}
+                for e_idx, (name, event_info) in enumerate(event_behaviors.items()):
+                    event_entry = event_behaviors_group.create_group(f"item_{e_idx:04d}")
+                    event_entry.attrs["name"] = str(name)
+                    if isinstance(event_info, dict):
+                        for attr_name in ("rule", "variable", "align", "source"):
+                            if event_info.get(attr_name) is not None:
+                                event_entry.attrs[attr_name] = str(event_info.get(attr_name))
+                        self._write_h5_numeric(event_entry, "on", np.asarray(event_info.get("on", np.array([], float)), float))
+                        self._write_h5_numeric(event_entry, "off", np.asarray(event_info.get("off", np.array([], float)), float))
+                        self._write_h5_numeric(event_entry, "dur", np.asarray(event_info.get("dur", np.array([], float)), float))
+                    else:
+                        values = np.asarray(event_info, float)
+                        self._write_h5_numeric(event_entry, "on", values)
+                        self._write_h5_numeric(event_entry, "off", values)
+                        self._write_h5_numeric(event_entry, "dur", np.full(values.shape, np.nan, dtype=float))
+
                 trajectory_group = entry.create_group("trajectory")
                 trajectory = source.get("trajectory") or {}
                 for t_idx, (name, values) in enumerate(trajectory.items()):
@@ -10082,6 +10610,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                             float,
                         ),
                         "behaviors": {},
+                        "event_behaviors": {},
                         "trajectory": {},
                         "trajectory_time": np.asarray(
                             self._read_h5_numeric(entry, "trajectory_time")
@@ -10104,6 +10633,26 @@ class PostProcessingPanel(QtWidgets.QWidget):
                                 continue
                             name = self._h5_text(ds.attrs.get("name", b_key), b_key)
                             info["behaviors"][name] = np.asarray(ds[()], float)
+
+                    event_behaviors_group = entry.get("event_behaviors")
+                    if isinstance(event_behaviors_group, h5py.Group):
+                        for e_key in sorted(event_behaviors_group.keys()):
+                            event_entry = event_behaviors_group.get(e_key)
+                            if not isinstance(event_entry, h5py.Group):
+                                continue
+                            name = self._h5_text(event_entry.attrs.get("name", e_key), e_key)
+                            on = self._read_h5_numeric(event_entry, "on")
+                            off = self._read_h5_numeric(event_entry, "off")
+                            dur = self._read_h5_numeric(event_entry, "dur")
+                            info["event_behaviors"][name] = {
+                                "on": np.asarray(on if on is not None else np.array([], float), float),
+                                "off": np.asarray(off if off is not None else np.array([], float), float),
+                                "dur": np.asarray(dur if dur is not None else np.array([], float), float),
+                                "rule": self._h5_text(event_entry.attrs.get("rule", ""), ""),
+                                "variable": self._h5_text(event_entry.attrs.get("variable", ""), ""),
+                                "align": self._h5_text(event_entry.attrs.get("align", ""), ""),
+                                "source": self._h5_text(event_entry.attrs.get("source", stem), stem),
+                            }
 
                     trajectory_group = entry.get("trajectory")
                     if isinstance(trajectory_group, h5py.Group):
@@ -10273,12 +10822,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._clear_cached_analysis_outputs()
             self._processed = []
             self._behavior_sources = {}
+            self._continuous_align_rules = {}
             self._sync_results_by_file = {}
             self._last_sync_preview = None
             self._pending_project_recompute_from_current = False
             self._dio_cache.clear()
+            self.receive_dio_list([])
             self.lbl_group.setText("(none)")
             self.lbl_beh.setText("(none)")
+            if hasattr(self, "lbl_continuous_align_status"):
+                self.lbl_continuous_align_status.setText("No continuous rule")
             self.lbl_behavior_msg.setText("")
             self.lbl_signal_msg.setText("")
             if hasattr(self, "txt_sync_report"):
@@ -10415,6 +10968,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded [{mode_label}]")
 
             self._update_file_lists()
+            self._refresh_dio_channels_from_processed()
             self._refresh_behavior_list()
             self._refresh_sync_sources()
             self._set_resample_from_processed()
@@ -10665,6 +11219,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "behavior_from": self.combo_behavior_from.currentText(),
             "behavior_to": self.combo_behavior_to.currentText(),
             "transition_gap": float(self.spin_transition_gap.value()),
+            "continuous_align_rules": copy.deepcopy(self._continuous_align_rules),
             "window_pre": float(self.spin_pre.value()),
             "window_post": float(self.spin_post.value()),
             "baseline_start": float(self.spin_b0.value()),
@@ -10788,6 +11343,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _set_combo(self.combo_behavior_to, data.get("behavior_to"))
         if "transition_gap" in data:
             self.spin_transition_gap.setValue(float(data["transition_gap"]))
+        rules = data.get("continuous_align_rules")
+        if isinstance(rules, dict):
+            self._continuous_align_rules = copy.deepcopy(rules)
         if "window_pre" in data:
             self.spin_pre.setValue(float(data["window_pre"]))
         if "window_post" in data:
@@ -11409,6 +11967,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for info in self._behavior_sources.values():
             behaviors = info.get("behaviors") or {}
             for beh in behaviors:
+                if beh not in names:
+                    names.append(beh)
+            event_behaviors = info.get("event_behaviors") or {}
+            for beh in event_behaviors:
                 if beh not in names:
                     names.append(beh)
         return names
