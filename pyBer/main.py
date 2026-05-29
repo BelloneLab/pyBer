@@ -1470,7 +1470,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.artifact_panel.installEventFilter(self)
             self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.art_dock)
 
-        # Left pane: data browser
+        # Data browser: mounted immediately to the right of the toolbar rail.
         self.file_panel.setMinimumWidth(260)
         self.file_panel.setMaximumWidth(340)
         self.file_panel.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
@@ -1669,24 +1669,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self._pre_drawer_splitter.setStretchFactor(0, 0)
             self._pre_drawer_splitter.setStretchFactor(1, 1)
             self._pre_drawer_splitter.setSizes([0, 1400])
-            center_h.addWidget(self._pre_drawer_splitter, stretch=1)
+            content_widget = self._pre_drawer_splitter
         else:
-            center_h.addWidget(center_panel, stretch=1)
+            content_widget = center_panel
 
-        # Main splitter: data panel + visuals. Parameter popups are floating by default.
+        # Main splitter: data browser + visuals, both to the right of the toolbar rail.
         self.pre_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self.pre_splitter.setObjectName("preprocessing_splitter")
         self.pre_splitter.addWidget(self.file_panel)
-        self.pre_splitter.addWidget(center_widget)
+        self.pre_splitter.addWidget(content_widget)
         self.pre_splitter.setChildrenCollapsible(False)
         self.pre_splitter.setStretchFactor(0, 0)
         self.pre_splitter.setStretchFactor(1, 1)
         self.pre_splitter.setSizes([350, 1350])
         self.pre_splitter.splitterMoved.connect(self._save_splitter_sizes)
+        center_h.addWidget(self.pre_splitter, stretch=1)
 
         pre_layout = QtWidgets.QVBoxLayout(self.pre_tab)
         pre_layout.setContentsMargins(10, 10, 10, 10)
-        pre_layout.addWidget(self.pre_splitter)
+        pre_layout.addWidget(center_widget)
 
         # Postprocessing tab
         self.post_tab = PostProcessingPanel()
@@ -3997,7 +3998,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._force_fixed_dock_layouts:
             # Fixed mode: always enforce deterministic defaults.
             try:
-                self.pre_splitter.setSizes([300, 1200])
+                self._set_pre_splitter_sizes(data_width=300, center_width=1200)
             except Exception:
                 pass
             try:
@@ -4008,15 +4009,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     vals = [int(x) for x in splitter_sizes]
                     if self._use_pg_dockarea_pre_layout:
                         if len(vals) >= 3:
-                            self.pre_splitter.setSizes([vals[0], max(640, vals[1] + vals[2])])
+                            self._set_pre_splitter_sizes(vals[0], max(640, vals[1] + vals[2]))
                         elif len(vals) == 2:
-                            self.pre_splitter.setSizes(vals[:2])
+                            self._set_pre_splitter_sizes(vals[0], vals[1])
                     elif len(vals) >= 3:
                         left = max(260, vals[0])
                         center = max(640, vals[1] + vals[2])
-                        self.pre_splitter.setSizes([left, center])
+                        self._set_pre_splitter_sizes(left, center)
                     elif len(vals) == 2:
-                        self.pre_splitter.setSizes(vals[:2])
+                        self._set_pre_splitter_sizes(vals[0], vals[1])
             except Exception:
                 pass
             try:
@@ -4045,16 +4046,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     vals = [int(x) for x in splitter_sizes]
                     if self._use_pg_dockarea_pre_layout:
                         if len(vals) >= 3:
-                            self.pre_splitter.setSizes([vals[0], max(640, vals[1] + vals[2])])
+                            self._set_pre_splitter_sizes(vals[0], max(640, vals[1] + vals[2]))
                         elif len(vals) == 2:
-                            self.pre_splitter.setSizes(vals[:2])
+                            self._set_pre_splitter_sizes(vals[0], vals[1])
                     elif len(vals) >= 3:
                         # Migrate old 3-pane [left, center, right] into [left, center+right].
                         left = max(260, vals[0])
                         center = max(640, vals[1] + vals[2])
-                        self.pre_splitter.setSizes([left, center])
+                        self._set_pre_splitter_sizes(left, center)
                     elif len(vals) == 2:
-                        self.pre_splitter.setSizes(vals[:2])
+                        self._set_pre_splitter_sizes(vals[0], vals[1])
             except Exception:
                 pass
 
@@ -4133,6 +4134,15 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         try:
             self.settings.sync()
+        except Exception:
+            pass
+
+    def _set_pre_splitter_sizes(self, data_width: int, center_width: int) -> None:
+        """Apply logical [data, center] sizes to the preprocessing splitter."""
+        try:
+            data = max(0, int(data_width))
+            center = max(640, int(center_width))
+            self.pre_splitter.setSizes([data, center])
         except Exception:
             pass
 

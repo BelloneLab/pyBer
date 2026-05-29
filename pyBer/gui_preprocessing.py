@@ -847,13 +847,41 @@ class FileQueuePanel(QtWidgets.QGroupBox):
 
     def __init__(self, parent=None) -> None:
         super().__init__("Data", parent)
+        self.setObjectName("fileQueuePanel")
         self._current_dir_hint: str = ""
         self._build_ui()
 
     def _build_ui(self) -> None:
         v = QtWidgets.QVBoxLayout(self)
-        v.setSpacing(8)
-        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(10)
+        v.setContentsMargins(10, 10, 10, 10)
+        self.setStyleSheet(
+            """
+            #fileQueuePanel QLabel[class="fieldLabel"] {
+                color: #d7e2f2;
+                font-weight: 650;
+                padding: 0 0 2px 1px;
+            }
+            #fileQueuePanel QLabel[class="pathHint"] {
+                color: #a9b7cb;
+                padding: 2px 1px 0 1px;
+            }
+            #fileQueuePanel QGroupBox#fileQueueSelectionBox {
+                margin-top: 12px;
+            }
+            #fileQueuePanel QGroupBox#fileQueueSelectionBox::title {
+                left: 10px;
+                padding: 0 8px;
+            }
+            #fileQueuePanel QListWidget {
+                padding: 6px;
+            }
+            #fileQueuePanel QListWidget::item {
+                min-height: 22px;
+                padding: 4px 6px;
+            }
+            """
+        )
 
         # Top actions
         top_row = QtWidgets.QHBoxLayout()
@@ -867,9 +895,10 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         top_row.addWidget(self.btn_folder)
 
         # File list fills available height
-        self.list_files = PlaceholderListWidget("Drop files here or click Open File")
+        self.list_files = PlaceholderListWidget("Drop Doric/HDF5/CSV files here\nor click Open File")
         self.list_files.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.list_files.setMinimumHeight(180)
+        self.list_files.setMinimumHeight(210)
+        self.list_files.setUniformItemSizes(True)
 
         self.btn_remove_file = QtWidgets.QPushButton("Remove selected")
         self.btn_remove_file.setProperty("class", "blueSecondarySmall")
@@ -879,46 +908,69 @@ class FileQueuePanel(QtWidgets.QGroupBox):
 
         # Selection block
         self.grp_sel = QtWidgets.QGroupBox("Selection")
-        form = QtWidgets.QGridLayout(self.grp_sel)
-        form.setContentsMargins(8, 8, 8, 8)
-        form.setHorizontalSpacing(6)
-        form.setVerticalSpacing(6)
+        self.grp_sel.setObjectName("fileQueueSelectionBox")
+        form = QtWidgets.QVBoxLayout(self.grp_sel)
+        form.setContentsMargins(12, 14, 12, 12)
+        form.setSpacing(8)
 
         self.combo_channel = QtWidgets.QComboBox()
-        self.combo_channel.setMinimumWidth(60)
-        _compact_combo(self.combo_channel, min_chars=6)
+        self.combo_channel.setMinimumWidth(180)
+        _compact_combo(self.combo_channel, min_chars=18)
 
         self.combo_trigger = QtWidgets.QComboBox()
-        self.combo_trigger.setMinimumWidth(60)
-        _compact_combo(self.combo_trigger, min_chars=6)
+        self.combo_trigger.setMinimumWidth(180)
+        _compact_combo(self.combo_trigger, min_chars=18)
         self.combo_trigger.addItem("")
 
         self.edit_time_start = QtWidgets.QLineEdit()
         self.edit_time_end = QtWidgets.QLineEdit()
         for ed in (self.edit_time_start, self.edit_time_end):
-            ed.setPlaceholderText("Start (s)" if ed is self.edit_time_start else "End (s)")
+            ed.setPlaceholderText("Start" if ed is self.edit_time_start else "End")
             val = QtGui.QDoubleValidator(0.0, 1e9, 3, ed)
             val.setLocale(_system_locale())
             ed.setValidator(val)
+            ed.setMinimumWidth(82)
             ed.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
 
-        form.addWidget(QtWidgets.QLabel("Channel"), 0, 0)
-        form.addWidget(self.combo_channel, 0, 1, 1, 3)
-        form.addWidget(QtWidgets.QLabel("Analog/Digital channel"), 1, 0)
-        form.addWidget(self.combo_trigger, 1, 1, 1, 3)
-        form.addWidget(QtWidgets.QLabel("Time window"), 2, 0)
-        form.addWidget(self.edit_time_start, 2, 1)
-        form.addWidget(QtWidgets.QLabel("to"), 2, 2)
-        form.addWidget(self.edit_time_end, 2, 3)
+        self.combo_channel.setToolTip("Signal channel to preprocess.")
+        self.combo_trigger.setToolTip("Optional trigger channel used for overlay and export alignment.")
+        self.edit_time_start.setToolTip("Optional window start in seconds.")
+        self.edit_time_end.setToolTip("Optional window end in seconds.")
+
+        def _field(label_text: str, field: QtWidgets.QWidget) -> QtWidgets.QWidget:
+            box = QtWidgets.QWidget()
+            lay = QtWidgets.QVBoxLayout(box)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(3)
+            lab = QtWidgets.QLabel(label_text)
+            lab.setProperty("class", "fieldLabel")
+            lay.addWidget(lab)
+            lay.addWidget(field)
+            return box
+
+        time_row = QtWidgets.QWidget()
+        time_lay = QtWidgets.QHBoxLayout(time_row)
+        time_lay.setContentsMargins(0, 0, 0, 0)
+        time_lay.setSpacing(6)
+        to_label = QtWidgets.QLabel("to")
+        to_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        to_label.setMinimumWidth(20)
+        time_lay.addWidget(self.edit_time_start, 1)
+        time_lay.addWidget(to_label, 0)
+        time_lay.addWidget(self.edit_time_end, 1)
+
+        form.addWidget(_field("Signal channel", self.combo_channel))
+        form.addWidget(_field("Trigger channel", self.combo_trigger))
+        form.addWidget(_field("Time window (s)", time_row))
         self.btn_cutting = QtWidgets.QPushButton("Cutting / Sectioning")
         self.btn_cutting.setProperty("class", "blueSecondarySmall")
         self.btn_cutting.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-        form.addWidget(self.btn_cutting, 3, 0, 1, 4)
-        form.setColumnStretch(1, 1)
-        form.setColumnStretch(3, 1)
+        form.addWidget(self.btn_cutting)
 
         self.lbl_hint = QtWidgets.QLabel("")
-        self.lbl_hint.setProperty("class", "hint")
+        self.lbl_hint.setProperty("class", "pathHint")
+        self.lbl_hint.setWordWrap(True)
+        self.lbl_hint.setMaximumHeight(42)
         self.lbl_hint.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
 
         v.addLayout(top_row)
@@ -966,20 +1018,35 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         self.btn_qc_batch.clicked.connect(self.batchQcRequested.emit)
 
     def set_path_hint(self, text: str) -> None:
-        self.lbl_hint.setText(text)
+        self.lbl_hint.setText(self._format_path_hint(text))
+        self.lbl_hint.setToolTip(text or "")
         if text and os.path.isdir(text):
             self._current_dir_hint = text
 
     def path_hint(self) -> str:
-        return self.lbl_hint.text()
+        return self.lbl_hint.toolTip() or self.lbl_hint.text()
 
     def set_current_dir_hint(self, dir_path: str) -> None:
         self._current_dir_hint = dir_path or ""
         if dir_path:
-            self.lbl_hint.setText(dir_path)
+            self.lbl_hint.setText(self._format_path_hint(dir_path))
+            self.lbl_hint.setToolTip(dir_path)
 
     def current_dir_hint(self) -> str:
         return self._current_dir_hint
+
+    def _format_path_hint(self, path: str) -> str:
+        text = str(path or "").strip()
+        if not text:
+            return ""
+        try:
+            parent = os.path.basename(os.path.dirname(text))
+            name = os.path.basename(text)
+            if name and parent:
+                return f"Folder: {parent}/{name}"
+            return f"Folder: {name or text}"
+        except Exception:
+            return text
 
     def add_file(self, path: str) -> None:
         item = QtWidgets.QListWidgetItem(os.path.basename(path))
