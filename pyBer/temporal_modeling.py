@@ -1216,6 +1216,23 @@ QToolButton:checked {
     background: #1f6db1;
     border: 1px solid #35a4e8;
 }
+QToolButton#paramHelpButton {
+    color: #9bd8ff;
+    background: #101b2b;
+    border: 1px solid #38597a;
+    border-radius: 9px;
+    padding: 0;
+    min-width: 18px;
+    max-width: 18px;
+    min-height: 18px;
+    max-height: 18px;
+    font-weight: 800;
+}
+QToolButton#paramHelpButton:hover {
+    color: #ffffff;
+    background: #1f6db1;
+    border: 1px solid #35a4e8;
+}
 QTabWidget::pane {
     border: 1px solid #263a52;
     border-radius: 6px;
@@ -1338,6 +1355,23 @@ QToolButton:hover {
     border: 1px solid #93c5fd;
 }
 QToolButton:checked {
+    color: #ffffff;
+    background: #2563eb;
+    border: 1px solid #1d4ed8;
+}
+QToolButton#paramHelpButton {
+    color: #1d4ed8;
+    background: #eef6ff;
+    border: 1px solid #93c5fd;
+    border-radius: 9px;
+    padding: 0;
+    min-width: 18px;
+    max-width: 18px;
+    min-height: 18px;
+    max-height: 18px;
+    font-weight: 800;
+}
+QToolButton#paramHelpButton:hover {
     color: #ffffff;
     background: #2563eb;
     border: 1px solid #1d4ed8;
@@ -1786,7 +1820,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.combo_fit_scope.setToolTip(
             "Active: fit the selected animal only.\n"
             "All: concatenate every loaded recording into one GLM.\n"
-            "Per-file batch: fit each animal independently, then aggregate for the Group tab."
+            "Per-file batch: snapshot the current predictor list, fit each animal independently with that same set, "
+            "then aggregate for the Group tab."
         )
         sb.addWidget(self.combo_fit_scope)
 
@@ -1904,50 +1939,89 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         self.combo_basis = QtWidgets.QComboBox()
         self.combo_basis.addItems(["Raised cosine", "B-spline", "FIR"])
-        gl.addRow("Basis", self.combo_basis)
+        gl.addRow(self._help_label(
+            "Basis",
+            "Controls the temporal shape used to model each predictor kernel. "
+            "Raised cosine is smooth and stable, B-spline is flexible, FIR is least constrained and needs more data.",
+            self.combo_basis,
+        ), self.combo_basis)
 
         self.spin_n_basis = QtWidgets.QSpinBox()
         self.spin_n_basis.setRange(2, 50)
         self.spin_n_basis.setValue(8)
-        gl.addRow("Basis count", self.spin_n_basis)
+        gl.addRow(self._help_label(
+            "Basis count",
+            "Number of basis functions per predictor. Higher values capture faster or more complex kernels, "
+            "but increase parameters and overfitting risk.",
+            self.spin_n_basis,
+        ), self.spin_n_basis)
 
         self.combo_reg = QtWidgets.QComboBox()
         self.combo_reg.addItems(["Ridge", "Lasso", "OLS"])
-        gl.addRow("Regularization", self.combo_reg)
+        gl.addRow(self._help_label(
+            "Regularization",
+            "Penalty used during fitting. Ridge shrinks correlated predictors smoothly, Lasso can zero weak predictors, "
+            "OLS is unpenalized and can be unstable with many or correlated predictors.",
+            self.combo_reg,
+        ), self.combo_reg)
 
         self.spin_alpha = QtWidgets.QDoubleSpinBox()
         self.spin_alpha.setRange(0.001, 1000.0)
         self.spin_alpha.setValue(1.0)
         self.spin_alpha.setDecimals(3)
-        gl.addRow("Alpha", self.spin_alpha)
+        gl.addRow(self._help_label(
+            "Alpha",
+            "Regularization strength for Ridge or Lasso. Larger alpha gives smoother, smaller kernels and less variance, "
+            "but can hide real effects. OLS ignores this value.",
+            self.spin_alpha,
+        ), self.spin_alpha)
 
         self.spin_kernel_pre = QtWidgets.QDoubleSpinBox()
         self.spin_kernel_pre.setRange(-30.0, 0.0)
         self.spin_kernel_pre.setValue(-1.0)
         self.spin_kernel_pre.setDecimals(1)
         self.spin_kernel_pre.setSuffix(" s")
-        gl.addRow("Kernel pre", self.spin_kernel_pre)
+        gl.addRow(self._help_label(
+            "Kernel pre",
+            "Seconds before each event included in the kernel. Use this to detect pre-event ramps or anticipatory effects. "
+            "Longer windows cost more parameters.",
+            self.spin_kernel_pre,
+        ), self.spin_kernel_pre)
 
         self.spin_kernel_post = QtWidgets.QDoubleSpinBox()
         self.spin_kernel_post.setRange(0.1, 60.0)
         self.spin_kernel_post.setValue(3.0)
         self.spin_kernel_post.setDecimals(1)
         self.spin_kernel_post.setSuffix(" s")
-        gl.addRow("Kernel post", self.spin_kernel_post)
+        gl.addRow(self._help_label(
+            "Kernel post",
+            "Seconds after each event included in the kernel. Increase it for slow photometry responses, "
+            "but avoid overly long windows that mix unrelated events.",
+            self.spin_kernel_post,
+        ), self.spin_kernel_post)
 
         self.spin_glm_bootstrap = QtWidgets.QSpinBox()
         self.spin_glm_bootstrap.setRange(0, 2000)
         self.spin_glm_bootstrap.setValue(100)
         self.spin_glm_bootstrap.setSpecialValueText("off")
         self.spin_glm_bootstrap.setToolTip("Circular-shift bootstraps for leave-one-out contribution p-values.")
-        gl.addRow("Shift bootstraps", self.spin_glm_bootstrap)
+        gl.addRow(self._help_label(
+            "Shift bootstraps",
+            "Number of circular-shift null fits for predictor contribution p-values and kernel confidence intervals. "
+            "More iterations improve p-value resolution but take longer.",
+            self.spin_glm_bootstrap,
+        ), self.spin_glm_bootstrap)
 
         self.spin_glm_jobs = QtWidgets.QSpinBox()
         max_jobs = max(1, os.cpu_count() or 1)
         self.spin_glm_jobs.setRange(1, max_jobs)
         self.spin_glm_jobs.setValue(min(4, max_jobs))
         self.spin_glm_jobs.setToolTip("Parallel jobs used for circular-shift bootstrap fits.")
-        gl.addRow("Bootstrap jobs", self.spin_glm_jobs)
+        gl.addRow(self._help_label(
+            "Bootstrap jobs",
+            "Parallel worker count for bootstrap fits. More jobs can speed up analysis, but also use more CPU and memory.",
+            self.spin_glm_jobs,
+        ), self.spin_glm_jobs)
 
         self.spin_glm_cv_folds = QtWidgets.QSpinBox()
         self.spin_glm_cv_folds.setRange(0, 20)
@@ -1958,7 +2032,12 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             "Set 0/auto to let pyBer pick: one fold per file when multiple files "
             "are loaded, otherwise 5 contiguous time blocks for a single file."
         )
-        gl.addRow("CV folds", self.spin_glm_cv_folds)
+        gl.addRow(self._help_label(
+            "CV folds",
+            "Number of held-out folds for out-of-sample R^2. More folds use data efficiently but take longer. "
+            "Auto uses files as folds when possible.",
+            self.spin_glm_cv_folds,
+        ), self.spin_glm_cv_folds)
         lay.addWidget(self.grp_glm)
 
         self.grp_flmm = QtWidgets.QGroupBox("FLMM Settings")
@@ -1974,22 +2053,47 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         self.edit_formula = QtWidgets.QLineEdit("Y.obs ~ 1")
         self.edit_formula.setPlaceholderText("Leave as Y.obs ~ 1 to auto-use selected predictors")
-        fl.addRow("Fixed formula", self.edit_formula)
+        fl.addRow(self._help_label(
+            "Fixed formula",
+            "R fixed-effect formula. Leave as Y.obs ~ 1 to automatically include selected predictors. "
+            "Custom formulas let you test a specific hypothesis, but omitted predictors are not estimated.",
+            self.edit_formula,
+        ), self.edit_formula)
         self.edit_random = QtWidgets.QLineEdit("~1")
         self.edit_random.setPlaceholderText("e.g. ~1 or ~time")
-        fl.addRow("Random", self.edit_random)
+        fl.addRow(self._help_label(
+            "Random",
+            "Random-effect structure for repeated trials or subjects. ~1 estimates baseline differences. "
+            "More complex terms can model subject-specific trends but need more repeated observations.",
+            self.edit_random,
+        ), self.edit_random)
         self.edit_group_var = QtWidgets.QLineEdit("subject")
-        fl.addRow("Group var", self.edit_group_var)
+        fl.addRow(self._help_label(
+            "Group var",
+            "Column used as the random-effect grouping variable, usually subject or animal. "
+            "Wrong grouping can make uncertainty estimates misleading.",
+            self.edit_group_var,
+        ), self.edit_group_var)
         self.spin_nknots = QtWidgets.QSpinBox()
         self.spin_nknots.setRange(0, 100)
         self.spin_nknots.setValue(0)
         self.spin_nknots.setSpecialValueText("auto")
-        fl.addRow("Min knots", self.spin_nknots)
+        fl.addRow(self._help_label(
+            "Min knots",
+            "Minimum spline knots for fastFMM. More knots allow sharper time-varying coefficient curves, "
+            "but can overfit noisy peri-event responses.",
+            self.spin_nknots,
+        ), self.spin_nknots)
         self.spin_boots = QtWidgets.QSpinBox()
         self.spin_boots.setRange(0, 5000)
         self.spin_boots.setValue(0)
         self.spin_boots.setSpecialValueText("analytic")
-        fl.addRow("Bootstrap iter", self.spin_boots)
+        fl.addRow(self._help_label(
+            "Bootstrap iter",
+            "Bootstrap iterations for FLMM uncertainty when supported. Analytic is faster. "
+            "Bootstrap can be more robust but increases runtime heavily.",
+            self.spin_boots,
+        ), self.spin_boots)
         self.combo_flmm_importance = QtWidgets.QComboBox()
         self.combo_flmm_importance.addItem("Fast coefficient ranking", "fast")
         self.combo_flmm_importance.addItem("Permutation contribution test", "perm")
@@ -2001,7 +2105,12 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             "refit, derive a p-value for variable contribution (slower but rigorous).\n"
             "Leave-one-out: refit FLMM without each predictor and compare AICs (very slow)."
         )
-        fl.addRow("Contribution", self.combo_flmm_importance)
+        fl.addRow(self._help_label(
+            "Contribution",
+            "How variable importance is estimated. Fast is descriptive, permutation gives a null test, "
+            "leave-one-out AIC is rigorous but very slow.",
+            self.combo_flmm_importance,
+        ), self.combo_flmm_importance)
 
         self.spin_flmm_perm = QtWidgets.QSpinBox()
         self.spin_flmm_perm.setRange(50, 5000)
@@ -2012,7 +2121,12 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             "(only used when Contribution = Permutation). The smallest "
             "achievable p-value is 1/(N+1)."
         )
-        fl.addRow("Permutations", self.spin_flmm_perm)
+        fl.addRow(self._help_label(
+            "Permutations",
+            "Number of shuffled-label FLMM refits for contribution testing. Higher values give finer p-values "
+            "and more stable results, but scale runtime linearly.",
+            self.spin_flmm_perm,
+        ), self.spin_flmm_perm)
         lay.addWidget(self.grp_flmm)
         lay.addStretch(1)
         self.stack_controls.addWidget(page)
@@ -2038,8 +2152,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         row = QtWidgets.QHBoxLayout()
         self.btn_add_predictor = QtWidgets.QPushButton("+ Add")
+        self.btn_add_all_predictors = QtWidgets.QPushButton("Add all variables")
+        self.btn_add_all_predictors.setToolTip(
+            "Add every currently available predictor to the model. Remove unwanted variables from the selected list before fitting."
+        )
         self.btn_remove_predictor = QtWidgets.QPushButton("- Remove")
         row.addWidget(self.btn_add_predictor)
+        row.addWidget(self.btn_add_all_predictors)
         row.addWidget(self.btn_remove_predictor)
         row.addStretch(1)
         pl.addLayout(row)
@@ -2066,7 +2185,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         hint = QtWidgets.QLabel(
             "Select an animal to make it the active recording. The Group tab aggregates "
-            "per-file fits once you run a Per-file batch."
+            "per-file fits once you run a Per-file batch. Batch fitting uses the current predictor list for every file."
         )
         hint.setProperty("class", "muted")
         hint.setWordWrap(True)
@@ -2077,8 +2196,12 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.list_files.setMinimumHeight(220)
         gl.addWidget(self.list_files, 1)
 
-        self.btn_fit_all_files = QtWidgets.QPushButton("Fit each file (per-file batch)")
+        self.btn_fit_all_files = QtWidgets.QPushButton("Fit all files with current predictors")
         self.btn_fit_all_files.setProperty("class", "primary")
+        self.btn_fit_all_files.setToolTip(
+            "Run one GLM per loaded file using the exact predictor list currently shown in the Predictors panel. "
+            "The same set is attempted for every file, then cached and aggregated in the Group tab."
+        )
         gl.addWidget(self.btn_fit_all_files)
 
         self.lbl_batch_status = QtWidgets.QLabel("")
@@ -2429,6 +2552,28 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
         return btn
 
+    def _make_param_help(self, text: str) -> QtWidgets.QToolButton:
+        btn = QtWidgets.QToolButton()
+        btn.setObjectName("paramHelpButton")
+        btn.setText("?")
+        btn.setAutoRaise(True)
+        btn.setCursor(QtCore.Qt.CursorShape.WhatsThisCursor)
+        btn.setToolTip(str(text or ""))
+        return btn
+
+    def _help_label(self, label: str, help_text: str, field: Optional[QtWidgets.QWidget] = None) -> QtWidgets.QWidget:
+        if field is not None and not field.toolTip():
+            field.setToolTip(help_text)
+        wrap = QtWidgets.QWidget()
+        lay = QtWidgets.QHBoxLayout(wrap)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(5)
+        lbl = QtWidgets.QLabel(label)
+        lay.addWidget(lbl)
+        lay.addWidget(self._make_param_help(help_text))
+        lay.addStretch(1)
+        return wrap
+
     def _select_control_page(self, index: int) -> None:
         self.stack_controls.setCurrentIndex(index)
         buttons = (self.btn_nav_model, self.btn_nav_predictors, self.btn_nav_files, self.btn_nav_fit)
@@ -2540,6 +2685,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.combo_model_type.currentIndexChanged.connect(self._on_model_type_changed)
         self.btn_fit.clicked.connect(self._on_fit_clicked)
         self.btn_add_predictor.clicked.connect(self._on_add_predictor)
+        if hasattr(self, "btn_add_all_predictors"):
+            self.btn_add_all_predictors.clicked.connect(self._on_add_all_predictors)
         self.btn_remove_predictor.clicked.connect(self._on_remove_predictor)
         for widget in (
             self.combo_basis,
@@ -2551,8 +2698,10 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.spin_kernel_post,
             self.spin_glm_bootstrap,
             self.spin_glm_jobs,
+            self.spin_glm_cv_folds,
             self.spin_nknots,
             self.spin_boots,
+            self.spin_flmm_perm,
         ):
             signal = getattr(widget, "currentIndexChanged", None) or getattr(widget, "valueChanged", None)
             if signal is not None:
@@ -2604,11 +2753,15 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self.spin_kernel_post.setValue(float(self._settings.value(prefix + "kernel_post", self.spin_kernel_post.value())))
             self.spin_glm_bootstrap.setValue(int(self._settings.value(prefix + "glm_shift_bootstraps", self.spin_glm_bootstrap.value())))
             self.spin_glm_jobs.setValue(int(self._settings.value(prefix + "glm_bootstrap_jobs", self.spin_glm_jobs.value())))
+            if hasattr(self, "spin_glm_cv_folds"):
+                self.spin_glm_cv_folds.setValue(int(self._settings.value(prefix + "glm_cv_folds", self.spin_glm_cv_folds.value())))
             self.edit_formula.setText(str(self._settings.value(prefix + "flmm_formula", self.edit_formula.text()) or "Y.obs ~ 1"))
             self.edit_random.setText(str(self._settings.value(prefix + "flmm_random", self.edit_random.text()) or "~1"))
             self.edit_group_var.setText(str(self._settings.value(prefix + "flmm_group_var", self.edit_group_var.text()) or "subject"))
             self.spin_nknots.setValue(int(self._settings.value(prefix + "flmm_nknots", self.spin_nknots.value())))
             self.spin_boots.setValue(int(self._settings.value(prefix + "flmm_boots", self.spin_boots.value())))
+            if hasattr(self, "spin_flmm_perm"):
+                self.spin_flmm_perm.setValue(int(self._settings.value(prefix + "flmm_permutations", self.spin_flmm_perm.value())))
             mode = str(self._settings.value(prefix + "flmm_importance_mode", "fast") or "fast")
             idx = self.combo_flmm_importance.findData(mode, QtCore.Qt.ItemDataRole.UserRole)
             if idx < 0:
@@ -2651,12 +2804,16 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self._settings.setValue(prefix + "kernel_post", self.spin_kernel_post.value())
         self._settings.setValue(prefix + "glm_shift_bootstraps", self.spin_glm_bootstrap.value())
         self._settings.setValue(prefix + "glm_bootstrap_jobs", self.spin_glm_jobs.value())
+        if hasattr(self, "spin_glm_cv_folds"):
+            self._settings.setValue(prefix + "glm_cv_folds", self.spin_glm_cv_folds.value())
         self._settings.setValue(prefix + "flmm_formula", self.edit_formula.text().strip())
         self._settings.setValue(prefix + "flmm_random", self.edit_random.text().strip())
         self._settings.setValue(prefix + "flmm_group_var", self.edit_group_var.text().strip())
         self._settings.setValue(prefix + "flmm_nknots", self.spin_nknots.value())
         self._settings.setValue(prefix + "flmm_boots", self.spin_boots.value())
         self._settings.setValue(prefix + "flmm_importance_mode", self.combo_flmm_importance.currentData(QtCore.Qt.ItemDataRole.UserRole) or "fast")
+        if hasattr(self, "spin_flmm_perm"):
+            self._settings.setValue(prefix + "flmm_permutations", self.spin_flmm_perm.value())
         predictors = self._selected_predictor_keys() if hasattr(self, "list_predictors") else self._saved_predictor_keys
         predictors = list(predictors)
         self._saved_predictor_keys = list(predictors)
@@ -3850,9 +4007,12 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         return np.zeros(time.size, float), str(entry.get("kind", "event"))
 
     def _build_glm_dataset_from_selected_predictors(
-        self, file_filter: Optional[str] = None
+        self,
+        file_filter: Optional[str] = None,
+        predictor_keys: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        selected = self._selected_predictor_keys()
+        selected = [str(key).strip() for key in (predictor_keys if predictor_keys is not None else self._selected_predictor_keys())]
+        selected = [key for key in selected if key in self._predictor_catalog]
         if not selected:
             return {"error": "Choose at least one predictor before fitting."}
         if not self._processed_trials:
@@ -6232,6 +6392,20 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self._save_temporal_settings()
             self.statusMessage.emit(f"Added predictor: {self._predictor_label(key)}", 3000)
 
+    def _on_add_all_predictors(self):
+        if not self._predictor_catalog:
+            self.statusMessage.emit("No predictors are available yet. Load or compute behavior/events first.", 5000)
+            return
+        added = 0
+        for key in self._predictor_catalog.keys():
+            if self._add_predictor_item(key):
+                added += 1
+        self._save_temporal_settings()
+        if added:
+            self.statusMessage.emit(f"Added {added} predictor(s). Remove unwanted variables before fitting.", 4000)
+        else:
+            self.statusMessage.emit("All available predictors are already selected.", 3000)
+
     def _on_remove_predictor(self):
         sel = self.list_predictors.currentRow()
         if sel >= 0:
@@ -6943,9 +7117,16 @@ class TemporalModelingWidget(QtWidgets.QWidget):
     # GLM fit
     # ------------------------------------------------------------------
 
-    def _fit_glm_catalog(self, file_filter: Optional[str] = None) -> Optional[GLMResult]:
+    def _fit_glm_catalog(
+        self,
+        file_filter: Optional[str] = None,
+        predictor_keys: Optional[List[str]] = None,
+    ) -> Optional[GLMResult]:
         self._save_temporal_settings()
-        dataset = self._build_glm_dataset_from_selected_predictors(file_filter=file_filter)
+        dataset = self._build_glm_dataset_from_selected_predictors(
+            file_filter=file_filter,
+            predictor_keys=predictor_keys,
+        )
         if "error" in dataset:
             msg = str(dataset.get("error", "Could not build GLM dataset."))
             dropped = dataset.get("dropped_predictors", []) or []
@@ -7164,10 +7345,20 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         return result
 
     def _fit_glm_per_file_batch(self) -> None:
-        """Fit each loaded file independently and populate the Group tab."""
+        """Fit each loaded file independently with one fixed predictor set."""
         if not self._processed_trials:
             self.statusMessage.emit("No recordings loaded.", 5000)
             return
+        batch_predictors = [
+            key for key in self._selected_predictor_keys()
+            if key in self._predictor_catalog
+        ]
+        if not batch_predictors:
+            self.statusMessage.emit("Choose predictors before running the batch.", 5000)
+            self._select_control_page(1)
+            return
+        self._saved_predictor_keys = list(batch_predictors)
+        self._save_temporal_settings()
         file_ids = [
             self._proc_file_id(p, fallback=f"file_{i + 1}")
             for i, p in enumerate(self._processed_trials)
@@ -7185,7 +7376,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 self.lbl_batch_status.setText(f"Fitting {idx}/{n}: {fid}")
                 QtWidgets.QApplication.processEvents()
             try:
-                result = self._fit_glm_catalog(file_filter=fid)
+                result = self._fit_glm_catalog(file_filter=fid, predictor_keys=batch_predictors)
             except Exception as exc:
                 _LOG.warning("Per-file fit failed for %s: %s", fid, exc)
                 result = None
@@ -7195,7 +7386,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             self._progress_update(idx, f"Per-file batch ({idx}/{n})")
         if hasattr(self, "lbl_batch_status"):
             self.lbl_batch_status.setText(
-                f"Batch complete: {len(ok_results)}/{n} files fit successfully."
+                f"Batch complete: {len(ok_results)}/{n} files fit successfully with {len(batch_predictors)} shared predictor(s)."
             )
         self._aggregate_group_results()
         if hasattr(self, "tabs_workspace") and ok_results:

@@ -948,6 +948,39 @@ QFrame#transportBar {
     border-radius: 12px;
 }
 
+QFrame#SidePanel, QFrame#syncPanel {
+    background: #1f242e;
+    border: 1px solid #343c4d;
+    border-radius: 8px;
+}
+
+QFrame#SidePanel QListWidget {
+    background: #202631;
+    border: 1px solid #3a4050;
+    border-radius: 8px;
+    padding: 4px;
+}
+
+QFrame#SidePanel QListWidget::item {
+    padding: 8px;
+    border-radius: 6px;
+    margin: 2px 0;
+}
+
+QFrame#SidePanel QListWidget::item:selected {
+    background: #4a3678;
+    color: #ffffff;
+}
+
+QLabel#BadgeLabel {
+    background: #243342;
+    border: 1px solid #3d5669;
+    border-radius: 10px;
+    color: #9ee6f4;
+    padding: 4px 8px;
+    font-weight: 700;
+}
+
 QToolButton#toolbarIconButton {
     background: #1f242e;
     border: 1px solid #343c4d;
@@ -1421,6 +1454,18 @@ QPushButton#railButton:checked, QPushButton#railToggleButton:checked {
 /* Drawer panels */
 QFrame#drawerPanel, QFrame#centerPanel { background: #ffffff; border: 1px solid #d6dde9; }
 QFrame#transportBar { background: #eef1f7; border: 1px solid #d6dde9; }
+QFrame#SidePanel, QFrame#syncPanel { background: #ffffff; border: 1px solid #d6dde9; border-radius: 8px; }
+QFrame#SidePanel QListWidget { background: #f7f9fc; border: 1px solid #d6dde9; border-radius: 8px; padding: 4px; }
+QFrame#SidePanel QListWidget::item { padding: 8px; border-radius: 6px; margin: 2px 0; }
+QFrame#SidePanel QListWidget::item:selected { background: #2563eb; color: #ffffff; }
+QLabel#BadgeLabel {
+    background: #dbeafe;
+    border: 1px solid #93c5fd;
+    border-radius: 10px;
+    color: #172033;
+    padding: 4px 8px;
+    font-weight: 700;
+}
 QToolButton#toolbarIconButton {
     background: #ffffff;
     border: 1px solid #c2ccda;
