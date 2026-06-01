@@ -164,6 +164,59 @@ def _paired_by_offset(
     return cam[start_cam:start_cam + n], fib[:n]
 
 
+def _overlap_candidate_offsets(
+    camera_events: np.ndarray,
+    fiber_events: np.ndarray,
+    *,
+    max_candidates: int = 200,
+) -> List[int]:
+    """Infer plausible pulse offsets when both event vectors share a time range."""
+    cam = np.asarray(camera_events, float).reshape(-1)
+    fib = np.asarray(fiber_events, float).reshape(-1)
+    if cam.size < 2 or fib.size < 2:
+        return []
+
+    overlap_start = max(float(cam[0]), float(fib[0]))
+    overlap_end = min(float(cam[-1]), float(fib[-1]))
+    cam_span = max(0.0, float(cam[-1] - cam[0]))
+    fib_span = max(0.0, float(fib[-1] - fib[0]))
+    overlap_span = overlap_end - overlap_start
+    min_span = min(cam_span, fib_span)
+    if overlap_span <= 0.0 or min_span <= 0.0:
+        return []
+    if overlap_span < max(1.0, 0.02 * min_span):
+        return []
+
+    offsets: set[int] = set()
+
+    def _sample_indices(indices: np.ndarray) -> np.ndarray:
+        idx = np.asarray(indices, int)
+        if idx.size <= 64:
+            return idx
+        picks = np.linspace(0, idx.size - 1, 64)
+        return np.unique(idx[np.round(picks).astype(int)])
+
+    cam_idx = _sample_indices(np.flatnonzero((cam >= overlap_start) & (cam <= overlap_end)))
+    fib_idx = _sample_indices(np.flatnonzero((fib >= overlap_start) & (fib <= overlap_end)))
+
+    for i_raw in cam_idx:
+        i = int(i_raw)
+        j = int(np.searchsorted(fib, cam[i], side="left"))
+        for jj in (j - 1, j, j + 1):
+            if 0 <= jj < fib.size:
+                offsets.add(int(jj) - i)
+
+    for j_raw in fib_idx:
+        j = int(j_raw)
+        i = int(np.searchsorted(cam, fib[j], side="left"))
+        for ii in (i - 1, i, i + 1):
+            if 0 <= ii < cam.size:
+                offsets.add(j - int(ii))
+
+    ranked = sorted(offsets, key=lambda val: (abs(int(val)), int(val)))
+    return [int(val) for val in ranked[:max(1, int(max_candidates))]]
+
+
 def _fit_linear(camera: np.ndarray, fiber: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray]:
     cam = np.asarray(camera, float)
     fib = np.asarray(fiber, float)
@@ -200,7 +253,10 @@ def match_sync_events(
     best: Optional[Tuple[float, int, int, np.ndarray, np.ndarray]] = None
     max_off = max(0, int(max_offset))
     max_pairs = min(cam.size, fib.size)
-    for offset in range(-max_off, max_off + 1):
+    inferred_offsets = set(_overlap_candidate_offsets(cam, fib))
+    candidate_offsets = set(range(-max_off, max_off + 1))
+    candidate_offsets.update(inferred_offsets)
+    for offset in sorted(candidate_offsets, key=lambda val: (abs(int(val)), int(val))):
         c, f = _paired_by_offset(cam, fib, offset)
         if c.size < min_pairs:
             continue
@@ -221,7 +277,11 @@ def match_sync_events(
         warnings.append("Could not robustly offset-match sync pulses; paired by order.")
         return cam[:n], fib[:n], 0, warnings
     _, neg_n, offset, c_best, f_best = best
-    if int(-neg_n) < min(cam.size, fib.size):
+    if offset in inferred_offsets and abs(int(offset)) > max_off:
+        warnings.append(
+            f"Inferred pulse offset {offset} from overlapping timestamps; check for unmatched leading sync pulses."
+        )
+    elif int(-neg_n) < min(cam.size, fib.size):
         warnings.append(f"Matched with pulse offset {offset}; check for dropped leading sync pulses.")
     return c_best, f_best, int(offset), warnings
 
