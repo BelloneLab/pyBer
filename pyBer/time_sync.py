@@ -58,6 +58,15 @@ class SyncResult:
         }
 
 
+@dataclass(frozen=True)
+class BarcodePacket:
+    start_time: float
+    end_time: float
+    anchor_time: float
+    code: Tuple[int, ...]
+    n_transitions: int
+
+
 def _finite_sorted(time: np.ndarray, signal: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     t = np.asarray(time, float).reshape(-1)
     x = np.asarray(signal, float).reshape(-1)
@@ -101,6 +110,11 @@ def _deduplicate_events(events: np.ndarray, min_interval_s: float) -> np.ndarray
     return np.asarray(keep, float)
 
 
+def _is_barcode_mode(mode: str) -> bool:
+    mode_l = str(mode or "").strip().lower()
+    return "barcode" in mode_l or "change" in mode_l or "value" in mode_l
+
+
 def extract_sync_events(
     time: np.ndarray,
     signal: Optional[np.ndarray] = None,
@@ -120,7 +134,7 @@ def extract_sync_events(
 
     mode_l = str(mode or "").strip().lower()
     polarity_l = str(polarity or "").strip().lower()
-    if "barcode" in mode_l or "change" in mode_l or "value" in mode_l:
+    if _is_barcode_mode(mode_l):
         rounded = np.asarray(x, float)
         finite = rounded[np.isfinite(rounded)]
         if finite.size == 0:
@@ -143,6 +157,87 @@ def extract_sync_events(
     else:
         idx = np.flatnonzero(high[1:] & (~high[:-1])) + 1
     return _deduplicate_events(t[idx], min_interval_s)
+
+
+def decode_barcode_packets(
+    time: np.ndarray,
+    signal: np.ndarray,
+    *,
+    threshold: Optional[float] = None,
+    min_transitions: int = 4,
+) -> List[BarcodePacket]:
+    """Decode binary barcode-like bursts into packet anchors and bit patterns."""
+    t, x = _finite_sorted(time, signal)
+    if t.size < 4:
+        return []
+    finite = x[np.isfinite(x)]
+    if finite.size < 4:
+        return []
+    value_span = float(np.nanmax(finite) - np.nanmin(finite))
+    if not np.isfinite(value_span) or value_span <= 0.0:
+        return []
+    if value_span > 2.0:
+        return []
+
+    thr = _auto_threshold(x) if threshold is None or not np.isfinite(float(threshold)) else float(threshold)
+    values = (x > thr).astype(int)
+    change_idx = np.flatnonzero(values[1:] != values[:-1]) + 1
+    if change_idx.size < max(2, int(min_transitions)):
+        return []
+
+    change_t = t[change_idx]
+    intervals = np.diff(change_t)
+    intervals = intervals[np.isfinite(intervals) & (intervals > 0.0)]
+    if intervals.size < 2:
+        return []
+    short_dt = float(np.nanpercentile(intervals, 35))
+    med_dt = float(np.nanmedian(intervals))
+    if not np.isfinite(short_dt) or short_dt <= 0.0:
+        short_dt = med_dt
+    if not np.isfinite(med_dt) or med_dt <= 0.0:
+        return []
+    gap_threshold = max(0.35, 4.0 * short_dt, 2.5 * med_dt)
+    split_after = np.flatnonzero(np.diff(change_t) > gap_threshold)
+    if split_after.size == 0:
+        return []
+
+    starts = np.r_[0, split_after + 1]
+    stops = np.r_[split_after + 1, change_idx.size]
+    packets: List[BarcodePacket] = []
+    for start, stop in zip(starts, stops):
+        idx = change_idx[int(start):int(stop)]
+        if idx.size < max(2, int(min_transitions)):
+            continue
+        trans_t = t[idx]
+        trans_values = values[idx]
+        local_dt = np.diff(trans_t)
+        local_dt = local_dt[np.isfinite(local_dt) & (local_dt > 0.0)]
+        if local_dt.size < 2:
+            continue
+        unit = float(np.nanpercentile(local_dt, 35))
+        if not np.isfinite(unit) or unit <= 0.0:
+            unit = float(np.nanmedian(local_dt))
+        if not np.isfinite(unit) or unit <= 0.0:
+            continue
+        units = np.clip(np.rint(np.diff(trans_t) / unit).astype(int), 1, 16)
+        if units.size == 0:
+            continue
+        bits: List[int] = []
+        for val, reps in zip(trans_values[:-1], units):
+            bits.extend([int(val)] * int(reps))
+        bits.append(int(trans_values[-1]))
+        if len(bits) < 3 or len(set(bits)) < 2:
+            continue
+        packets.append(
+            BarcodePacket(
+                start_time=float(trans_t[0]),
+                end_time=float(trans_t[-1]),
+                anchor_time=float(trans_t[0]),
+                code=tuple(bits),
+                n_transitions=int(idx.size),
+            )
+        )
+    return packets
 
 
 def _paired_by_offset(
@@ -215,6 +310,149 @@ def _overlap_candidate_offsets(
 
     ranked = sorted(offsets, key=lambda val: (abs(int(val)), int(val)))
     return [int(val) for val in ranked[:max(1, int(max_candidates))]]
+
+
+def _paired_packets_by_offset(
+    camera_packets: List[BarcodePacket],
+    fiber_packets: List[BarcodePacket],
+    offset: int,
+) -> Tuple[List[BarcodePacket], List[BarcodePacket]]:
+    if offset >= 0:
+        n = min(len(camera_packets), len(fiber_packets) - offset)
+        if n <= 0:
+            return [], []
+        return camera_packets[:n], fiber_packets[offset:offset + n]
+    start_cam = -offset
+    n = min(len(camera_packets) - start_cam, len(fiber_packets))
+    if n <= 0:
+        return [], []
+    return camera_packets[start_cam:start_cam + n], fiber_packets[:n]
+
+
+def _barcode_code_distance(a: Tuple[int, ...], b: Tuple[int, ...]) -> float:
+    if not a and not b:
+        return 0.0
+    if not a or not b:
+        return 1.0
+    prev = list(range(len(b) + 1))
+    for i, aval in enumerate(a, start=1):
+        cur = [i] + [0] * len(b)
+        for j, bval in enumerate(b, start=1):
+            cur[j] = min(
+                prev[j] + 1,
+                cur[j - 1] + 1,
+                prev[j - 1] + (0 if aval == bval else 1),
+            )
+        prev = cur
+    return float(prev[-1]) / float(max(len(a), len(b), 1))
+
+
+def match_barcode_packets(
+    camera_packets: List[BarcodePacket],
+    fiber_packets: List[BarcodePacket],
+    *,
+    max_offset: int = 5,
+    min_pairs: int = 2,
+) -> Tuple[np.ndarray, np.ndarray, int, List[str]]:
+    """Match barcode packets by decoded code, then return their anchor times."""
+    warnings: List[str] = []
+    if len(camera_packets) < max(1, int(min_pairs)) or len(fiber_packets) < max(1, int(min_pairs)):
+        return np.array([], float), np.array([], float), 0, ["Not enough decoded barcode packets."]
+
+    cam_anchors = np.asarray([pkt.anchor_time for pkt in camera_packets], float)
+    fib_anchors = np.asarray([pkt.anchor_time for pkt in fiber_packets], float)
+
+    cam_step = float(np.nanmedian(np.diff(cam_anchors))) if cam_anchors.size > 1 else 1.0
+    fib_step = float(np.nanmedian(np.diff(fib_anchors))) if fib_anchors.size > 1 else 1.0
+    typical_step = float(np.nanmedian([cam_step, fib_step]))
+    if not np.isfinite(typical_step) or typical_step <= 0.0:
+        typical_step = 1.0
+    time_tolerance = max(0.35, min(2.0, 0.45 * typical_step))
+    bin_width = max(0.05, min(0.5, 0.12 * typical_step))
+    max_code_distance = 0.35
+
+    pair_rows: List[Tuple[int, int, float, float]] = []
+    for ci, c_pkt in enumerate(camera_packets):
+        for fi, f_pkt in enumerate(fiber_packets):
+            dist = _barcode_code_distance(c_pkt.code, f_pkt.code)
+            if dist <= max_code_distance:
+                pair_rows.append((ci, fi, float(c_pkt.anchor_time - f_pkt.anchor_time), float(dist)))
+    if not pair_rows:
+        return np.array([], float), np.array([], float), 0, ["No decoded barcode packet identities matched."]
+
+    bins: Dict[int, List[Tuple[int, int, float, float]]] = {}
+    for row in pair_rows:
+        key = int(np.round(row[2] / bin_width))
+        bins.setdefault(key, []).append(row)
+    ranked_bins = sorted(
+        bins.items(),
+        key=lambda item: (-len(item[1]), float(np.nanmean([row[3] for row in item[1]])), abs(item[0])),
+    )[:30]
+
+    best: Optional[Tuple[float, int, int, np.ndarray, np.ndarray, float, float]] = None
+    for _bin_key, rows in ranked_bins:
+        lag0 = float(np.nanmedian([row[2] for row in rows]))
+        used_camera: set[int] = set()
+        matched: List[Tuple[int, int, float, float, float]] = []
+        for fi, f_pkt in enumerate(fiber_packets):
+            predicted = float(f_pkt.anchor_time + lag0)
+            left = int(np.searchsorted(cam_anchors, predicted - time_tolerance, side="left"))
+            right = int(np.searchsorted(cam_anchors, predicted + time_tolerance, side="right"))
+            best_local: Optional[Tuple[float, int, float, float]] = None
+            for ci in range(left, right):
+                if ci in used_camera:
+                    continue
+                dist = _barcode_code_distance(camera_packets[ci].code, f_pkt.code)
+                if dist > max_code_distance:
+                    continue
+                dt = abs(float(cam_anchors[ci] - predicted))
+                local_score = dt + time_tolerance * dist
+                candidate = (local_score, ci, dt, dist)
+                if best_local is None or candidate < best_local:
+                    best_local = candidate
+            if best_local is None:
+                continue
+            _local_score, ci, dt, dist = best_local
+            used_camera.add(int(ci))
+            matched.append((int(ci), int(fi), float(cam_anchors[ci]), float(f_pkt.anchor_time), float(dist)))
+        if len(matched) < min_pairs:
+            continue
+        c = np.asarray([row[2] for row in matched], float)
+        f = np.asarray([row[3] for row in matched], float)
+        dists = np.asarray([row[4] for row in matched], float)
+        slope, intercept, fitted, resid = _fit_linear(c, f)
+        finite = resid[np.isfinite(resid)]
+        if finite.size == 0:
+            continue
+        rms = float(np.sqrt(np.nanmean(finite ** 2)))
+        if finite.size >= 4:
+            keep = np.abs(finite - float(np.nanmedian(finite))) <= max(0.15, 0.5 * time_tolerance)
+            if int(np.sum(keep)) >= min_pairs and int(np.sum(keep)) < finite.size:
+                c = c[keep]
+                f = f[keep]
+                dists = dists[keep]
+                slope, intercept, fitted, resid = _fit_linear(c, f)
+                finite = resid[np.isfinite(resid)]
+                if finite.size == 0:
+                    continue
+                rms = float(np.sqrt(np.nanmean(finite ** 2)))
+        mean_dist = float(np.nanmean(dists)) if dists.size else 1.0
+        median_offset = int(np.round(np.nanmedian([row[1] - row[0] for row in matched])))
+        score = rms + 0.05 * mean_dist + 0.5 / np.sqrt(max(1, int(c.size))) + 0.0001 * abs(lag0)
+        candidate = (score, -int(c.size), median_offset, c, f, rms, mean_dist)
+        if best is None or candidate[:3] < best[:3]:
+            best = candidate
+
+    if best is None:
+        return np.array([], float), np.array([], float), 0, ["No decoded barcode packet identities matched."]
+
+    _score, neg_n, offset, c_best, f_best, _rms, mean_dist = best
+    if int(-neg_n) < min(len(camera_packets), len(fiber_packets)):
+        warnings.append(f"Matched barcode packets with median packet offset {offset}.")
+    if mean_dist > 0.0:
+        warnings.append(f"Mean barcode identity edit distance: {mean_dist:.3g}.")
+    warnings.append(f"Decoded barcode packets: camera {len(camera_packets)}, photometry {len(fiber_packets)}.")
+    return np.asarray(c_best, float), np.asarray(f_best, float), int(offset), warnings
 
 
 def _fit_linear(camera: np.ndarray, fiber: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray]:
@@ -307,26 +545,24 @@ def _interp_with_linear_extrapolation(x: np.ndarray, xp: np.ndarray, fp: np.ndar
     return out
 
 
-def align_timebase(
+def _sync_result_from_matches(
     fiber_time: np.ndarray,
     camera_events: np.ndarray,
     fiber_events: np.ndarray,
+    matched_camera_events: np.ndarray,
+    matched_fiber_events: np.ndarray,
     *,
-    method: str = "linear",
-    max_offset: int = 5,
-    min_pairs: int = 2,
+    method: str,
+    pair_offset: int,
+    warnings: List[str],
+    method_prefix: str = "",
 ) -> SyncResult:
-    """Return a camera-time vector for each photometry sample."""
     ft = np.asarray(fiber_time, float).reshape(-1)
-    cam, fib, offset, warnings = match_sync_events(
-        camera_events,
-        fiber_events,
-        max_offset=max_offset,
-        min_pairs=min_pairs,
-    )
+    cam = np.asarray(matched_camera_events, float).reshape(-1)
+    fib = np.asarray(matched_fiber_events, float).reshape(-1)
     if cam.size == 0 or fib.size == 0:
         return SyncResult(
-            method=str(method),
+            method=str(method_prefix or method),
             status="failed",
             aligned_time=np.full(ft.shape, np.nan, dtype=float),
             camera_events=np.asarray(camera_events, float),
@@ -335,21 +571,19 @@ def align_timebase(
             matched_fiber_events=fib,
             fitted_camera_events=np.array([], float),
             residuals=np.array([], float),
-            pair_offset=offset,
-            warnings=warnings,
+            pair_offset=int(pair_offset),
+            warnings=list(warnings),
         )
 
     method_l = str(method or "").strip().lower()
     slope, intercept, fitted, residuals = _fit_linear(cam, fib)
     if "interp" in method_l and cam.size >= 2:
         aligned = _interp_with_linear_extrapolation(ft, fib, cam)
-        method_out = "interpolation"
-        # Keep the linear fit and its residuals for diagnostics.  Interpolation
-        # passes exactly through matched pulses, so interpolation residuals would
-        # hide dropped-pulse or non-linear clock problems in the QC report.
+        base_method = "interpolation"
     else:
         aligned = slope * ft + intercept if np.isfinite(slope) and np.isfinite(intercept) else np.full(ft.shape, np.nan)
-        method_out = "linear_regression"
+        base_method = "linear_regression"
+    method_out = f"{method_prefix}_{base_method}" if method_prefix else base_method
 
     finite_resid = residuals[np.isfinite(residuals)]
     if finite_resid.size:
@@ -366,12 +600,13 @@ def align_timebase(
     drift_ppm = float((slope - 1.0) * 1e6) if np.isfinite(slope) else float("nan")
 
     status = "ok"
+    result_warnings = list(warnings)
     if cam.size < 3:
         status = "warning"
-        warnings.append("Fewer than 3 matched sync events; inspect the residual plot.")
+        result_warnings.append("Fewer than 3 matched sync events; inspect the residual plot.")
     if np.isfinite(rms) and rms > 0.2:
         status = "warning"
-        warnings.append(f"High sync residual RMS ({rms * 1000:.1f} ms).")
+        result_warnings.append(f"High sync residual RMS ({rms * 1000:.1f} ms).")
 
     return SyncResult(
         method=method_out,
@@ -390,6 +625,101 @@ def align_timebase(
         max_abs_error_s=max_abs,
         median_lag_s=median_lag,
         drift_ppm=drift_ppm,
+        pair_offset=int(pair_offset),
+        warnings=result_warnings,
+    )
+
+
+def align_timebase(
+    fiber_time: np.ndarray,
+    camera_events: np.ndarray,
+    fiber_events: np.ndarray,
+    *,
+    method: str = "linear",
+    max_offset: int = 5,
+    min_pairs: int = 2,
+) -> SyncResult:
+    """Return a camera-time vector for each photometry sample."""
+    cam, fib, offset, warnings = match_sync_events(
+        camera_events,
+        fiber_events,
+        max_offset=max_offset,
+        min_pairs=min_pairs,
+    )
+    return _sync_result_from_matches(
+        fiber_time,
+        camera_events,
+        fiber_events,
+        cam,
+        fib,
+        method=method,
         pair_offset=offset,
         warnings=warnings,
     )
+
+
+def align_sync_traces(
+    fiber_time: np.ndarray,
+    camera_time: np.ndarray,
+    camera_signal: np.ndarray,
+    fiber_signal: np.ndarray,
+    *,
+    camera_mode: str = "ttl_rising",
+    fiber_mode: str = "ttl_rising",
+    threshold: Optional[float] = None,
+    min_interval_s: float = 0.2,
+    method: str = "linear",
+    max_offset: int = 5,
+    min_pairs: int = 2,
+) -> SyncResult:
+    """Align raw sync traces, using decoded barcode packets when available."""
+    barcode_requested = _is_barcode_mode(camera_mode) or _is_barcode_mode(fiber_mode)
+    camera_packets = decode_barcode_packets(camera_time, camera_signal, threshold=threshold)
+    fiber_packets = decode_barcode_packets(fiber_time, fiber_signal, threshold=threshold)
+    if len(camera_packets) >= min_pairs and len(fiber_packets) >= min_pairs:
+        cam, fib, offset, warnings = match_barcode_packets(
+            camera_packets,
+            fiber_packets,
+            max_offset=max_offset,
+            min_pairs=min_pairs,
+        )
+        if cam.size >= min_pairs and fib.size >= min_pairs:
+            if not barcode_requested:
+                warnings.insert(0, "Auto-detected barcode packets in both sync traces.")
+            return _sync_result_from_matches(
+                fiber_time,
+                np.asarray([pkt.anchor_time for pkt in camera_packets], float),
+                np.asarray([pkt.anchor_time for pkt in fiber_packets], float),
+                cam,
+                fib,
+                method=method,
+                pair_offset=offset,
+                warnings=warnings,
+                method_prefix="barcode_packets",
+            )
+
+    camera_events = extract_sync_events(
+        camera_time,
+        camera_signal,
+        mode=camera_mode,
+        threshold=threshold,
+        min_interval_s=min_interval_s,
+    )
+    fiber_events = extract_sync_events(
+        fiber_time,
+        fiber_signal,
+        mode=fiber_mode,
+        threshold=threshold,
+        min_interval_s=min_interval_s,
+    )
+    result = align_timebase(
+        fiber_time,
+        camera_events,
+        fiber_events,
+        method=method,
+        max_offset=max_offset,
+        min_pairs=min_pairs,
+    )
+    if barcode_requested:
+        result.warnings.insert(0, "No reliable barcode packets decoded; fell back to edge-train matching.")
+    return result

@@ -20,7 +20,7 @@ import h5py
 
 from analysis_core import ProcessedTrial, coerce_time_value
 from ethovision_process_gui import clean_sheet
-from time_sync import SyncResult, align_timebase, extract_sync_events
+from time_sync import SyncResult, align_sync_traces, align_timebase, extract_sync_events
 from temporal_modeling import TemporalModelingWidget
 from onboarding import (
     PanelHeader as _PyberPanelHeader,
@@ -8482,15 +8482,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return self._behavior_sources.get(stem)
         return self._match_behavior_source(proc)
 
-    def _sync_camera_events_for_proc(self, proc: ProcessedTrial) -> np.ndarray:
+    def _sync_camera_trace_for_proc(self, proc: ProcessedTrial) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         info = self._sync_behavior_source_for_proc(proc)
         data = self.combo_sync_camera_column.currentData() if hasattr(self, "combo_sync_camera_column") else ""
         if not isinstance(data, str) or "::" not in data:
             raise ValueError("Choose a camera sync behavior or column.")
         kind, name = data.split("::", 1)
-        min_interval = float(self.spin_sync_min_interval.value())
-        mode = self._sync_mode_key(self.combo_sync_camera_mode.currentText())
-        threshold = None if self.cb_sync_auto_threshold.isChecked() else float(self.spin_sync_threshold.value())
         if kind == "external":
             if "::" not in name:
                 raise ValueError("Choose a loaded Sync signal column.")
@@ -8503,7 +8500,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 raise ValueError(f"Sync signal column not found: {column_name}")
             t = np.asarray(ext.get("time", np.array([], float)), float)
             x = np.asarray(columns[column_name], float)
-            return extract_sync_events(t, x, mode=mode, threshold=threshold, min_interval_s=min_interval)
+            return t, x
         if not info:
             raise ValueError("No behavior/camera file matched this recording.")
         if kind == "behavior":
@@ -8511,10 +8508,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if name not in behaviors:
                 raise ValueError(f"Behavior sync column not found: {name}")
             if str(info.get("kind", _BEHAVIOR_PARSE_BINARY)) == _BEHAVIOR_PARSE_TIMESTAMPS:
-                return extract_sync_events(np.asarray(behaviors[name], float), None, min_interval_s=min_interval)
+                return np.asarray(behaviors[name], float), None
             t = np.asarray(info.get("time", np.array([], float)), float)
             x = np.asarray(behaviors[name], float)
-            return extract_sync_events(t, x, mode=mode, threshold=threshold, min_interval_s=min_interval)
+            return t, x
         if kind == "trajectory":
             traj = info.get("trajectory") or {}
             if name not in traj:
@@ -8523,8 +8520,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if t.size == 0:
                 t = np.asarray(info.get("time", np.array([], float)), float)
             x = np.asarray(traj[name], float)
-            return extract_sync_events(t, x, mode=mode, threshold=threshold, min_interval_s=min_interval)
+            return t, x
         raise ValueError(f"Unsupported camera sync source: {kind}")
+
+    def _sync_camera_events_for_proc(self, proc: ProcessedTrial) -> np.ndarray:
+        t, x = self._sync_camera_trace_for_proc(proc)
+        min_interval = float(self.spin_sync_min_interval.value())
+        if x is None:
+            return extract_sync_events(t, None, min_interval_s=min_interval)
+        mode = self._sync_mode_key(self.combo_sync_camera_mode.currentText())
+        threshold = None if self.cb_sync_auto_threshold.isChecked() else float(self.spin_sync_threshold.value())
+        return extract_sync_events(t, x, mode=mode, threshold=threshold, min_interval_s=min_interval)
 
     def _sync_fiber_trace_for_proc(self, proc: ProcessedTrial) -> Tuple[np.ndarray, np.ndarray]:
         source = self.combo_sync_fiber_source.currentData() if hasattr(self, "combo_sync_fiber_source") else "__embedded__"
@@ -8579,18 +8585,35 @@ class PostProcessingPanel(QtWidgets.QWidget):
         raise ValueError(f"Unsupported photometry sync source: {source}")
 
     def _compute_time_sync_for_proc(self, proc: ProcessedTrial) -> SyncResult:
-        camera_events = self._sync_camera_events_for_proc(proc)
+        camera_time, camera_sync = self._sync_camera_trace_for_proc(proc)
         fiber_time, fiber_sync = self._sync_fiber_trace_for_proc(proc)
-        mode = self._sync_mode_key(self.combo_sync_fiber_mode.currentText())
+        camera_mode = self._sync_mode_key(self.combo_sync_camera_mode.currentText())
+        fiber_mode = self._sync_mode_key(self.combo_sync_fiber_mode.currentText())
         threshold = None if self.cb_sync_auto_threshold.isChecked() else float(self.spin_sync_threshold.value())
+        min_interval = float(self.spin_sync_min_interval.value())
+        method = "interpolation" if "interp" in self.combo_sync_method.currentText().lower() else "linear"
+        if camera_sync is not None:
+            return align_sync_traces(
+                np.asarray(fiber_time, float),
+                np.asarray(camera_time, float),
+                np.asarray(camera_sync, float),
+                np.asarray(fiber_sync, float),
+                camera_mode=camera_mode,
+                fiber_mode=fiber_mode,
+                threshold=threshold,
+                min_interval_s=min_interval,
+                method=method,
+                max_offset=int(self.spin_sync_max_offset.value()),
+                min_pairs=2,
+            )
+        camera_events = extract_sync_events(np.asarray(camera_time, float), None, min_interval_s=min_interval)
         fiber_events = extract_sync_events(
             fiber_time,
             fiber_sync,
-            mode=mode,
+            mode=fiber_mode,
             threshold=threshold,
-            min_interval_s=float(self.spin_sync_min_interval.value()),
+            min_interval_s=min_interval,
         )
-        method = "interpolation" if "interp" in self.combo_sync_method.currentText().lower() else "linear"
         return align_timebase(
             np.asarray(fiber_time, float),
             camera_events,
@@ -8618,7 +8641,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         lines = [
             f"File: {file_id}",
             f"Status: {rep.get('status')} | method: {rep.get('method')}",
-            f"Matched pulses: {rep.get('n_matched')} / camera {rep.get('n_camera_events')} / photometry {rep.get('n_fiber_events')}",
+            f"Matched sync anchors: {rep.get('n_matched')} / camera {rep.get('n_camera_events')} / photometry {rep.get('n_fiber_events')}",
             f"Clock mapping: camera_time = {float(rep.get('slope', np.nan)):.9g} * photometry_time + {float(rep.get('intercept', np.nan)):.9g}",
             f"Median lag: {float(rep.get('median_lag_s', np.nan)) * 1000:.3f} ms",
             f"Residual RMS: {float(rep.get('rms_error_s', np.nan)) * 1000:.3f} ms",
