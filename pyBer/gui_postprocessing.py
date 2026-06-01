@@ -3020,7 +3020,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         rail_layout = QtWidgets.QVBoxLayout(self._post_side_rail)
         rail_layout.setContentsMargins(8, 10, 8, 10)
         rail_layout.setSpacing(6)
-        for key in ("setup", "sync", "psth", "spatial", "temporal", "signal", "behavior", "export"):
+        for key in ("setup", "psth", "spatial", "temporal", "signal", "behavior", "sync", "export"):
             rail_layout.addWidget(self._section_buttons[key], 0,
                                   QtCore.Qt.AlignmentFlag.AlignHCenter)
         rail_layout.addStretch(1)
