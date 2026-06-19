@@ -29,6 +29,12 @@ dependencies:
   - pybaselines>=1.1
   - pandas>=2.0
   - openpyxl>=3.1
+  # opencv powers LED sync-signal extraction from videos (ROI -> 1-D trace).
+  # Batch extraction parallelizes across videos on the CPU via the stdlib
+  # concurrent.futures (no extra package). The optional GPU path uses cv2.cuda
+  # and only activates with a CUDA-enabled OpenCV build; the conda-forge package
+  # below is CPU-only, so the code automatically falls back to multi-core CPU.
+  - opencv>=4.13
 
   # GUI
   - pyside6>=6.6

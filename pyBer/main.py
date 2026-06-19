@@ -80,6 +80,27 @@ def _bootstrap_windows_conda_runtime() -> None:
 
 _bootstrap_windows_conda_runtime()
 
+
+def _crash_log_path() -> str:
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or os.path.expanduser("~")
+    folder = os.path.join(base, "pyBer")
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except Exception:
+        folder = base
+    return os.path.join(folder, "pyber_crash.log")
+
+
+# Dump a native C-level traceback (e.g. a NumPy-ABI / OpenCV segfault) to a log
+# file so a hard crash leaves evidence instead of vanishing silently.
+try:
+    import faulthandler
+
+    _CRASH_LOG_FILE = open(_crash_log_path(), "a", buffering=1, encoding="utf-8")
+    faulthandler.enable(file=_CRASH_LOG_FILE, all_threads=True)
+except Exception:
+    _CRASH_LOG_FILE = None
+
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 from pyqtgraph.dockarea import DockArea, Dock
@@ -1383,6 +1404,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pre_history_key: str = ""
         self._pre_history_restoring: bool = False
         self._pre_history_limit: int = 60
+        self._export_progress_generation: int = 0
 
         # Worker infra (stable)
         self._pool = QtCore.QThreadPool.globalInstance()
@@ -1449,6 +1471,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._app_theme_group.addAction(self.act_app_theme_light)
         self.act_app_theme_dark.setChecked(True)
         self.btn_app_theme.setMenu(self.menu_app_theme)
+
+        self._export_progress_widget = QtWidgets.QFrame()
+        self._export_progress_widget.setObjectName("pyberExportProgressWidget")
+        export_progress_layout = QtWidgets.QHBoxLayout(self._export_progress_widget)
+        export_progress_layout.setContentsMargins(8, 0, 8, 0)
+        export_progress_layout.setSpacing(0)
+        self._export_progress_bar = QtWidgets.QProgressBar()
+        self._export_progress_bar.setObjectName("pyberExportProgressBar")
+        self._export_progress_bar.setRange(0, 100)
+        self._export_progress_bar.setValue(0)
+        self._export_progress_bar.setTextVisible(False)
+        self._export_progress_bar.setFixedSize(180, 6)
+        self._export_progress_bar.setToolTip("Export progress")
+        export_progress_layout.addWidget(self._export_progress_bar)
+        self._export_progress_widget.setVisible(False)
+        self._status_bar.addPermanentWidget(self._export_progress_widget)
 
         self._status_bar.addPermanentWidget(QtWidgets.QLabel("App theme"))
         self._status_bar.addPermanentWidget(self.btn_app_theme)
@@ -1729,6 +1767,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         self.tabs.addTab(self.post_tab, "Postprocessing")
         self.post_tab.statusUpdate.connect(self._show_status_message)
+        if hasattr(self.post_tab, "exportProgress"):
+            try:
+                self.post_tab.exportProgress.connect(self._on_post_export_progress)
+            except Exception:
+                pass
         if hasattr(self.post_tab, "helpRequested"):
             try:
                 self.post_tab.helpRequested.connect(lambda: self._show_tutorial_again(automatic=False))
@@ -5919,6 +5962,68 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             return None
 
+    def _pump_export_progress_events(self) -> None:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        try:
+            app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
+        except TypeError:
+            app.processEvents()
+
+    def _begin_export_progress(self, total_steps: int, message: str = "Exporting data...") -> None:
+        self._export_progress_generation += 1
+        self._set_export_progress(0, total_steps, message)
+
+    def _on_post_export_progress(self, value: int, total_steps: int, message: str) -> None:
+        total = max(1, int(total_steps))
+        current = max(0, min(int(value), total))
+        if current <= 0:
+            self._begin_export_progress(total, message or "Exporting data...")
+        elif current >= total:
+            self._finish_export_progress(total, message or "Export complete")
+        else:
+            self._set_export_progress(current, total, message or "Exporting data...")
+
+    def _set_export_progress(self, value: int, total_steps: int, message: str = "") -> None:
+        widget = getattr(self, "_export_progress_widget", None)
+        bar = getattr(self, "_export_progress_bar", None)
+        if not isinstance(widget, QtWidgets.QWidget) or not isinstance(bar, QtWidgets.QProgressBar):
+            return
+        total = max(1, int(total_steps))
+        current = max(0, min(int(value), total))
+        try:
+            bar.setRange(0, total)
+            bar.setValue(current)
+            if message:
+                text = str(message)
+                bar.setToolTip(text)
+                self._show_status_message(text, 0)
+            widget.setVisible(True)
+            self._pump_export_progress_events()
+        except Exception:
+            pass
+
+    def _finish_export_progress(self, total_steps: int, message: str = "") -> None:
+        generation = int(getattr(self, "_export_progress_generation", 0))
+        self._set_export_progress(total_steps, total_steps, message or "Export complete")
+        if message:
+            self._show_status_message(message, 5000)
+        QtCore.QTimer.singleShot(900, lambda gen=generation: self._hide_export_progress(gen))
+
+    def _hide_export_progress(self, generation: Optional[int] = None) -> None:
+        if generation is not None and int(generation) != int(getattr(self, "_export_progress_generation", 0)):
+            return
+        widget = getattr(self, "_export_progress_widget", None)
+        bar = getattr(self, "_export_progress_bar", None)
+        try:
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setVisible(False)
+            if isinstance(bar, QtWidgets.QProgressBar):
+                bar.setValue(0)
+        except Exception:
+            pass
+
     def _show_status_message(self, message: str, timeout_ms: int = 0) -> None:
         sb = getattr(self, "_status_bar", None)
         if not isinstance(sb, QtWidgets.QStatusBar):
@@ -7211,6 +7316,28 @@ class MainWindow(QtWidgets.QMainWindow):
         export_channel_names = [] if auto_export else self.param_panel.export_channel_names()
         export_trigger_names = self.param_panel.export_trigger_names()
 
+        def _channels_for_export(doric: LoadedDoricFile) -> List[str]:
+            if auto_export:
+                return list(doric.channels)
+            channels = [name for name in export_channel_names if name in doric.channels]
+            if not channels:
+                fallback = self._current_channel if (self._current_channel in doric.channels) else (doric.channels[0] if doric.channels else None)
+                channels = [fallback] if fallback else []
+            return [ch for ch in channels if ch]
+
+        estimated_jobs = 0
+        for path in selected:
+            doric = self._loaded_files.get(path)
+            if not doric:
+                continue
+            for ch in _channels_for_export(doric):
+                sections = self._sections_by_key.get((path, ch), [])
+                estimated_jobs += max(1, len(sections))
+        progress_total = max(1, estimated_jobs * 3)
+        progress_step = 0
+        if estimated_jobs:
+            self._begin_export_progress(progress_total, f"Exporting 0/{estimated_jobs} recording(s)...")
+
         # Process/export each selected file. Auto export writes beside each source
         # file and intentionally exports every analog channel with the same params.
         n_total = 0
@@ -7219,13 +7346,7 @@ class MainWindow(QtWidgets.QMainWindow):
             doric = self._loaded_files.get(path)
             if not doric:
                 continue
-            if auto_export:
-                channels = list(doric.channels)
-            else:
-                channels = [name for name in export_channel_names if name in doric.channels]
-                if not channels:
-                    fallback = self._current_channel if (self._current_channel in doric.channels) else (doric.channels[0] if doric.channels else None)
-                    channels = [fallback] if fallback else []
+            channels = _channels_for_export(doric)
             path_out_dir = out_dir
             if auto_export:
                 path_out_dir = os.path.dirname(path)
@@ -7260,17 +7381,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 trial = self._apply_cutouts(trial, cutouts)
 
                 def _export_one(proc: ProcessedTrial, suffix: str = "") -> None:
-                    nonlocal n_total
+                    nonlocal n_total, progress_step
                     proc = self._apply_cutouts_to_processed(proc, cutouts)
                     stem = safe_stem_from_metadata(path, ch, meta)
                     if suffix:
                         stem = f"{stem}_{suffix}"
                     csv_path = os.path.join(path_out_dir, f"{stem}.csv")
                     h5_path = os.path.join(path_out_dir, f"{stem}.h5")
+                    if estimated_jobs:
+                        self._set_export_progress(progress_step, progress_total, f"Writing CSV: {stem}")
                     export_processed_csv(csv_path, proc, metadata=meta, selection=export_selection)
+                    progress_step += 1
+                    if estimated_jobs:
+                        self._set_export_progress(progress_step, progress_total, f"Writing HDF5: {stem}")
                     export_processed_h5(h5_path, proc, metadata=meta, selection=export_selection)
+                    progress_step += 1
                     exported_dirs.add(path_out_dir)
                     n_total += 1
+                    if estimated_jobs:
+                        self._set_export_progress(
+                            progress_step,
+                            progress_total,
+                            f"Exported {n_total}/{estimated_jobs} recording(s)",
+                        )
 
                 try:
                     if sections:
@@ -7281,6 +7414,12 @@ class MainWindow(QtWidgets.QMainWindow):
                             if sec_trial is None:
                                 continue
                             sec_params = ProcessingParams.from_dict(sec.get("params", {})) if isinstance(sec.get("params"), dict) else params
+                            if estimated_jobs:
+                                self._set_export_progress(
+                                    progress_step,
+                                    progress_total,
+                                    f"Processing {os.path.basename(path)} [{ch}] section {i}",
+                                )
                             processed = self._process_trial_for_export(
                                 trial=sec_trial,
                                 params=sec_params,
@@ -7288,8 +7427,15 @@ class MainWindow(QtWidgets.QMainWindow):
                                 manual_regions_sec=manual,
                                 manual_exclude_regions_sec=manual_exclude,
                             )
+                            progress_step += 1
                             _export_one(processed, suffix=f"sec{i}_{s0:.2f}_{s1:.2f}")
                     else:
+                        if estimated_jobs:
+                            self._set_export_progress(
+                                progress_step,
+                                progress_total,
+                                f"Processing {os.path.basename(path)} [{ch}]",
+                            )
                         processed = self._process_trial_for_export(
                             trial=trial,
                             params=params,
@@ -7297,6 +7443,7 @@ class MainWindow(QtWidgets.QMainWindow):
                             manual_regions_sec=manual,
                             manual_exclude_regions_sec=manual_exclude,
                         )
+                        progress_step += 1
                         _export_one(processed)
                 except Exception as e:
                     QtWidgets.QMessageBox.warning(
@@ -7313,7 +7460,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 target = "source folders"
         else:
             target = out_dir
-        self._show_status_message(f"Export complete: {n_total} recording(s) written to {target}")
+        message = f"Export complete: {n_total} recording(s) written to {target}"
+        if estimated_jobs:
+            self._finish_export_progress(progress_total, message)
+        else:
+            self._show_status_message(message)
 
         # optional: update post tab list by loading exported results? (user can load later)
 
@@ -7924,11 +8075,52 @@ class MainWindow(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
 
+def _install_global_excepthook() -> None:
+    """Log unhandled Python exceptions and show a dialog instead of letting
+    them abort the process. PySide6 terminates the app on an uncaught exception
+    raised inside a Qt slot; this keeps the app alive and surfaces the cause."""
+    import traceback
+
+    def _hook(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        try:
+            logging.getLogger("pyber").error("Unhandled exception:\n%s", text)
+        except Exception:
+            pass
+        try:
+            with open(_crash_log_path(), "a", encoding="utf-8") as fh:
+                fh.write("\n=== Unhandled exception ===\n")
+                fh.write(text)
+        except Exception:
+            pass
+        try:
+            sys.stderr.write(text)
+        except Exception:
+            pass
+        try:
+            if QtWidgets.QApplication.instance() is not None:
+                box = QtWidgets.QMessageBox()
+                box.setIcon(QtWidgets.QMessageBox.Icon.Critical)
+                box.setWindowTitle("pyBer - unexpected error")
+                box.setText("An unexpected error occurred but pyBer kept running.")
+                box.setInformativeText(f"{exc_type.__name__}: {exc_value}")
+                box.setDetailedText(text)
+                box.exec()
+        except Exception:
+            pass
+
+    sys.excepthook = _hook
+
+
 def main() -> None:
     pg.setConfigOptions(antialias=False)
     smoke_test = str(os.environ.get("PYBER_SMOKE_TEST", "")).strip().lower() in {"1", "true", "yes", "on"}
     _set_windows_app_user_model_id()
     app = QtWidgets.QApplication([])
+    _install_global_excepthook()
     apply_app_palette(app, "dark")
     spinbox_scrubber = install_spinbox_scrubbers(app)
     _set_qt_application_icon(app)

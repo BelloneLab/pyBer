@@ -929,6 +929,25 @@ QProgressBar::chunk {
     margin: 1px;
 }
 
+QFrame#pyberExportProgressWidget {
+    background: transparent;
+    border: 0;
+}
+
+QProgressBar#pyberExportProgressBar {
+    background: #252b37;
+    border: 0;
+    border-radius: 3px;
+    min-height: 6px;
+    max-height: 6px;
+}
+
+QProgressBar#pyberExportProgressBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #5dd39e, stop:1 #7d4df2);
+    border-radius: 3px;
+    margin: 0;
+}
+
 /* ---------- Modern shell: side rail, drawers, transport bar ---------- */
 QFrame#sideRail {
     background: #14171f;
@@ -1526,6 +1545,23 @@ QFrame#pyberBusyWidget QPushButton {
 }
 QFrame#pyberBusyWidget QPushButton:hover {
     background: #b91c1c;
+}
+
+QFrame#pyberExportProgressWidget {
+    background: transparent;
+    border: 0;
+}
+QProgressBar#pyberExportProgressBar {
+    background: #dbe3ef;
+    border: 0;
+    border-radius: 3px;
+    min-height: 6px;
+    max-height: 6px;
+}
+QProgressBar#pyberExportProgressBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #14b8a6, stop:1 #7d4df2);
+    border-radius: 3px;
+    margin: 0;
 }
 
 QTabBar#visualModeBar::tab {

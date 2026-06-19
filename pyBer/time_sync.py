@@ -17,6 +17,9 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 
+DEFAULT_MIN_XCORR_R = 0.30
+
+
 @dataclass
 class SyncResult:
     method: str
@@ -85,15 +88,307 @@ def _finite_sorted(time: np.ndarray, signal: np.ndarray) -> Tuple[np.ndarray, np
 
 
 def _auto_threshold(x: np.ndarray) -> float:
+    """Duty-cycle-aware threshold shared with the LED export path.
+
+    Delegates to ``led_extract.compute_threshold`` (Otsu when the signal is
+    balanced, Triangle when skewed/sparse) so the live preview, alignment and
+    the "Binary (thresholded)" export all use the identical threshold. Falls
+    back to a self-contained Otsu if that module cannot be imported.
+    """
     finite = np.asarray(x, float)
     finite = finite[np.isfinite(finite)]
     if finite.size == 0:
         return 0.5
-    lo = float(np.nanpercentile(finite, 10))
-    hi = float(np.nanpercentile(finite, 90))
-    if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+    try:
+        import led_extract
+
+        thr = led_extract.compute_threshold(finite, "auto")
+        if np.isfinite(thr):
+            return float(thr)
+    except Exception:
+        pass
+
+    lo = float(np.nanmin(finite))
+    hi = float(np.nanmax(finite))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return float(np.nanmedian(finite))
+    hist, edges = np.histogram(finite, bins=256, range=(lo, hi))
+    hist = hist.astype(float)
+    total = float(hist.sum())
+    if total <= 0:
         return 0.5 * (lo + hi)
-    return float(np.nanmedian(finite))
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    w0 = np.cumsum(hist)
+    w1 = total - w0
+    s0 = np.cumsum(hist * centers)
+    grand = float(s0[-1])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        m0 = s0 / w0
+        m1 = (grand - s0) / w1
+        between = w0 * w1 * (m0 - m1) ** 2
+    between[~np.isfinite(between)] = -1.0
+    idx = int(np.nanargmax(between))
+    thr = float(centers[idx])
+    if not np.isfinite(thr) or thr <= lo or thr >= hi:
+        return 0.5 * (lo + hi)
+    return thr
+
+
+def _norm01(x: np.ndarray) -> np.ndarray:
+    arr = np.asarray(x, float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return np.zeros_like(arr, dtype=float)
+    lo = float(np.nanmin(finite))
+    hi = float(np.nanmax(finite))
+    span = hi - lo
+    if not np.isfinite(span) or span <= 0.0:
+        return np.zeros_like(arr, dtype=float)
+    return (arr - lo) / span
+
+
+def _looks_discrete_value_trace(x: np.ndarray) -> bool:
+    finite = np.asarray(x, float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size < 2:
+        return False
+    rounded = np.round(finite, decimals=3)
+    unique = np.unique(rounded)
+    if unique.size <= 2:
+        return False
+    if unique.size > min(64, max(8, finite.size // 100)):
+        return False
+    nearest_int = np.rint(unique)
+    return bool(np.nanmax(np.abs(unique - nearest_int)) <= 1e-3)
+
+
+def edge_times(
+    time: np.ndarray,
+    signal: np.ndarray,
+    *,
+    threshold_norm: float = 0.5,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return sub-sample transition times and signed directions.
+
+    The LED extractor aligns on all binary transitions, not only rising TTL
+    events. This reproduces that behavior and estimates the threshold crossing
+    by linear interpolation between neighboring samples.
+    """
+    t, x = _finite_sorted(time, signal)
+    if t.size < 2:
+        return np.array([], float), np.array([], np.int8)
+    x_norm = _norm01(x)
+    state = x_norm >= float(threshold_norm)
+    changes = np.flatnonzero(np.diff(state.astype(np.int8)) != 0) + 1
+    if changes.size == 0:
+        return np.array([], float), np.array([], np.int8)
+    before = x_norm[changes - 1]
+    after = x_norm[changes]
+    denom = after - before
+    alpha = np.where(
+        np.abs(denom) > 1e-12,
+        (float(threshold_norm) - before) / denom,
+        0.5,
+    )
+    alpha = np.clip(alpha, 0.0, 1.0)
+    edge_t = t[changes - 1] + alpha * (t[changes] - t[changes - 1])
+    edge_dir = np.where(state[changes], 1, -1).astype(np.int8)
+    return edge_t.astype(float), edge_dir
+
+
+def _sample_rate_from_time(time: np.ndarray, fallback: float = 30.0) -> float:
+    t = np.asarray(time, float).reshape(-1)
+    t = t[np.isfinite(t)]
+    if t.size < 2:
+        return float(fallback)
+    dt = np.diff(np.sort(t))
+    dt = dt[np.isfinite(dt) & (dt > 0.0)]
+    if dt.size == 0:
+        return float(fallback)
+    med = float(np.nanmedian(dt))
+    if not np.isfinite(med) or med <= 0.0:
+        return float(fallback)
+    return float(1.0 / med)
+
+
+def pair_edges(
+    fiber_edges: np.ndarray,
+    fiber_dirs: np.ndarray,
+    camera_edges: np.ndarray,
+    camera_dirs: np.ndarray,
+    offset: float,
+    sample_rate_hz: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Pair fiber edge times to camera edge times after an xcorr offset seed.
+
+    ``offset`` follows the cross-correlation convention used below:
+    ``camera_time = fiber_time - offset``.
+    """
+    fib = np.asarray(fiber_edges, float).reshape(-1)
+    cam = np.asarray(camera_edges, float).reshape(-1)
+    fib_dirs = np.asarray(fiber_dirs, np.int8).reshape(-1)
+    cam_dirs = np.asarray(camera_dirs, np.int8).reshape(-1)
+    if fib.size == 0 or cam.size == 0:
+        return np.array([], float), np.array([], float)
+
+    cam_on_fiber_time = cam + float(offset)
+    spacings: List[float] = []
+    for arr in (fib, cam_on_fiber_time):
+        if arr.size > 1:
+            d = np.diff(arr)
+            spacings.extend([float(v) for v in d[np.isfinite(d) & (d > 0.0)]])
+    typical = float(np.nanmedian(spacings)) if spacings else 1.0
+    if not np.isfinite(typical) or typical <= 0.0:
+        typical = 1.0
+    rate = max(float(sample_rate_hz), 1e-9)
+    tol = max(3.0 / rate, min(1.0, 0.45 * typical))
+
+    pairs_fiber: List[float] = []
+    pairs_camera: List[float] = []
+    j = 0
+    for i, fe in enumerate(fib):
+        fd = fib_dirs[i] if i < fib_dirs.size else 0
+        while j < cam_on_fiber_time.size and cam_on_fiber_time[j] < fe - tol:
+            j += 1
+        candidates: List[int] = []
+        for k in (j, j + 1):
+            if k < cam_on_fiber_time.size and abs(float(cam_on_fiber_time[k] - fe)) <= tol:
+                if cam_dirs.size <= k or int(cam_dirs[k]) == int(fd):
+                    candidates.append(int(k))
+        if candidates:
+            k_best = min(candidates, key=lambda idx: abs(float(cam_on_fiber_time[idx] - fe)))
+            pairs_fiber.append(float(fe))
+            pairs_camera.append(float(cam[k_best]))
+            j = k_best + 1
+
+    if len(pairs_fiber) < 2:
+        diff = abs(int(fib.size) - int(cam.size))
+        slack = max(2, int(0.15 * min(fib.size, cam.size)))
+        if diff <= slack:
+            n = min(fib.size, cam.size)
+            pairs_fiber = fib[:n].astype(float).tolist()
+            pairs_camera = cam[:n].astype(float).tolist()
+
+    return np.asarray(pairs_fiber, float), np.asarray(pairs_camera, float)
+
+
+def estimate_xcorr_offset(
+    fiber_time: np.ndarray,
+    fiber_signal: np.ndarray,
+    camera_time: np.ndarray,
+    camera_signal: np.ndarray,
+    *,
+    max_lag_s: float = 5.0,
+) -> Optional[Dict[str, object]]:
+    """Estimate the global offset between fiber and camera sync traces.
+
+    The sign convention is ``camera_time = fiber_time - offset``. This is the
+    same convention used by the standalone barcode extractor.
+    """
+    ft, fx = _finite_sorted(fiber_time, fiber_signal)
+    ct, cx = _finite_sorted(camera_time, camera_signal)
+    if ft.size < 20 or ct.size < 20:
+        return None
+
+    dt_f = np.diff(ft)
+    dt_f = dt_f[np.isfinite(dt_f) & (dt_f > 0.0)]
+    dt_c = np.diff(ct)
+    dt_c = dt_c[np.isfinite(dt_c) & (dt_c > 0.0)]
+    if dt_f.size == 0 and dt_c.size == 0:
+        return None
+    dt = float(np.nanmedian(dt_f if dt_f.size else dt_c))
+    if dt_c.size:
+        dt = max(dt, float(np.nanmedian(dt_c)))
+    if not np.isfinite(dt) or dt <= 0.0:
+        return None
+
+    lag = max(0.0, float(max_lag_s))
+    t_lo = max(float(ft[0]), float(ct[0]) - lag)
+    t_hi = min(float(ft[-1]), float(ct[-1]) + lag)
+    if (t_hi - t_lo) < max(1.0, 20.0 * dt):
+        return None
+    grid = np.arange(t_lo, t_hi + 0.5 * dt, dt, dtype=np.float64)
+    if grid.size < 20:
+        return None
+
+    a = np.interp(grid, ft, fx, left=np.nan, right=np.nan)
+    b = np.interp(grid, ct, cx, left=np.nan, right=np.nan)
+    mask = np.isfinite(a) & np.isfinite(b)
+    if int(np.sum(mask)) < 20:
+        return None
+    a = _norm01(a[mask])
+    b = _norm01(b[mask])
+    grid = grid[mask]
+
+    a_c = a - float(np.nanmean(a))
+    b_c = b - float(np.nanmean(b))
+    a_std = float(np.nanstd(a_c))
+    b_std = float(np.nanstd(b_c))
+    if a_std < 1e-12 or b_std < 1e-12:
+        return None
+
+    try:
+        from scipy.signal import fftconvolve
+        corr = fftconvolve(a_c, b_c[::-1], mode="full")
+    except Exception:
+        corr = np.correlate(a_c, b_c, mode="full")
+    n = int(a_c.size)
+    lags = np.arange(-(n - 1), n, dtype=np.float64) * dt
+    corr_norm = corr / max(a_std * b_std * n, 1e-12)
+    keep = np.abs(lags) <= lag
+    if not np.any(keep):
+        return None
+    lags = lags[keep]
+    corr_norm = corr_norm[keep]
+    if corr_norm.size == 0 or not np.any(np.isfinite(corr_norm)):
+        return None
+    best_idx = int(np.nanargmax(corr_norm))
+    best_lag = float(lags[best_idx])
+    return {
+        "offset": best_lag,
+        "lag": best_lag,
+        "peak": float(corr_norm[best_idx]),
+        "lags": lags,
+        "corr_norm": corr_norm,
+        "window_s": (float(grid[0]), float(grid[-1])),
+        "samples": int(n),
+    }
+
+
+def _robust_filter_edge_pairs(
+    pairs_fiber: np.ndarray,
+    pairs_camera: np.ndarray,
+    *,
+    min_pairs: int = 3,
+) -> Tuple[np.ndarray, np.ndarray, int, int]:
+    fib = np.asarray(pairs_fiber, float).reshape(-1)
+    cam = np.asarray(pairs_camera, float).reshape(-1)
+    n = min(fib.size, cam.size)
+    fib = fib[:n]
+    cam = cam[:n]
+    if n < max(1, int(min_pairs)):
+        return fib, cam, n, n
+    keep = np.isfinite(fib) & np.isfinite(cam)
+    for _ in range(3):
+        if int(np.sum(keep)) < max(2, int(min_pairs)):
+            break
+        slope, intercept, _fitted, resid = _fit_linear(cam[keep], fib[keep])
+        if not np.isfinite(slope) or not np.isfinite(intercept):
+            break
+        r = resid[np.isfinite(resid)]
+        if r.size < max(2, int(min_pairs)):
+            break
+        med = float(np.nanmedian(r))
+        mad = float(np.nanmedian(np.abs(r - med)))
+        limit = max(0.05, 6.0 * 1.4826 * mad)
+        local_keep = np.zeros_like(keep, dtype=bool)
+        local_keep[keep] = np.abs(resid - med) <= limit
+        if int(np.sum(local_keep)) == int(np.sum(keep)):
+            break
+        if int(np.sum(local_keep)) < max(2, int(min_pairs)):
+            break
+        keep = local_keep
+    return fib[keep], cam[keep], int(np.sum(keep)), int(n)
 
 
 def _deduplicate_events(events: np.ndarray, min_interval_s: float) -> np.ndarray:
@@ -135,24 +430,40 @@ def extract_sync_events(
     mode_l = str(mode or "").strip().lower()
     polarity_l = str(polarity or "").strip().lower()
     if _is_barcode_mode(mode_l):
-        rounded = np.asarray(x, float)
-        finite = rounded[np.isfinite(rounded)]
+        finite = x[np.isfinite(x)]
         if finite.size == 0:
             return np.array([], float)
-        # Preserve integer/barcode transitions when possible; otherwise smooth
-        # tiny float noise so value changes are not over-counted.
-        if np.nanmax(finite) - np.nanmin(finite) <= 2.0:
-            values = (rounded > _auto_threshold(rounded)).astype(int)
-        else:
-            values = np.round(rounded, decimals=3)
-        idx = np.flatnonzero(values[1:] != values[:-1]) + 1
-        return _deduplicate_events(t[idx], min_interval_s)
+
+        # A true decoded barcode/value trace is discrete. Preserve changes in
+        # those integer-like values. A raw LED ROI trace is continuous, so it
+        # must be thresholded to a binary state before edge extraction.
+        if _looks_discrete_value_trace(x):
+            values = np.round(x, decimals=3)
+            idx = np.flatnonzero(values[1:] != values[:-1]) + 1
+            return _deduplicate_events(t[idx], 0.0)
+
+        thr = _auto_threshold(x) if threshold is None or not np.isfinite(float(threshold)) else float(threshold)
+        high = x > thr
+        if "low" in polarity_l:
+            high = ~high
+        changes = np.flatnonzero(high[1:] != high[:-1]) + 1
+        if changes.size == 0:
+            return np.array([], float)
+        before = x[changes - 1]
+        after = x[changes]
+        denom = after - before
+        alpha = np.where(np.abs(denom) > 1e-12, (thr - before) / denom, 0.5)
+        alpha = np.clip(alpha, 0.0, 1.0)
+        edge_t = t[changes - 1] + alpha * (t[changes] - t[changes - 1])
+        return _deduplicate_events(edge_t, 0.0)
 
     thr = _auto_threshold(x) if threshold is None or not np.isfinite(float(threshold)) else float(threshold)
     high = x > thr
     if "low" in polarity_l:
         high = ~high
-    if "fall" in mode_l:
+    if "change" in mode_l or "both" in mode_l:
+        idx = np.flatnonzero(high[1:] != high[:-1]) + 1
+    elif "fall" in mode_l:
         idx = np.flatnonzero((~high[1:]) & high[:-1]) + 1
     else:
         idx = np.flatnonzero(high[1:] & (~high[:-1])) + 1
@@ -658,6 +969,144 @@ def align_timebase(
     )
 
 
+def align_sync_traces_xcorr(
+    fiber_time: np.ndarray,
+    camera_time: np.ndarray,
+    camera_signal: np.ndarray,
+    fiber_signal: np.ndarray,
+    *,
+    camera_mode: str = "barcode",
+    fiber_mode: str = "barcode",
+    threshold: Optional[float] = None,
+    min_interval_s: float = 0.2,
+    method: str = "cross_correlation",
+    max_lag_s: float = 5.0,
+    min_pairs: int = 2,
+) -> SyncResult:
+    """Align traces with the standalone extractor's waveform correlation model.
+
+    The returned mapping follows the module convention:
+    ``camera_time = f(photometry_time)``.
+    """
+    ft = np.asarray(fiber_time, float).reshape(-1)
+    xcorr = estimate_xcorr_offset(
+        ft,
+        np.asarray(fiber_signal, float),
+        np.asarray(camera_time, float),
+        np.asarray(camera_signal, float),
+        max_lag_s=float(max_lag_s),
+    )
+    if xcorr is None:
+        return SyncResult(
+            method="cross_correlation",
+            status="failed",
+            aligned_time=np.full(ft.shape, np.nan, dtype=float),
+            camera_events=np.array([], float),
+            fiber_events=np.array([], float),
+            matched_camera_events=np.array([], float),
+            matched_fiber_events=np.array([], float),
+            fitted_camera_events=np.array([], float),
+            residuals=np.array([], float),
+            warnings=["Cross-correlation could not estimate a reliable lag."],
+        )
+
+    offset = float(xcorr.get("offset", 0.0))
+    camera_events = extract_sync_events(
+        camera_time,
+        camera_signal,
+        mode=camera_mode,
+        threshold=threshold,
+        min_interval_s=min_interval_s,
+    )
+    fiber_events = extract_sync_events(
+        fiber_time,
+        fiber_signal,
+        mode=fiber_mode,
+        threshold=threshold,
+        min_interval_s=min_interval_s,
+    )
+    rate = _sample_rate_from_time(ft, fallback=_sample_rate_from_time(camera_time, 30.0))
+    pairs_fiber, pairs_camera = pair_edges(
+        fiber_events,
+        np.array([], np.int8),
+        camera_events,
+        np.array([], np.int8),
+        offset,
+        rate,
+    )
+    pairs_fiber, pairs_camera, n_inlier, n_total = _robust_filter_edge_pairs(
+        pairs_fiber,
+        pairs_camera,
+        min_pairs=max(2, int(min_pairs)),
+    )
+
+    method_l = str(method or "").lower()
+    warnings: List[str] = []
+    peak = float(xcorr.get("peak", float("nan")))
+    if np.isfinite(peak) and peak < DEFAULT_MIN_XCORR_R:
+        warnings.append(
+            f"Low cross-correlation peak r={peak:.3f}; inspect the waveform overlay."
+        )
+    if n_total and n_inlier < n_total:
+        warnings.append(f"Rejected {n_total - n_inlier} inconsistent edge pair(s).")
+
+    if ("linear" in method_l or "interp" in method_l) and pairs_fiber.size >= max(2, int(min_pairs)):
+        warnings.insert(0, f"Cross-correlation seed offset: {offset:.6g} s.")
+        return _sync_result_from_matches(
+            ft,
+            camera_events,
+            fiber_events,
+            pairs_camera,
+            pairs_fiber,
+            method=("interpolation" if "interp" in method_l else "linear"),
+            pair_offset=0,
+            warnings=warnings,
+            method_prefix="xcorr_seeded",
+        )
+
+    aligned = ft - offset
+    fitted = pairs_fiber - offset if pairs_fiber.size else np.array([], float)
+    residuals = pairs_camera - fitted if pairs_camera.size and fitted.size else np.array([], float)
+    finite_resid = residuals[np.isfinite(residuals)]
+    if finite_resid.size:
+        rms = float(np.sqrt(np.nanmean(finite_resid ** 2)))
+        med = float(np.nanmedian(finite_resid))
+        max_abs = float(np.nanmax(np.abs(finite_resid)))
+        median_lag = float(np.nanmedian(pairs_camera - pairs_fiber))
+    else:
+        rms = med = max_abs = float("nan")
+        median_lag = float(-offset)
+
+    status = "ok"
+    if not np.isfinite(peak) or peak < DEFAULT_MIN_XCORR_R:
+        status = "warning"
+    if pairs_fiber.size < max(2, int(min_pairs)):
+        warnings.append(
+            "Waveform lag was estimated, but too few thresholded edges were paired for residual diagnostics."
+        )
+
+    return SyncResult(
+        method="cross_correlation",
+        status=status,
+        aligned_time=np.asarray(aligned, float),
+        camera_events=np.asarray(camera_events, float),
+        fiber_events=np.asarray(fiber_events, float),
+        matched_camera_events=np.asarray(pairs_camera, float),
+        matched_fiber_events=np.asarray(pairs_fiber, float),
+        fitted_camera_events=np.asarray(fitted, float),
+        residuals=np.asarray(residuals, float),
+        slope=1.0,
+        intercept=-offset,
+        rms_error_s=rms,
+        median_error_s=med,
+        max_abs_error_s=max_abs,
+        median_lag_s=median_lag,
+        drift_ppm=0.0,
+        pair_offset=0,
+        warnings=warnings,
+    )
+
+
 def align_sync_traces(
     fiber_time: np.ndarray,
     camera_time: np.ndarray,
@@ -673,6 +1122,22 @@ def align_sync_traces(
     min_pairs: int = 2,
 ) -> SyncResult:
     """Align raw sync traces, using decoded barcode packets when available."""
+    method_l = str(method or "").lower()
+    if "cross" in method_l or "xcorr" in method_l:
+        return align_sync_traces_xcorr(
+            fiber_time,
+            camera_time,
+            camera_signal,
+            fiber_signal,
+            camera_mode=camera_mode,
+            fiber_mode=fiber_mode,
+            threshold=threshold,
+            min_interval_s=min_interval_s,
+            method=method,
+            max_lag_s=float(max_offset),
+            min_pairs=min_pairs,
+        )
+
     barcode_requested = _is_barcode_mode(camera_mode) or _is_barcode_mode(fiber_mode)
     camera_packets = decode_barcode_packets(camera_time, camera_signal, threshold=threshold)
     fiber_packets = decode_barcode_packets(fiber_time, fiber_signal, threshold=threshold)
