@@ -161,49 +161,54 @@ def smooth_signal(values: np.ndarray, window: int = 5) -> np.ndarray:
     return np.convolve(padded, kernel, mode="valid")
 
 
+def _finite_values(x: np.ndarray) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float64).reshape(-1)
+    return arr[np.isfinite(arr)]
+
+
 def _otsu_threshold(x: np.ndarray, bins: int = 256) -> float:
-    finite = np.asarray(x, float)
-    finite = finite[np.isfinite(finite)]
+    """Match video_barcode_extractor's Otsu threshold."""
+    finite = _finite_values(x)
     if finite.size < 2:
-        return float("nan")
+        return 0.0
+    try:
+        from skimage.filters import threshold_otsu as _otsu
+
+        return float(_otsu(finite))
+    except Exception:
+        pass
     lo, hi = float(finite.min()), float(finite.max())
     if hi <= lo:
-        return float(lo)
+        return lo
     hist, edges = np.histogram(finite, bins=bins, range=(lo, hi))
-    hist = hist.astype(float)
-    total = hist.sum()
+    hist = hist.astype(np.float64)
+    total = float(hist.sum())
     if total <= 0:
         return 0.5 * (lo + hi)
     centers = 0.5 * (edges[:-1] + edges[1:])
     w0 = np.cumsum(hist)
     w1 = total - w0
-    sum_total = np.cumsum(hist * centers)
-    grand = sum_total[-1]
+    weighted = np.cumsum(hist * centers)
+    grand = float(weighted[-1])
     with np.errstate(invalid="ignore", divide="ignore"):
-        m0 = sum_total / w0
-        m1 = (grand - sum_total) / w1
+        m0 = weighted / w0
+        m1 = (grand - weighted) / w1
         between = w0 * w1 * (m0 - m1) ** 2
     between[~np.isfinite(between)] = -1.0
-    k = int(np.argmax(between))
-    # Use the midpoint of the two class means (robust for sparse/bimodal
-    # barcode histograms where the optimal bin sits at a cluster edge).
-    if np.isfinite(m0[k]) and np.isfinite(m1[k]):
-        return float(0.5 * (m0[k] + m1[k]))
-    return float(centers[k])
+    return float(centers[int(np.argmax(between))])
 
 
 def _triangle_threshold(x: np.ndarray, bins: int = 256) -> float:
-    """Triangle method (Zack et al. 1977).
-
-    Builds the line from the histogram peak to the far end of the longer tail
-    and returns the level of maximum perpendicular distance. Unlike Otsu it does
-    not assume balanced classes, so it stays accurate for the skewed histogram
-    of a low-duty-cycle LED barcode (long "off" baseline, brief "on" flashes).
-    """
-    finite = np.asarray(x, float)
-    finite = finite[np.isfinite(finite)]
+    """Match video_barcode_extractor's Triangle threshold."""
+    finite = _finite_values(x)
     if finite.size < 2:
-        return float("nan")
+        return 0.0
+    try:
+        from skimage.filters import threshold_triangle as _tri
+
+        return float(_tri(finite))
+    except Exception:
+        pass
     lo, hi = float(finite.min()), float(finite.max())
     if hi <= lo:
         return lo
@@ -216,9 +221,8 @@ def _triangle_threshold(x: np.ndarray, bins: int = 256) -> float:
     peak = int(np.argmax(hist))
     if first == last:
         return float(centers[first])
-    # Put the long tail on the left of the peak so the geometry is uniform.
     flip = (peak - first) < (last - peak)
-    h = hist[::-1].astype(float) if flip else hist.astype(float)
+    h = hist[::-1].astype(np.float64) if flip else hist.astype(np.float64)
     if flip:
         peak, first = bins - 1 - peak, bins - 1 - last
     width = max(peak - first, 1)
@@ -237,10 +241,9 @@ def _mad_threshold(x: np.ndarray, k: float = 3.0) -> float:
     """Robust off-state baseline + k.sigma, with sigma from the MAD of the
     samples at or below the median (the assumed off-state). Exactly the right
     model for sparse pulses; bounded noise keeps it usable when balanced too."""
-    arr = np.asarray(x, float)
-    arr = arr[np.isfinite(arr)]
+    arr = _finite_values(x)
     if arr.size < 2:
-        return float("nan")
+        return 0.0
     med = float(np.median(arr))
     off = arr[arr <= med]
     if off.size < 2:
@@ -248,6 +251,18 @@ def _mad_threshold(x: np.ndarray, k: float = 3.0) -> float:
     med_off = float(np.median(off))
     mad_off = float(np.median(np.abs(off - med_off)))
     return med_off + k * mad_off * 1.4826
+
+
+def auto_threshold(values: np.ndarray) -> Tuple[float, str]:
+    """Return the standalone app's automatic threshold and method name."""
+    arr = _finite_values(values)
+    if arr.size < 2:
+        return 0.0, "Otsu"
+    mid = 0.5 * (float(arr.min()) + float(arr.max()))
+    frac_high = float(np.mean(arr > mid))
+    if frac_high < 0.15 or frac_high > 0.85:
+        return _triangle_threshold(arr), "Triangle"
+    return _otsu_threshold(arr), "Otsu"
 
 
 def compute_threshold(x: np.ndarray, method: str = "auto") -> float:
@@ -260,10 +275,9 @@ def compute_threshold(x: np.ndarray, method: str = "auto") -> float:
     Triangle for skewed/sparse ones (the LED barcode case). ``otsu``,
     ``triangle``, ``mad`` and ``p<NN>`` (percentile, e.g. ``p95``) force a method.
     """
-    arr = np.asarray(x, float)
-    arr = arr[np.isfinite(arr)]
+    arr = _finite_values(x)
     if arr.size < 2:
-        return float("nan")
+        return 0.0
     m = str(method or "auto").strip().lower()
     if m == "otsu":
         return _otsu_threshold(arr)
@@ -276,13 +290,8 @@ def compute_threshold(x: np.ndarray, method: str = "auto") -> float:
             return float(np.percentile(arr, float(m[1:])))
         except Exception:
             pass
-    # auto: mid-range tracks the on-fraction of a bimodal signal (median is 50%
-    # by construction and useless here). Skewed -> Triangle, balanced -> Otsu.
-    mid = 0.5 * (float(arr.min()) + float(arr.max()))
-    frac_high = float(np.mean(arr > mid))
-    if frac_high < 0.15 or frac_high > 0.85:
-        return _triangle_threshold(arr)
-    return _otsu_threshold(arr)
+    threshold, _method = auto_threshold(arr)
+    return threshold
 
 
 def debounce_binary(binary: np.ndarray, min_run: int = 2) -> np.ndarray:

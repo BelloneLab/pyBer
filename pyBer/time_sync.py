@@ -440,7 +440,17 @@ def extract_sync_events(
         if _looks_discrete_value_trace(x):
             values = np.round(x, decimals=3)
             idx = np.flatnonzero(values[1:] != values[:-1]) + 1
-            return _deduplicate_events(t[idx], 0.0)
+            return _deduplicate_events(t[idx], min_interval_s)
+
+        try:
+            packets = decode_barcode_packets(t, x, threshold=threshold)
+            if len(packets) >= 2:
+                return _deduplicate_events(
+                    np.asarray([pkt.anchor_time for pkt in packets], float),
+                    min_interval_s,
+                )
+        except Exception:
+            pass
 
         thr = _auto_threshold(x) if threshold is None or not np.isfinite(float(threshold)) else float(threshold)
         high = x > thr
@@ -487,11 +497,10 @@ def decode_barcode_packets(
     value_span = float(np.nanmax(finite) - np.nanmin(finite))
     if not np.isfinite(value_span) or value_span <= 0.0:
         return []
-    if value_span > 2.0:
-        return []
-
     thr = _auto_threshold(x) if threshold is None or not np.isfinite(float(threshold)) else float(threshold)
     values = (x > thr).astype(int)
+    if np.unique(values).size < 2:
+        return []
     change_idx = np.flatnonzero(values[1:] != values[:-1]) + 1
     if change_idx.size < max(2, int(min_transitions)):
         return []

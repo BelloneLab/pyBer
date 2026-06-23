@@ -25,6 +25,7 @@ from time_sync import (
     align_sync_traces,
     align_sync_traces_xcorr,
     align_timebase,
+    decode_barcode_packets,
     extract_sync_events,
 )
 from temporal_modeling import TemporalModelingWidget
@@ -58,6 +59,10 @@ _FIXED_POST_RIGHT_TAB_TITLES: Dict[str, str] = {
 }
 _USE_PG_DOCKAREA_POST_LAYOUT = True
 _LOG = logging.getLogger(__name__)
+_LED_SYNC_COLUMN = "LED signal"
+_LED_RAW_COLUMN = "LED raw"
+_SYNC_LED_ROI_CACHE_KEY = "sync_led_roi_cache_v1"
+_SYNC_LED_ROI_SIDECAR_SUFFIX = "_pyber_led_roi.json"
 
 
 def _opt_plot(w: pg.PlotWidget) -> None:
@@ -1113,14 +1118,16 @@ class SyncRoiPreview(QtWidgets.QWidget):
         top_left = self._image_to_widget(roi.topLeft()).toPoint()
         bottom_right = self._image_to_widget(roi.bottomRight()).toPoint()
         draw_rect = QtCore.QRect(top_left, bottom_right).normalized()
-        painter.setPen(QtGui.QPen(QtGui.QColor("#f9e154"), 2))
-        painter.setBrush(QtGui.QColor(249, 225, 84, 36))
+        small_roi = draw_rect.width() < 18 or draw_rect.height() < 18
+        painter.setPen(QtGui.QPen(QtGui.QColor("#f9e154"), 1 if small_roi else 2))
+        painter.setBrush(QtGui.QColor(249, 225, 84, 0 if small_roi else 28))
         painter.drawRect(draw_rect)
-        # Draggable handles at the corners and edge midpoints.
-        painter.setBrush(QtGui.QColor("#f9e154"))
-        painter.setPen(QtGui.QPen(QtGui.QColor("#141922"), 1))
-        for pt in self._handle_points(draw_rect).values():
-            painter.drawRect(QtCore.QRectF(pt.x() - 3, pt.y() - 3, 6, 6))
+        if not small_roi:
+            # Draggable handles at the corners and edge midpoints.
+            painter.setBrush(QtGui.QColor("#f9e154"))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#141922"), 1))
+            for pt in self._handle_points(draw_rect).values():
+                painter.drawRect(QtCore.QRectF(pt.x() - 3, pt.y() - 3, 6, 6))
 
     def _handle_points(self, r: QtCore.QRect) -> Dict[str, QtCore.QPointF]:
         cx = (r.left() + r.right()) / 2.0
@@ -1253,7 +1260,7 @@ class _LedExtractWorker(QtCore.QObject):
     caller on the main thread.
     """
 
-    progress = QtCore.Signal(int, int)             # (done, total chunks)
+    progress = QtCore.Signal(object)              # frame-progress payload
     videoFinished = QtCore.Signal(str, object, object) # (video key, parts_by_start, errors)
     message = QtCore.Signal(str)                   # current item label
     finished = QtCore.Signal(object, object)       # (parts_by_id, errors)
@@ -1264,10 +1271,19 @@ class _LedExtractWorker(QtCore.QObject):
         self._n_workers = max(1, int(n_workers))
         self._cancel = False
         self._expected_by_id: Dict[str, int] = {}
+        self._frame_total_by_id: Dict[str, int] = {}
+        self._label_by_id: Dict[str, str] = {}
         for task in self._tasks:
             key = str(task.get("id", ""))
             if key:
                 self._expected_by_id[key] = self._expected_by_id.get(key, 0) + 1
+                start = int(task.get("start_frame", 0) or 0)
+                end = int(task.get("end_frame", start) or start)
+                self._frame_total_by_id[key] = self._frame_total_by_id.get(key, 0) + max(0, end - start)
+                label = str(task.get("label", "") or "").strip()
+                if label and key not in self._label_by_id:
+                    self._label_by_id[key] = label
+        self._total_frames = int(sum(self._frame_total_by_id.values()))
 
     def cancel(self) -> None:
         self._cancel = True
@@ -1280,14 +1296,17 @@ class _LedExtractWorker(QtCore.QObject):
         errors_by_id: Dict[str, List[str]],
         counts_by_id: Dict[str, int],
         emitted: set,
-    ) -> None:
+    ) -> Tuple[str, int]:
         key = str(res.get("id", ""))
+        extracted_frames = 0
         if res.get("error"):
             msg = f"{key}: {res['error']}"
             errors.append(msg)
             errors_by_id.setdefault(key, []).append(msg)
         else:
-            parts.setdefault(key, {})[int(res.get("start", 0))] = np.asarray(res.get("values"), float)
+            values = np.asarray(res.get("values"), float)
+            extracted_frames = int(values.size)
+            parts.setdefault(key, {})[int(res.get("start", 0))] = values
         if key:
             counts_by_id[key] = counts_by_id.get(key, 0) + 1
             expected = int(self._expected_by_id.get(key, 0))
@@ -1298,6 +1317,30 @@ class _LedExtractWorker(QtCore.QObject):
                     dict(parts.get(key, {})),
                     list(errors_by_id.get(key, [])),
                 )
+        return key, extracted_frames
+
+    def _progress_payload(
+        self,
+        done_chunks: int,
+        total_chunks: int,
+        frame_done_by_id: Dict[str, int],
+    ) -> Dict[str, object]:
+        by_video: Dict[str, Dict[str, object]] = {}
+        for key in self._frame_total_by_id:
+            done_frames = int(frame_done_by_id.get(key, 0))
+            total_frames = int(self._frame_total_by_id.get(key, 0))
+            by_video[key] = {
+                "done": min(done_frames, total_frames) if total_frames > 0 else done_frames,
+                "total": total_frames,
+                "label": self._label_by_id.get(key, key),
+            }
+        return {
+            "done_chunks": int(done_chunks),
+            "total_chunks": int(total_chunks),
+            "done_frames": int(sum(frame_done_by_id.values())),
+            "total_frames": int(self._total_frames),
+            "by_video": by_video,
+        }
 
     def run(self) -> None:
         import led_extract
@@ -1307,10 +1350,12 @@ class _LedExtractWorker(QtCore.QObject):
         errors: List[str] = []
         errors_by_id: Dict[str, List[str]] = {}
         counts_by_id: Dict[str, int] = {}
+        frame_done_by_id: Dict[str, int] = {}
         emitted: set = set()
         total = len(self._tasks)
         done = 0
         used_pool = False
+        self.progress.emit(self._progress_payload(done, total, frame_done_by_id))
         if self._n_workers > 1 and total > 1:
             pool = None
             try:
@@ -1319,9 +1364,11 @@ class _LedExtractWorker(QtCore.QObject):
                 for fut in as_completed(futures):
                     if self._cancel:
                         break
-                    self._collect(fut.result(), parts, errors, errors_by_id, counts_by_id, emitted)
+                    key, frames = self._collect(fut.result(), parts, errors, errors_by_id, counts_by_id, emitted)
+                    if key:
+                        frame_done_by_id[key] = frame_done_by_id.get(key, 0) + int(frames)
                     done += 1
-                    self.progress.emit(done, total)
+                    self.progress.emit(self._progress_payload(done, total, frame_done_by_id))
                 used_pool = True
             except Exception as exc:  # pool can fail in restricted environments
                 errors.append(f"Parallel pool failed ({exc}).")
@@ -1330,6 +1377,7 @@ class _LedExtractWorker(QtCore.QObject):
                     parts.clear()
                     errors_by_id.clear()
                     counts_by_id.clear()
+                    frame_done_by_id.clear()
                     emitted.clear()
                     done = 0
                 else:
@@ -1345,9 +1393,11 @@ class _LedExtractWorker(QtCore.QObject):
                 for t in self._tasks:
                     if self._cancel:
                         break
-                    self._collect(led_extract.extract_chunk_task(t), parts, errors, errors_by_id, counts_by_id, emitted)
+                    key, frames = self._collect(led_extract.extract_chunk_task(t), parts, errors, errors_by_id, counts_by_id, emitted)
+                    if key:
+                        frame_done_by_id[key] = frame_done_by_id.get(key, 0) + int(frames)
                     done += 1
-                    self.progress.emit(done, total)
+                    self.progress.emit(self._progress_payload(done, total, frame_done_by_id))
             except Exception as exc:  # pragma: no cover - decoder dependent
                 errors.append(f"Extraction failed: {exc}")
         if self._cancel:
@@ -1610,6 +1660,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._psth_excluded_files: Dict[str, Dict[str, object]] = {}
         self._sync_results_by_file: Dict[str, Dict[str, object]] = {}
         self._last_sync_preview: Optional[SyncResult] = None
+        self._last_sync_preview_file_id = ""
         self._sync_dialog: Optional[QtWidgets.QDialog] = None
         self._known_dio_channels: List[str] = []
         # Per-file / group data for Individual vs Group visual modes
@@ -1912,10 +1963,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_continuous_align_status.setWordWrap(True)
 
 
-        # ── Shared QSS for PSTH subsection headers ──
+        # -- Shared QSS for PSTH subsection headers --
         _psth_section_qss = ""
 
-        # ── Widget creation (unchanged logic, reordered for sections) ──
+        # -- Widget creation (unchanged logic, reordered for sections) --
         self.spin_pre = QtWidgets.QDoubleSpinBox(); self.spin_pre.setRange(0.1, 60); self.spin_pre.setValue(2.0); self.spin_pre.setDecimals(2)
         self.spin_post = QtWidgets.QDoubleSpinBox(); self.spin_post.setRange(0.1, 120); self.spin_post.setValue(5.0); self.spin_post.setDecimals(2)
         self.spin_b0 = QtWidgets.QDoubleSpinBox(); self.spin_b0.setRange(-60, 0); self.spin_b0.setValue(-1.0); self.spin_b0.setDecimals(2)
@@ -1985,7 +2036,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             w.setMinimumWidth(60)
             w.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
-        # ── Helper: dual-spin row ──
+        # -- Helper: dual-spin row --
         def _dual_row(lbl_a: str, w_a, lbl_b: str, w_b):
             g = QtWidgets.QGridLayout()
             g.setHorizontalSpacing(6); g.setContentsMargins(0, 0, 0, 0)
@@ -2002,9 +2053,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         metric_post_widget = _dual_row("Start:", self.spin_metric_post0, "End:", self.spin_metric_post1)
         global_widget = _dual_row("Start:", self.spin_global_start, "End:", self.spin_global_end)
 
-        # ═══════════════════════════════════════════════════════
+        # =======================================================
         # Section 0: Alignment
-        # ═══════════════════════════════════════════════════════
+        # =======================================================
         grp_align_psth = QtWidgets.QGroupBox("Alignment")
         grp_align_psth.setStyleSheet(_psth_section_qss)
         fa_psth = QtWidgets.QFormLayout(grp_align_psth)
@@ -2025,9 +2076,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fa_psth.addRow(self.lbl_continuous_align, continuous_widget)
         self._continuous_align_widget = continuous_widget
 
-        # ═══════════════════════════════════════════════════════
-        # Section 1 — Window & Baseline
-        # ═══════════════════════════════════════════════════════
+        # =======================================================
+        # Section 1 - Window & Baseline
+        # =======================================================
         grp_window = QtWidgets.QGroupBox("Window && baseline")
         grp_window.setStyleSheet(_psth_section_qss)
         fw = QtWidgets.QFormLayout(grp_window)
@@ -2038,9 +2089,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fw.addRow("Resample (Hz)", self.spin_resample)
         fw.addRow("Smooth sigma (s)", self.spin_smooth)
 
-        # ═══════════════════════════════════════════════════════
-        # Section 2 — Event filters
-        # ═══════════════════════════════════════════════════════
+        # =======================================================
+        # Section 2 - Event filters
+        # =======================================================
         grp_filt = QtWidgets.QGroupBox("Event filters")
         grp_filt.setStyleSheet(_psth_section_qss)
         ff = QtWidgets.QFormLayout(grp_filt)
@@ -2063,9 +2114,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         ff.addRow(self.lbl_dur_min, self.spin_dur_min)
         ff.addRow(self.lbl_dur_max, self.spin_dur_max)
 
-        # ═══════════════════════════════════════════════════════
-        # Section 3 — PSTH metrics
-        # ═══════════════════════════════════════════════════════
+        # =======================================================
+        # Section 3 - PSTH metrics
+        # =======================================================
         grp_include = QtWidgets.QGroupBox("Animal inclusion")
         grp_include.setStyleSheet(_psth_section_qss)
         fi = QtWidgets.QFormLayout(grp_include)
@@ -2093,9 +2144,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fm.addRow(self.lbl_metric_pre, metric_pre_widget)
         fm.addRow(self.lbl_metric_post, metric_post_widget)
 
-        # ═══════════════════════════════════════════════════════
-        # Section 4 — Global metrics
-        # ═══════════════════════════════════════════════════════
+        # =======================================================
+        # Section 4 - Global metrics
+        # =======================================================
         grp_global = QtWidgets.QGroupBox("Global metrics")
         grp_global.setStyleSheet(_psth_section_qss)
         fg = QtWidgets.QFormLayout(grp_global)
@@ -2942,6 +2993,45 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_sync_quality = QtWidgets.QLabel("SNR (dB): -\nEdges: -\nEdge interval CV: -\nSaturated frac: -")
         self.lbl_sync_quality.setProperty("class", "hint")
         self.lbl_sync_quality.setWordWrap(True)
+        self.plot_sync_alignment_validation = pg.PlotWidget(title="Alignment validation: photometry sync over ROI LED")
+        _opt_plot(self.plot_sync_alignment_validation)
+        self.plot_sync_alignment_validation.setMinimumHeight(220)
+        self.plot_sync_alignment_validation.setLabel("bottom", "Time (s)")
+        self.plot_sync_alignment_validation.setLabel("left", "Signal")
+        self.plot_sync_alignment_validation.addLegend(offset=(10, 10))
+        self.lbl_sync_alignment_validation = QtWidgets.QLabel(
+            "Select a matched photometry file to validate the ROI LED signal against its photometry sync trace."
+        )
+        self.lbl_sync_alignment_validation.setProperty("class", "hint")
+        self.lbl_sync_alignment_validation.setWordWrap(True)
+        self.combo_sync_alignment_view = QtWidgets.QComboBox()
+        self.combo_sync_alignment_view.addItem("20 s window", "window")
+        self.combo_sync_alignment_view.addItem("Full record", "full")
+        _compact_combo(self.combo_sync_alignment_view, min_chars=8)
+        self.btn_sync_alignment_prev_window = QtWidgets.QPushButton("<")
+        self.btn_sync_alignment_next_window = QtWidgets.QPushButton(">")
+        for btn in (self.btn_sync_alignment_prev_window, self.btn_sync_alignment_next_window):
+            btn.setProperty("class", "compactSmall")
+            btn.setEnabled(False)
+        self.spin_sync_alignment_window_start = QtWidgets.QDoubleSpinBox()
+        self.spin_sync_alignment_window_start.setRange(0.0, 0.0)
+        self.spin_sync_alignment_window_start.setDecimals(2)
+        self.spin_sync_alignment_window_start.setSingleStep(30.0)
+        self.spin_sync_alignment_window_start.setSuffix(" s")
+        self.spin_sync_alignment_window_start.setKeyboardTracking(False)
+        self.spin_sync_alignment_window_start.setMaximumWidth(130)
+        self.spin_sync_alignment_window_start.setEnabled(False)
+        self.spin_sync_alignment_window_duration = QtWidgets.QDoubleSpinBox()
+        self.spin_sync_alignment_window_duration.setRange(1.0, 600.0)
+        self.spin_sync_alignment_window_duration.setDecimals(1)
+        self.spin_sync_alignment_window_duration.setSingleStep(5.0)
+        self.spin_sync_alignment_window_duration.setValue(20.0)
+        self.spin_sync_alignment_window_duration.setSuffix(" s")
+        self.spin_sync_alignment_window_duration.setKeyboardTracking(False)
+        self.spin_sync_alignment_window_duration.setMaximumWidth(120)
+        self.lbl_sync_alignment_window_range = QtWidgets.QLabel("No window")
+        self.lbl_sync_alignment_window_range.setProperty("class", "hint")
+        self.lbl_sync_alignment_window_range.setMinimumWidth(150)
 
         # Photometry recordings (processed or raw fiber) carrying the sync signal.
         self.list_sync_photometry = QtWidgets.QListWidget()
@@ -3016,14 +3106,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_sync_led_reduce.setToolTip(
             "Per-frame ROI reduction. Mean matches the standalone extractor; Bright/Max are for low-contrast LEDs."
         )
-        # Keep raw intensity by default so thresholding remains adjustable in
-        # the Sync preview/alignment stage.
         self.combo_sync_led_format = QtWidgets.QComboBox()
+        self.combo_sync_led_format.addItem("Binary (thresholded)", "binary")
         self.combo_sync_led_format.addItem("Raw intensity", "raw")
         self.combo_sync_led_format.addItem("Smoothed", "smoothed")
-        self.combo_sync_led_format.addItem("Binary (thresholded)", "binary")
         self.combo_sync_led_format.setToolTip(
-            "Raw preserves the LED trace. Thresholding is applied later for preview and alignment."
+            "Binary matches the standalone extractor for sync. Raw intensity is saved for inspection."
         )
         self.spin_sync_led_x = QtWidgets.QSpinBox(); self.spin_sync_led_x.setRange(0, 100000)
         self.spin_sync_led_y = QtWidgets.QSpinBox(); self.spin_sync_led_y.setRange(0, 100000)
@@ -3069,6 +3157,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         act_sync_open_csv = menu_file.addAction("Open Sync CSV/H5")
         act_sync_open_processed = menu_file.addAction("Open processed file")
         act_sync_open_video = menu_file.addAction("Open video")
+        self.menu_sync_recent = menu_file.addMenu("Load recent")
+        self.menu_sync_recent_signal = self.menu_sync_recent.addMenu("Sync files")
+        self.menu_sync_recent_processed = self.menu_sync_recent.addMenu("Processed files")
+        self.menu_sync_recent_projects = self.menu_sync_recent.addMenu("Projects")
+        self.menu_sync_recent.aboutToShow.connect(self._refresh_recent_sync_menus)
         act_sync_remove_source = menu_file.addAction("Clear selected source")
         menu_file.addSeparator()
         act_sync_save_project = menu_file.addAction("Save project (.h5)")
@@ -3120,10 +3213,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         sync_toolbar_layout.addStretch(1)
         # Window controls (resize / maximize / full screen).
         self.btn_sync_win_maximize = QtWidgets.QToolButton()
-        self.btn_sync_win_maximize.setText("❐")  # maximize glyph
+        self.btn_sync_win_maximize.setText("[]")
         self.btn_sync_win_maximize.setToolTip("Maximize / restore window")
         self.btn_sync_win_fullscreen = QtWidgets.QToolButton()
-        self.btn_sync_win_fullscreen.setText("⛶")  # full-screen glyph
+        self.btn_sync_win_fullscreen.setText("F11")
         self.btn_sync_win_fullscreen.setToolTip("Toggle full screen (F11 / Esc)")
         for b in (self.btn_sync_win_maximize, self.btn_sync_win_fullscreen):
             b.setObjectName("toolbarIconButton")
@@ -3141,7 +3234,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _pp = QtWidgets.QHBoxLayout(self.sync_progress_panel)
         _pp.setContentsMargins(12, 6, 12, 6)
         _pp.setSpacing(10)
-        self.lbl_sync_progress = QtWidgets.QLabel("Extracting LED signal…")
+        self.lbl_sync_progress = QtWidgets.QLabel("Extracting LED signal...")
         self.lbl_sync_progress.setMinimumWidth(220)
         self.sync_progress = QtWidgets.QProgressBar()
         self.sync_progress.setObjectName("syncProgress")
@@ -3197,8 +3290,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         nav_row = QtWidgets.QHBoxLayout()
         nav_row.setContentsMargins(0, 0, 0, 0)
         nav_row.setSpacing(6)
-        self.btn_sync_prev_file = QtWidgets.QToolButton(); self.btn_sync_prev_file.setText("◀")
-        self.btn_sync_next_file = QtWidgets.QToolButton(); self.btn_sync_next_file.setText("▶")
+        self.btn_sync_prev_file = QtWidgets.QToolButton(); self.btn_sync_prev_file.setText("<")
+        self.btn_sync_next_file = QtWidgets.QToolButton(); self.btn_sync_next_file.setText(">")
         self.btn_sync_prev_file.setToolTip("Previous file (Ctrl+Left)")
         self.btn_sync_next_file.setToolTip("Next file (Ctrl+Right)")
         self.lbl_sync_file_counter = QtWidgets.QLabel("-/-")
@@ -3270,7 +3363,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         frame_row.addWidget(QtWidgets.QLabel("Frame:"))
         frame_row.addWidget(self.spin_sync_led_frame)
         frame_row.addSpacing(8)
-        self.btn_sync_zoom_out = QtWidgets.QPushButton("−")
+        self.btn_sync_zoom_out = QtWidgets.QPushButton("-")
         self.btn_sync_zoom_in = QtWidgets.QPushButton("+")
         self.btn_sync_zoom_reset = QtWidgets.QPushButton("Fit view")
         for b in (self.btn_sync_zoom_out, self.btn_sync_zoom_in, self.btn_sync_zoom_reset):
@@ -3370,6 +3463,29 @@ class PostProcessingPanel(QtWidgets.QWidget):
         alignment_layout = QtWidgets.QVBoxLayout(alignment_page)
         alignment_layout.setContentsMargins(10, 10, 10, 10)
         alignment_layout.setSpacing(8)
+        validation_panel = _sync_panel()
+        validation_panel.setMinimumHeight(270)
+        validation_layout = QtWidgets.QVBoxLayout(validation_panel)
+        validation_layout.setContentsMargins(10, 8, 10, 8)
+        validation_layout.setSpacing(6)
+        validation_controls = QtWidgets.QHBoxLayout()
+        validation_controls.setContentsMargins(0, 0, 0, 0)
+        validation_controls.setSpacing(8)
+        validation_controls.addWidget(QtWidgets.QLabel("View"))
+        validation_controls.addWidget(self.combo_sync_alignment_view, 0)
+        validation_controls.addSpacing(8)
+        validation_controls.addWidget(self.btn_sync_alignment_prev_window, 0)
+        validation_controls.addWidget(QtWidgets.QLabel("Start"))
+        validation_controls.addWidget(self.spin_sync_alignment_window_start, 0)
+        validation_controls.addWidget(QtWidgets.QLabel("Window"))
+        validation_controls.addWidget(self.spin_sync_alignment_window_duration, 0)
+        validation_controls.addWidget(self.btn_sync_alignment_next_window, 0)
+        validation_controls.addWidget(self.lbl_sync_alignment_window_range, 0)
+        validation_controls.addStretch(1)
+        validation_layout.addLayout(validation_controls, 0)
+        validation_layout.addWidget(self.plot_sync_alignment_validation, 1)
+        validation_layout.addWidget(self.lbl_sync_alignment_validation, 0)
+        alignment_layout.addWidget(validation_panel, 1)
         alignment_subtabs = QtWidgets.QTabWidget()
         alignment_subtabs.setDocumentMode(True)
         event_page = QtWidgets.QWidget()
@@ -3409,7 +3525,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         alignment_subtabs.addTab(residual_page, "Residuals")
         alignment_subtabs.addTab(report_page, "Report")
         alignment_subtabs.addTab(files_page, "Files")
-        alignment_layout.addWidget(alignment_subtabs, 1)
+        alignment_layout.addWidget(alignment_subtabs, 2)
 
         right_tabs.addTab(signal_page, "Signal")
         right_tabs.addTab(alignment_page, "Alignment")
@@ -3574,14 +3690,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         self.btn_action_undo = QtWidgets.QToolButton()
         self.btn_action_undo.setObjectName("toolbarIconButton")
-        self.btn_action_undo.setText("↶")
+        self.btn_action_undo.setText("Undo")
         self.btn_action_undo.setToolTip("Undo last postprocessing setting or view action (Ctrl+Z)")
-        self.btn_action_undo.setFixedSize(34, 30)
+        self.btn_action_undo.setFixedSize(48, 30)
         self.btn_action_redo = QtWidgets.QToolButton()
         self.btn_action_redo.setObjectName("toolbarIconButton")
-        self.btn_action_redo.setText("↷")
+        self.btn_action_redo.setText("Redo")
         self.btn_action_redo.setToolTip("Redo last undone postprocessing setting or view action (Ctrl+Y)")
-        self.btn_action_redo.setFixedSize(34, 30)
+        self.btn_action_redo.setFixedSize(48, 30)
         self.btn_action_help = QtWidgets.QToolButton()
         self.btn_action_help.setObjectName("toolbarIconButton")
         self.btn_action_help.setText("?")
@@ -4150,15 +4266,28 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_sync_behavior_file.currentIndexChanged.connect(self._refresh_sync_camera_columns)
         self.combo_sync_behavior_file.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_source_list())
         self.combo_sync_behavior_file.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_signal_preview())
+        self.combo_sync_behavior_file.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_alignment_validation())
         self.combo_sync_camera_column.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_signal_preview())
         self.combo_sync_camera_mode.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_signal_preview())
         self.combo_sync_fiber_source.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_signal_preview())
         self.combo_sync_fiber_mode.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_signal_preview())
         self.spin_sync_threshold.valueChanged.connect(lambda _value=0.0: self._refresh_sync_signal_preview())
         self.spin_sync_min_interval.valueChanged.connect(lambda _value=0.0: self._refresh_sync_signal_preview())
+        self.combo_sync_camera_column.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_alignment_validation())
+        self.combo_sync_camera_mode.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_alignment_validation())
+        self.combo_sync_fiber_source.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_alignment_validation())
+        self.combo_sync_fiber_mode.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_alignment_validation())
+        self.spin_sync_threshold.valueChanged.connect(lambda _value=0.0: self._refresh_sync_alignment_validation())
+        self.spin_sync_min_interval.valueChanged.connect(lambda _value=0.0: self._refresh_sync_alignment_validation())
+        self.combo_sync_alignment_view.currentIndexChanged.connect(lambda _idx=0: self._refresh_sync_alignment_validation())
+        self.spin_sync_alignment_window_start.valueChanged.connect(lambda _value=0.0: self._refresh_sync_alignment_validation())
+        self.spin_sync_alignment_window_duration.valueChanged.connect(lambda _value=0.0: self._refresh_sync_alignment_validation())
+        self.btn_sync_alignment_prev_window.clicked.connect(lambda _checked=False: self._sync_step_alignment_window(-1))
+        self.btn_sync_alignment_next_window.clicked.connect(lambda _checked=False: self._sync_step_alignment_window(1))
         self.edit_sync_filter.textChanged.connect(lambda _text="": self._refresh_sync_source_list())
         self.list_sync_sources.itemSelectionChanged.connect(self._on_sync_source_list_selected)
         self.list_sync_photometry.itemSelectionChanged.connect(self._on_sync_photometry_list_selected)
+        self.tbl_sync_match.itemSelectionChanged.connect(self._on_sync_match_selection_changed)
         self.btn_sync_prev_file.clicked.connect(lambda _checked=False: self._sync_step_file(-1))
         self.btn_sync_next_file.clicked.connect(lambda _checked=False: self._sync_step_file(1))
         QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Left"), self._sync_dialog).activated.connect(lambda: self._sync_step_file(-1))
@@ -4187,6 +4316,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_sync_led_channel.currentIndexChanged.connect(lambda _i=0: self._sync_persist_current_video_roi())
         self.combo_sync_led_reduce.currentIndexChanged.connect(lambda _i=0: self._sync_persist_current_video_roi())
         self.combo_sync_led_format.currentIndexChanged.connect(lambda _i=0: self._sync_persist_current_video_roi())
+        self.spin_sync_led_start.valueChanged.connect(lambda _value=0: self._sync_persist_current_video_roi())
+        self.spin_sync_led_end.valueChanged.connect(lambda _value=0: self._sync_persist_current_video_roi())
         self.cb_sync_use_aligned.toggled.connect(lambda _checked=False: self._on_sync_use_aligned_changed())
         self.list_preprocessed.filesDropped.connect(self._on_preprocessed_files_dropped)
         self.list_preprocessed.orderChanged.connect(self._sync_processed_order_from_list)
@@ -5603,6 +5734,23 @@ class PostProcessingPanel(QtWidgets.QWidget):
             loader=self._load_recent_project_path,
         )
 
+    def _refresh_recent_sync_menus(self) -> None:
+        self._refresh_recent_menu(
+            getattr(self, "menu_sync_recent_signal", None),
+            key="postprocess_recent_sync_signal_paths",
+            loader=self._load_recent_sync_signal_path,
+        )
+        self._refresh_recent_menu(
+            getattr(self, "menu_sync_recent_processed", None),
+            key="postprocess_recent_processed_paths",
+            loader=self._load_recent_processed_path,
+        )
+        self._refresh_recent_menu(
+            getattr(self, "menu_sync_recent_projects", None),
+            key="postprocess_recent_project_paths",
+            loader=self._load_recent_project_path,
+        )
+
     def _refresh_recent_menu(
         self,
         menu: QtWidgets.QMenu,
@@ -5657,6 +5805,29 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
         except Exception:
             pass
+
+    def _load_recent_sync_signal_path(self, path: str) -> None:
+        if not path or not os.path.isfile(path):
+            QtWidgets.QMessageBox.warning(self, "Load recent", "Selected recent Sync file is missing.")
+            return
+        try:
+            self._load_sync_signal_path(path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Load recent",
+                f"Could not load recent Sync file:\n{exc}",
+            )
+            return
+        self._push_recent_paths("postprocess_recent_sync_signal_paths", [path])
+        try:
+            self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
+        except Exception:
+            pass
+        self._refresh_sync_source_list()
+        self._sync_auto_match()
+        self.sync_status.set(f"Loaded Sync signal file: {os.path.basename(path)}", "ok")
+        self.statusUpdate.emit(f"Loaded Sync signal file: {os.path.basename(path)}", 5000)
 
     def _load_recent_project_path(self, path: str) -> None:
         if not path or not os.path.isfile(path):
@@ -5821,6 +5992,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._refresh_sync_source_list()
         self._sync_auto_match()
         self._refresh_sync_signal_preview()
+        self._refresh_sync_alignment_validation()
         self._update_data_availability()
         self._sync_dialog.show()
         self._sync_dialog.raise_()
@@ -5848,7 +6020,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         dlg.activateWindow()
 
     # --- Inline LED-extraction progress (label + bar + Cancel) -------------
-    def _sync_progress_begin(self, maximum: int = 0, label: str = "Extracting LED signal…") -> None:
+    def _sync_progress_begin(self, maximum: int = 0, label: str = "Extracting LED signal...") -> None:
         panel = getattr(self, "sync_progress_panel", None)
         bar = getattr(self, "sync_progress", None)
         if panel is None or bar is None:
@@ -5858,6 +6030,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             bar.setValue(0)
         else:
             bar.setRange(0, 0)  # indeterminate / busy
+        bar.setFormat("%p%")
         if hasattr(self, "lbl_sync_progress"):
             self.lbl_sync_progress.setText(label)
         panel.setVisible(True)
@@ -5867,7 +6040,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if bar is None:
             return
         if bar.maximum() > 0:
-            bar.setValue(int(value))
+            bar.setValue(min(max(0, int(value)), int(bar.maximum())))
         if label is not None and hasattr(self, "lbl_sync_progress"):
             self.lbl_sync_progress.setText(label)
 
@@ -5877,6 +6050,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if bar is not None:
             bar.setRange(0, 100)
             bar.setValue(0)
+            bar.setFormat("%p%")
         if panel is not None:
             panel.setVisible(False)
 
@@ -5952,10 +6126,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._sync_linking_selection = True
         try:
             self._select_proc_in_photometry_list(proc)
+            self._select_proc_in_sync_match_table(proc)
             self._sync_select_matched_video_for_proc(proc)
         finally:
             self._sync_linking_selection = False
         self._refresh_sync_signal_preview()
+        self._refresh_sync_alignment_validation()
         self._sync_autopreview_alignment(proc)
 
     def _select_proc_in_photometry_list(self, proc: ProcessedTrial) -> None:
@@ -5973,6 +6149,53 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if idx >= 0 and idx != self.combo_individual_file.currentIndex():
                 self.combo_individual_file.setCurrentIndex(idx)
         self._update_sync_file_counter()
+
+    def _select_proc_in_sync_match_table(self, proc: ProcessedTrial) -> None:
+        if not hasattr(self, "tbl_sync_match"):
+            return
+        fid = self._file_id_for_proc(proc)
+        self.tbl_sync_match.blockSignals(True)
+        try:
+            for row in range(self.tbl_sync_match.rowCount()):
+                item = self.tbl_sync_match.item(row, 0)
+                if item is None:
+                    continue
+                if item.data(QtCore.Qt.ItemDataRole.UserRole) == fid or item.text() == fid:
+                    if self.tbl_sync_match.currentRow() != row:
+                        self.tbl_sync_match.selectRow(row)
+                    return
+        finally:
+            self.tbl_sync_match.blockSignals(False)
+
+    def _proc_from_sync_match_table(self) -> Optional[ProcessedTrial]:
+        if not hasattr(self, "tbl_sync_match"):
+            return None
+        row = self.tbl_sync_match.currentRow()
+        if row < 0:
+            selected = self.tbl_sync_match.selectionModel().selectedRows() if self.tbl_sync_match.selectionModel() else []
+            row = selected[0].row() if selected else -1
+        if row < 0:
+            return None
+        item = self.tbl_sync_match.item(row, 0)
+        if item is None:
+            return None
+        try:
+            fid = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        except RuntimeError:
+            fid = None
+        fid = str(fid or item.text() or "").strip()
+        if not fid:
+            return None
+        return next((p for p in self._processed if self._file_id_for_proc(p) == fid), None)
+
+    def _on_sync_match_selection_changed(self) -> None:
+        if getattr(self, "_sync_linking_selection", False):
+            return
+        proc = self._proc_from_sync_match_table()
+        if proc is None:
+            self._refresh_sync_alignment_validation()
+            return
+        self._sync_focus_proc(proc)
 
     def _proc_for_video_key(self, vkey: str) -> Optional[ProcessedTrial]:
         """Find the photometry recording paired with reference video `vkey`."""
@@ -6053,6 +6276,288 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     self.list_sync_sources.setCurrentRow(row)
                 break
 
+    @staticmethod
+    def _sync_video_path_key(path: str) -> str:
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        try:
+            return os.path.normcase(os.path.abspath(raw))
+        except Exception:
+            return os.path.normcase(raw)
+
+    @staticmethod
+    def _sync_led_roi_sidecar_path(path: str) -> str:
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        folder = os.path.dirname(raw) or os.getcwd()
+        stem = os.path.splitext(os.path.basename(raw))[0] or "video"
+        return os.path.join(folder, f"{stem}{_SYNC_LED_ROI_SIDECAR_SUFFIX}")
+
+    @staticmethod
+    def _sync_bound_roi_tuple(
+        roi: object,
+        frame_shape: Optional[Tuple[int, int]] = None,
+    ) -> Tuple[int, int, int, int]:
+        try:
+            vals = [int(v) for v in list(roi)[:4]]  # type: ignore[arg-type]
+        except Exception:
+            vals = [0, 0, 1, 1]
+        while len(vals) < 4:
+            vals.append(1)
+        x, y, w, h = vals[:4]
+        x = max(0, int(x))
+        y = max(0, int(y))
+        w = max(1, int(w))
+        h = max(1, int(h))
+        if frame_shape is not None:
+            fh, fw = [max(1, int(v)) for v in frame_shape[:2]]
+            x = min(x, fw - 1)
+            y = min(y, fh - 1)
+            w = max(1, min(w, fw - x))
+            h = max(1, min(h, fh - y))
+        return (x, y, w, h)
+
+    def _sync_load_led_roi_cache(self) -> Dict[str, Dict[str, object]]:
+        raw = "{}"
+        try:
+            raw = self._settings.value(_SYNC_LED_ROI_CACHE_KEY, "{}", type=str)
+        except Exception:
+            raw = "{}"
+        try:
+            data = json.loads(raw or "{}")
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            return {}
+        out: Dict[str, Dict[str, object]] = {}
+        for key, value in data.items():
+            if isinstance(value, dict):
+                out[str(key)] = dict(value)
+        return out
+
+    def _sync_save_led_roi_cache(self, cache: Dict[str, Dict[str, object]]) -> None:
+        try:
+            self._settings.setValue(_SYNC_LED_ROI_CACHE_KEY, json.dumps(cache))
+        except Exception:
+            pass
+
+    def _sync_read_led_roi_sidecar(self, path: str) -> Dict[str, object]:
+        sidecar = self._sync_led_roi_sidecar_path(path)
+        if not sidecar or not os.path.isfile(sidecar):
+            return {}
+        try:
+            with open(sidecar, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return dict(data) if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _sync_read_led_sync_csv_config(self, path: str) -> Dict[str, object]:
+        raw = str(path or "").strip()
+        if not raw:
+            return {}
+        folder = os.path.dirname(raw) or os.getcwd()
+        stem = os.path.splitext(os.path.basename(raw))[0] or "video"
+        csv_path = os.path.join(folder, f"{stem}_LED_sync.csv")
+        if not os.path.isfile(csv_path):
+            return {}
+        meta: Dict[str, str] = {}
+        try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.startswith("#"):
+                        break
+                    text = line[1:].strip()
+                    if ":" not in text:
+                        continue
+                    key, value = text.split(":", 1)
+                    meta[key.strip().lower()] = value.strip()
+        except Exception:
+            return {}
+        try:
+            roi = [
+                int(meta["roi_x"]),
+                int(meta["roi_y"]),
+                int(meta["roi_w"]),
+                int(meta["roi_h"]),
+            ]
+        except Exception:
+            return {}
+
+        def _int_meta(key: str, default: int) -> int:
+            try:
+                return int(float(meta.get(key, str(default))))
+            except Exception:
+                return int(default)
+
+        record: Dict[str, object] = {
+            "path": raw,
+            "roi": roi,
+            "channel": meta.get("channel", "Grayscale") or "Grayscale",
+            "reduce": meta.get("reduce", "mean") or "mean",
+            "signal_format": meta.get("signal_format", "binary") or "binary",
+            "start_frame": _int_meta("start_frame", 0),
+            "end_frame": _int_meta("end_frame", 0),
+        }
+        try:
+            threshold = float(meta.get("threshold", "nan"))
+            if np.isfinite(threshold):
+                record["threshold"] = threshold
+        except Exception:
+            pass
+        return record
+
+    def _sync_read_vbe_cache_config(self, path: str) -> Dict[str, object]:
+        raw = str(path or "").strip()
+        if not raw:
+            return {}
+        folder = os.path.dirname(raw) or os.getcwd()
+        cache_dir = os.path.join(folder, ".sig_cache")
+        if not os.path.isdir(cache_dir):
+            return {}
+        target = self._sync_video_path_key(raw)
+        best: Dict[str, object] = {}
+        best_mtime = -1.0
+        for name in os.listdir(cache_dir):
+            if not name.lower().endswith(".json"):
+                continue
+            meta_path = os.path.join(cache_dir, name)
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                continue
+            if not isinstance(meta, dict):
+                continue
+            meta_video = str(meta.get("video_path", "") or "")
+            if meta_video and self._sync_video_path_key(meta_video) != target:
+                continue
+            roi = meta.get("roi")
+            if not isinstance(roi, (list, tuple)) or len(roi) < 4:
+                continue
+            try:
+                mtime = float(os.path.getmtime(meta_path))
+            except Exception:
+                mtime = 0.0
+            if mtime < best_mtime:
+                continue
+            channel = str(meta.get("channel", "") or "").strip().lower()
+            channel_map = {
+                "gray": "Grayscale",
+                "grayscale": "Grayscale",
+                "r": "Red",
+                "red": "Red",
+                "g": "Green",
+                "green": "Green",
+                "b": "Blue",
+                "blue": "Blue",
+            }
+            best = {
+                "path": raw,
+                "roi": [int(v) for v in list(roi)[:4]],
+                "channel": channel_map.get(channel, "Grayscale"),
+                "reduce": "mean",
+                "signal_format": "binary",
+                "start_frame": int(meta.get("start_frame", 0) or 0),
+                "end_frame": int(meta.get("end_frame", 0) or 0),
+                "source": "video_barcode_extractor_cache",
+                "source_cache": meta_path,
+                "threshold": float(meta.get("threshold", np.nan)) if meta.get("threshold") is not None else np.nan,
+            }
+            best_mtime = mtime
+        return best
+
+    def _sync_write_led_roi_sidecar(self, path: str, record: Dict[str, object]) -> None:
+        sidecar = self._sync_led_roi_sidecar_path(path)
+        if not sidecar:
+            return
+        try:
+            with open(sidecar, "w", encoding="utf-8") as f:
+                json.dump(record, f, indent=2)
+        except Exception:
+            pass
+
+    def _sync_saved_led_config_for_path(self, path: str) -> Dict[str, object]:
+        key = self._sync_video_path_key(path)
+        if not key:
+            return {}
+        cache = self._sync_load_led_roi_cache()
+        record = self._sync_read_led_roi_sidecar(path)
+        if not isinstance(record, dict) or not record:
+            record = self._sync_read_vbe_cache_config(path)
+        if not isinstance(record, dict) or not record:
+            record = cache.get(key)
+        if not isinstance(record, dict) or not record:
+            record = self._sync_read_led_sync_csv_config(path)
+            if record:
+                record = dict(record)
+        if isinstance(record, dict) and record:
+            cache[key] = dict(record)
+            self._sync_save_led_roi_cache(cache)
+            self._sync_write_led_roi_sidecar(path, dict(record))
+        return dict(record) if isinstance(record, dict) else {}
+
+    def _sync_store_led_config_for_path(self, path: str, info: Dict[str, object]) -> None:
+        key = self._sync_video_path_key(path)
+        if not key:
+            return
+        roi = self._sync_bound_roi_tuple(info.get("roi", (0, 0, 1, 1)))
+        record: Dict[str, object] = {
+            "path": str(path or ""),
+            "roi": [int(v) for v in roi],
+            "channel": str(info.get("channel", "Grayscale") or "Grayscale"),
+            "reduce": str(info.get("reduce", "mean") or "mean"),
+            "signal_format": str(info.get("signal_format", "binary") or "binary"),
+            "start_frame": int(info.get("start_frame", 0) or 0),
+            "end_frame": int(info.get("end_frame", 0) or 0),
+            "updated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        try:
+            threshold = float(info.get("threshold", np.nan))
+            if np.isfinite(threshold):
+                record["threshold"] = threshold
+        except Exception:
+            pass
+        cache = self._sync_load_led_roi_cache()
+        cache[key] = record
+        self._sync_save_led_roi_cache(cache)
+        self._sync_write_led_roi_sidecar(path, record)
+
+    def _sync_apply_saved_led_config(
+        self,
+        path: str,
+        target: Dict[str, object],
+        *,
+        frame_shape: Optional[Tuple[int, int]] = None,
+        n_frames: int = 0,
+    ) -> bool:
+        record = self._sync_saved_led_config_for_path(path)
+        if not record:
+            return False
+        target["roi"] = self._sync_bound_roi_tuple(record.get("roi", target.get("roi", (0, 0, 1, 1))), frame_shape)
+        target["channel"] = str(record.get("channel", target.get("channel", "Grayscale")) or "Grayscale")
+        target["reduce"] = str(record.get("reduce", target.get("reduce", "mean")) or "mean")
+        target["signal_format"] = str(record.get("signal_format", target.get("signal_format", "binary")) or "binary")
+        try:
+            threshold = float(record.get("threshold", np.nan))
+            if np.isfinite(threshold):
+                target["threshold"] = threshold
+        except Exception:
+            pass
+        start = max(0, int(record.get("start_frame", target.get("start_frame", 0)) or 0))
+        end_default = int(target.get("end_frame", n_frames) or n_frames or start + 1)
+        end = int(record.get("end_frame", end_default) or end_default)
+        if end <= start:
+            end = end_default
+        if n_frames > 0:
+            end = min(max(start + 1, end), int(n_frames))
+        target["start_frame"] = start
+        target["end_frame"] = end if end > start else max(start + 1, int(n_frames or start + 1))
+        target["roi_locked"] = True
+        return True
+
     def _sync_probe_video(self, path: str):
         """Return (fps, n_frames, first_frame_bgr) for a video, or None on error."""
         try:
@@ -6081,6 +6586,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not paths:
             return
         added = 0
+        saved_roi_count = 0
         last_key = ""
         for path in paths:
             probe = self._sync_probe_video(path)
@@ -6091,19 +6597,28 @@ class PostProcessingPanel(QtWidgets.QWidget):
             default_w = max(8, min(80, w // 6))
             default_h = max(8, min(80, h // 6))
             key = self._unique_video_key(os.path.splitext(os.path.basename(path))[0])
-            self._sync_reference_videos[key] = {
+            video_info: Dict[str, Any] = {
                 "path": path,
                 "fps": float(fps),
                 "n_frames": int(n_frames),
                 "roi": (max(0, w // 2 - default_w // 2), max(0, h // 2 - default_h // 2), default_w, default_h),
                 "channel": "Grayscale",
                 "reduce": "mean",
-                "signal_format": "raw",
+                "signal_format": "binary",
                 "start_frame": 0,
                 "end_frame": max(1, n_frames),
                 "roi_locked": False,
                 "extracted_key": "",
             }
+            loaded_saved = self._sync_apply_saved_led_config(
+                path,
+                video_info,
+                frame_shape=(h, w),
+                n_frames=int(n_frames),
+            )
+            if loaded_saved:
+                saved_roi_count += 1
+            self._sync_reference_videos[key] = video_info
             last_key = key
             added += 1
         if not added:
@@ -6115,7 +6630,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if last_key:
             self._sync_select_reference_video(last_key)
         self._sync_auto_match()
-        self.sync_status.set(f"Added {added} reference video(s). Draw the LED ROI, then Extract all.", "ok")
+        self.sync_status.set(
+            f"Added {added} reference video(s). Loaded saved ROI for {saved_roi_count}."
+            if saved_roi_count else f"Added {added} reference video(s). Draw the LED ROI, then Extract all.",
+            "ok",
+        )
         self.statusUpdate.emit(f"Added {added} reference video(s).", 5000)
 
     def _unique_video_key(self, base: str) -> str:
@@ -6149,6 +6668,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if probe is not None:
             _fps, _n, frame = probe
             self.sync_led_preview.set_frame_bgr(frame)
+            self.sync_led_preview.reset_view()
+            if self._sync_apply_saved_led_config(
+                path,
+                vid,
+                frame_shape=frame.shape[:2],
+                n_frames=int(self._sync_led_n_frames),
+            ):
+                self._sync_led_fps = float(vid.get("fps", self._sync_led_fps) or self._sync_led_fps)
         max_frame = max(0, self._sync_led_n_frames - 1)
         for spin in (self.spin_sync_led_start, self.spin_sync_led_frame):
             spin.blockSignals(True)
@@ -6167,7 +6694,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_sync_led_channel.blockSignals(False)
         for combo, value in (
             (self.combo_sync_led_reduce, str(vid.get("reduce", "mean") or "mean")),
-            (self.combo_sync_led_format, str(vid.get("signal_format", "raw") or "raw")),
+            (self.combo_sync_led_format, str(vid.get("signal_format", "binary") or "binary")),
         ):
             combo.blockSignals(True)
             idx = combo.findData(value)
@@ -6193,11 +6720,26 @@ class PostProcessingPanel(QtWidgets.QWidget):
         last ROI state is the saved state for that video. Suppressed only while
         a video's stored ROI is being loaded into the editor.
         """
-        if getattr(self, "_sync_loading_video", False):
+        if getattr(self, "_sync_loading_video", False) or getattr(self, "_sync_led_updating_roi", False):
             return
         key = str(getattr(self, "_sync_current_video_key", "") or "")
         vid = self._sync_reference_videos.get(key)
         if not vid:
+            path = str(getattr(self, "_sync_led_video_path", "") or "")
+            if not path:
+                return
+            x, y, w, h = self.sync_led_preview.roi()
+            self._sync_store_led_config_for_path(path, {
+                "path": path,
+                "fps": float(getattr(self, "_sync_led_fps", 30.0) or 30.0),
+                "n_frames": int(getattr(self, "_sync_led_n_frames", 0) or 0),
+                "roi": (int(x), int(y), int(w), int(h)),
+                "channel": self.combo_sync_led_channel.currentText(),
+                "reduce": str(self.combo_sync_led_reduce.currentData() or "mean"),
+                "signal_format": str(self.combo_sync_led_format.currentData() or "binary"),
+                "start_frame": int(self.spin_sync_led_start.value()),
+                "end_frame": int(self.spin_sync_led_end.value()),
+            })
             return
         # The preview widget is the source of truth for the ROI (mouse edits go
         # through it); the spins mirror it.
@@ -6205,10 +6747,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         vid["roi"] = (int(x), int(y), int(w), int(h))
         vid["channel"] = self.combo_sync_led_channel.currentText()
         vid["reduce"] = str(self.combo_sync_led_reduce.currentData() or "mean")
-        vid["signal_format"] = str(self.combo_sync_led_format.currentData() or "raw")
+        vid["signal_format"] = str(self.combo_sync_led_format.currentData() or "binary")
         vid["start_frame"] = int(self.spin_sync_led_start.value())
         vid["end_frame"] = int(self.spin_sync_led_end.value())
         vid["roi_locked"] = True
+        self._sync_store_led_config_for_path(str(vid.get("path", "") or ""), vid)
         if not self._autosave_restoring:
             self._project_dirty = True
 
@@ -6224,7 +6767,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         channel = self.combo_sync_led_channel.currentText()
         reduce = str(self.combo_sync_led_reduce.currentData() or "mean")
-        signal_format = str(self.combo_sync_led_format.currentData() or "raw")
+        signal_format = str(self.combo_sync_led_format.currentData() or "binary")
+        start_frame = int(self.spin_sync_led_start.value())
+        end_frame = int(self.spin_sync_led_end.value())
         current = str(getattr(self, "_sync_current_video_key", "") or "")
         applied = 0
         for key, vid in self._sync_reference_videos.items():
@@ -6236,7 +6781,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             vid["channel"] = channel
             vid["reduce"] = reduce
             vid["signal_format"] = signal_format
+            vid["start_frame"] = start_frame
+            vid["end_frame"] = end_frame
             applied += 1
+            self._sync_store_led_config_for_path(str(vid.get("path", "") or ""), vid)
         if not self._autosave_restoring:
             self._project_dirty = True
         self.sync_status.set(
@@ -6250,6 +6798,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         time: np.ndarray,
         values: np.ndarray,
         used_gpu: bool,
+        raw_values: Optional[np.ndarray] = None,
     ) -> str:
         """Auto-save an extracted LED trace as a CSV next to its video.
 
@@ -6276,25 +6825,33 @@ class PostProcessingPanel(QtWidgets.QWidget):
             ("roi_h", str(roi[3] if len(roi) > 3 else 0)),
             ("channel", str(vid.get("channel", "Grayscale") or "Grayscale")),
             ("reduce", str(vid.get("reduce", "mean") or "mean")),
-            ("signal_format", str(vid.get("signal_format", "raw") or "raw")),
+            ("signal_format", str(vid.get("signal_format", "binary") or "binary")),
             ("start_frame", str(int(vid.get("start_frame", 0) or 0))),
             ("end_frame", str(int(vid.get("end_frame", 0) or 0))),
             ("n_samples", str(int(np.asarray(values).size))),
             ("acceleration", "GPU" if used_gpu else "CPU"),
             ("time_unit", "seconds"),
             ("time_column", "time"),
-            ("signal_column", "LED signal"),
+            ("signal_column", _LED_SYNC_COLUMN),
+            ("raw_column", _LED_RAW_COLUMN),
         ]
+        try:
+            threshold = float(vid.get("threshold", np.nan))
+            if np.isfinite(threshold):
+                meta.append(("threshold", f"{threshold:.12g}"))
+        except Exception:
+            pass
         t = np.asarray(time, float).reshape(-1)
         x = np.asarray(values, float).reshape(-1)
-        n = min(t.size, x.size)
+        raw = np.asarray(raw_values if raw_values is not None else values, float).reshape(-1)
+        n = min(t.size, x.size, raw.size)
         with open(out_path, "w", newline="", encoding="utf-8") as f:
             for key, val in meta:
                 f.write(f"# {key}: {val}\n")
             # Column header uses "time" so the loader auto-detects the time axis.
-            f.write("time,LED signal\n")
+            f.write(f"time,{_LED_SYNC_COLUMN},{_LED_RAW_COLUMN}\n")
             for i in range(n):
-                f.write(f"{t[i]:.6f},{x[i]:.6f}\n")
+                f.write(f"{t[i]:.6f},{x[i]:.6f},{raw[i]:.6f}\n")
         return out_path
 
     def _sync_ensure_current_video_reference(self) -> str:
@@ -6321,13 +6878,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "roi": tuple(int(v) for v in (config.get("roi") or (0, 0, 1, 1))),
             "channel": str(config.get("channel", "Grayscale") or "Grayscale"),
             "reduce": str(config.get("reduce", "mean") or "mean"),
-            "signal_format": str(config.get("signal_format", "raw") or "raw"),
+            "signal_format": str(config.get("signal_format", "binary") or "binary"),
             "start_frame": int(config.get("start_frame", 0) or 0),
             "end_frame": int(config.get("end_frame", 0) or 0),
             "roi_locked": True,
             "extracted_key": str(previous.get("extracted_key", "") or ""),
             "led_csv": str(previous.get("led_csv", "") or ""),
         }
+        self._sync_store_led_config_for_path(path, self._sync_reference_videos[key])
         self._sync_current_video_key = key
         self._refresh_sync_source_list()
         return key
@@ -6370,13 +6928,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
             channel = str(vid.get("channel", "Grayscale") or "Grayscale")
             reduce = str(vid.get("reduce", "mean") or "mean")
             chunks = led_extract.plan_chunks(start, end, chunks_per_video)
+            total_frames = max(0, int(end) - int(start))
             video_meta[key] = {
                 "fps": float(vid.get("fps", 30.0) or 30.0),
                 "start": start,
-                "signal_format": str(vid.get("signal_format", "raw") or "raw"),
+                "signal_format": str(vid.get("signal_format", "binary") or "binary"),
                 "n_chunks": len(chunks),
+                "total_frames": total_frames,
+                "label": os.path.basename(path) or key,
                 "match_stem": os.path.splitext(os.path.basename(path))[0],
             }
+            try:
+                threshold = float(vid.get("threshold", np.nan))
+                if np.isfinite(threshold):
+                    video_meta[key]["threshold"] = threshold
+            except Exception:
+                pass
             ref_vid = self._sync_reference_videos.get(key)
             if ref_vid is not None:
                 ref_vid["extraction_status"] = "running"
@@ -6389,6 +6956,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     "reduce": reduce,
                     "start_frame": s,
                     "end_frame": e,
+                    "label": os.path.basename(path) or key,
                 })
         if not tasks:
             self.sync_status.set("No valid frame ranges to extract.", "warn")
@@ -6398,14 +6966,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._sync_extract_meta = video_meta
         self._sync_extract_done_chunks = 0
         self._sync_extract_total_chunks = len(tasks)
+        self._sync_extract_done_frames = 0
+        self._sync_extract_total_frames = int(sum(int(m.get("total_frames", 0) or 0) for m in video_meta.values()))
         self._sync_extract_done_videos = 0
         self._sync_extract_target_videos = len(video_meta)
         self._sync_extract_ok_videos = 0
         self._sync_extract_errors = []
         self._sync_set_extract_busy(True)
         self._sync_progress_begin(
-            len(tasks),
-            label=f"Extracting LED from {len(video_meta)} video(s), {n_workers} worker(s)...",
+            self._sync_extract_total_frames,
+            label=(
+                f"Extracting LED from {len(video_meta)} video(s), {n_workers} worker(s): "
+                f"0/{self._sync_extract_total_frames:,} frames"
+            ),
         )
         self._refresh_sync_source_list()
         self.sync_status.set(
@@ -6430,78 +7003,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         self._sync_persist_current_video_roi()
         self._sync_start_led_extraction(list(self._sync_reference_videos.items()))
-        return
-        if getattr(self, "_sync_extract_thread", None) is not None:
-            self.sync_status.set("Extraction already running.", "warn")
-            return
-        # Make sure the on-screen ROI for the current video is captured.
-        self._sync_persist_current_video_roi()
-        videos = list(self._sync_reference_videos.items())
-
-        import led_extract
-
-        cpu = max(1, (os.cpu_count() or 1))
-        # Video decode is I/O-bound: a few parallel decoders saturate the disk,
-        # and using every core just makes the whole machine unresponsive. Cap
-        # the pool so the PC stays usable while extraction runs in the
-        # background. (Frozen builds stay single-process: no freeze_support.)
-        frozen = bool(getattr(sys, "frozen", False))
-        worker_cap = 1 if frozen else max(1, min(4, cpu - 1))
-
-        n_videos = max(1, sum(
-            1 for _k, v in videos
-            if int(v.get("end_frame", 0) or v.get("n_frames", 0) or 0) > int(v.get("start_frame", 0) or 0)
-        ))
-        chunks_per_video = max(1, -(-worker_cap // n_videos))  # ceil(cap/videos)
-        tasks: List[Dict[str, Any]] = []
-        video_meta: Dict[str, Dict[str, Any]] = {}
-        for key, vid in videos:
-            start = max(0, int(vid.get("start_frame", 0) or 0))
-            n_frames = int(vid.get("n_frames", 0) or 0)
-            end = int(vid.get("end_frame", 0) or n_frames or 0)
-            if n_frames:
-                end = min(max(start + 1, end), n_frames)
-            if end <= start:
-                continue
-            roi = tuple(int(v) for v in (vid.get("roi") or (0, 0, 1, 1)))
-            channel = str(vid.get("channel", "Grayscale") or "Grayscale")
-            reduce = str(vid.get("reduce", "mean") or "mean")
-            chunks = led_extract.plan_chunks(start, end, chunks_per_video)
-            video_meta[key] = {
-                "fps": float(vid.get("fps", 30.0) or 30.0),
-                "start": start,
-                "signal_format": str(vid.get("signal_format", "raw") or "raw"),
-                "n_chunks": len(chunks),
-                "parts": {},
-            }
-            for (s, e) in chunks:
-                tasks.append({
-                    "id": key, "video_path": str(vid.get("path", "")), "roi": roi,
-                    "channel": channel, "reduce": reduce, "start_frame": s, "end_frame": e,
-                })
-        if not tasks:
-            self.sync_status.set("No valid frame ranges to extract.", "warn")
-            return
-
-        n_workers = max(1, min(worker_cap, len(tasks)))
-        self._sync_extract_meta = video_meta
-        self._sync_extract_total = len(tasks)
-        self._sync_set_extract_busy(True)
-        self._sync_progress_begin(
-            len(tasks),
-            label=f"Extracting LED from {n_videos} video(s) · {n_workers} worker(s)…",
-        )
-        self.sync_status.set(f"Extracting LED signals ({n_workers} worker(s), {len(tasks)} chunks)…", "info")
-
-        thread = QtCore.QThread(self)
-        worker = _LedExtractWorker(tasks, n_workers)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(self._sync_on_extract_progress)
-        worker.finished.connect(self._sync_on_extract_finished)
-        self._sync_extract_thread = thread
-        self._sync_extract_worker = worker
-        thread.start()
 
     def _sync_set_extract_busy(self, busy: bool) -> None:
         for name in ("btn_sync_extract_all", "btn_sync_extract_led"):
@@ -6514,14 +7015,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if worker is not None:
             worker.cancel()
             if hasattr(self, "lbl_sync_progress"):
-                self.lbl_sync_progress.setText("Cancelling…")
-
-    def _sync_on_extract_progress(self, done: int, total: int) -> None:
-        bar = getattr(self, "sync_progress", None)
-        if bar is not None and bar.maximum() != total:
-            bar.setRange(0, max(1, total))
-        pct = int(100 * done / max(1, total))
-        self._sync_progress_set(done, label=f"Extracting LED…  {done}/{total} chunks  ({pct}%)")
+                self.lbl_sync_progress.setText("Cancelling...")
 
     def _sync_register_led_extraction_result(
         self,
@@ -6557,15 +7051,23 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._sync_extract_errors.append(f"{key}: no usable LED samples.")
             return False
 
-        values_arr = led_extract.apply_signal_format(
-            raw,
-            str(meta.get("signal_format", vid.get("signal_format", "raw")) or "raw"),
-        )
+        threshold = float("nan")
+        try:
+            threshold = float(meta.get("threshold", vid.get("threshold", np.nan)))
+        except Exception:
+            threshold = float("nan")
+        if np.isfinite(threshold):
+            sync_arr = (raw >= threshold).astype(float)
+            vid["threshold"] = float(threshold)
+        else:
+            sync_arr = led_extract.binarize_signal(raw)
+        signal_format = str(meta.get("signal_format", vid.get("signal_format", "binary")) or "binary")
+        selected_arr = sync_arr if signal_format.startswith("bin") else led_extract.apply_signal_format(raw, signal_format)
         fps = float(meta.get("fps", vid.get("fps", 30.0)) or 30.0)
         if not np.isfinite(fps) or fps <= 0:
             fps = 30.0
         start = int(meta.get("start", vid.get("start_frame", 0)) or 0)
-        time_arr = (np.arange(values_arr.size, dtype=float) + start) / fps
+        time_arr = (np.arange(sync_arr.size, dtype=float) + start) / fps
 
         old_key = str(vid.get("extracted_key", "") or "")
         if old_key:
@@ -6576,21 +7078,28 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         csv_path = ""
         try:
-            csv_path = self._write_led_sync_csv(vid, time_arr, values_arr, False)
+            csv_path = self._write_led_sync_csv(vid, time_arr, sync_arr, False, raw_values=raw)
             vid["led_csv"] = csv_path
         except Exception:
             _LOG.exception("Could not auto-save LED CSV next to video")
 
         path = str(vid.get("path", "") or "")
         base = f"{os.path.splitext(os.path.basename(path))[0]}_LED"
+        columns = {
+            _LED_SYNC_COLUMN: sync_arr,
+            _LED_RAW_COLUMN: raw,
+        }
+        if not np.array_equal(np.asarray(selected_arr, float), np.asarray(sync_arr, float)):
+            columns["LED selected"] = np.asarray(selected_arr, float)
         ext_key = self._add_sync_external_source(
             base,
             time_arr,
-            {"LED signal": values_arr},
+            columns,
             source_path=csv_path or path,
             kind="led_video",
             time_col="video_time_s",
             match_stem=str(meta.get("match_stem", "") or os.path.splitext(os.path.basename(path))[0]),
+            metadata={"threshold": float(threshold)} if np.isfinite(threshold) else {},
             select_source=False,
         )
         vid["extracted_key"] = ext_key
@@ -6610,20 +7119,80 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._refresh_sync_signal_preview()
         return True
 
-    def _sync_on_extract_progress(self, done: int, total: int) -> None:
+    def _sync_on_extract_progress(self, progress: object, total_legacy: Optional[int] = None) -> None:
         bar = getattr(self, "sync_progress", None)
-        if bar is not None and bar.maximum() != total:
-            bar.setRange(0, max(1, total))
-        pct = int(100 * done / max(1, total))
-        self._sync_extract_done_chunks = int(done)
-        self._sync_extract_total_chunks = int(total)
-        self._sync_progress_set(
-            done,
-            label=(
-                f"Extracting LED... {done}/{total} chunks ({pct}%), "
-                f"{self._sync_extract_ok_videos}/{max(1, self._sync_extract_target_videos)} videos ready"
-            ),
+
+        if not isinstance(progress, dict):
+            done_chunks = int(progress or 0)
+            total_chunks = int(total_legacy or 0)
+            if bar is not None and bar.maximum() != total_chunks:
+                bar.setRange(0, max(1, total_chunks))
+                bar.setFormat("%p%")
+            self._sync_extract_done_chunks = done_chunks
+            self._sync_extract_total_chunks = total_chunks
+            pct = int(100 * done_chunks / max(1, total_chunks))
+            self._sync_progress_set(
+                done_chunks,
+                label=(
+                    f"Extracting LED... {done_chunks}/{total_chunks} chunks ({pct}%), "
+                    f"{self._sync_extract_ok_videos}/{max(1, self._sync_extract_target_videos)} videos ready"
+                ),
+            )
+            return
+
+        done_chunks = int(progress.get("done_chunks", 0) or 0)
+        total_chunks = int(progress.get("total_chunks", 0) or 0)
+        done_frames = int(progress.get("done_frames", 0) or 0)
+        total_frames = int(progress.get("total_frames", 0) or 0)
+        display_done_frames = min(done_frames, total_frames) if total_frames > 0 else done_frames
+        by_video = progress.get("by_video", {}) or {}
+        if not isinstance(by_video, dict):
+            by_video = {}
+
+        self._sync_extract_done_chunks = done_chunks
+        self._sync_extract_total_chunks = total_chunks
+        self._sync_extract_done_frames = done_frames
+        self._sync_extract_total_frames = total_frames
+
+        if bar is not None:
+            if total_frames > 0:
+                if bar.maximum() != total_frames:
+                    bar.setRange(0, total_frames)
+                bar.setFormat(f"{display_done_frames:,}/{total_frames:,} frames (%p%)")
+            elif total_chunks > 0:
+                if bar.maximum() != total_chunks:
+                    bar.setRange(0, total_chunks)
+                bar.setFormat(f"{done_chunks:,}/{total_chunks:,} chunks (%p%)")
+
+        def _short_label(value: object, limit: int = 44) -> str:
+            text = os.path.basename(str(value or "").strip()) or "video"
+            if len(text) <= limit:
+                return text
+            keep = max(8, (limit - 3) // 2)
+            return f"{text[:keep]}...{text[-keep:]}"
+
+        per_video_lines: List[str] = []
+        for key, item in by_video.items():
+            if not isinstance(item, dict):
+                continue
+            label = _short_label(item.get("label") or key)
+            v_done = int(item.get("done", 0) or 0)
+            v_total = int(item.get("total", 0) or 0)
+            per_video_lines.append(f"{label}: {v_done:,}/{v_total:,} frames")
+
+        shown = "; ".join(per_video_lines)
+        if not shown:
+            shown = f"total: {display_done_frames:,}/{total_frames:,} frames"
+
+        ready = int(getattr(self, "_sync_extract_ok_videos", 0))
+        target = max(1, int(getattr(self, "_sync_extract_target_videos", 0) or 1))
+        label = (
+            f"Extracting LED frames ({ready}/{target} videos ready): "
+            f"{shown} | chunks {done_chunks:,}/{total_chunks:,}"
         )
+        self._sync_progress_set(display_done_frames if total_frames > 0 else done_chunks, label=label)
+        if hasattr(self, "lbl_sync_progress"):
+            self.lbl_sync_progress.setToolTip("\n".join(per_video_lines))
 
     def _sync_on_extract_video_finished(self, key: str, parts: Dict[int, Any], errors: List[str]) -> None:
         self._sync_extract_done_videos += 1
@@ -6696,6 +7265,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if ext_key:
                 result[fid] = f"external::{ext_key}"
         self._refresh_sync_match_table(result)
+        self._refresh_sync_alignment_validation()
         return result
 
     def _reference_token_label(self, token: str) -> str:
@@ -6773,6 +7343,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not self._autosave_restoring:
             self._project_dirty = True
         self._refresh_sync_signal_preview()
+        proc = next((p for p in self._processed if self._file_id_for_proc(p) == file_id), None)
+        if proc is not None:
+            self._select_proc_in_sync_match_table(proc)
+            self._refresh_sync_alignment_validation()
+            self._sync_autopreview_alignment(proc)
+        else:
+            self._refresh_sync_alignment_validation()
 
     def _add_sync_external_source(
         self,
@@ -6785,6 +7362,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         time_col: str = "",
         match_stem: str = "",
         select_source: bool = True,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         clean_key = str(key or "").strip() or "sync_source"
         base_key = clean_key
@@ -6801,6 +7379,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 numeric_columns[str(name)] = arr[:n]
         if not numeric_columns:
             raise ValueError("No numeric sync signal columns were found.")
+        raw_col = self._sync_find_led_raw_column(numeric_columns)
+        if raw_col and str(kind or "") == "led_video" and _LED_SYNC_COLUMN not in numeric_columns:
+            try:
+                import led_extract
+
+                numeric_columns[_LED_SYNC_COLUMN] = led_extract.binarize_signal(numeric_columns[raw_col])
+            except Exception:
+                pass
         self._sync_external_sources[clean_key] = {
             "time": t,
             "columns": numeric_columns,
@@ -6808,6 +7394,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "kind": str(kind or "signal_file"),
             "time_col": str(time_col or ""),
             "match_stem": str(match_stem or ""),
+            "metadata": dict(metadata or {}),
         }
         self._refresh_sync_sources()
         if select_source:
@@ -6820,6 +7407,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_data_availability()
         return clean_key
 
+    def _load_sync_signal_path(self, path: str) -> str:
+        df = _load_sync_table(path)
+        time, time_col = _time_array_for_signal_table(df)
+        cols = _numeric_columns_from_df(df, time_col=None if time_col == "sample_index" else time_col)
+        key = os.path.splitext(os.path.basename(path))[0]
+        match_stem = re.sub(r"_LED_sync$", "", key, flags=re.IGNORECASE)
+        return self._add_sync_external_source(
+            key,
+            time,
+            cols,
+            source_path=path,
+            kind="signal_file",
+            time_col=time_col,
+            match_stem=match_stem if match_stem != key else "",
+        )
+
     def _load_sync_signal_files(self) -> None:
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
@@ -6830,24 +7433,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not paths:
             return
         loaded = 0
+        loaded_paths: List[str] = []
         errors: List[str] = []
         for path in paths:
             try:
-                df = _load_sync_table(path)
-                time, time_col = _time_array_for_signal_table(df)
-                cols = _numeric_columns_from_df(df, time_col=None if time_col == "sample_index" else time_col)
-                key = os.path.splitext(os.path.basename(path))[0]
-                match_stem = re.sub(r"_LED_sync$", "", key, flags=re.IGNORECASE)
-                self._add_sync_external_source(
-                    key,
-                    time,
-                    cols,
-                    source_path=path,
-                    kind="signal_file",
-                    time_col=time_col,
-                    match_stem=match_stem if match_stem != key else "",
-                )
+                self._load_sync_signal_path(path)
                 loaded += 1
+                loaded_paths.append(path)
             except Exception as exc:
                 errors.append(f"{os.path.basename(path)}: {exc}")
         if errors:
@@ -6857,6 +7449,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 "Some Sync files could not be loaded:\n" + "\n".join(errors[:8]),
             )
         if loaded:
+            self._push_recent_paths("postprocess_recent_sync_signal_paths", loaded_paths)
+            try:
+                self._settings.setValue("postprocess_last_dir", os.path.dirname(loaded_paths[0]))
+            except Exception:
+                pass
             self._refresh_sync_source_list()
             self._sync_auto_match()
             self.sync_status.set(f"Loaded {loaded} Sync signal file(s).", "ok")
@@ -7028,6 +7625,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     self._sync_focus_proc(proc)
                 else:
                     self._refresh_sync_signal_preview()
+                    self._refresh_sync_alignment_validation()
             return
         idx = self.combo_sync_behavior_file.findData(data)
         if idx >= 0 and idx != self.combo_sync_behavior_file.currentIndex():
@@ -7036,6 +7634,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.lbl_sync_current_source.setText(item_label)
         self._refresh_sync_camera_columns()
         self._refresh_sync_signal_preview()
+        self._refresh_sync_alignment_validation()
 
     def _sync_browse_led_video(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -7065,28 +7664,79 @@ class PostProcessingPanel(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Sync", "Could not read a preview frame from the selected video.")
             return
 
-        self._sync_led_video_path = path
-        self._sync_led_fps = fps if np.isfinite(fps) and fps > 0 else 30.0
-        self._sync_led_n_frames = max(0, n_frames)
-        self.edit_sync_video_path.setText(path)
-        self.sync_led_preview.set_frame_bgr(frame)
         h, w = frame.shape[:2]
         default_w = max(8, min(80, w // 6))
         default_h = max(8, min(80, h // 6))
-        self._sync_led_roi_to_spins(
-            (max(0, w // 2 - default_w // 2), max(0, h // 2 - default_h // 2), default_w, default_h)
+        video_info: Dict[str, object] = {
+            "path": path,
+            "fps": fps if np.isfinite(fps) and fps > 0 else 30.0,
+            "n_frames": max(0, n_frames),
+            "roi": (max(0, w // 2 - default_w // 2), max(0, h // 2 - default_h // 2), default_w, default_h),
+            "channel": "Grayscale",
+            "reduce": "mean",
+            "signal_format": "binary",
+            "start_frame": 0,
+            "end_frame": max(1, n_frames),
+            "roi_locked": False,
+        }
+        loaded_saved = self._sync_apply_saved_led_config(
+            path,
+            video_info,
+            frame_shape=(h, w),
+            n_frames=max(0, n_frames),
         )
-        max_frame = max(0, self._sync_led_n_frames - 1)
-        for spin in (self.spin_sync_led_start, self.spin_sync_led_frame):
-            spin.blockSignals(True)
-            spin.setMaximum(max_frame)
-            spin.setValue(0)
-            spin.blockSignals(False)
-        self.spin_sync_led_end.blockSignals(True)
-        self.spin_sync_led_end.setMaximum(max(1, self._sync_led_n_frames))
-        self.spin_sync_led_end.setValue(max(1, self._sync_led_n_frames))
-        self.spin_sync_led_end.blockSignals(False)
-        self.lbl_sync_led_info.setText(f"{Path(path).name}: {self._sync_led_n_frames} frame(s), {self._sync_led_fps:.3f} fps")
+
+        was_loading = bool(getattr(self, "_sync_loading_video", False))
+        self._sync_loading_video = True
+        try:
+            self._sync_current_video_key = ""
+            self._sync_led_video_path = path
+            self._sync_led_fps = float(video_info.get("fps", 30.0) or 30.0)
+            self._sync_led_n_frames = int(video_info.get("n_frames", 0) or 0)
+            self.edit_sync_video_path.setText(path)
+            self.sync_led_preview.set_frame_bgr(frame)
+            self.sync_led_preview.reset_view()
+            self._sync_led_roi_to_spins(tuple(int(v) for v in (video_info.get("roi") or (0, 0, 1, 1))))
+
+            channel = str(video_info.get("channel", "Grayscale") or "Grayscale")
+            self.combo_sync_led_channel.blockSignals(True)
+            ci = self.combo_sync_led_channel.findText(channel)
+            if ci >= 0:
+                self.combo_sync_led_channel.setCurrentIndex(ci)
+            self.combo_sync_led_channel.blockSignals(False)
+            for combo, value in (
+                (self.combo_sync_led_reduce, str(video_info.get("reduce", "mean") or "mean")),
+                (self.combo_sync_led_format, str(video_info.get("signal_format", "binary") or "binary")),
+            ):
+                combo.blockSignals(True)
+                idx = combo.findData(value)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
+
+            max_frame = max(0, self._sync_led_n_frames - 1)
+            start_frame = min(max(0, int(video_info.get("start_frame", 0) or 0)), max_frame)
+            end_frame = int(video_info.get("end_frame", max(1, self._sync_led_n_frames)) or 0)
+            end_frame = min(max(start_frame + 1, end_frame), max(1, self._sync_led_n_frames))
+            for spin, value in (
+                (self.spin_sync_led_start, start_frame),
+                (self.spin_sync_led_frame, start_frame),
+            ):
+                spin.blockSignals(True)
+                spin.setMaximum(max_frame)
+                spin.setValue(value)
+                spin.blockSignals(False)
+            self.spin_sync_led_end.blockSignals(True)
+            self.spin_sync_led_end.setMaximum(max(1, self._sync_led_n_frames))
+            self.spin_sync_led_end.setValue(end_frame)
+            self.spin_sync_led_end.blockSignals(False)
+        finally:
+            self._sync_loading_video = was_loading
+
+        suffix = " (saved ROI)" if loaded_saved else ""
+        self.lbl_sync_led_info.setText(
+            f"{Path(path).name}: {self._sync_led_n_frames} frame(s), {self._sync_led_fps:.3f} fps{suffix}"
+        )
 
     def _sync_seek_led_frame(self, *_args) -> None:
         path = str(getattr(self, "_sync_led_video_path", "") or "")
@@ -7156,7 +7806,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "roi": (int(x), int(y), int(w), int(h)),
             "channel": self.combo_sync_led_channel.currentText(),
             "reduce": str(self.combo_sync_led_reduce.currentData() or "mean"),
-            "signal_format": str(self.combo_sync_led_format.currentData() or "raw"),
+            "signal_format": str(self.combo_sync_led_format.currentData() or "binary"),
             "start_frame": int(self.spin_sync_led_start.value()),
             "end_frame": int(self.spin_sync_led_end.value()),
         }
@@ -7183,6 +7833,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         try:
             self.plot_sync_signal.setTitle("Reference and photometry sync signals")
             self.plot_sync_signal.setLabel("left", "Normalized signal")
+            if self._plot_led_raw_threshold_preview():
+                return
             threshold = None if self.cb_sync_auto_threshold.isChecked() else float(self.spin_sync_threshold.value())
             min_interval = float(self.spin_sync_min_interval.value())
             quality_lines: List[str] = []
@@ -7215,19 +7867,28 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     return np.zeros_like(x_arr, dtype=float), lo, hi
                 return (x_arr - lo) / span, lo, hi
 
+            def _thin_events(events: np.ndarray, max_items: int) -> np.ndarray:
+                arr = np.asarray(events, float)
+                arr = arr[np.isfinite(arr)]
+                if arr.size <= max_items:
+                    return arr
+                idx = np.linspace(0, arr.size - 1, max_items)
+                return arr[np.unique(np.round(idx).astype(int))]
+
             def _event_guides(events: np.ndarray, offset: float, color: Tuple[int, int, int, int]) -> None:
-                shown = np.asarray(events[:400], float)
+                shown = _thin_events(events, 90)
                 if shown.size == 0:
                     return
+                tick_color = (int(color[0]), int(color[1]), int(color[2]), min(int(color[3]), 95))
                 xs = np.empty(shown.size * 3, dtype=float)
                 ys = np.empty(shown.size * 3, dtype=float)
                 xs[0::3] = shown
                 xs[1::3] = shown
                 xs[2::3] = np.nan
-                ys[0::3] = offset
-                ys[1::3] = offset + 1.0
+                ys[0::3] = offset + 1.015
+                ys[1::3] = offset + 1.11
                 ys[2::3] = np.nan
-                self.plot_sync_signal.plot(xs, ys, pen=pg.mkPen(color, width=0.8, style=QtCore.Qt.PenStyle.DashLine))
+                self.plot_sync_signal.plot(xs, ys, pen=pg.mkPen(tick_color, width=0.7))
 
             def _stats_text(role: str, label: str, sample_text: str, events: np.ndarray, values: Optional[np.ndarray]) -> None:
                 intervals = np.diff(events) if events.size > 1 else np.array([], float)
@@ -7267,21 +7928,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self.plot_sync_signal.plot(
                     t_arr[::stride],
                     offset + x_norm[::stride],
-                    pen=pg.mkPen(color, width=1.1),
+                    pen=pg.mkPen(color, width=0.85),
                     name=role,
                 )
                 _event_guides(events, offset, event_color)
-                if events.size:
-                    marker_events = events[::max(1, int(np.ceil(events.size / 1200)))]
-                    self.plot_sync_signal.plot(
-                        marker_events,
-                        np.full_like(marker_events, offset + 1.06),
-                        pen=None,
-                        symbol="t",
-                        symbolSize=7,
-                        symbolBrush=pg.mkBrush(event_color),
-                        symbolPen=pg.mkPen(event_color[:3], width=0.6),
-                    )
                 if threshold is not None and np.isfinite(threshold) and np.isfinite(hi - lo) and hi > lo:
                     y_thr = offset + ((float(threshold) - lo) / (hi - lo))
                     if offset - 0.05 <= y_thr <= offset + 1.05:
@@ -7358,14 +8008,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         events = extract_sync_events(np.asarray(timestamp_events, float), None, min_interval_s=min_interval)
                         if events.size:
                             _event_guides(events, 0.0, (255, 138, 128, 135))
-                            self.plot_sync_signal.plot(
-                                events,
-                                np.full_like(events, 0.5),
-                                pen=None,
-                                symbol="t",
-                                symbolSize=8,
-                                symbolBrush=pg.mkBrush(127, 209, 230, 220),
-                            )
                         _stats_text("Reference", ref_label, "timestamp list", events, None)
                         plotted_rows.append((0.5, "Reference"))
                     elif ref_x is not None:
@@ -7402,6 +8044,446 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.lbl_sync_quality.setText("\n".join(quality_lines) if quality_lines else "No Sync signal available to preview.")
         except Exception as exc:
             self.lbl_sync_quality.setText(f"Signal preview failed: {exc}")
+
+    def _sync_alignment_view_mode(self) -> str:
+        combo = getattr(self, "combo_sync_alignment_view", None)
+        if combo is None:
+            return "window"
+        data = combo.currentData()
+        return "full" if str(data) == "full" else "window"
+
+    def _sync_alignment_window_duration(self) -> float:
+        spin = getattr(self, "spin_sync_alignment_window_duration", None)
+        if spin is None:
+            return 20.0
+        try:
+            value = float(spin.value())
+        except Exception:
+            value = 20.0
+        return max(1.0, value if np.isfinite(value) else 20.0)
+
+    def _sync_step_alignment_window(self, direction: int) -> None:
+        spin = getattr(self, "spin_sync_alignment_window_start", None)
+        if spin is None:
+            return
+        old_value = float(spin.value())
+        step = self._sync_alignment_window_duration()
+        spin.setValue(old_value + (step if direction > 0 else -step))
+        if abs(float(spin.value()) - old_value) <= 1e-9:
+            self._refresh_sync_alignment_validation()
+
+    def _refresh_sync_alignment_validation(self) -> None:
+        if not hasattr(self, "plot_sync_alignment_validation"):
+            return
+        pw = self.plot_sync_alignment_validation
+        pw.clear()
+        pw.setTitle("Alignment validation: photometry sync over ROI LED")
+        pw.setLabel("bottom", "Camera / reference time (s)")
+        pw.setLabel("left", "Compact normalized signal")
+        if getattr(pw.getPlotItem(), "legend", None) is None:
+            pw.addLegend(offset=(10, 10))
+        trace_height = 0.54
+        row_step = 0.70
+
+        def _set_message(text: str) -> None:
+            if hasattr(self, "lbl_sync_alignment_validation"):
+                self.lbl_sync_alignment_validation.setText(text)
+
+        def _set_window_controls(
+            data_available: bool,
+            mode: str,
+            label: str,
+            start_s: Optional[float] = None,
+            min_start_s: Optional[float] = None,
+            max_start_s: Optional[float] = None,
+        ) -> None:
+            spin = getattr(self, "spin_sync_alignment_window_start", None)
+            prev_btn = getattr(self, "btn_sync_alignment_prev_window", None)
+            next_btn = getattr(self, "btn_sync_alignment_next_window", None)
+            range_label = getattr(self, "lbl_sync_alignment_window_range", None)
+            window_enabled = bool(data_available and mode == "window")
+            window_s = self._sync_alignment_window_duration()
+            combo = getattr(self, "combo_sync_alignment_view", None)
+            if combo is not None:
+                idx = combo.findData("window")
+                if idx >= 0:
+                    combo.setItemText(idx, f"{window_s:g} s window")
+            if spin is not None:
+                if min_start_s is not None and max_start_s is not None:
+                    blocker = QtCore.QSignalBlocker(spin)
+                    spin.setRange(float(min_start_s), float(max_start_s))
+                    if start_s is not None:
+                        spin.setValue(float(start_s))
+                    del blocker
+                spin.setSingleStep(window_s)
+                spin.setEnabled(window_enabled)
+            if prev_btn is not None:
+                prev_btn.setEnabled(
+                    window_enabled
+                    and start_s is not None
+                    and min_start_s is not None
+                    and float(start_s) > float(min_start_s) + 1e-9
+                )
+            if next_btn is not None:
+                next_btn.setEnabled(
+                    window_enabled
+                    and start_s is not None
+                    and max_start_s is not None
+                    and float(start_s) < float(max_start_s) - 1e-9
+                )
+            if range_label is not None:
+                range_label.setText(label)
+
+        def _clean_trace(t_in: np.ndarray, x_in: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+            t_arr = np.asarray(t_in, float).reshape(-1)
+            x_arr = np.asarray(x_in, float).reshape(-1)
+            n = min(t_arr.size, x_arr.size)
+            if n < 2:
+                return np.array([], float), np.array([], float)
+            t_arr = t_arr[:n]
+            x_arr = x_arr[:n]
+            good = np.isfinite(t_arr) & np.isfinite(x_arr)
+            if int(np.sum(good)) < 2:
+                return np.array([], float), np.array([], float)
+            t_arr = t_arr[good]
+            x_arr = x_arr[good]
+            order = np.argsort(t_arr)
+            return t_arr[order], x_arr[order]
+
+        def _trace_count(t_arr: np.ndarray, x_arr: np.ndarray) -> int:
+            return int(_clean_trace(t_arr, x_arr)[0].size)
+
+        def _event_count(events: np.ndarray) -> int:
+            arr = np.asarray(events, float).reshape(-1)
+            return int(np.count_nonzero(np.isfinite(arr)))
+
+        def _format_count(visible: int, total: int, window: Optional[Tuple[float, float]]) -> str:
+            return f"{visible}/{total}" if window is not None else str(total)
+
+        def _time_extent(*arrays: np.ndarray) -> Tuple[float, float]:
+            lows: List[float] = []
+            highs: List[float] = []
+            for arr in arrays:
+                vals = np.asarray(arr, float).reshape(-1)
+                vals = vals[np.isfinite(vals)]
+                if vals.size:
+                    lows.append(float(np.nanmin(vals)))
+                    highs.append(float(np.nanmax(vals)))
+            if not lows or not highs:
+                return float("nan"), float("nan")
+            return min(lows), max(highs)
+
+        def _clip_trace(
+            t_arr: np.ndarray,
+            x_arr: np.ndarray,
+            window: Optional[Tuple[float, float]],
+        ) -> Tuple[np.ndarray, np.ndarray]:
+            t_arr, x_arr = _clean_trace(t_arr, x_arr)
+            if window is None or t_arr.size == 0:
+                return t_arr, x_arr
+            t0, t1 = window
+            keep = (t_arr >= float(t0)) & (t_arr <= float(t1))
+            return t_arr[keep], x_arr[keep]
+
+        def _clip_events(events: np.ndarray, window: Optional[Tuple[float, float]]) -> np.ndarray:
+            arr = np.asarray(events, float).reshape(-1)
+            arr = arr[np.isfinite(arr)]
+            if window is None:
+                return arr
+            t0, t1 = window
+            return arr[(arr >= float(t0)) & (arr <= float(t1))]
+
+        def _validation_events(
+            t_arr: np.ndarray,
+            x_arr: np.ndarray,
+            mode: str,
+            threshold_value: Optional[float],
+            min_interval_value: float,
+        ) -> Tuple[np.ndarray, str]:
+            mode_l = str(mode or "").strip().lower()
+            is_barcode = "barcode" in mode_l or "value" in mode_l or "change" in mode_l
+            if is_barcode:
+                try:
+                    packets = decode_barcode_packets(t_arr, x_arr, threshold=threshold_value)
+                    if len(packets) >= 2:
+                        anchors = np.asarray([pkt.anchor_time for pkt in packets], float)
+                        return anchors, "barcode packet"
+                except Exception:
+                    pass
+            return (
+                extract_sync_events(
+                    t_arr,
+                    x_arr,
+                    mode=mode,
+                    threshold=threshold_value,
+                    min_interval_s=min_interval_value,
+                ),
+                "edge",
+            )
+
+        def _nearest_event_residual(
+            ref_events_in: np.ndarray,
+            fib_events_in: np.ndarray,
+        ) -> Tuple[int, float, float]:
+            ref = np.asarray(ref_events_in, float).reshape(-1)
+            fib = np.asarray(fib_events_in, float).reshape(-1)
+            ref = np.sort(ref[np.isfinite(ref)])
+            fib = np.sort(fib[np.isfinite(fib)])
+            if ref.size == 0 or fib.size == 0:
+                return 0, float("nan"), float("nan")
+            spacings: List[float] = []
+            for arr in (ref, fib):
+                if arr.size > 1:
+                    d = np.diff(arr)
+                    spacings.extend([float(v) for v in d[np.isfinite(d) & (d > 0.0)]])
+            typical = float(np.nanmedian(spacings)) if spacings else 0.2
+            if not np.isfinite(typical) or typical <= 0.0:
+                typical = 0.2
+            tolerance = max(0.02, min(0.5, 0.45 * typical))
+            diffs: List[float] = []
+            used: set = set()
+            for val in ref:
+                idx = int(np.searchsorted(fib, float(val), side="left"))
+                candidates = [j for j in (idx - 1, idx) if 0 <= j < fib.size and j not in used]
+                if not candidates:
+                    continue
+                best = min(candidates, key=lambda j: abs(float(fib[j] - val)))
+                diff = float(fib[best] - val)
+                if abs(diff) <= tolerance:
+                    used.add(best)
+                    diffs.append(diff)
+            if not diffs:
+                return 0, float("nan"), float("nan")
+            arr = np.asarray(diffs, float)
+            return int(arr.size), float(np.nanmedian(np.abs(arr)) * 1000.0), float(np.sqrt(np.nanmean(arr ** 2)) * 1000.0)
+
+        def _normalize(x_arr: np.ndarray) -> np.ndarray:
+            out = np.asarray(x_arr, float)
+            finite = out[np.isfinite(out)]
+            if finite.size == 0:
+                return np.zeros_like(out, dtype=float)
+            lo = float(np.nanmin(finite))
+            hi = float(np.nanmax(finite))
+            span = hi - lo
+            if not np.isfinite(span) or span <= 1e-12:
+                return np.zeros_like(out, dtype=float)
+            return (out - lo) / span
+
+        def _plot_trace(
+            label: str,
+            t_arr: np.ndarray,
+            x_arr: np.ndarray,
+            y_offset: float,
+            color: Tuple[int, int, int],
+            window: Optional[Tuple[float, float]],
+        ) -> int:
+            t_arr, x_arr = _clip_trace(t_arr, x_arr, window)
+            if t_arr.size < 2:
+                return 0
+            y_arr = y_offset + trace_height * _normalize(x_arr)
+            stride = max(1, int(np.ceil(t_arr.size / 50000)))
+            pw.plot(
+                t_arr[::stride],
+                y_arr[::stride],
+                pen=pg.mkPen(color, width=1.2),
+                name=label,
+            )
+            return int(t_arr.size)
+
+        def _thin_events(events: np.ndarray, max_items: int = 160) -> np.ndarray:
+            arr = np.asarray(events, float).reshape(-1)
+            arr = arr[np.isfinite(arr)]
+            if arr.size <= max_items:
+                return arr
+            idx = np.linspace(0, arr.size - 1, max_items)
+            return arr[np.unique(np.round(idx).astype(int))]
+
+        def _plot_events(events: np.ndarray, y_offset: float, color: Tuple[int, int, int, int]) -> int:
+            shown = _thin_events(events)
+            if shown.size == 0:
+                return 0
+            xs = np.empty(shown.size * 3, dtype=float)
+            ys = np.empty(shown.size * 3, dtype=float)
+            xs[0::3] = shown
+            xs[1::3] = shown
+            xs[2::3] = np.nan
+            ys[0::3] = y_offset + trace_height + 0.04
+            ys[1::3] = y_offset + trace_height + 0.14
+            ys[2::3] = np.nan
+            pw.plot(xs, ys, pen=pg.mkPen(color, width=0.8))
+            return int(np.asarray(events, float).size)
+
+        def _map_events_to_aligned_time(events: np.ndarray, source_t: np.ndarray, aligned_t: np.ndarray) -> np.ndarray:
+            ev = np.asarray(events, float).reshape(-1)
+            src = np.asarray(source_t, float).reshape(-1)
+            dst = np.asarray(aligned_t, float).reshape(-1)
+            n = min(src.size, dst.size)
+            if ev.size == 0 or n < 2:
+                return ev
+            src = src[:n]
+            dst = dst[:n]
+            good = np.isfinite(src) & np.isfinite(dst)
+            if int(np.sum(good)) < 2:
+                return ev
+            src = src[good]
+            dst = dst[good]
+            order = np.argsort(src)
+            return np.interp(ev, src[order], dst[order], left=np.nan, right=np.nan)
+
+        def _overlap_r(
+            ref_t: np.ndarray,
+            ref_x: np.ndarray,
+            fib_t: np.ndarray,
+            fib_x: np.ndarray,
+        ) -> float:
+            ref_t, ref_x = _clean_trace(ref_t, ref_x)
+            fib_t, fib_x = _clean_trace(fib_t, fib_x)
+            if ref_t.size < 5 or fib_t.size < 5:
+                return float("nan")
+            lo = max(float(ref_t[0]), float(fib_t[0]))
+            hi = min(float(ref_t[-1]), float(fib_t[-1]))
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                return float("nan")
+            grid_n = int(min(5000, max(100, min(ref_t.size, fib_t.size))))
+            grid = np.linspace(lo, hi, grid_n)
+            a = _normalize(np.interp(grid, ref_t, ref_x))
+            b = _normalize(np.interp(grid, fib_t, fib_x))
+            a_std = float(np.nanstd(a))
+            b_std = float(np.nanstd(b))
+            if a_std <= 1e-12 or b_std <= 1e-12:
+                return float("nan")
+            return float(np.nanmean((a - np.nanmean(a)) * (b - np.nanmean(b))) / (a_std * b_std))
+
+        proc = self._proc_from_sync_match_table() or self._selected_proc_for_sync()
+        if proc is None:
+            _set_window_controls(False, self._sync_alignment_view_mode(), "No window")
+            _set_message("Load a photometry file and a matched ROI LED reference to validate alignment.")
+            pw.getAxis("left").setTicks([[]])
+            return
+
+        fid = self._file_id_for_proc(proc)
+        try:
+            resolved = self._sync_reference_for_proc(proc)
+            if resolved is None:
+                ref_t, ref_x = self._sync_camera_trace_for_proc(proc)
+                ref_label = self.combo_sync_camera_column.currentText() if hasattr(self, "combo_sync_camera_column") else "Reference"
+            else:
+                ref_t, ref_x, ref_label = resolved
+            if ref_x is None:
+                raise ValueError("The matched reference is a timestamp list, not an ROI waveform.")
+            fib_t, fib_x = self._sync_fiber_trace_for_proc(proc)
+
+            threshold = None if self.cb_sync_auto_threshold.isChecked() else float(self.spin_sync_threshold.value())
+            min_interval = float(self.spin_sync_min_interval.value())
+            ref_mode = self._sync_mode_key(self.combo_sync_camera_mode.currentText())
+            fib_mode = self._sync_mode_key(self.combo_sync_fiber_mode.currentText())
+            ref_events, ref_event_kind = _validation_events(ref_t, ref_x, ref_mode, threshold, min_interval)
+            fib_events, fib_event_kind = _validation_events(fib_t, fib_x, fib_mode, threshold, min_interval)
+
+            aligned_t = np.array([], float)
+            aligned_mode = "raw photometry time"
+            result = getattr(self, "_last_sync_preview", None)
+            if (
+                isinstance(result, SyncResult)
+                and getattr(self, "_last_sync_preview_file_id", "") == fid
+                and np.asarray(result.aligned_time, float).size == np.asarray(fib_t, float).size
+            ):
+                aligned_t = np.asarray(result.aligned_time, float)
+                aligned_mode = "aligned camera time"
+            else:
+                report = getattr(proc, "sync_report", {}) or {}
+                stored = getattr(proc, "sync_aligned_time", None)
+                if stored is not None and np.asarray(stored, float).size == np.asarray(fib_t, float).size:
+                    aligned_t = np.asarray(stored, float)
+                    aligned_mode = "saved aligned camera time"
+                elif isinstance(report, dict):
+                    slope = float(report.get("slope", np.nan))
+                    intercept = float(report.get("intercept", np.nan))
+                    if np.isfinite(slope) and np.isfinite(intercept):
+                        aligned_t = slope * np.asarray(fib_t, float) + intercept
+                        aligned_mode = "reported camera time"
+            if aligned_t.size != np.asarray(fib_t, float).size:
+                aligned_t = np.asarray(fib_t, float)
+
+            view_mode = self._sync_alignment_view_mode()
+            window_s = self._sync_alignment_window_duration()
+            full_lo, full_hi = _time_extent(ref_t, aligned_t)
+            window: Optional[Tuple[float, float]] = None
+            view_text = "full record"
+            if np.isfinite(full_lo) and np.isfinite(full_hi) and full_hi > full_lo:
+                max_start = max(float(full_lo), float(full_hi) - window_s)
+                spin = getattr(self, "spin_sync_alignment_window_start", None)
+                current_start = float(spin.value()) if spin is not None else float(full_lo)
+                if not np.isfinite(current_start):
+                    current_start = float(full_lo)
+                start_s = min(max(current_start, float(full_lo)), max_start)
+                if view_mode == "window":
+                    end_s = min(float(full_hi), start_s + window_s)
+                    window = (start_s, end_s)
+                    view_text = f"window {start_s:.2f}-{end_s:.2f} s"
+                    _set_window_controls(
+                        True,
+                        view_mode,
+                        f"{start_s:.2f}-{end_s:.2f} s",
+                        start_s=start_s,
+                        min_start_s=float(full_lo),
+                        max_start_s=max_start,
+                    )
+                else:
+                    view_text = f"full record {float(full_lo):.2f}-{float(full_hi):.2f} s"
+                    _set_window_controls(
+                        True,
+                        view_mode,
+                        f"{float(full_lo):.2f}-{float(full_hi):.2f} s",
+                        start_s=start_s,
+                        min_start_s=float(full_lo),
+                        max_start_s=max_start,
+                    )
+            else:
+                _set_window_controls(False, view_mode, "No window")
+
+            title_mode = f"{window_s:g} s window" if window is not None else "full record"
+            pw.setTitle(f"Alignment validation: photometry sync over ROI LED ({title_mode})")
+            ref_total = _trace_count(ref_t, ref_x)
+            fib_total = _trace_count(aligned_t, fib_x)
+            ref_count = _plot_trace(f"ROI LED: {ref_label}", ref_t, ref_x, 0.0, (127, 209, 230), window)
+            fib_label = self.combo_sync_fiber_source.currentText() if hasattr(self, "combo_sync_fiber_source") else "Photometry"
+            fib_count = _plot_trace(f"Photometry: {fib_label}", aligned_t, fib_x, row_step, (255, 214, 102), window)
+            fib_event_x = _map_events_to_aligned_time(fib_events, fib_t, aligned_t)
+            ref_event_total = _event_count(ref_events)
+            fib_event_total = _event_count(fib_event_x)
+            ref_event_count = _plot_events(_clip_events(ref_events, window), 0.0, (127, 209, 230, 125))
+            fib_event_count = _plot_events(_clip_events(fib_event_x, window), row_step, (255, 214, 102, 140))
+
+            pw.getAxis("left").setTicks([[(0.5 * trace_height, "ROI LED"), (row_step + 0.5 * trace_height, "Photometry")]])
+            pw.setYRange(-0.08, row_step + trace_height + 0.22, padding=0.01)
+            if window is not None:
+                pw.setXRange(float(window[0]), float(window[1]), padding=0.0)
+            elif np.isfinite(full_lo) and np.isfinite(full_hi) and full_hi > full_lo:
+                pw.setXRange(float(full_lo), float(full_hi), padding=0.0)
+            r_ref_t, r_ref_x = _clip_trace(ref_t, ref_x, window)
+            r_fib_t, r_fib_x = _clip_trace(aligned_t, fib_x, window)
+            r = _overlap_r(r_ref_t, r_ref_x, r_fib_t, r_fib_x)
+            r_name = "visible waveform r" if window is not None else "waveform r"
+            r_text = f" | {r_name}={r:.3f}" if np.isfinite(r) else ""
+            ref_visible_events = _clip_events(ref_events, window)
+            fib_visible_events = _clip_events(fib_event_x, window)
+            matched_n, median_abs_ms, rms_ms = _nearest_event_residual(ref_visible_events, fib_visible_events)
+            event_text = ""
+            if matched_n > 0 and np.isfinite(median_abs_ms):
+                event_text = f" | event dt median={median_abs_ms:.1f} ms, rms={rms_ms:.1f} ms, n={matched_n}"
+            kind_text = f" | events: ROI {ref_event_kind}, photometry {fib_event_kind}"
+            _set_message(
+                f"{fid}: {aligned_mode} | view={view_text} | "
+                f"ROI samples={_format_count(ref_count, ref_total, window)}, "
+                f"events={_format_count(ref_event_count, ref_event_total, window)} | "
+                f"photometry samples={_format_count(fib_count, fib_total, window)}, "
+                f"events={_format_count(fib_event_count, fib_event_total, window)}{event_text}{r_text}{kind_text}"
+            )
+        except Exception as exc:
+            _set_window_controls(False, self._sync_alignment_view_mode(), "No window")
+            pw.getAxis("left").setTicks([[]])
+            _set_message(f"{fid}: alignment validation unavailable: {exc}")
 
     def _sync_temporal_modeling_context(self) -> None:
         if not hasattr(self, "section_temporal"):
@@ -10040,6 +11122,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._refresh_sync_results_table()
         self._refresh_sync_source_list()
         self._refresh_sync_signal_preview()
+        self._refresh_sync_alignment_validation()
 
     def _refresh_sync_camera_columns(self) -> None:
         if not hasattr(self, "combo_sync_camera_column"):
@@ -10184,12 +11267,27 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not names:
             raise ValueError("Reference source has no numeric columns.")
 
+        def _compact(name: str) -> str:
+            return str(name or "").strip().lower().replace(" ", "").replace("_", "")
+
+        preferred = {
+            _compact(_LED_SYNC_COLUMN),
+            "binary",
+            "ledbinary",
+            "ledsync",
+            "barcodesignal",
+            "syncsignal",
+        }
+        for name in names:
+            if _compact(name) in preferred:
+                return name
+
         def _looks_like_sync(name: str) -> bool:
-            key = str(name or "").strip().lower().replace(" ", "").replace("_", "")
+            key = _compact(name)
             return (
                 "sync" in key
                 or "barcode" in key
-                or key.startswith("led")
+                or (key.startswith("led") and "raw" not in key)
                 or key.startswith("dio")
                 or key.startswith("ttl")
                 or key.startswith("trigger")
@@ -10199,6 +11297,142 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if _looks_like_sync(name):
                 return name
         return names[0]
+
+    @staticmethod
+    def _sync_find_led_raw_column(columns: Dict[str, np.ndarray]) -> str:
+        names = list((columns or {}).keys())
+        if not names:
+            return ""
+
+        def _compact(name: str) -> str:
+            return str(name or "").strip().lower().replace(" ", "").replace("_", "")
+
+        preferred = {_compact(_LED_RAW_COLUMN), "raw", "rawsignal", "ledraw", "ledrawsignal"}
+        for name in names:
+            if _compact(name) in preferred:
+                return name
+        for name in names:
+            key = _compact(name)
+            if "raw" in key and "465" not in key and "405" not in key:
+                return name
+        return ""
+
+    def _sync_selected_led_external_source(self) -> Tuple[str, Dict[str, Any], str]:
+        candidates: List[str] = []
+        data = self.combo_sync_camera_column.currentData() if hasattr(self, "combo_sync_camera_column") else ""
+        if isinstance(data, str) and data.startswith("external::") and "::" in data[len("external::"):]:
+            name = data.split("::", 1)[1]
+            candidates.append(name.split("::", 1)[0])
+        source = self.combo_sync_behavior_file.currentData() if hasattr(self, "combo_sync_behavior_file") else ""
+        if isinstance(source, str) and source.startswith("external::"):
+            candidates.append(source.split("::", 1)[1])
+        try:
+            proc = self._selected_proc_for_sync()
+            if proc is not None:
+                auto_key = self._auto_matched_ref_key_for_proc(proc)
+                if auto_key:
+                    candidates.append(auto_key)
+        except Exception:
+            pass
+        seen = set()
+        for key in candidates:
+            key = str(key or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ext = self._sync_external_sources.get(key) or {}
+            columns = ext.get("columns") or {}
+            raw_col = self._sync_find_led_raw_column(columns)
+            if raw_col:
+                return key, ext, raw_col
+        return "", {}, ""
+
+    def _plot_led_raw_threshold_preview(self) -> bool:
+        key, ext, raw_col = self._sync_selected_led_external_source()
+        if not key or not ext or not raw_col:
+            return False
+        columns = ext.get("columns") or {}
+        raw = np.asarray(columns.get(raw_col, np.array([], float)), float).reshape(-1)
+        time = np.asarray(ext.get("time", np.array([], float)), float).reshape(-1)
+        n = min(time.size, raw.size)
+        if n < 2:
+            return False
+        time = time[:n]
+        raw = raw[:n]
+        good = np.isfinite(time) & np.isfinite(raw)
+        time = time[good]
+        raw = raw[good]
+        if time.size < 2:
+            return False
+        order = np.argsort(time)
+        time = time[order]
+        raw = raw[order]
+        threshold = float("nan")
+        try:
+            threshold = float((ext.get("metadata") or {}).get("threshold", np.nan))
+        except Exception:
+            threshold = float("nan")
+        try:
+            import led_extract
+
+            if np.isfinite(threshold):
+                method = "cached"
+                binary = (raw >= threshold).astype(float)
+            else:
+                threshold, method = led_extract.auto_threshold(raw)
+                binary = led_extract.binarize_signal(raw)
+        except Exception:
+            finite = raw[np.isfinite(raw)]
+            threshold = float(np.nanmedian(finite)) if finite.size else 0.0
+            method = "median fallback"
+            binary = (raw >= threshold).astype(float)
+
+        finite = raw[np.isfinite(raw)]
+        if finite.size:
+            lo = float(np.nanmin(finite))
+            hi = float(np.nanmax(finite))
+        else:
+            lo, hi = 0.0, 1.0
+        span = hi - lo if hi > lo else 1.0
+        bin_lo = lo
+        bin_hi = lo + span * 0.30
+        binary_scaled = bin_lo + binary * (bin_hi - bin_lo)
+
+        self.plot_sync_signal.setTitle("Extracted LED raw and thresholded signal")
+        self.plot_sync_signal.setLabel("left", "ROI mean intensity")
+        self.plot_sync_signal.setLabel("bottom", "Time (s)")
+        if getattr(self.plot_sync_signal.getPlotItem(), "legend", None) is None:
+            self.plot_sync_signal.addLegend(offset=(10, 10))
+        self.plot_sync_signal.plot(time, raw, pen=pg.mkPen((127, 209, 230), width=1.1), name="Raw signal")
+        self.plot_sync_signal.plot(time, binary_scaled, pen=pg.mkPen((163, 190, 140), width=1.1), name="Binary (scaled)")
+        self.plot_sync_signal.plot(
+            [float(time[0]), float(time[-1])],
+            [float(threshold), float(threshold)],
+            pen=pg.mkPen((220, 110, 120), width=1.0, style=QtCore.Qt.PenStyle.DashLine),
+            name=f"Thr {threshold:.1f}",
+        )
+        window_s = 30.0
+        t0 = float(time[0])
+        t1 = min(float(time[-1]), t0 + window_s)
+        if t1 > t0:
+            self.plot_sync_signal.setXRange(t0, t1, padding=0.0)
+        self.plot_sync_signal.setYRange(lo - 0.05 * span, hi + 0.08 * span, padding=0.0)
+
+        edges = int(np.count_nonzero(np.diff(binary > 0.5)))
+        stored_text = ""
+        stored_col = self._pick_sync_column(columns) if columns else ""
+        if stored_col and stored_col != raw_col and stored_col in columns:
+            stored = np.asarray(columns.get(stored_col, np.array([], float)), float).reshape(-1)[:binary.size]
+            if stored.size == binary.size:
+                stored_binary = stored > 0.5
+                agreement = float(np.mean(stored_binary == (binary > 0.5)))
+                stored_text = f" | stored binary agreement: {agreement * 100.0:.1f}%"
+        self.lbl_sync_quality.setText(
+            f"LED source: {key}:{raw_col}\n"
+            f"Samples: {time.size} | threshold: {threshold:.3g} ({method}) | edges: {edges}{stored_text}\n"
+            f"Default window: {t0:.2f}-{t1:.2f} s of {float(time[-1] - time[0]):.2f} s"
+        )
+        return True
 
     def _auto_matched_ref_key_for_proc(self, proc: ProcessedTrial) -> str:
         """Return the external-source key whose filename best matches `proc`."""
@@ -10464,6 +11698,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _render_sync_result(self, proc: ProcessedTrial, result: SyncResult) -> None:
         self._last_sync_preview = result
+        self._last_sync_preview_file_id = self._file_id_for_proc(proc)
         self.txt_sync_report.setPlainText(self._sync_report_text(proc, result))
         self.plot_sync_map.clear()
         self.plot_sync_residual.clear()
@@ -10494,6 +11729,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             f"RMS {result.rms_error_s * 1000:.2f} ms",
             sev,
         )
+        self._refresh_sync_alignment_validation()
 
     def _store_sync_result(self, proc: ProcessedTrial, result: SyncResult) -> None:
         base = np.asarray(getattr(proc, "time", np.array([], float)), float)
@@ -13523,12 +14759,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 src = str((info or {}).get("source_path", "") or "").strip()
                 if src:
                     behavior_paths.append(src)
+            sync_signal_paths: List[str] = []
+            for info in self._sync_external_sources.values():
+                src = str((info or {}).get("source_path", "") or "").strip()
+                if src:
+                    sync_signal_paths.append(src)
             self._write_h5_json(
                 meta_group,
                 "recent_paths_json",
                 {
                     "processed_paths": processed_paths,
                     "behavior_paths": behavior_paths,
+                    "sync_signal_paths": sync_signal_paths,
                 },
             )
 
@@ -13655,6 +14897,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 entry.attrs["source_path"] = str(source.get("source_path", "") or "")
                 entry.attrs["time_col"] = str(source.get("time_col", "") or "")
                 entry.attrs["match_stem"] = str(source.get("match_stem", "") or "")
+                self._write_h5_json_any(entry, "metadata_json", dict(source.get("metadata", {}) or {}))
                 self._write_h5_numeric(entry, "time", np.asarray(source.get("time", np.array([], float)), float))
                 columns_group = entry.create_group("columns")
                 for col_idx, (name, values) in enumerate((source.get("columns") or {}).items()):
@@ -13678,12 +14921,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 entry.attrs["roi"] = np.asarray(v.get("roi", (0, 0, 1, 1)), dtype=np.int64)
                 entry.attrs["channel"] = str(v.get("channel", "Grayscale") or "Grayscale")
                 entry.attrs["reduce"] = str(v.get("reduce", "mean") or "mean")
-                entry.attrs["signal_format"] = str(v.get("signal_format", "raw") or "raw")
+                entry.attrs["signal_format"] = str(v.get("signal_format", "binary") or "binary")
                 entry.attrs["start_frame"] = int(v.get("start_frame", 0) or 0)
                 entry.attrs["end_frame"] = int(v.get("end_frame", 0) or 0)
                 entry.attrs["roi_locked"] = bool(v.get("roi_locked", False))
                 entry.attrs["extracted_key"] = str(v.get("extracted_key", "") or "")
                 entry.attrs["led_csv"] = str(v.get("led_csv", "") or "")
+                try:
+                    threshold = float(v.get("threshold", np.nan))
+                    if np.isfinite(threshold):
+                        entry.attrs["threshold"] = threshold
+                except Exception:
+                    pass
                 ext_key = str(v.get("extracted_key", "") or "")
                 ext = (self._sync_external_sources or {}).get(ext_key) if ext_key else None
                 if isinstance(ext, dict):
@@ -13696,6 +14945,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         sig_group.attrs["source_path"] = str(ext.get("source_path", "") or "")
                         sig_group.attrs["time_col"] = str(ext.get("time_col", "video_time_s") or "video_time_s")
                         sig_group.attrs["match_stem"] = str(ext.get("match_stem", "") or "")
+                        self._write_h5_json_any(sig_group, "metadata_json", dict(ext.get("metadata", {}) or {}))
                         self._write_h5_numeric(sig_group, "time", time_arr)
                         sig_columns_group = sig_group.create_group("columns")
                         for col_idx, (name, values) in enumerate(columns.items()):
@@ -13931,6 +15181,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         "source_path": self._h5_text(entry.attrs.get("source_path", ""), ""),
                         "time_col": self._h5_text(entry.attrs.get("time_col", ""), ""),
                         "match_stem": self._h5_text(entry.attrs.get("match_stem", ""), ""),
+                        "metadata": self._read_h5_json_any(entry, "metadata_json", {}),
                         "time": np.asarray(
                             self._read_h5_numeric(entry, "time") if "time" in entry else np.array([], float),
                             float,
@@ -13964,13 +15215,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         "roi": roi,
                         "channel": self._h5_text(entry.attrs.get("channel", "Grayscale"), "Grayscale"),
                         "reduce": self._h5_text(entry.attrs.get("reduce", "mean"), "mean"),
-                        "signal_format": self._h5_text(entry.attrs.get("signal_format", "raw"), "raw"),
+                        "signal_format": self._h5_text(entry.attrs.get("signal_format", "binary"), "binary"),
                         "start_frame": int(entry.attrs.get("start_frame", 0) or 0),
                         "end_frame": int(entry.attrs.get("end_frame", 0) or 0),
                         "roi_locked": bool(entry.attrs.get("roi_locked", False)),
                         "extracted_key": self._h5_text(entry.attrs.get("extracted_key", ""), ""),
                         "led_csv": self._h5_text(entry.attrs.get("led_csv", ""), ""),
                     }
+                    if "threshold" in entry.attrs:
+                        try:
+                            video_info["threshold"] = float(entry.attrs.get("threshold"))
+                        except Exception:
+                            pass
                     sig_group = entry.get("extracted_signal")
                     if isinstance(sig_group, h5py.Group):
                         source_key = self._h5_text(
@@ -14006,6 +15262,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                                     sig_group.attrs.get("match_stem", ""),
                                     os.path.splitext(os.path.basename(str(video_info.get("path", "") or "")))[0],
                                 ),
+                                "metadata": self._read_h5_json_any(sig_group, "metadata_json", {}),
                                 "time": time_arr,
                                 "columns": columns,
                             }
@@ -14360,10 +15617,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         proc_paths = recent_paths.get("processed_paths", []) if isinstance(recent_paths, dict) else []
         beh_paths = recent_paths.get("behavior_paths", []) if isinstance(recent_paths, dict) else []
+        sync_paths = recent_paths.get("sync_signal_paths", []) if isinstance(recent_paths, dict) else []
         if isinstance(proc_paths, list) and proc_paths:
             self._push_recent_paths("postprocess_recent_processed_paths", [str(p) for p in proc_paths if str(p).strip()])
         if isinstance(beh_paths, list) and beh_paths:
             self._push_recent_paths("postprocess_recent_behavior_paths", [str(p) for p in beh_paths if str(p).strip()])
+        if isinstance(sync_paths, list) and sync_paths:
+            self._push_recent_paths("postprocess_recent_sync_signal_paths", [str(p) for p in sync_paths if str(p).strip()])
 
         if not from_autosave:
             self._push_recent_paths("postprocess_recent_project_paths", [path])
@@ -15519,7 +16779,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             col = 0
 
             if mat is None or tvec is None or mat.size == 0:
-                # Empty row — still show behavior name as title
+                # Empty row - still show behavior name as title
                 titled = False
                 if show_heat:
                     ax = fig.add_subplot(gs[row_i, col])
@@ -16460,7 +17720,7 @@ class ExportDialog(QtWidgets.QDialog):
 
         # Show group info if applicable
         if group_labels and len(group_labels) > 1:
-            info = QtWidgets.QLabel(f"Group mode: {len(group_labels)} animals — columns will be labeled by animal ID")
+            info = QtWidgets.QLabel(f"Group mode: {len(group_labels)} animals - columns will be labeled by animal ID")
             info.setProperty("class", "hint")
             info.setStyleSheet("color: #5abeFF; font-style: italic; padding: 4px 0;")
             layout.addWidget(info)
