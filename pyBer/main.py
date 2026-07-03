@@ -116,6 +116,8 @@ from analysis_core import (
     ProcessedTrial,
     export_processed_csv,
     export_processed_h5,
+    load_processed_csv,
+    load_processed_h5,
     safe_stem_from_metadata,
     detect_artifacts_adaptive,
     interpolate_nans,
@@ -7252,17 +7254,21 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_regions_sec: List[Tuple[float, float]],
         manual_exclude_regions_sec: List[Tuple[float, float]],
     ) -> ProcessedTrial:
+        # "What you select is what you get": the previewed/primary output
+        # (params.output_mode, from combo_output) is ALWAYS exported and is
+        # always written first, followed by any additional selected outputs.
         modes: List[str] = []
         if export_selection.output:
-            for mode in export_selection.output_modes or [params.output_mode]:
+            if params.output_mode in OUTPUT_MODES:
+                modes.append(params.output_mode)
+            for mode in export_selection.output_modes or []:
                 mode = str(mode or "").strip()
                 if mode in OUTPUT_MODES and mode not in modes:
                     modes.append(mode)
         if not modes:
             modes = [params.output_mode if params.output_mode in OUTPUT_MODES else OUTPUT_MODES[0]]
 
-        primary = params.output_mode if params.output_mode in modes else modes[0]
-        ordered_modes = [primary] + [mode for mode in modes if mode != primary]
+        ordered_modes = modes
         base_processed: Optional[ProcessedTrial] = None
         outputs: Dict[str, np.ndarray] = {}
 
@@ -7380,7 +7386,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 trial = self._apply_time_window(trial)
                 trial = self._apply_cutouts(trial, cutouts)
 
-                def _export_one(proc: ProcessedTrial, suffix: str = "") -> None:
+                def _export_one(proc: ProcessedTrial, suffix: str = "", params_used: Optional[ProcessingParams] = None) -> None:
                     nonlocal n_total, progress_step
                     proc = self._apply_cutouts_to_processed(proc, cutouts)
                     stem = safe_stem_from_metadata(path, ch, meta)
@@ -7388,13 +7394,14 @@ class MainWindow(QtWidgets.QMainWindow):
                         stem = f"{stem}_{suffix}"
                     csv_path = os.path.join(path_out_dir, f"{stem}.csv")
                     h5_path = os.path.join(path_out_dir, f"{stem}.h5")
+                    export_params = params_used if params_used is not None else params
                     if estimated_jobs:
                         self._set_export_progress(progress_step, progress_total, f"Writing CSV: {stem}")
-                    export_processed_csv(csv_path, proc, metadata=meta, selection=export_selection)
+                    export_processed_csv(csv_path, proc, metadata=meta, selection=export_selection, params=export_params)
                     progress_step += 1
                     if estimated_jobs:
                         self._set_export_progress(progress_step, progress_total, f"Writing HDF5: {stem}")
-                    export_processed_h5(h5_path, proc, metadata=meta, selection=export_selection)
+                    export_processed_h5(h5_path, proc, metadata=meta, selection=export_selection, params=export_params)
                     progress_step += 1
                     exported_dirs.add(path_out_dir)
                     n_total += 1
@@ -7428,7 +7435,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                 manual_exclude_regions_sec=manual_exclude,
                             )
                             progress_step += 1
-                            _export_one(processed, suffix=f"sec{i}_{s0:.2f}_{s1:.2f}")
+                            _export_one(processed, suffix=f"sec{i}_{s0:.2f}_{s1:.2f}", params_used=sec_params)
                     else:
                         if estimated_jobs:
                             self._set_export_progress(
@@ -7693,292 +7700,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.post_tab.append_processed(processed)
 
     def _load_processed_csv(self, path: str) -> Optional[ProcessedTrial]:
-        import csv
-        try:
-            with open(path, "r", newline="") as f:
-                reader = csv.reader(f)
-                rows = list(reader)
-        except Exception:
-            return None
-        if not rows:
-            return None
-
-        output_context = ""
-        for r in rows:
-            if not r:
-                continue
-            cell0 = str(r[0]).strip()
-            if cell0.lower().startswith("# output_context:"):
-                output_context = cell0.split(":", 1)[1].strip()
-                break
-
-        # Drop empty rows and metadata/comment rows (e.g., "# key: value")
-        rows = [r for r in rows if r and any(cell.strip() for cell in r)]
-        data_rows = [r for r in rows if not (r and r[0].lstrip().startswith("#"))]
-        if not data_rows:
-            return None
-
-        raw_header = [str(h).strip() for h in data_rows[0]]
-        header = [h.lower() for h in raw_header]
-
-        def _find_col(names: List[str]) -> Optional[int]:
-            for name in names:
-                if name in header:
-                    return header.index(name)
-            return None
-
-        def _looks_like_photometry_sync_col(name: str) -> bool:
-            key = str(name or "").strip().lower().replace(" ", "").replace("_", "")
-            return (
-                key == "dio"
-                or key.startswith("dio")
-                or key.startswith("ttl")
-                or key.startswith("trigger")
-                or "sync" in key
-                or "barcode" in key
-            )
-
-        time_idx = header.index("time") if "time" in header else None
-        output_idx = _find_col([
-            "dff",
-            "z-score",
-            "zscore",
-            "z score",
-            "prominence",
-            "output",
-            "raw_signal",
-            "raw_465",
-            "raw",
-            "isobestic",
-            "raw_405",
-            "reference",
-            "reference_405",
-            "ref",
-            "dio",
-            "baseline_465",
-            "baseline_405",
-        ])
-        has_header = time_idx is not None and output_idx is not None
-
-        raw_idx = _find_col(["raw", "raw_465", "signal", "signal_465"]) if has_header else None
-        iso_idx = _find_col(["isobestic", "isosbestic", "raw_405", "reference", "reference_405", "ref"]) if has_header else None
-        dio_idx = _find_col(["dio"]) if has_header else None
-        aligned_idx = _find_col(["time_aligned", "aligned_time", "sync_aligned_time"]) if has_header else None
-        trigger_cols: List[Tuple[int, str]] = []
-        if has_header:
-            seen_trigger_names: set[str] = set()
-            for idx, name in enumerate(raw_header):
-                if idx == time_idx:
-                    continue
-                label = str(name or header[idx] or f"column_{idx + 1}").strip()
-                if not _looks_like_photometry_sync_col(label):
-                    continue
-                key = label.lower()
-                if key in seen_trigger_names:
-                    continue
-                seen_trigger_names.add(key)
-                trigger_cols.append((idx, label))
-            if dio_idx is None and len(trigger_cols) == 1:
-                dio_idx = trigger_cols[0][0]
-
-        data_rows = data_rows[1:] if has_header else data_rows
-
-        time = []
-        output = []
-        raw_vals = []
-        iso_vals = []
-        dio_vals = []
-        aligned_vals = []
-        trigger_vals: Dict[str, List[float]] = {name: [] for _, name in trigger_cols}
-
-        for r in data_rows:
-            if time_idx is None or output_idx is None:
-                continue
-            if len(r) <= max(time_idx, output_idx):
-                continue
-            try:
-                tval = self._parse_csv_float(r[time_idx])
-                oval = float(r[output_idx])
-            except Exception:
-                continue
-            if not np.isfinite(tval):
-                continue
-            time.append(tval)
-            output.append(oval)
-
-            if raw_idx is not None:
-                try:
-                    raw_vals.append(float(r[raw_idx]) if len(r) > raw_idx else np.nan)
-                except Exception:
-                    raw_vals.append(np.nan)
-            if iso_idx is not None:
-                try:
-                    iso_vals.append(float(r[iso_idx]) if len(r) > iso_idx else np.nan)
-                except Exception:
-                    iso_vals.append(np.nan)
-            if dio_idx is not None:
-                try:
-                    dio_vals.append(float(r[dio_idx]) if len(r) > dio_idx else np.nan)
-                except Exception:
-                    dio_vals.append(np.nan)
-            if aligned_idx is not None:
-                try:
-                    aligned_vals.append(float(r[aligned_idx]) if len(r) > aligned_idx else np.nan)
-                except Exception:
-                    aligned_vals.append(np.nan)
-            for trig_idx, trig_name in trigger_cols:
-                try:
-                    trigger_vals[trig_name].append(float(r[trig_idx]) if len(r) > trig_idx else np.nan)
-                except Exception:
-                    trigger_vals[trig_name].append(np.nan)
-
-        if not time:
-            return None
-
-        t = np.asarray(time, float)
-        out = np.asarray(output, float)
-        raw = np.asarray(raw_vals, float) if raw_idx is not None and len(raw_vals) == len(time) else np.full_like(t, np.nan)
-        iso = np.asarray(iso_vals, float) if iso_idx is not None and len(iso_vals) == len(time) else np.full_like(t, np.nan)
-        dio_arr = np.asarray(dio_vals, float) if dio_idx is not None and len(dio_vals) == len(time) else None
-        dio_name = ""
-        if dio_arr is not None and dio_idx is not None and 0 <= dio_idx < len(raw_header):
-            dio_name = str(raw_header[dio_idx] or "DIO").strip() or "DIO"
-        triggers: Dict[str, np.ndarray] = {}
-        for trig_name, vals in trigger_vals.items():
-            arr = np.asarray(vals, float)
-            if arr.size == t.size and int(np.sum(np.isfinite(arr))) >= 2:
-                triggers[str(trig_name)] = arr
-        if dio_arr is not None and int(np.sum(np.isfinite(dio_arr))) >= 2:
-            triggers.setdefault(dio_name or "DIO", dio_arr)
-        sync_aligned = (
-            np.asarray(aligned_vals, float)
-            if aligned_idx is not None and len(aligned_vals) == len(time)
-            else None
-        )
-
-        output_label = "Imported CSV"
-        if has_header and output_idx is not None:
-            col = header[output_idx]
-            if col and col != "output":
-                if col == "zscore":
-                    col = "z-score"
-                elif col == "dff":
-                    col = "dFF"
-                elif col == "raw_signal":
-                    col = "Raw signal (465)"
-                elif col == "prominence":
-                    col = "Prominence normalized"
-                output_label = f"Imported CSV ({col})"
-
-        return ProcessedTrial(
-            path=path,
-            channel_id="import",
-            time=t,
-            raw_signal=raw,
-            raw_reference=iso,
-            dio=dio_arr,
-            dio_name=dio_name,
-            triggers=triggers,
-            sig_f=None,
-            ref_f=None,
-            baseline_sig=None,
-            baseline_ref=None,
-            output=out,
-            output_label=output_label,
-            output_context=output_context,
-            sync_aligned_time=sync_aligned,
-            sync_report={"status": "imported", "method": "imported time_aligned"} if sync_aligned is not None else {},
-            artifact_regions_sec=None,
-            fs_actual=np.nan,
-            fs_target=np.nan,
-            fs_used=np.nan,
-        )
+        return load_processed_csv(path)
 
     def _load_processed_h5(self, path: str) -> Optional[ProcessedTrial]:
-        try:
-            with h5py.File(path, "r") as f:
-                if "data" not in f:
-                    return None
-                g = f["data"]
-                if "time" not in g:
-                    return None
-                t = np.asarray(g["time"][()], float)
-                if "output" in g:
-                    out = np.asarray(g["output"][()], float)
-                elif "dFF" in g:
-                    out = np.asarray(g["dFF"][()], float)
-                elif "z-score" in g:
-                    out = np.asarray(g["z-score"][()], float)
-                elif "zscore" in g:
-                    out = np.asarray(g["zscore"][()], float)
-                elif "prominence" in g:
-                    out = np.asarray(g["prominence"][()], float)
-                elif "raw_465" in g:
-                    out = np.asarray(g["raw_465"][()], float)
-                elif "raw" in g:
-                    out = np.asarray(g["raw"][()], float)
-                elif "raw_405" in g:
-                    out = np.asarray(g["raw_405"][()], float)
-                elif "isobestic" in g:
-                    out = np.asarray(g["isobestic"][()], float)
-                elif "dio" in g:
-                    out = np.asarray(g["dio"][()], float)
-                elif "baseline_465" in g:
-                    out = np.asarray(g["baseline_465"][()], float)
-                elif "baseline_405" in g:
-                    out = np.asarray(g["baseline_405"][()], float)
-                else:
-                    return None
-                raw_sig = np.asarray(g["raw_465"][()], float) if "raw_465" in g else (
-                    np.asarray(g["raw"][()], float) if "raw" in g else np.full_like(t, np.nan)
-                )
-                raw_ref = np.asarray(g["raw_405"][()], float) if "raw_405" in g else (
-                    np.asarray(g["isobestic"][()], float) if "isobestic" in g else np.full_like(t, np.nan)
-                )
-                dio = np.asarray(g["dio"][()], float) if "dio" in g else None
-                dio_name = str(g.attrs.get("dio_name", "")) if hasattr(g, "attrs") else ""
-                output_label = str(g.attrs.get("output_label", "Imported H5")) if hasattr(g, "attrs") else "Imported H5"
-                output_context = str(g.attrs.get("output_context", "")) if hasattr(g, "attrs") else ""
-                fs_actual = float(g.attrs.get("fs_actual", np.nan)) if hasattr(g, "attrs") else np.nan
-                fs_target = float(g.attrs.get("fs_target", np.nan)) if hasattr(g, "attrs") else np.nan
-                fs_used = float(g.attrs.get("fs_used", np.nan)) if hasattr(g, "attrs") else np.nan
-                sync_aligned = None
-                if "time_aligned" in g:
-                    sync_aligned = np.asarray(g["time_aligned"][()], float)
-                elif "sync_aligned_time" in g:
-                    sync_aligned = np.asarray(g["sync_aligned_time"][()], float)
-                sync_report = {}
-                raw_report = g.attrs.get("sync_report_json", "") if hasattr(g, "attrs") else ""
-                if raw_report:
-                    try:
-                        sync_report = json.loads(str(raw_report))
-                    except Exception:
-                        sync_report = {}
-        except Exception:
-            return None
-
-        return ProcessedTrial(
-            path=path,
-            channel_id="import",
-            time=t,
-            raw_signal=raw_sig,
-            raw_reference=raw_ref,
-            dio=dio,
-            dio_name=dio_name,
-            sig_f=None,
-            ref_f=None,
-            baseline_sig=None,
-            baseline_ref=None,
-            output=out,
-            output_label=output_label,
-            output_context=output_context,
-            sync_aligned_time=sync_aligned,
-            sync_report=sync_report if isinstance(sync_report, dict) else {},
-            artifact_regions_sec=None,
-            fs_actual=fs_actual,
-            fs_target=fs_target,
-            fs_used=fs_used,
-        )
+        return load_processed_h5(path)
 
     def _processed_trial_to_loaded_doric(self, processed: ProcessedTrial) -> Optional[LoadedDoricFile]:
         t = np.asarray(processed.time if processed.time is not None else np.array([], float), float)

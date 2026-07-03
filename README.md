@@ -100,8 +100,10 @@ environment created from `environment.yml`.
   metrics.
 - 🧠 **Model** with a continuous GLM or trial-level FLMM, then rank feature contribution
   with leave-one-feature-out summaries.
-- 💾 **Export** processed CSV or HDF5 with selectable fields and metadata, ready for
-  Python, MATLAB, R, or Prism.
+- 💾 **Export** processed CSV or HDF5 with stable, self-describing column names and a
+  `.pyber.json` metadata sidecar (embedded inside the HDF5), ready for Python, MATLAB,
+  R, or Prism. What you select is what you get, and the exact output definition is
+  always recorded.
 
 ---
 

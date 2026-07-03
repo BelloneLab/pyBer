@@ -414,8 +414,70 @@ def safe_stem_from_metadata(path: str, channel: str, meta: Dict[str, str]) -> st
     return f"{clean(base)}_{clean(channel)}"
 
 
+# =============================================================================
+# Processed-trace export format  ("pyBer processed trace" v1.0)
+# =============================================================================
+#
+# One gold-standard layout shared by the preprocessing CSV/HDF5 export and the
+# postprocessing sync-aligned re-export. Design principles:
+#
+#   * Simple, stable headers for downstream scripts and Prism. The processed
+#     output is written under its FAMILY name ("dFF" / "z-score" / "prominence"
+#     / "signal_465"), never a generic "output" column. Structural columns are
+#     fixed ("time", "time_aligned", "raw_465", "raw_405", "baseline_465",
+#     "baseline_405"); triggers keep their real names ("DIO01", ...).
+#   * The exact nature of every output (which motion-correction variant, the
+#     reference fit, the baseline, and all processing parameters) lives in a
+#     sidecar JSON file "<stem>.pyber.json". HDF5 also embeds that same JSON so
+#     the file stays self-contained. CSV carries NO comment/metadata lines.
+#   * "What you select is what you get": the previewed/primary output is always
+#     present and is flagged primary in the sidecar; there is no duplicated or
+#     unrequested column.
+#
+PYBER_FORMAT_VERSION = "1.0"
+PYBER_FORMAT_KIND = "processed_trace"
+PYBER_SIDECAR_SUFFIX = ".pyber.json"
+
+# Fixed structural column / dataset names (identical across CSV and HDF5).
+COL_TIME = "time"
+COL_TIME_ALIGNED = "time_aligned"
+COL_RAW_465 = "raw_465"
+COL_RAW_405 = "raw_405"
+COL_BASELINE_465 = "baseline_465"
+COL_BASELINE_405 = "baseline_405"
+
+_RESERVED_COLUMN_NAMES = {
+    COL_TIME, COL_TIME_ALIGNED, COL_RAW_465, COL_RAW_405,
+    COL_BASELINE_465, COL_BASELINE_405,
+}
+
+# Map each OUTPUT_MODES label to (family, variant). "family" is the bare column
+# name used when the output is primary (or the first written of its family);
+# "variant" disambiguates additional same-family outputs as "<family>__<variant>".
+_OUTPUT_MODE_INFO: Dict[str, Tuple[str, str]] = {
+    "dFF (non motion corrected)": ("dFF", "nomc"),
+    "zscore (non motion corrected)": ("z-score", "nomc"),
+    "dFF (motion corrected via subtraction)": ("dFF", "sub"),
+    "zscore (motion corrected via subtraction)": ("z-score", "sub"),
+    "zscore (subtractions)": ("z-score", "zdiff"),
+    "dFF (motion corrected with fitted ref)": ("dFF", "fitref"),
+    "zscore (motion corrected with fitted ref)": ("z-score", "fitref"),
+    "prominence normalized (motion corrected with fitted ref)": ("prominence", "fitref"),
+    "Raw signal (465)": ("signal_465", "raw"),
+}
+
+_VARIANT_MOTION_CORRECTION = {
+    "nomc": "none",
+    "sub": "subtraction",
+    "zdiff": "zscore_subtraction",
+    "fitref": "fitted_ref",
+    "raw": "none",
+}
+
+
 def output_label_type(label: str) -> str:
-    """Return a short output label type for export column/dataset names."""
+    """Short output label type. Kept for backward compatibility with old readers;
+    new code should prefer output_family()."""
     lab = (label or "").strip().lower()
     if "zscore" in lab or "z-score" in lab or "z score" in lab:
         return "z-score"
@@ -428,22 +490,40 @@ def output_label_type(label: str) -> str:
     return "output"
 
 
-def output_label_key(label: str) -> str:
-    """Return a stable, readable key for one output mode in multi-output exports."""
-    lab = (label or "").strip()
-    key = re.sub(r"[^A-Za-z0-9]+", "_", lab).strip("_").lower()
-    replacements = {
-        "dff_motion_corrected_with_fitted_ref": "dff_mc_fitted_ref",
-        "zscore_motion_corrected_with_fitted_ref": "zscore_mc_fitted_ref",
-        "prominence_normalized_motion_corrected_with_fitted_ref": "prominence_mc_fitted_ref",
-        "dff_motion_corrected_via_subtraction": "dff_mc_subtraction",
-        "zscore_motion_corrected_via_subtraction": "zscore_mc_subtraction",
-        "dff_non_motion_corrected": "dff_non_mc",
-        "zscore_non_motion_corrected": "zscore_non_mc",
-        "zscore_subtractions": "zscore_subtractions",
-        "raw_signal_465": "raw_signal_465",
-    }
-    return replacements.get(key, key or "output")
+def output_family(label: str) -> str:
+    """Family-level column name for an output mode (dFF / z-score / prominence / signal_465)."""
+    info = _OUTPUT_MODE_INFO.get(str(label or "").strip())
+    if info:
+        return info[0]
+    lab = (label or "").strip().lower()
+    if "zscore" in lab or "z-score" in lab or "z score" in lab:
+        return "z-score"
+    if "prominence" in lab:
+        return "prominence"
+    if "dff" in lab:
+        return "dFF"
+    if "raw signal" in lab or "signal" in lab or lab.startswith("raw"):
+        return "signal_465"
+    return "output"
+
+
+def output_variant_key(label: str) -> str:
+    """Short variant tag distinguishing same-family output modes (fitref, sub, nomc, ...)."""
+    info = _OUTPUT_MODE_INFO.get(str(label or "").strip())
+    if info:
+        return info[1]
+    key = re.sub(r"[^A-Za-z0-9]+", "_", str(label or "").strip()).strip("_").lower()
+    return key or "output"
+
+
+def output_units(label: str) -> str:
+    """Interpretive units string for an output family."""
+    return {
+        "dFF": "dF/F",
+        "z-score": "z-score (median/MAD)",
+        "prominence": "prominence-normalized",
+        "signal_465": "a.u. (processed 465)",
+    }.get(output_family(label), "a.u.")
 
 
 def _unique_export_name(name: str, used: set) -> str:
@@ -455,6 +535,25 @@ def _unique_export_name(name: str, used: set) -> str:
         i += 1
     used.add(out)
     return out
+
+
+def assign_output_column_names(labels: List[str]) -> List[Tuple[str, str]]:
+    """Assign a stable, unique column/dataset name to each output label (primary first).
+
+    The first output of a family gets the bare family name (e.g. "dFF"); any
+    further same-family outputs get "<family>__<variant>". Names never collide
+    with each other or with reserved structural columns.
+    """
+    used: set = set(_RESERVED_COLUMN_NAMES)
+    family_taken: set = set()
+    assigned: List[Tuple[str, str]] = []
+    for label in labels:
+        fam = output_family(label)
+        candidate = f"{fam}__{output_variant_key(label)}" if fam in family_taken else fam
+        name = _unique_export_name(candidate, used)
+        family_taken.add(fam)
+        assigned.append((str(label), name))
+    return assigned
 
 
 def _output_items_for_export(
@@ -484,9 +583,652 @@ def _output_items_for_export(
     return items
 
 
-def _csv_output_values(label: str, values: np.ndarray, t: np.ndarray) -> np.ndarray:
-    values = values if values.size == t.size else np.full_like(t, np.nan)
-    return np.asarray(values, float)
+def _pyber_now_iso() -> str:
+    try:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return ""
+
+
+def _json_float(x: Any) -> Optional[float]:
+    try:
+        v = float(x)
+    except Exception:
+        return None
+    return v if np.isfinite(v) else None
+
+
+def plan_processed_columns(
+    processed: ProcessedTrial,
+    selection: ExportSelection,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """Build the ordered column plan shared by the CSV and HDF5 writers.
+
+    Returns (columns, primary_output_name) where each column is a dict with at
+    least {name, role, values}. Roles: time, time_aligned, raw_signal,
+    isosbestic, output, baseline_signal, baseline_reference, trigger.
+    """
+    t = np.asarray(processed.time, float)
+    n = t.size
+
+    def _fit(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        if arr is None:
+            return None
+        a = np.asarray(arr, float)
+        return a if a.size == n else None
+
+    columns: List[Dict[str, Any]] = []
+    used: set = set()
+
+    def _add(name: str, role: str, values: np.ndarray, **extra: Any) -> None:
+        unique = _unique_export_name(name, used)
+        entry = {"name": unique, "role": role, "values": np.asarray(values, float)}
+        entry.update(extra)
+        columns.append(entry)
+
+    _add(COL_TIME, "time", t, units="s")
+    for nm in (COL_TIME, COL_TIME_ALIGNED, COL_RAW_465, COL_RAW_405, COL_BASELINE_465, COL_BASELINE_405):
+        used.add(nm)  # reserve structural names up front
+
+    aligned = _fit(getattr(processed, "sync_aligned_time", None))
+    if aligned is not None:
+        columns.append({"name": COL_TIME_ALIGNED, "role": "time_aligned",
+                        "values": aligned, "units": "s"})
+
+    if selection.raw:
+        raw = _fit(processed.raw_signal)
+        columns.append({"name": COL_RAW_465, "role": "raw_signal",
+                        "values": raw if raw is not None else np.full(n, np.nan)})
+    if selection.isobestic:
+        iso = _fit(processed.raw_reference)
+        columns.append({"name": COL_RAW_405, "role": "isosbestic",
+                        "values": iso if iso is not None else np.full(n, np.nan)})
+
+    primary_output_name = ""
+    if selection.output:
+        output_items = _output_items_for_export(processed, selection)
+        assigned = assign_output_column_names([lab for lab, _ in output_items])
+        for (label, values), (_, colname) in zip(output_items, assigned):
+            used.add(colname)
+            vals = _fit(values)
+            is_primary = not primary_output_name
+            if is_primary:
+                primary_output_name = colname
+            columns.append({
+                "name": colname, "role": "output",
+                "values": vals if vals is not None else np.full(n, np.nan),
+                "label": str(label), "family": output_family(label),
+                "variant": output_variant_key(label), "units": output_units(label),
+                "primary": is_primary,
+            })
+
+    if getattr(selection, "baseline_sig", False):
+        b = _fit(processed.baseline_sig)
+        if b is not None:
+            columns.append({"name": COL_BASELINE_465, "role": "baseline_signal", "values": b})
+    if getattr(selection, "baseline_ref", False):
+        b = _fit(processed.baseline_ref)
+        if b is not None:
+            columns.append({"name": COL_BASELINE_405, "role": "baseline_reference", "values": b})
+
+    if selection.dio:
+        primary_dio = str(processed.dio_name or "").strip()
+        dio = _fit(processed.dio)
+        if dio is not None:
+            _add(primary_dio or "dio", "trigger", dio, dio_name=(primary_dio or "dio"))
+        for name, val in (getattr(processed, "triggers", None) or {}).items():
+            if str(name) == primary_dio:
+                continue
+            v = _fit(val)
+            if v is not None:
+                _add(str(name), "trigger", v, dio_name=str(name))
+
+    return columns, primary_output_name
+
+
+def _split_subject(metadata: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    md = dict(metadata or {})
+    subject: Dict[str, Any] = {}
+    for key in ("animal_id", "session", "trial", "treatment"):
+        if key in md:
+            subject[key] = md.get(key, "")
+    custom: Dict[str, str] = {}
+    for k, v in md.items():
+        if k in ("animal_id", "session", "trial", "treatment"):
+            continue
+        name = str(k)[len("custom:"):] if str(k).startswith("custom:") else str(k)
+        custom[name] = v
+    if custom:
+        subject["custom"] = custom
+    return subject
+
+
+def build_processed_metadata(
+    processed: ProcessedTrial,
+    columns: List[Dict[str, Any]],
+    primary_output_name: str,
+    *,
+    metadata: Optional[Dict[str, str]] = None,
+    params: Any = None,
+    source_path: Optional[str] = None,
+    channel: Optional[str] = None,
+    created_utc: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble the sidecar / embedded metadata document for a processed export."""
+    output_cols = [c for c in columns if c.get("role") == "output"]
+    outputs: Dict[str, Any] = {}
+    for c in output_cols:
+        variant = str(c.get("variant", ""))
+        entry = {
+            "column": c["name"],
+            "label": str(c.get("label", "")),
+            "family": str(c.get("family", "")),
+            "variant": variant,
+            "units": str(c.get("units", "")),
+            "primary": bool(c.get("primary")),
+            "motion_correction": _VARIANT_MOTION_CORRECTION.get(variant, ""),
+        }
+        if variant == "fitref" and params is not None:
+            entry["reference_fit"] = str(getattr(params, "reference_fit", "") or "")
+        outputs[c["name"]] = entry
+
+    col_list: List[Dict[str, Any]] = []
+    for c in columns:
+        entry: Dict[str, Any] = {"name": c["name"], "role": c.get("role", "")}
+        if c.get("units"):
+            entry["units"] = c["units"]
+        if c.get("dio_name"):
+            entry["dio_name"] = c["dio_name"]
+        if c.get("role") == "output":
+            entry["primary"] = bool(c.get("primary"))
+        col_list.append(entry)
+
+    triggers = [str(c.get("dio_name") or c["name"]) for c in columns if c.get("role") == "trigger"]
+    has_aligned = any(c["name"] == COL_TIME_ALIGNED for c in columns)
+
+    if hasattr(params, "to_dict"):
+        processing = params.to_dict()
+    elif isinstance(params, dict):
+        processing = dict(params)
+    else:
+        processing = {}
+
+    return {
+        "pyber_format": PYBER_FORMAT_KIND,
+        "pyber_format_version": PYBER_FORMAT_VERSION,
+        "created_utc": created_utc or _pyber_now_iso(),
+        "source": {
+            "file": os.path.basename(str(source_path or processed.path or "")),
+            "path": str(source_path or processed.path or ""),
+            "channel": str(channel or processed.channel_id or ""),
+        },
+        "subject": _split_subject(metadata),
+        "sampling_rate_hz": {
+            "actual": _json_float(processed.fs_actual),
+            "target": _json_float(processed.fs_target),
+            "used": _json_float(processed.fs_used),
+        },
+        "time": {
+            "primary": COL_TIME,
+            "aligned": COL_TIME_ALIGNED if has_aligned else None,
+            "units": "s",
+        },
+        "primary_output": str(primary_output_name),
+        "outputs": outputs,
+        "columns": col_list,
+        "triggers": triggers,
+        "output_context": str(getattr(processed, "output_context", "") or ""),
+        "processing": processing,
+        "sync": (getattr(processed, "sync_report", {}) or {}),
+    }
+
+
+def sidecar_path_for(data_path: str) -> str:
+    """Return the sidecar metadata path for a given CSV/HDF5 data path."""
+    return os.path.splitext(str(data_path))[0] + PYBER_SIDECAR_SUFFIX
+
+
+def write_processed_sidecar(data_path: str, meta: Dict[str, Any]) -> str:
+    """Write the metadata document beside a data file as <stem>.pyber.json."""
+    out = sidecar_path_for(data_path)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, default=str)
+    return out
+
+
+def read_processed_sidecar(data_path: str) -> Optional[Dict[str, Any]]:
+    """Read the sidecar metadata for a data file, if present."""
+    side = sidecar_path_for(data_path)
+    if not os.path.isfile(side):
+        return None
+    try:
+        with open(side, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+# =============================================================================
+# Processed-trace import (single reader shared by both GUI tabs)
+# =============================================================================
+
+def _parse_processed_number(text: Any) -> float:
+    """Parse a numeric cell, tolerating European decimals and HH:MM:SS times."""
+    s = str(text or "").strip()
+    if not s or s.lower() in {"nan", "none", "null", "na"}:
+        return np.nan
+    try:
+        return float(s)
+    except Exception:
+        pass
+    try:
+        return float(s.replace(" ", "").replace(",", "."))
+    except Exception:
+        pass
+    return coerce_time_value(s)
+
+
+def _looks_like_trigger_col(name: str) -> bool:
+    key = str(name or "").strip().lower().replace(" ", "").replace("_", "")
+    return (
+        key == "dio" or key.startswith("dio") or key.startswith("ttl")
+        or key.startswith("trigger") or "sync" in key or "barcode" in key
+    )
+
+
+def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
+    """Load a processed-trace CSV (pyBer v1.0 sidecar-aware, with legacy fallback)."""
+    import csv
+    try:
+        with open(path, "r", newline="") as f:
+            rows = list(csv.reader(f))
+    except Exception:
+        return None
+    if not rows:
+        return None
+
+    try:
+        sidecar = read_processed_sidecar(path)
+    except Exception:
+        sidecar = None
+    if not isinstance(sidecar, dict):
+        sidecar = None
+
+    output_context = ""
+    output_label = ""
+    if sidecar is not None:
+        output_context = str(sidecar.get("output_context", "") or "")
+    if not output_context:
+        for r in rows:
+            if r and str(r[0]).strip().lower().startswith("# output_context:"):
+                output_context = str(r[0]).split(":", 1)[1].strip()
+                break
+
+    rows = [r for r in rows if r and any(str(cell).strip() for cell in r)]
+    data_rows = [r for r in rows if not str(r[0]).lstrip().startswith("#")]
+    if not data_rows:
+        return None
+
+    raw_header = [str(h).strip() for h in data_rows[0]]
+    header = [h.lower() for h in raw_header]
+
+    def _find_col(names: List[str]) -> Optional[int]:
+        for name in names:
+            key = str(name or "").strip().lower()
+            if key and key in header:
+                return header.index(key)
+        return None
+
+    sidecar_role_idx: Dict[int, str] = {}
+    sidecar_trigger_names: Dict[int, str] = {}
+    primary_output_name = ""
+    time_name = ""
+    aligned_name = ""
+    if sidecar is not None:
+        primary_output_name = str(sidecar.get("primary_output", "") or "")
+        time_meta = sidecar.get("time") if isinstance(sidecar.get("time"), dict) else {}
+        time_name = str((time_meta or {}).get("primary", "") or "")
+        aligned_name = str((time_meta or {}).get("aligned", "") or "")
+        for col in (sidecar.get("columns") or []):
+            if not isinstance(col, dict):
+                continue
+            idx = _find_col([col.get("name", "")])
+            if idx is None:
+                continue
+            role = str(col.get("role", ""))
+            sidecar_role_idx[idx] = role
+            if role == "trigger":
+                sidecar_trigger_names[idx] = str(col.get("dio_name") or raw_header[idx])
+        outs = sidecar.get("outputs") if isinstance(sidecar.get("outputs"), dict) else {}
+        prim = (outs or {}).get(primary_output_name) if isinstance(outs, dict) else None
+        if isinstance(prim, dict):
+            output_label = str(prim.get("label", "") or "")
+
+    def _role_index(role: str) -> Optional[int]:
+        for idx, r in sidecar_role_idx.items():
+            if r == role:
+                return idx
+        return None
+
+    time_idx = _find_col([time_name]) if time_name else None
+    if time_idx is None:
+        time_idx = _role_index("time")
+    if time_idx is None:
+        time_idx = header.index("time") if "time" in header else None
+
+    output_idx = _find_col([primary_output_name]) if primary_output_name else None
+    if output_idx is None:
+        output_idx = _role_index("output")
+    if output_idx is None:
+        output_idx = _find_col([
+            "dff", "z-score", "zscore", "z score", "prominence", "signal_465",
+            "output", "raw_signal",
+            "raw_465", "raw", "isobestic", "raw_405",
+            "reference", "reference_405", "ref", "dio",
+            "baseline_465", "baseline_405",
+        ])
+    has_header = time_idx is not None and output_idx is not None
+
+    raw_idx = _role_index("raw_signal") if sidecar is not None else None
+    if raw_idx is None and has_header:
+        raw_idx = _find_col(["raw_465", "raw", "signal", "signal_465"])
+    iso_idx = _role_index("isosbestic") if sidecar is not None else None
+    if iso_idx is None and has_header:
+        iso_idx = _find_col(["raw_405", "isobestic", "isosbestic", "reference", "reference_405", "ref"])
+
+    aligned_idx = _find_col([aligned_name]) if aligned_name else None
+    if aligned_idx is None and has_header:
+        aligned_idx = _find_col(["time_aligned", "aligned_time", "sync_aligned_time"])
+
+    dio_idx = None
+    trigger_cols: List[Tuple[int, str]] = []
+    if has_header:
+        if sidecar_trigger_names:
+            for idx, name in sidecar_trigger_names.items():
+                trigger_cols.append((idx, str(name or raw_header[idx])))
+        else:
+            seen: set = set()
+            for idx, name in enumerate(raw_header):
+                if idx == time_idx:
+                    continue
+                label = str(name or header[idx] or f"column_{idx + 1}").strip()
+                if not _looks_like_trigger_col(label):
+                    continue
+                key = label.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                trigger_cols.append((idx, label))
+        dio_idx = _find_col(["dio"])
+        if dio_idx is None and len(trigger_cols) == 1:
+            dio_idx = trigger_cols[0][0]
+
+    data_rows = data_rows[1:] if has_header else data_rows
+
+    time: List[float] = []
+    output: List[float] = []
+    raw_vals: List[float] = []
+    iso_vals: List[float] = []
+    dio_vals: List[float] = []
+    aligned_vals: List[float] = []
+    trigger_vals: Dict[str, List[float]] = {name: [] for _, name in trigger_cols}
+
+    for r in data_rows:
+        if time_idx is None or output_idx is None:
+            continue
+        if len(r) <= max(time_idx, output_idx):
+            continue
+        try:
+            tval = _parse_processed_number(r[time_idx])
+            oval = float(r[output_idx])
+        except Exception:
+            continue
+        if not np.isfinite(tval):
+            continue
+        time.append(tval)
+        output.append(oval)
+        if raw_idx is not None:
+            try:
+                raw_vals.append(float(r[raw_idx]) if len(r) > raw_idx else np.nan)
+            except Exception:
+                raw_vals.append(np.nan)
+        if iso_idx is not None:
+            try:
+                iso_vals.append(float(r[iso_idx]) if len(r) > iso_idx else np.nan)
+            except Exception:
+                iso_vals.append(np.nan)
+        if dio_idx is not None:
+            try:
+                dio_vals.append(float(r[dio_idx]) if len(r) > dio_idx else np.nan)
+            except Exception:
+                dio_vals.append(np.nan)
+        if aligned_idx is not None:
+            try:
+                aligned_vals.append(float(r[aligned_idx]) if len(r) > aligned_idx else np.nan)
+            except Exception:
+                aligned_vals.append(np.nan)
+        for trig_idx, trig_name in trigger_cols:
+            try:
+                trigger_vals[trig_name].append(float(r[trig_idx]) if len(r) > trig_idx else np.nan)
+            except Exception:
+                trigger_vals[trig_name].append(np.nan)
+
+    if not time:
+        return None
+
+    t = np.asarray(time, float)
+    out = np.asarray(output, float)
+    raw = np.asarray(raw_vals, float) if raw_idx is not None and len(raw_vals) == len(time) else np.full_like(t, np.nan)
+    iso = np.asarray(iso_vals, float) if iso_idx is not None and len(iso_vals) == len(time) else np.full_like(t, np.nan)
+    dio_arr = np.asarray(dio_vals, float) if dio_idx is not None and len(dio_vals) == len(time) else None
+    dio_name = ""
+    if dio_arr is not None and dio_idx is not None and 0 <= dio_idx < len(raw_header):
+        dio_name = str(raw_header[dio_idx] or "DIO").strip() or "DIO"
+    triggers: Dict[str, np.ndarray] = {}
+    for trig_name, vals in trigger_vals.items():
+        arr = np.asarray(vals, float)
+        if arr.size == t.size and int(np.sum(np.isfinite(arr))) >= 2:
+            triggers[str(trig_name)] = arr
+    if dio_arr is not None and int(np.sum(np.isfinite(dio_arr))) >= 2:
+        triggers.setdefault(dio_name or "DIO", dio_arr)
+    sync_aligned = (
+        np.asarray(aligned_vals, float)
+        if aligned_idx is not None and len(aligned_vals) == len(time)
+        else None
+    )
+
+    if not output_label:
+        output_label = "Imported CSV"
+        if has_header and output_idx is not None:
+            col = raw_header[output_idx] if output_idx < len(raw_header) else header[output_idx]
+            col_l = str(col).strip().lower()
+            if col and col_l != "output":
+                pretty = {
+                    "zscore": "z-score", "dff": "dFF",
+                    "raw_signal": "Raw signal (465)", "signal_465": "Raw signal (465)",
+                    "prominence": "Prominence normalized",
+                }.get(col_l, str(col))
+                output_label = f"Imported CSV ({pretty})"
+
+    return ProcessedTrial(
+        path=path,
+        channel_id="import",
+        time=t,
+        raw_signal=raw,
+        raw_reference=iso,
+        dio=dio_arr,
+        dio_name=dio_name,
+        triggers=triggers,
+        sig_f=None,
+        ref_f=None,
+        baseline_sig=None,
+        baseline_ref=None,
+        output=out,
+        output_label=output_label,
+        output_context=output_context,
+        sync_aligned_time=sync_aligned,
+        sync_report={"status": "imported", "method": "imported time_aligned"} if sync_aligned is not None else {},
+        artifact_regions_sec=None,
+        fs_actual=np.nan,
+        fs_target=np.nan,
+        fs_used=np.nan,
+    )
+
+
+def load_processed_h5(path: str) -> Optional[ProcessedTrial]:
+    """Load a processed-trace HDF5 (pyBer v1.0 embedded/sidecar-aware, legacy fallback)."""
+    try:
+        with h5py.File(path, "r") as f:
+            if "data" not in f:
+                return None
+            g = f["data"]
+            if "time" not in g:
+                return None
+            gattrs = g.attrs
+            t = np.asarray(g["time"][()], float)
+
+            def _ds(name: Optional[str]) -> Optional[np.ndarray]:
+                return np.asarray(g[name][()], float) if name and name in g else None
+
+            meta: Optional[Dict[str, Any]] = None
+            raw_meta = f.attrs.get("pyber_meta_json", "") if hasattr(f, "attrs") else ""
+            if raw_meta:
+                try:
+                    parsed = json.loads(str(raw_meta))
+                    meta = parsed if isinstance(parsed, dict) else None
+                except Exception:
+                    meta = None
+            if meta is None:
+                try:
+                    side = read_processed_sidecar(path)
+                    meta = side if isinstance(side, dict) else None
+                except Exception:
+                    meta = None
+
+            roles: Dict[str, str] = {}
+            trigger_meta: List[Tuple[str, str]] = []
+            primary_output_name = ""
+            if meta is not None:
+                primary_output_name = str(meta.get("primary_output", "") or "")
+                for col in (meta.get("columns") or []):
+                    if isinstance(col, dict) and col.get("name"):
+                        nm = str(col["name"])
+                        role = str(col.get("role", ""))
+                        roles[nm] = role
+                        if role == "trigger":
+                            trigger_meta.append((nm, str(col.get("dio_name") or nm)))
+
+            out = None
+            out_name = primary_output_name or str(gattrs.get("primary_output", "") or "")
+            if out_name and out_name in g:
+                out = _ds(out_name)
+            if out is None:
+                for nm, role in roles.items():
+                    if role == "output" and nm in g:
+                        out, out_name = _ds(nm), nm
+                        break
+            if out is None:
+                for nm in ("output", "dFF", "z-score", "zscore", "prominence", "signal_465",
+                           "raw_465", "raw", "raw_405", "isobestic", "dio",
+                           "baseline_465", "baseline_405"):
+                    if nm in g:
+                        out, out_name = _ds(nm), nm
+                        break
+            if out is None:
+                return None
+
+            raw_sig = _ds("raw_465")
+            if raw_sig is None:
+                raw_sig = _ds("raw")
+            if raw_sig is None:
+                raw_sig = np.full_like(t, np.nan)
+            raw_ref = _ds("raw_405")
+            if raw_ref is None:
+                raw_ref = _ds("isobestic")
+            if raw_ref is None:
+                raw_ref = np.full_like(t, np.nan)
+
+            triggers: Dict[str, np.ndarray] = {}
+            if trigger_meta:
+                for ds_name, logical in trigger_meta:
+                    arr = _ds(ds_name)
+                    if arr is not None and arr.size == t.size:
+                        triggers[str(logical)] = arr
+            else:
+                reserved = {"time", "time_aligned", "sync_aligned_time", "raw_465", "raw_405",
+                            "raw", "isobestic", "baseline_465", "baseline_405", "output", out_name}
+                for nm in g.keys():
+                    if nm in reserved or not _looks_like_trigger_col(nm):
+                        continue
+                    arr = _ds(nm)
+                    if arr is not None and arr.size == t.size:
+                        triggers[str(nm)] = arr
+
+            dio_name = str(gattrs.get("dio_name", "") or "")
+            dio = _ds("dio")
+            if dio is None and dio_name and dio_name in g:
+                dio = _ds(dio_name)
+            if dio is None and len(triggers) == 1:
+                only_name, only_arr = next(iter(triggers.items()))
+                dio = only_arr
+                if not dio_name:
+                    dio_name = only_name
+            if dio is not None and dio.size == t.size:
+                triggers.setdefault(dio_name or "DIO", dio)
+
+            output_label = str(gattrs.get("output_label", "") or "")
+            if not output_label and meta is not None:
+                outs = meta.get("outputs") if isinstance(meta.get("outputs"), dict) else {}
+                prim = (outs or {}).get(primary_output_name)
+                if isinstance(prim, dict):
+                    output_label = str(prim.get("label", "") or "")
+            if not output_label:
+                output_label = "Imported H5"
+            output_context = str(gattrs.get("output_context", "") or "")
+            fs_actual = float(gattrs.get("fs_actual", np.nan))
+            fs_target = float(gattrs.get("fs_target", np.nan))
+            fs_used = float(gattrs.get("fs_used", np.nan))
+
+            sync_aligned = _ds("time_aligned")
+            if sync_aligned is None:
+                sync_aligned = _ds("sync_aligned_time")
+
+            sync_report: Dict[str, Any] = {}
+            raw_report = gattrs.get("sync_report_json", "")
+            if raw_report:
+                try:
+                    parsed = json.loads(str(raw_report))
+                    sync_report = parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    sync_report = {}
+    except Exception:
+        return None
+
+    return ProcessedTrial(
+        path=path,
+        channel_id="import",
+        time=t,
+        raw_signal=raw_sig,
+        raw_reference=raw_ref,
+        dio=dio,
+        dio_name=dio_name,
+        triggers=triggers,
+        sig_f=None,
+        ref_f=None,
+        baseline_sig=None,
+        baseline_ref=None,
+        output=out,
+        output_label=output_label,
+        output_context=output_context,
+        sync_aligned_time=sync_aligned,
+        sync_report=sync_report,
+        artifact_regions_sec=None,
+        fs_actual=fs_actual,
+        fs_target=fs_target,
+        fs_used=fs_used,
+    )
 
 
 def export_processed_csv(
@@ -494,85 +1236,32 @@ def export_processed_csv(
     processed: ProcessedTrial,
     metadata: Optional[Dict[str, str]] = None,
     selection: Optional[ExportSelection] = None,
+    params: Any = None,
+    created_utc: Optional[str] = None,
+    write_sidecar: bool = True,
 ) -> None:
     import csv
 
     selection = selection if isinstance(selection, ExportSelection) else ExportSelection()
-    t = np.asarray(processed.time, float)
-    out = np.asarray(processed.output if processed.output is not None else np.full_like(t, np.nan), float)
-    raw = np.asarray(processed.raw_signal if processed.raw_signal is not None else np.full_like(t, np.nan), float)
-    iso = np.asarray(processed.raw_reference if processed.raw_reference is not None else np.full_like(t, np.nan), float)
-    if raw.size != t.size:
-        raw = np.full_like(t, np.nan)
-    if iso.size != t.size:
-        iso = np.full_like(t, np.nan)
-
-    dio = None
-    if selection.dio and processed.dio is not None and processed.dio.size == t.size:
-        dio = np.asarray(processed.dio, float)
-
-    output_items = _output_items_for_export(processed, selection) if selection.output else []
+    columns, primary_output_name = plan_processed_columns(processed, selection)
+    n = int(np.asarray(processed.time, float).size)
 
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        if bool(getattr(selection, "csv_metadata", True)):
-            w.writerow([f"# output_label: {processed.output_label}"])
-            if processed.output_context:
-                w.writerow([f"# output_context: {processed.output_context}"])
-            sync_report = getattr(processed, "sync_report", {}) or {}
-            if sync_report:
-                try:
-                    w.writerow([f"# sync_report_json: {json.dumps(sync_report)}"])
-                except Exception:
-                    pass
-            if output_items:
-                w.writerow([f"# output_modes: {json.dumps([label for label, _ in output_items])}"])
-            if metadata:
-                for k, v in metadata.items():
-                    w.writerow([f"# {k}: {v}"])
-        columns = [("time", t)]
-        aligned = getattr(processed, "sync_aligned_time", None)
-        if aligned is not None:
-            aligned_arr = np.asarray(aligned, float)
-            if aligned_arr.size == t.size:
-                columns.append(("time_aligned", aligned_arr))
-        if selection.raw:
-            columns.append(("raw", raw))
-        if selection.isobestic:
-            columns.append(("isobestic", iso))
-        if selection.output and output_items:
-            if len(output_items) == 1:
-                label, values = output_items[0]
-                values = _csv_output_values(label, values, t)
-                columns.append((output_label_type(label), values))
-            else:
-                used_names = {name for name, _ in columns}
-                primary_label, primary_values = output_items[0]
-                primary_values = _csv_output_values(primary_label, primary_values, t)
-                columns.append((_unique_export_name("output", used_names), primary_values))
-                for label, values in output_items:
-                    values = _csv_output_values(label, values, t)
-                    col = _unique_export_name(f"output__{output_label_key(label)}", used_names)
-                    columns.append((col, values))
-
-        # Primary trigger name (e.g. "DIO01")
-        primary_name = str(processed.dio_name) if processed.dio_name else "dio"
-        if dio is not None:
-            columns.append((primary_name, dio))
-
-        # Add additional triggers
-        if selection.dio and hasattr(processed, "triggers") and processed.triggers:
-            for name, val in processed.triggers.items():
-                if name != processed.dio_name: # Avoid duplicates
-                    columns.append((name, val))
-
-        w.writerow([name for name, _ in columns])
-        for i in range(t.size):
+        w.writerow([c["name"] for c in columns])
+        for i in range(n):
             row = []
-            for _, values in columns:
-                v = float(values[i])
+            for c in columns:
+                v = float(c["values"][i])
                 row.append(v if np.isfinite(v) else np.nan)
             w.writerow(row)
+
+    if write_sidecar:
+        meta = build_processed_metadata(
+            processed, columns, primary_output_name,
+            metadata=metadata, params=params, created_utc=created_utc,
+        )
+        write_processed_sidecar(path, meta)
 
 
 def export_processed_h5(
@@ -580,86 +1269,64 @@ def export_processed_h5(
     processed: ProcessedTrial,
     metadata: Optional[Dict[str, str]] = None,
     selection: Optional[ExportSelection] = None,
+    params: Any = None,
+    created_utc: Optional[str] = None,
+    write_sidecar: bool = True,
 ) -> None:
     selection = selection if isinstance(selection, ExportSelection) else ExportSelection()
+    columns, primary_output_name = plan_processed_columns(processed, selection)
+    meta = build_processed_metadata(
+        processed, columns, primary_output_name,
+        metadata=metadata, params=params, created_utc=created_utc,
+    )
+
     with h5py.File(path, "w") as f:
+        f.attrs["pyber_format"] = PYBER_FORMAT_KIND
+        f.attrs["pyber_format_version"] = PYBER_FORMAT_VERSION
+        # Self-contained: embed the full sidecar document.
+        try:
+            f.attrs["pyber_meta_json"] = json.dumps(meta, default=str)
+        except Exception:
+            pass
+
         g = f.create_group("data")
-        g.create_dataset("time", data=np.asarray(processed.time, float), compression="gzip")
-        aligned = getattr(processed, "sync_aligned_time", None)
-        if aligned is not None:
-            aligned_arr = np.asarray(aligned, float)
-            if aligned_arr.size == np.asarray(processed.time, float).size:
-                g.create_dataset("time_aligned", data=aligned_arr, compression="gzip")
-                try:
-                    g.attrs["sync_report_json"] = json.dumps(getattr(processed, "sync_report", {}) or {})
-                except Exception:
-                    pass
-        out_type = output_label_type(processed.output_label)
-        output_items = _output_items_for_export(processed, selection) if selection.output else []
-        g.attrs["output_label"] = str(processed.output_label)
-        g.attrs["output_context"] = str(processed.output_context)
-        g.attrs["output_type"] = str(out_type)
-        if output_items:
-            g.attrs["output_modes"] = json.dumps([label for label, _ in output_items])
+        for c in columns:
+            g.create_dataset(c["name"], data=np.asarray(c["values"], float), compression="gzip")
+            if c.get("role") == "output":
+                ds = g[c["name"]]
+                ds.attrs["label"] = str(c.get("label", ""))
+                ds.attrs["family"] = str(c.get("family", ""))
+                ds.attrs["variant"] = str(c.get("variant", ""))
+                ds.attrs["units"] = str(c.get("units", ""))
+                ds.attrs["primary"] = bool(c.get("primary"))
+
+        output_names = [c["name"] for c in columns if c.get("role") == "output"]
+        trigger_names = [str(c.get("dio_name") or c["name"]) for c in columns if c.get("role") == "trigger"]
+        g.attrs["primary_output"] = str(primary_output_name)
+        g.attrs["output_columns"] = json.dumps(output_names)
+        g.attrs["trigger_columns"] = json.dumps(trigger_names)
+        prim = next((c for c in columns if c.get("role") == "output" and c.get("primary")), None)
+        g.attrs["output_label"] = str(prim.get("label", "")) if prim else str(processed.output_label or "")
+        g.attrs["output_context"] = str(getattr(processed, "output_context", "") or "")
+        g.attrs["dio_name"] = str(processed.dio_name or "")
         g.attrs["fs_actual"] = float(processed.fs_actual)
         g.attrs["fs_used"] = float(processed.fs_used)
         g.attrs["fs_target"] = float(processed.fs_target)
         g.attrs["export_selection"] = json.dumps(selection.to_dict())
+        if any(c["name"] == COL_TIME_ALIGNED for c in columns):
+            try:
+                g.attrs["sync_report_json"] = json.dumps(getattr(processed, "sync_report", {}) or {})
+            except Exception:
+                pass
 
-        if selection.output and output_items:
-            t = np.asarray(processed.time, float)
-            _primary_label, primary_output = output_items[0]
-            primary_output = primary_output if primary_output.size == t.size else np.full_like(t, np.nan)
-            g.create_dataset("output", data=np.asarray(primary_output, float), compression="gzip")
-
-            if len(output_items) > 1:
-                out_group = g.create_group("outputs")
-                used = set()
-                for label, values in output_items:
-                    values = values if values.size == t.size else np.full_like(t, np.nan)
-                    ds_name = _unique_export_name(output_label_key(label), used)
-                    ds = out_group.create_dataset(ds_name, data=np.asarray(values, float), compression="gzip")
-                    ds.attrs["label"] = str(label)
-                    ds.attrs["output_type"] = str(output_label_type(label))
-
-        raw_sig = np.asarray(processed.raw_signal if processed.raw_signal is not None else np.full_like(processed.time, np.nan), float)
-        raw_ref = np.asarray(processed.raw_reference if processed.raw_reference is not None else np.full_like(processed.time, np.nan), float)
-        if selection.raw:
-            g.create_dataset("raw_465", data=raw_sig, compression="gzip")
-        if selection.isobestic:
-            g.create_dataset("raw_405", data=raw_ref, compression="gzip")
-        try:
-            if selection.raw and "raw" not in g:
-                g["raw"] = g["raw_465"]
-            if selection.isobestic and "isobestic" not in g:
-                g["isobestic"] = g["raw_405"]
-            if selection.output and out_type and out_type != "output" and out_type not in g:
-                g[out_type] = g["output"]
-        except Exception:
-            pass
-
-        if selection.dio and processed.dio is not None:
-            primary_name = str(processed.dio_name) if processed.dio_name else "dio"
-            g.create_dataset(primary_name, data=np.asarray(processed.dio, float), compression="gzip")
-            g.attrs["dio_name"] = str(processed.dio_name)
-            if primary_name != "dio":
-                g["dio"] = g[primary_name] # link for compatibility
-
-        # Add all selected triggers
-        if selection.dio and hasattr(processed, "triggers") and processed.triggers:
-            for name, val in processed.triggers.items():
-                if name not in g:
-                    g.create_dataset(name, data=np.asarray(val, float), compression="gzip")
-
-        if selection.baseline_sig and processed.baseline_sig is not None:
-            g.create_dataset("baseline_465", data=np.asarray(processed.baseline_sig, float), compression="gzip")
-        if selection.baseline_ref and processed.baseline_ref is not None:
-            g.create_dataset("baseline_405", data=np.asarray(processed.baseline_ref, float), compression="gzip")
-
+        # Structured subject metadata group (flat key/value, for quick browsing).
         if metadata:
             mg = f.create_group("metadata")
             for k, v in metadata.items():
                 mg.attrs[str(k)] = str(v)
+
+    if write_sidecar:
+        write_processed_sidecar(path, meta)
 
 
 # =============================================================================

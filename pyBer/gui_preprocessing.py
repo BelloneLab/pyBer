@@ -1653,7 +1653,15 @@ class ParameterPanel(QtWidgets.QGroupBox):
             ),
             "export_selection": (
                 "Choose which processed signals are written during CSV/H5 export.\n"
-                "Time is always exported. These options are saved in the preprocessing configuration file."
+                "Time is always exported. Every export also writes a '<name>.pyber.json' sidecar\n"
+                "recording the exact output definitions, processing parameters, and metadata.\n"
+                "These options are saved in the preprocessing configuration file."
+            ),
+            "export_extra_outputs": (
+                "Additional processed outputs to also export alongside the primary one.\n"
+                "The output chosen in 'Output mode' is always exported and is marked primary in the\n"
+                "sidecar. Each output is written under its family column name (dFF / z-score /\n"
+                "prominence / signal_465); extra same-family outputs get a '<family>__<variant>' name."
             ),
             "export_dio_channel": (
                 "Choose which DIO / trigger channel to export.\n"
@@ -1666,10 +1674,6 @@ class ParameterPanel(QtWidgets.QGroupBox):
             "export_dio_channels": (
                 "Choose one or more DIO channels to export.\n"
                 "If none are checked, export uses the current overlay trigger."
-            ),
-            "csv_metadata": (
-                "Write pyBer metadata comment lines at the top of CSV files.\n"
-                "Turn this off when you need the first CSV row to be the column header for Excel, MATLAB, R, or other tools."
             ),
             "auto_export": (
                 "When enabled, the Export button writes selected files directly beside their source raw data.\n"
@@ -2066,11 +2070,6 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.chk_export_baseline_sig.setChecked(True)
         self.chk_export_baseline_ref = QtWidgets.QCheckBox("Baseline 405")
         self.chk_export_baseline_ref.setChecked(True)
-        self.chk_csv_metadata = QtWidgets.QCheckBox("CSV metadata comment lines")
-        self.chk_csv_metadata.setChecked(True)
-        self.chk_csv_metadata.setToolTip(
-            "Include # output_label / output_context / output_modes metadata rows at the top of CSV exports."
-        )
         self.list_export_channels = CheckableListWidget()
         self.list_export_channels.setMaximumHeight(84)
         self.list_export_channels.setMinimumHeight(54)
@@ -2080,11 +2079,14 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.list_export_outputs = CheckableListWidget()
         self.list_export_outputs.setMaximumHeight(116)
         self.list_export_outputs.setMinimumHeight(72)
-        self.list_export_outputs.setToolTip("Select one or more processed output traces to write during export.")
+        self.list_export_outputs.setToolTip(
+            "Additional processed outputs to also export.\n"
+            "The primary output chosen in 'Output mode' is always exported; tick any extra outputs here."
+        )
         self._pending_export_channel_names: List[str] = []
         self._pending_export_trigger_names: List[str] = []
-        self._pending_export_output_modes: List[str] = [self.combo_output.currentText()]
-        self._export_outputs_follow_current_mode = True
+        # Extra outputs to also export (the primary 'Output mode' is always written).
+        self._pending_export_output_modes: List[str] = []
         self.list_export_outputs.set_items(
             [(mode, mode) for mode in OUTPUT_MODES],
             checked_values=self._pending_export_output_modes,
@@ -2108,8 +2110,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         export_checks.addWidget(self.chk_export_baseline_ref, 2, 1)
         export_form.addRow(export_checks)
         export_form.addRow(self._label_with_help("Auto export", "auto_export"), self.chk_auto_export)
-        export_form.addRow(self._label_with_help("CSV metadata", "csv_metadata"), self.chk_csv_metadata)
-        export_form.addRow(self._label_with_help("Output traces", "output_mode"), self.list_export_outputs)
+        export_form.addRow(self._label_with_help("Also export", "export_extra_outputs"), self.list_export_outputs)
         export_form.addRow(self._label_with_help("AN channels", "export_analog_channels"), self.list_export_channels)
         export_form.addRow(self._label_with_help("DIO channels", "export_dio_channels"), self.list_export_dio)
 
@@ -2455,7 +2456,6 @@ class ParameterPanel(QtWidgets.QGroupBox):
             self.chk_export_dio,
             self.chk_export_baseline_sig,
             self.chk_export_baseline_ref,
-            self.chk_csv_metadata,
         ):
             cb.toggled.connect(emit_noargs)
 
@@ -2486,7 +2486,6 @@ class ParameterPanel(QtWidgets.QGroupBox):
             dio=self.chk_export_dio.isChecked(),
             baseline_sig=self.chk_export_baseline_sig.isChecked(),
             baseline_ref=self.chk_export_baseline_ref.isChecked(),
-            csv_metadata=self.chk_csv_metadata.isChecked(),
             output_modes=self.export_output_modes(),
         )
 
@@ -2518,8 +2517,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 parts.append("baseline465")
             else:
                 parts.append("baseline405")
-        if not selection.csv_metadata:
-            parts.append("clean CSV")
+        parts.append("sidecar")
         if not parts:
             parts.append("time only")
         return "CSV/H5: " + " + ".join(parts)
@@ -2532,11 +2530,11 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.chk_export_dio.setChecked(bool(selection.dio))
         self.chk_export_baseline_sig.setChecked(bool(selection.baseline_sig))
         self.chk_export_baseline_ref.setChecked(bool(selection.baseline_ref))
-        self.chk_csv_metadata.setChecked(bool(getattr(selection, "csv_metadata", True)))
-        if selection.output_modes:
-            self.set_export_output_modes(selection.output_modes, follow_current=False)
-        else:
-            self.set_export_output_modes([self.combo_output.currentText()], follow_current=True)
+        # Restore extra outputs; the primary is always taken from combo_output at
+        # export time, so drop it from the extras list to avoid a redundant tick.
+        primary = self.combo_output.currentText().strip()
+        extras = [m for m in (selection.output_modes or []) if str(m or "").strip() != primary]
+        self.set_export_output_modes(extras)
 
     def export_channel_names(self) -> List[str]:
         checked = self.list_export_channels.checked_values()
@@ -2547,10 +2545,23 @@ class ParameterPanel(QtWidgets.QGroupBox):
         return checked or list(self._pending_export_trigger_names)
 
     def export_output_modes(self) -> List[str]:
-        checked = self.list_export_outputs.checked_values()
-        modes = checked or list(self._pending_export_output_modes)
-        modes = [mode for mode in modes if mode in OUTPUT_MODES]
-        return modes or [self.combo_output.currentText()]
+        """Ordered export set: the previewed primary output first, then any checked extras.
+
+        Guarantees "what you select is what you get": the mode shown in the
+        Output-mode combo is always exported and always primary, independent of
+        any stale checklist state.
+        """
+        primary = self.combo_output.currentText().strip()
+        ordered: List[str] = []
+        if primary in OUTPUT_MODES:
+            ordered.append(primary)
+        for mode in self.list_export_outputs.checked_values():
+            mode = str(mode or "").strip()
+            if mode in OUTPUT_MODES and mode not in ordered:
+                ordered.append(mode)
+        if not ordered:
+            ordered = [primary if primary in OUTPUT_MODES else OUTPUT_MODES[0]]
+        return ordered
 
     def _on_export_channel_selection_changed(self) -> None:
         self._pending_export_channel_names = self.list_export_channels.checked_values()
@@ -2560,13 +2571,12 @@ class ParameterPanel(QtWidgets.QGroupBox):
 
     def _on_export_output_selection_changed(self) -> None:
         self._pending_export_output_modes = self.list_export_outputs.checked_values()
-        self._export_outputs_follow_current_mode = False
         self._update_section_summaries()
 
     def _sync_export_outputs_to_current_mode(self) -> None:
-        if not getattr(self, "_export_outputs_follow_current_mode", True):
-            return
-        self.set_export_output_modes([self.combo_output.currentText()], follow_current=True)
+        # The primary output is derived from combo_output at export time, so a
+        # change to the previewed mode only needs a summary refresh.
+        self._update_section_summaries()
 
     def set_available_export_channels(self, channels: List[str], preferred: Optional[List[str]] = None) -> None:
         current = list(preferred if preferred is not None else self.export_channel_names())
@@ -2590,12 +2600,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._pending_export_trigger_names = names
         self.list_export_dio.set_checked_values(names)
 
-    def set_export_output_modes(self, output_modes: List[str], follow_current: bool = False) -> None:
+    def set_export_output_modes(self, output_modes: List[str]) -> None:
+        """Set the checked EXTRA outputs (the primary comes from combo_output)."""
         modes = [str(mode or "").strip() for mode in output_modes or [] if str(mode or "").strip() in OUTPUT_MODES]
-        if not modes:
-            modes = [self.combo_output.currentText()]
         self._pending_export_output_modes = modes
-        self._export_outputs_follow_current_mode = bool(follow_current)
         self.list_export_outputs.set_checked_values(modes)
 
     def auto_export_enabled(self) -> bool:
@@ -2687,7 +2695,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.cb_filtering.setChecked(True)
         self.cb_show_artifact_overlay.setChecked(True)
         self.set_export_selection(ExportSelection())
-        self.set_export_output_modes([self.combo_output.currentText()], follow_current=True)
+        self.set_export_output_modes([])
         self.chk_auto_export.setChecked(False)
         self._update_auto_export_controls()
         self._update_section_summaries()

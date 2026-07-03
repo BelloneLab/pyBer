@@ -72,15 +72,28 @@ Use Preprocessing when you want to clean and export photometry traces.
 
 ### Output definitions
 
-pyBer exposes explicit output modes so exported traces are reproducible:
+pyBer exposes explicit output modes so exported traces are reproducible. Each
+mode maps to a stable **family column name** used in the exported files, plus a
+short **variant** tag that distinguishes same-family modes. The exact mode you
+picked is always recorded in the sidecar metadata (see [Export](#8-export)).
 
-- dFF without motion correction.
-- z-score without motion correction.
-- dFF with motion correction by subtraction.
-- z-score with motion correction by subtraction.
-- z-score signal minus z-score reference.
-- dFF with fitted reference.
-- z-score with fitted reference.
+| Output mode | Column / dataset | Variant |
+|-------------|------------------|---------|
+| dFF without motion correction | `dFF` | `nomc` |
+| z-score without motion correction | `z-score` | `nomc` |
+| dFF with motion correction by subtraction | `dFF` | `sub` |
+| z-score with motion correction by subtraction | `z-score` | `sub` |
+| z-score signal minus z-score reference | `z-score` | `zdiff` |
+| dFF with fitted reference | `dFF` | `fitref` |
+| z-score with fitted reference | `z-score` | `fitref` |
+| prominence-normalized (fitted reference) | `prominence` | `fitref` |
+| raw processed 465 signal | `signal_465` | `raw` |
+
+The output you preview in **Output mode** is always the one exported (the
+"primary" output). You can tick additional outputs under **Also export** to write
+several at once; the primary keeps the bare family name (for example `dFF`) and
+each extra same-family output gets a `family__variant` name (for example
+`dFF__nomc`). There is never a generic `output` column.
 
 For fitted-reference modes, pyBer fits the reference channel to the signal before
 computing dFF. The usual choice is OLS. Lasso and robust Huber fitting are also
@@ -233,10 +246,55 @@ contribution so the feature ranking remains usable.
 
 ## 8. Export
 
-Preprocessing can export processed traces as:
+### Processed-trace format (pyBer v1.0)
 
-- CSV.
-- HDF5.
+Preprocessing exports each processed recording as a matched pair plus a metadata
+sidecar, all sharing one file stem:
+
+```
+M12_day1_3_AIN01.csv          # data table (clean, header on the first row)
+M12_day1_3_AIN01.h5           # same data as HDF5 datasets (self-contained)
+M12_day1_3_AIN01.pyber.json   # metadata sidecar (shared by the CSV and H5)
+```
+
+**Design principles**
+
+- **Simple, stable headers.** Columns are named for downstream scripts, Prism,
+  MATLAB, and R. There are no comment lines in the CSV; the first row is the
+  header. The processed output uses its family name (`dFF`, `z-score`,
+  `prominence`, or `signal_465`), never a generic `output`.
+- **What you select is what you get.** The primary output (the one shown in
+  *Output mode*) is always written and is flagged `primary` in the sidecar.
+  Extra outputs are additive and are written under `family__variant` names.
+- **Metadata lives in the sidecar**, not in the data file. HDF5 also embeds the
+  same JSON (attribute `pyber_meta_json`) so a single `.h5` is self-contained.
+
+**Columns / datasets** (present only when selected):
+
+| Name | Meaning |
+|------|---------|
+| `time` | Recording time in seconds (photometry clock). Always present. |
+| `time_aligned` | Camera/behavior-aligned time in seconds (only after Sync). |
+| `raw_465` | Raw processed 465 signal. |
+| `raw_405` | Isosbestic (405) reference. |
+| `dFF` / `z-score` / `prominence` / `signal_465` | The primary processed output. |
+| `dFF__nomc`, `z-score__sub`, ... | Any additional selected outputs. |
+| `baseline_465`, `baseline_405` | Estimated baselines. |
+| `DIO01`, `DIO02`, ... | Digital trigger channels, under their real names. |
+
+In HDF5 these are datasets under the `/data` group; `/data` carries attributes
+(`primary_output`, `output_label`, `fs_used`, `dio_name`, ...) and each output
+dataset carries `label`, `family`, `variant`, and `units`.
+
+**Sidecar (`<stem>.pyber.json`)** records everything needed to interpret the
+file: `primary_output`, an `outputs` map (label, family, variant, units,
+reference fit, motion-correction method), a `columns` role map, the `subject`
+metadata, the full `processing` parameters, sampling rates, and the `sync`
+report. Load the sidecar (or the embedded HDF5 JSON) to know exactly which
+output definition a `dFF` column represents.
+
+> Backward compatibility: pyBer still reads older exports that carried `#`
+> comment metadata lines and a generic `output` column/dataset.
 
 Postprocessing can export:
 
@@ -247,8 +305,12 @@ Postprocessing can export:
 - Metrics tables.
 - Group-level outputs.
 
-Use HDF5 when you want metadata and multiple arrays in one file. Use CSV when you
-want easy loading into spreadsheets or Prism.
+The **Export aligned files** action in postprocessing writes the same v1.0
+processed-trace format (with a `time_aligned` column) so aligned files load back
+exactly like preprocessing exports.
+
+Use HDF5 when you want a single self-contained file with all arrays and metadata.
+Use CSV plus its sidecar when you want easy loading into spreadsheets or Prism.
 
 ## 9. Troubleshooting
 
