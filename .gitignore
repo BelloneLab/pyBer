@@ -1,43 +1,22 @@
-build/pyBer/Analysis-00.toc
-build/pyBer/base_library.zip
-build/pyBer/EXE-00.toc
-build/pyBer/PKG-00.toc
-build/pyBer/pyBer.pkg
-build/pyBer/PYZ-00.pyz
-build/pyBer/PYZ-00.toc
-build/pyBer/warn-pyBer.txt
-build/pyBer/xref-pyBer.html
-build/pyBer/localpycs/pyimod01_archive.pyc
-build/pyBer/localpycs/pyimod02_importers.pyc
-build/pyBer/localpycs/pyimod03_ctypes.pyc
-build/pyBer/localpycs/pyimod04_pywin32.pyc
-build/pyBer/localpycs/struct.pyc
-dist/pyBer.exe
-pyBer/__pycache__/gui_postprocessing.cpython-38.pyc
-pyBer/__pycache__/gui_postprocessing.cpython-38.pyc
-pyBer/__pycache__/gui_postprocessing.cpython-38.pyc
-pyBer/__pycache__/gui_postprocessing.cpython-38.pyc
-pyBer/__pycache__/gui_postprocessing.cpython-311.pyc
-pyBer/__pycache__/main.cpython-311.pyc
-pyBer/__pycache__/gui_postprocessing.cpython-311.pyc
-pyBer/__pycache__/gui_postprocessing.cpython-38.pyc
-pyBer/__pycache__/gui_postprocessing.cpython-311.pyc
-pyBer/__pycache__
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build and packaging output
+build/
+dist/
+*.spec
+
+# Local runtime state
 panel_layout.json
-pyBer/__pycache__/gui_postprocessing.cpython-311.pyc
-pyBer/__pycache__/analysis_core.cpython-38.pyc
-pyBer/__pycache__/ethovision_process_gui.cpython-38.pyc
-pyBer/__pycache__/gui_postprocessing.cpython-38.pyc
-pyBer/__pycache__/gui_preprocessing.cpython-38.pyc
-pyBer/__pycache__/styles.cpython-38.pyc
-pyBer/__pycache__/analysis_core.cpython-38.pyc
-pyBer/__pycache__/ethovision_process_gui.cpython-38.pyc
-pyBer/__pycache__/gui_postprocessing.cpython-38.pyc
-pyBer/__pycache__/gui_preprocessing.cpython-38.pyc
-pyBer/__pycache__/styles.cpython-38.pyc
-pyBer/__pycache__/analysis_core.cpython-311.pyc
-pyBer/__pycache__/ethovision_process_gui.cpython-311.pyc
-pyBer/__pycache__/gui_postprocessing.cpython-311.pyc
-pyBer/__pycache__/gui_preprocessing.cpython-311.pyc
-pyBer/__pycache__/main.cpython-311.pyc
-pyBer/__pycache__/styles.cpython-311.pyc
+
+# Local editor state
+.vscode/launch.json
+
+# OS metadata
+.DS_Store
+Thumbs.db
