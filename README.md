@@ -40,18 +40,11 @@ export all live in the rail on the left.
 
 ![Preprocessing panel](assets/screenshots/preprocessing.png)
 
-### Sync the camera to the fiber with an LED barcode
-Point an ROI at the sync LED, extract the on/off train, and auto-align it to the
-photometry DIO column. pyBer reads the barcode flashes with a duty-cycle-aware
-threshold (Otsu when balanced, Triangle when sparse) so even faint LEDs line up.
+### Sync fiber photometry time with reference time
+Point an ROI at a sync LED in a video, extract the on/off train, or load a reference signal recorded simultaneously, and auto-align with the same signal recorded with
+photometry. 
 
 ![LED barcode sync extraction](assets/screenshots/sync_extraction.png)
-
-### Cross-correlate and verify the alignment
-Reference and photometry sync signals stacked on one timeline, with matched edges,
-correlation, and agreement metrics so you know the alignment is real before you trust it.
-
-![Photometry sync overlay](assets/screenshots/sync_photometry.png)
 
 ---
 
