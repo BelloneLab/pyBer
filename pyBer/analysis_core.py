@@ -2617,11 +2617,15 @@ def fit_reference_to_signal(
     ref: np.ndarray,
     sig: np.ndarray,
     params: ProcessingParams,
+    *,
+    nonnegative_slope: bool = False,
 ) -> Tuple[float, float]:
     """
     Fit sig ≈ a*ref + b using the selected method in params.reference_fit.
 
     Notes:
+    - If nonnegative_slope is True, a is constrained to be >= 0 so the model
+      cannot silently undo the user-selected reference polarity.
     - For Lasso: if sklearn is unavailable, we fall back to OLS.
     - For RLM (HuberT): we use an internal IRLS implementation.
     """
@@ -2634,32 +2638,46 @@ def fit_reference_to_signal(
 
     method = str(params.reference_fit or "OLS (recommended)")
 
+    def _constant_fit() -> Tuple[float, float]:
+        yy = y[m]
+        if yy.size == 0:
+            return 0.0, 0.0
+        if method.startswith("RLM"):
+            return 0.0, float(np.nanmedian(yy))
+        return 0.0, float(np.nanmean(yy))
+
+    def _apply_slope_constraint(a: float, b: float) -> Tuple[float, float]:
+        if bool(nonnegative_slope) and np.isfinite(a) and float(a) < 0.0:
+            return _constant_fit()
+        return float(a), float(b)
+
     # --- Lasso ---
     if method.startswith("Lasso"):
         if Lasso is None:
-            return ols_fit(x, y)
+            return _apply_slope_constraint(*ols_fit(x, y))
         model = Lasso(
             alpha=float(params.lasso_alpha),
             fit_intercept=True,
             max_iter=5000,
+            positive=bool(nonnegative_slope),
         )
         model.fit(x[m].reshape(-1, 1), y[m])
         a = float(model.coef_[0])
         b = float(model.intercept_)
-        return a, b
+        return _apply_slope_constraint(a, b)
 
     # --- Robust regression: Huber ---
     if method.startswith("RLM"):
-        return _rlm_huber_fit(
+        return _apply_slope_constraint(*_rlm_huber_fit(
             x,
             y,
             huber_t=float(params.rlm_huber_t),
             max_iter=int(params.rlm_max_iter),
             tol=float(params.rlm_tol),
-        )
+        ))
 
     # --- Default: OLS ---
-    return ols_fit(x, y)
+    return _apply_slope_constraint(*ols_fit(x, y))
 
 
 def safe_divide(num: np.ndarray, den: np.ndarray) -> np.ndarray:
@@ -2676,6 +2694,7 @@ def _compute_fitted_reference_dff(
     params: ProcessingParams,
     *,
     invert_reference: bool = False,
+    nonnegative_slope: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, float, float]:
     """
     Fit the isobestic trace onto the calcium trace, then compute dF/F.
@@ -2688,7 +2707,12 @@ def _compute_fitted_reference_dff(
     ref_for_fit = np.asarray(ref, float)
     if invert_reference:
         ref_for_fit = -ref_for_fit
-    a, b = fit_reference_to_signal(ref_for_fit, sig_arr, params)
+    a, b = fit_reference_to_signal(
+        ref_for_fit,
+        sig_arr,
+        params,
+        nonnegative_slope=nonnegative_slope,
+    )
     fitted_ref = a * ref_for_fit + b
     dff_fit = safe_divide(sig_arr - fitted_ref, fitted_ref)
     return dff_fit, fitted_ref, a, b

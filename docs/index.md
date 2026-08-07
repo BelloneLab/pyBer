@@ -97,17 +97,18 @@ each extra same-family output gets a `family__variant` name (for example
 `dFF__nomc`). There is never a generic `output` column.
 
 For fitted-reference modes, pyBer fits the reference channel to the signal before
-computing dFF. The usual choice is OLS. Lasso and robust Huber fitting are also
-available.
+computing dFF. The fit slope is constrained to be nonnegative in the selected
+polarity, so a normal 405 fit cannot silently become an inverted 405 fit by
+learning a negative coefficient. The usual choice is OLS. Lasso and robust Huber
+fitting are also available.
 
 If the isobestic trace is inverted relative to the calcium signal, choose
 **dFF (motion corrected with inverted isobestic fit)**. pyBer fits `-ref_f` onto
 `sig_f`, then computes `(sig_f - fitted_ref) / fitted_ref` and records the
-variant as `invfitref` in export metadata. The ordinary fitted-reference mode is
-unconstrained and may already learn a negative slope, so it can be numerically
-identical to the inverted mode. In that case the fit has already corrected the
-polarity. The preprocessing output context reports the fitted slope and
-intercept so this is visible.
+variant as `invfitref` in export metadata. If the un-inverted reference is
+anti-correlated, the normal fitted-reference mode will not use a negative slope;
+the inverted mode is the efficient correction. The preprocessing output context
+reports the fitted slope and intercept so this is visible.
 
 ## 4. Artifact Handling
 
