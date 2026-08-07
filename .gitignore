@@ -14,6 +14,7 @@ dist/
 # Local runtime state
 panel_layout.json
 PYBER_CONDA_ENV_MEMORY.md
+*_MEMORY.md
 
 # Local editor state
 .vscode/launch.json

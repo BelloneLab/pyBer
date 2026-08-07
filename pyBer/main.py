@@ -118,6 +118,8 @@ from analysis_core import (
     export_processed_h5,
     load_processed_csv,
     load_processed_h5,
+    load_rwd_csv,
+    is_rwd_events_csv,
     safe_stem_from_metadata,
     detect_artifacts_adaptive,
     interpolate_nans,
@@ -4947,6 +4949,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return t
 
     def _load_raw_csv_as_pre_file(self, path: str) -> Optional[LoadedDoricFile]:
+        rwd_loaded = load_rwd_csv(path)
+        if rwd_loaded is not None:
+            return rwd_loaded
+
         rows = self._read_csv_rows(path)
         if not rows:
             raise ValueError("CSV file is empty.")
@@ -5111,6 +5117,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             ext = os.path.splitext(p)[1].lower()
             if ext == ".csv":
+                if is_rwd_events_csv(p):
+                    self._show_status_message(
+                        f"Skipped RWD Events.csv: load the matching Fluorescence.csv file instead.",
+                        6000,
+                    )
+                    continue
                 try:
                     loaded_from_csv = self._load_raw_csv_as_pre_file(p)
                 except Exception as e:

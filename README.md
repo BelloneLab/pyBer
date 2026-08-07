@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-41cd52?logo=qt&logoColor=white" alt="PySide6 + pyqtgraph">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white" alt="Windows">
   <img src="https://img.shields.io/badge/license-GPLv3-blue" alt="GPLv3">
-  <img src="https://img.shields.io/badge/photometry-Doric%20%7C%20HDF5%20%7C%20CSV-purple" alt="Formats">
+  <img src="https://img.shields.io/badge/photometry-Doric%20%7C%20RWD%20%7C%20HDF5%20%7C%20CSV-purple" alt="Formats">
 </p>
 
 ---
@@ -81,6 +81,10 @@ environment created from `environment.yml`.
 ---
 
 ## What you can do
+
+- **Load RWD raw CSVs** from aligned `Fluorescence.csv` exports or alternating-light
+  `Fluorescence-unaligned.csv` exports, with sibling `Events.csv` files available
+  as trigger channels.
 
 - 🧹 **Preprocess** raw traces: filtering, resampling, baseline correction, motion
   correction, and artifact handling.

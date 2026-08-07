@@ -1908,6 +1908,409 @@ def _baseline_intervals_from_mask(time: np.ndarray, mask: np.ndarray) -> List[Tu
     return out
 
 
+# =============================================================================
+# RWD CSV raw import
+# =============================================================================
+
+_RWD_REF_WAVELENGTHS = ("405", "410", "415")
+_RWD_SIGNAL_WAVELENGTHS = ("465", "470", "475", "560", "565")
+
+
+def _rwd_clean_csv_row(row: List[str]) -> List[str]:
+    out = [str(cell or "").strip() for cell in row]
+    while out and not out[-1]:
+        out.pop()
+    return out
+
+
+def _rwd_read_csv_rows(path: str) -> List[List[str]]:
+    """Read an RWD CSV with a few common Windows encodings."""
+    import csv
+
+    last_error: Optional[Exception] = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            with open(path, "r", newline="", encoding=encoding) as f:
+                return [_rwd_clean_csv_row(row) for row in csv.reader(f)]
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
+    return []
+
+
+def _rwd_norm(value: object) -> str:
+    return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+
+def _rwd_float(value: object) -> float:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none", "null", "na"}:
+        return np.nan
+    try:
+        return float(text)
+    except Exception:
+        pass
+    try:
+        return float(text.replace(" ", "").replace(",", "."))
+    except Exception:
+        return coerce_time_value(text)
+
+
+def _rwd_time_seconds(values: np.ndarray) -> np.ndarray:
+    """RWD TimeStamp values are milliseconds in fluorescence and event CSVs."""
+    return np.asarray(values, float) / 1000.0
+
+
+def _rwd_find_table(rows: List[List[str]]) -> Tuple[List[str], List[List[str]]]:
+    cleaned = [r for r in (_rwd_clean_csv_row(row) for row in rows) if r and any(r)]
+    for idx, row in enumerate(cleaned):
+        norms = [_rwd_norm(cell) for cell in row]
+        if "timestamp" in norms or "time" in norms:
+            headers = [h.strip() or f"Column {i + 1}" for i, h in enumerate(row)]
+            return headers, cleaned[idx + 1 :]
+    return [], []
+
+
+def _rwd_column_index(headers: List[str], *names: str) -> int:
+    wanted = {_rwd_norm(name) for name in names}
+    for idx, header in enumerate(headers):
+        if _rwd_norm(header) in wanted:
+            return idx
+    return -1
+
+
+def _rwd_parse_wavelength_column(header: str) -> Optional[Tuple[str, str]]:
+    match = re.match(r"^\s*(.+?)[\s_\-]*([0-9]{3})\s*$", str(header or ""))
+    if match is None:
+        return None
+    channel = match.group(1).strip(" _-") or "Channel"
+    wave = match.group(2)
+    return channel, wave
+
+
+def _rwd_choose_ref_signal(waves: Dict[str, int]) -> Tuple[str, str]:
+    ref = next((wave for wave in _RWD_REF_WAVELENGTHS if wave in waves), "")
+    signal = next((wave for wave in _RWD_SIGNAL_WAVELENGTHS if wave in waves and wave != ref), "")
+    if not signal:
+        signal = next((wave for wave in waves.keys() if wave != ref), "")
+    return ref, signal
+
+
+def _rwd_unique_name(name: str, used: set) -> str:
+    base = str(name or "Channel").strip() or "Channel"
+    out = base
+    i = 2
+    while out in used:
+        out = f"{base}_{i}"
+        i += 1
+    used.add(out)
+    return out
+
+
+def is_rwd_events_csv(path: str) -> bool:
+    """Return True for sparse RWD `Events.csv` files."""
+    try:
+        if os.path.basename(str(path or "")).lower() != "events.csv":
+            return False
+        rows = _rwd_read_csv_rows(path)
+        headers, _data = _rwd_find_table(rows)
+        norms = {_rwd_norm(h) for h in headers}
+        return {"timestamp", "name", "state"}.issubset(norms)
+    except Exception:
+        return False
+
+
+def _rwd_find_events_csv(path: str) -> str:
+    folder = os.path.dirname(os.path.abspath(path))
+    if not folder or not os.path.isdir(folder):
+        return ""
+    preferred = os.path.join(folder, "Events.csv")
+    if is_rwd_events_csv(preferred):
+        return preferred
+    try:
+        for name in os.listdir(folder):
+            candidate = os.path.join(folder, name)
+            if is_rwd_events_csv(candidate):
+                return candidate
+    except Exception:
+        return ""
+    return ""
+
+
+def _rwd_event_traces(events_path: str, timebase: np.ndarray) -> Dict[str, np.ndarray]:
+    """Convert sparse RWD state changes into active-high trigger traces."""
+    if not events_path or not os.path.isfile(events_path):
+        return {}
+    rows = _rwd_read_csv_rows(events_path)
+    headers, data_rows = _rwd_find_table(rows)
+    idx_time = _rwd_column_index(headers, "TimeStamp", "Time")
+    idx_name = _rwd_column_index(headers, "Name", "Event", "Events")
+    idx_state = _rwd_column_index(headers, "State", "Value")
+    if min(idx_time, idx_name, idx_state) < 0:
+        return {}
+
+    grouped: Dict[str, List[Tuple[float, float]]] = {}
+    for row in data_rows:
+        if max(idx_time, idx_name, idx_state) >= len(row):
+            continue
+        name = str(row[idx_name] or "").strip()
+        if not name:
+            continue
+        t_ms = _rwd_float(row[idx_time])
+        state = _rwd_float(row[idx_state])
+        if not np.isfinite(t_ms):
+            continue
+        if not np.isfinite(state):
+            state = 1.0
+        grouped.setdefault(name, []).append((float(t_ms) / 1000.0, float(state)))
+
+    t = np.asarray(timebase, float)
+    if t.size < 2:
+        return {}
+
+    out: Dict[str, np.ndarray] = {}
+    used: set = set()
+    for raw_name, transitions in grouped.items():
+        transitions = sorted(transitions, key=lambda item: item[0])
+        trace = np.zeros(t.size, dtype=float)
+        cursor = 0
+        current = 0.0
+        active_state = bool(float(transitions[0][1]) > 0.5) if transitions else True
+        for event_t, state in transitions:
+            idx = int(np.searchsorted(t, float(event_t), side="left"))
+            idx = max(0, min(idx, t.size))
+            if idx > cursor:
+                trace[cursor:idx] = current
+            current = 1.0 if bool(float(state) > 0.5) == active_state else 0.0
+            cursor = max(cursor, idx)
+        if cursor < t.size:
+            trace[cursor:] = current
+        out[_rwd_unique_name(raw_name, used)] = trace
+    return out
+
+
+def _rwd_attach_events(path: str, loaded: LoadedDoricFile) -> LoadedDoricFile:
+    if not loaded.channels:
+        return loaded
+    first_time = loaded.time_by_channel.get(loaded.channels[0], np.array([], float))
+    events_path = _rwd_find_events_csv(path)
+    triggers = _rwd_event_traces(events_path, first_time)
+    if not triggers:
+        return loaded
+    trigger_time_by = dict(loaded.trigger_time_by_name or {})
+    trigger_by = dict(loaded.trigger_by_name or {})
+    digital_by = dict(loaded.digital_by_name or {})
+    for name, values in triggers.items():
+        trigger_by[name] = np.asarray(values, float)
+        trigger_time_by[name] = np.asarray(first_time, float).copy()
+        digital_by[name] = np.asarray(values, float)
+    return LoadedDoricFile(
+        path=loaded.path,
+        channels=list(loaded.channels),
+        time_by_channel=dict(loaded.time_by_channel),
+        signal_by_channel=dict(loaded.signal_by_channel),
+        reference_by_channel=dict(loaded.reference_by_channel),
+        digital_time=np.asarray(first_time, float).copy(),
+        digital_by_name=digital_by,
+        trigger_time_by_name=trigger_time_by,
+        trigger_by_name=trigger_by,
+    )
+
+
+def _rwd_load_aligned_csv(path: str, headers: List[str], data_rows: List[List[str]]) -> Optional[LoadedDoricFile]:
+    idx_time = _rwd_column_index(headers, "TimeStamp", "Time")
+    if idx_time < 0:
+        return None
+
+    groups: Dict[str, Dict[str, int]] = {}
+    for idx, header in enumerate(headers):
+        parsed = _rwd_parse_wavelength_column(header)
+        if parsed is None:
+            continue
+        channel, wave = parsed
+        groups.setdefault(channel, {})[wave] = idx
+    if not groups:
+        return None
+
+    time_vals: List[float] = []
+    by_col: Dict[int, List[float]] = {idx: [] for waves in groups.values() for idx in waves.values()}
+    for row in data_rows:
+        if idx_time >= len(row):
+            continue
+        tval = _rwd_float(row[idx_time])
+        if not np.isfinite(tval):
+            continue
+        time_vals.append(tval)
+        for col_idx in by_col:
+            by_col[col_idx].append(_rwd_float(row[col_idx] if col_idx < len(row) else ""))
+    if len(time_vals) < 2:
+        return None
+
+    t = _rwd_time_seconds(np.asarray(time_vals, float))
+    order = np.argsort(t)
+    t = t[order]
+    finite_time = np.isfinite(t)
+    t = t[finite_time]
+    if t.size < 2:
+        return None
+
+    channels: List[str] = []
+    time_by: Dict[str, np.ndarray] = {}
+    signal_by: Dict[str, np.ndarray] = {}
+    reference_by: Dict[str, np.ndarray] = {}
+    used: set = set()
+    for raw_channel, waves in groups.items():
+        ref_wave, signal_wave = _rwd_choose_ref_signal(waves)
+        if not ref_wave or not signal_wave:
+            continue
+        ref = np.asarray(by_col[waves[ref_wave]], float)[order][finite_time]
+        signal = np.asarray(by_col[waves[signal_wave]], float)[order][finite_time]
+        if signal.size != t.size or ref.size != t.size:
+            continue
+        if not np.isfinite(signal).any() or not np.isfinite(ref).any():
+            continue
+        channel = _rwd_unique_name(raw_channel, used)
+        channels.append(channel)
+        time_by[channel] = t.copy()
+        signal_by[channel] = signal
+        reference_by[channel] = ref
+
+    if not channels:
+        return None
+    return _rwd_attach_events(
+        path,
+        LoadedDoricFile(
+            path=path,
+            channels=channels,
+            time_by_channel=time_by,
+            signal_by_channel=signal_by,
+            reference_by_channel=reference_by,
+            digital_time=None,
+            digital_by_name={},
+            trigger_time_by_name={},
+            trigger_by_name={},
+        ),
+    )
+
+
+def _rwd_load_unaligned_csv(path: str, headers: List[str], data_rows: List[List[str]]) -> Optional[LoadedDoricFile]:
+    idx_time = _rwd_column_index(headers, "TimeStamp", "Time")
+    idx_lights = _rwd_column_index(headers, "Lights", "Light", "Led")
+    if min(idx_time, idx_lights) < 0:
+        return None
+
+    channel_cols = [
+        idx for idx, header in enumerate(headers)
+        if idx not in {idx_time, idx_lights} and str(header or "").strip()
+    ]
+    if not channel_cols:
+        return None
+
+    records: Dict[int, Dict[str, List[Tuple[float, float]]]] = {idx: {} for idx in channel_cols}
+    for row in data_rows:
+        if max(idx_time, idx_lights) >= len(row):
+            continue
+        t_ms = _rwd_float(row[idx_time])
+        if not np.isfinite(t_ms):
+            continue
+        light_text = str(row[idx_lights] or "").strip()
+        match = re.search(r"([0-9]{3})", light_text)
+        if match is None:
+            continue
+        wave = match.group(1)
+        for col_idx in channel_cols:
+            value = _rwd_float(row[col_idx] if col_idx < len(row) else "")
+            if np.isfinite(value):
+                records[col_idx].setdefault(wave, []).append((float(t_ms), float(value)))
+
+    channels: List[str] = []
+    time_by: Dict[str, np.ndarray] = {}
+    signal_by: Dict[str, np.ndarray] = {}
+    reference_by: Dict[str, np.ndarray] = {}
+    used: set = set()
+
+    for col_idx in channel_cols:
+        waves = records.get(col_idx, {})
+        wave_cols = {wave: i for i, wave in enumerate(waves.keys())}
+        ref_wave, signal_wave = _rwd_choose_ref_signal(wave_cols)
+        if not ref_wave or not signal_wave:
+            continue
+        ref_pairs = np.asarray(waves.get(ref_wave, []), float)
+        sig_pairs = np.asarray(waves.get(signal_wave, []), float)
+        if ref_pairs.ndim != 2 or sig_pairs.ndim != 2 or ref_pairs.shape[0] < 2 or sig_pairs.shape[0] < 2:
+            continue
+        ref_order = np.argsort(ref_pairs[:, 0])
+        sig_order = np.argsort(sig_pairs[:, 0])
+        ref_t_ms = ref_pairs[ref_order, 0]
+        ref_values = ref_pairs[ref_order, 1]
+        sig_values = sig_pairs[sig_order, 1]
+
+        n = min(ref_t_ms.size, sig_values.size)
+        if n < 2:
+            continue
+        t = _rwd_time_seconds(ref_t_ms[:n])
+        ref = ref_values[:n]
+        signal = sig_values[:n]
+        finite = np.isfinite(t) & np.isfinite(ref) & np.isfinite(signal)
+        if int(np.sum(finite)) < 2:
+            continue
+        t = t[finite]
+        signal = signal[finite]
+        ref = ref[finite]
+        channel = _rwd_unique_name(str(headers[col_idx] or f"Channel{col_idx + 1}"), used)
+        channels.append(channel)
+        time_by[channel] = t
+        signal_by[channel] = signal
+        reference_by[channel] = ref
+
+    if not channels:
+        return None
+    return _rwd_attach_events(
+        path,
+        LoadedDoricFile(
+            path=path,
+            channels=channels,
+            time_by_channel=time_by,
+            signal_by_channel=signal_by,
+            reference_by_channel=reference_by,
+            digital_time=None,
+            digital_by_name={},
+            trigger_time_by_name={},
+            trigger_by_name={},
+        ),
+    )
+
+
+def load_rwd_csv(path: str) -> Optional[LoadedDoricFile]:
+    """Load RWD fluorescence CSV exports as pyBer raw preprocessing inputs.
+
+    Supported RWD styles:
+    - aligned fluorescence tables with `CH1-410`, `CH1-470`, ...
+    - unaligned alternating-light tables with `TimeStamp,Lights,Channel1,...`
+
+    Sibling `Events.csv` files are attached as dense trigger traces on the
+    fluorescence timebase, making them visible in preprocessing and selectable
+    for postprocessing.
+    """
+    if not path or not os.path.isfile(path) or is_rwd_events_csv(path):
+        return None
+    try:
+        rows = _rwd_read_csv_rows(path)
+        headers, data_rows = _rwd_find_table(rows)
+    except Exception:
+        return None
+    if not headers or not data_rows:
+        return None
+
+    if _rwd_column_index(headers, "Lights", "Light", "Led") >= 0:
+        return _rwd_load_unaligned_csv(path, headers, data_rows)
+    if any(_rwd_parse_wavelength_column(header) is not None for header in headers):
+        return _rwd_load_aligned_csv(path, headers, data_rows)
+    return None
+
+
 def prominence_peaks_detection(
     temp: np.ndarray,
     percent_top: float,
