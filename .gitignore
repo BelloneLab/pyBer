@@ -9,6 +9,7 @@ __pycache__/
 # Build and packaging output
 build/
 dist/
+release/
 *.spec
 
 # Local runtime state

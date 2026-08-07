@@ -237,8 +237,74 @@ _PRE_DOCKAREA_DEFAULT_VISIBLE = frozenset(_PRE_DOCKAREA_PRIMARY_ORDER)
 _CSV_NONE_LABEL = "(none)"
 _PRE_PROJECT_TYPE = "pyber_preprocessing_project"
 _PRE_PROJECT_VERSION = 1
+_SUPPORTED_DATA_EXTS = (".doric", ".h5", ".hdf5", ".csv")
+_RWD_FLUORESCENCE_CSV_NAMES = frozenset({"fluorescence.csv", "fluorescence-unaligned.csv"})
+_FOLDER_DISCOVERY_SKIP_DIRS = frozenset({
+    ".git",
+    ".pytest_cache",
+    "__pycache__",
+    "build",
+    "dist",
+    "release",
+})
 
 _LOG = logging.getLogger(__name__)
+
+
+def _is_rwd_fluorescence_csv_name(path: str) -> bool:
+    name = os.path.basename(str(path or "")).strip().lower()
+    return name in _RWD_FLUORESCENCE_CSV_NAMES
+
+
+def _is_supported_preprocessing_folder_file(path: str, *, include_generic_csv: bool = False) -> bool:
+    ext = os.path.splitext(str(path or ""))[1].lower()
+    if ext in (".doric", ".h5", ".hdf5"):
+        return True
+    if ext != ".csv":
+        return False
+    if is_rwd_events_csv(path):
+        return False
+    if _is_rwd_fluorescence_csv_name(path):
+        return True
+    return bool(include_generic_csv)
+
+
+def _discover_preprocessing_data_files(folder: str, *, recursive: bool = True) -> List[str]:
+    """Find raw preprocessing files under a folder.
+
+    Direct CSV files are kept for backward compatibility with the old one-level
+    folder import. In nested folders, CSV discovery is deliberately narrower:
+    RWD fluorescence files are included, while sibling Events.csv files are
+    ignored because the RWD loader attaches them automatically.
+    """
+    root = os.path.abspath(str(folder or ""))
+    if not root or not os.path.isdir(root):
+        return []
+    root_norm = os.path.normcase(root)
+    out: List[str] = []
+    seen: set[str] = set()
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        if recursive:
+            dirnames[:] = [
+                name for name in sorted(dirnames)
+                if name not in _FOLDER_DISCOVERY_SKIP_DIRS and not name.startswith(".")
+            ]
+        else:
+            dirnames[:] = []
+
+        is_root = os.path.normcase(os.path.abspath(dirpath)) == root_norm
+        for filename in sorted(filenames):
+            full = os.path.join(dirpath, filename)
+            if not _is_supported_preprocessing_folder_file(full, include_generic_csv=is_root):
+                continue
+            key = os.path.normcase(os.path.abspath(full))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(full)
+
+    return out
 
 
 def _asset_candidates(filename: str) -> List[str]:
@@ -5064,8 +5130,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._push_recent_preprocessing_files(paths)
         self._add_files(paths)
 
-    _SUPPORTED_DATA_EXTS = (".doric", ".h5", ".hdf5", ".csv")
-
     def _open_folder_dialog(self) -> None:
         start_dir = self.file_panel.current_dir_hint() or self.settings.value("last_open_dir", "", type=str) or os.getcwd()
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Add folder with data files", start_dir)
@@ -5073,19 +5137,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.settings.setValue("last_open_dir", folder)
 
-        paths: List[str] = []
-        for fn in os.listdir(folder):
-            if fn.lower().endswith(self._SUPPORTED_DATA_EXTS):
-                paths.append(os.path.join(folder, fn))
-        paths.sort()
+        paths = _discover_preprocessing_data_files(folder, recursive=True)
+        if not paths:
+            self._show_status_message("No raw preprocessing files found in that folder or its subfolders.", 6000)
+            return
         self._push_recent_preprocessing_files(paths)
         self._add_files(paths)
 
     def _expand_dropped_url_paths(self, urls: List[QtCore.QUrl]) -> List[str]:
         """Resolve a list of dropped URLs into supported file paths.
-        Folders are scanned at top level (non-recursive, matching the
-        Add-folder dialog). Files are passed through if their extension is
-        supported. Duplicates are dropped, order is preserved."""
+        Folders are scanned recursively, matching the Add-folder dialog. Files
+        are passed through if their extension is supported. Duplicates are
+        dropped, order is preserved."""
         paths: List[str] = []
         seen: set[str] = set()
         for url in urls:
@@ -5095,20 +5158,23 @@ class MainWindow(QtWidgets.QMainWindow):
             if not local:
                 continue
             if os.path.isdir(local):
-                try:
-                    entries = sorted(os.listdir(local))
-                except OSError:
+                discovered = _discover_preprocessing_data_files(local, recursive=True)
+                for full in discovered:
+                    key = os.path.normcase(os.path.abspath(full))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    paths.append(full)
+            elif os.path.isfile(local):
+                ext = os.path.splitext(local)[1].lower()
+                include_generic_csv = ext == ".csv" and not is_rwd_events_csv(local)
+                if not _is_supported_preprocessing_folder_file(local, include_generic_csv=include_generic_csv):
                     continue
-                for fn in entries:
-                    if fn.lower().endswith(self._SUPPORTED_DATA_EXTS):
-                        full = os.path.join(local, fn)
-                        if full not in seen:
-                            seen.add(full)
-                            paths.append(full)
-            elif os.path.isfile(local) and local.lower().endswith(self._SUPPORTED_DATA_EXTS):
-                if local not in seen:
-                    seen.add(local)
-                    paths.append(local)
+                key = os.path.normcase(os.path.abspath(local))
+                if key in seen:
+                    continue
+                seen.add(key)
+                paths.append(local)
         return paths
 
     def _add_files(self, paths: List[str], select_after: bool = True) -> None:

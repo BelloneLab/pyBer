@@ -10,6 +10,12 @@ sys.path.insert(0, os.path.join(ROOT, "pyBer"))
 
 from analysis_core import is_rwd_events_csv, load_rwd_csv  # noqa: E402
 
+try:
+    from main import _discover_preprocessing_data_files  # noqa: E402
+    _MAIN_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - GUI deps (PySide6) may be absent
+    _MAIN_IMPORT_ERROR = exc
+
 
 class RwdImportTests(unittest.TestCase):
     def setUp(self):
@@ -83,6 +89,42 @@ class RwdImportTests(unittest.TestCase):
     def test_events_csv_is_detected_but_not_loaded_as_fluorescence(self):
         self.assertTrue(is_rwd_events_csv(self.events_path))
         self.assertIsNone(load_rwd_csv(self.events_path))
+
+
+@unittest.skipIf(_MAIN_IMPORT_ERROR is not None, f"main import failed: {_MAIN_IMPORT_ERROR}")
+class RecursiveFolderDiscoveryTests(unittest.TestCase):
+    def test_nested_rwd_files_are_discovered_without_events_csv(self):
+        with tempfile.TemporaryDirectory(prefix="pyber_nested_rwd_") as tmp:
+            root_generic = os.path.join(tmp, "manual_raw.csv")
+            with open(root_generic, "w", encoding="utf-8", newline="") as f:
+                f.write("time,raw,ref\n0,1,2\n")
+
+            animal_a = os.path.join(tmp, "animal_a", "session_1")
+            animal_b = os.path.join(tmp, "animal_b", "session_2")
+            os.makedirs(animal_a)
+            os.makedirs(animal_b)
+
+            paths_to_create = [
+                os.path.join(animal_a, "Fluorescence.csv"),
+                os.path.join(animal_a, "Events.csv"),
+                os.path.join(animal_a, "behavior.csv"),
+                os.path.join(animal_b, "Fluorescence-unaligned.csv"),
+                os.path.join(animal_b, "Events.csv"),
+                os.path.join(animal_b, "recording.doric"),
+            ]
+            for path in paths_to_create:
+                with open(path, "w", encoding="utf-8", newline="") as f:
+                    f.write("placeholder\n")
+
+            discovered = _discover_preprocessing_data_files(tmp, recursive=True)
+            names = sorted(os.path.relpath(path, tmp).replace("\\", "/") for path in discovered)
+
+            self.assertEqual(names, [
+                "animal_a/session_1/Fluorescence.csv",
+                "animal_b/session_2/Fluorescence-unaligned.csv",
+                "animal_b/session_2/recording.doric",
+                "manual_raw.csv",
+            ])
 
 
 if __name__ == "__main__":
