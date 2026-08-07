@@ -103,7 +103,11 @@ available.
 If the isobestic trace is inverted relative to the calcium signal, choose
 **dFF (motion corrected with inverted isobestic fit)**. pyBer fits `-ref_f` onto
 `sig_f`, then computes `(sig_f - fitted_ref) / fitted_ref` and records the
-variant as `invfitref` in export metadata.
+variant as `invfitref` in export metadata. The ordinary fitted-reference mode is
+unconstrained and may already learn a negative slope, so it can be numerically
+identical to the inverted mode. In that case the fit has already corrected the
+polarity. The preprocessing output context reports the fitted slope and
+intercept so this is visible.
 
 ## 4. Artifact Handling
 

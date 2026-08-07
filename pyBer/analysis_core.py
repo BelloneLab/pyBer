@@ -3077,6 +3077,8 @@ class PhotometryProcessor:
         out: Optional[np.ndarray] = None
         prominence_stats: Optional[Dict[str, float]] = None
         no_reference_fallback = False
+        fit_slope: Optional[float] = None
+        fit_intercept: Optional[float] = None
 
         # --- Compute baseline-referenced dFFs (building blocks) ---
         # dFF_sig = (sig_filtered - baseline_sig) / baseline_sig
@@ -3128,7 +3130,7 @@ class PhotometryProcessor:
             # 2) Compute dFF using fitted reference denominator:
             #    dFF = (sig_filtered - fitted_ref) / fitted_ref
             if has_reference:
-                out, _, _, _ = _compute_fitted_reference_dff(ref2, sig2, params)
+                out, _, fit_slope, fit_intercept = _compute_fitted_reference_dff(ref2, sig2, params)
             else:
                 out = dff_sig
                 no_reference_fallback = True
@@ -3139,7 +3141,7 @@ class PhotometryProcessor:
             # 2) Compute dFF using the fitted reference in 465 signal units:
             #    dFF = (sig_filtered - fitted_ref) / fitted_ref
             if has_reference:
-                out, _, _, _ = _compute_fitted_reference_dff(
+                out, _, fit_slope, fit_intercept = _compute_fitted_reference_dff(
                     ref2,
                     sig2,
                     params,
@@ -3153,7 +3155,7 @@ class PhotometryProcessor:
             # (8) zscore (motion corrected with fitted ref)
             # zscore( (sig_filtered - fitted_ref) / fitted_ref )
             if has_reference:
-                dff_fit, _, _, _ = _compute_fitted_reference_dff(ref2, sig2, params)
+                dff_fit, _, fit_slope, fit_intercept = _compute_fitted_reference_dff(ref2, sig2, params)
                 out = zscore_median_std(dff_fit)
             else:
                 out = zscore_median_std(dff_sig)
@@ -3166,7 +3168,7 @@ class PhotometryProcessor:
             # 3) Detect baseline peaks by prominence, average the top fraction,
             #    then scale like a z-score using peak prominence instead of std.
             if has_reference:
-                dff_fit, _, _, _ = _compute_fitted_reference_dff(ref2, sig2, params)
+                dff_fit, _, fit_slope, fit_intercept = _compute_fitted_reference_dff(ref2, sig2, params)
             else:
                 dff_fit = dff_sig
                 no_reference_fallback = True
@@ -3197,7 +3199,13 @@ class PhotometryProcessor:
                 "zscore (motion corrected with fitted ref)",
                 "prominence normalized (motion corrected with fitted ref)",
             ):
-                context_parts.append(f"Fit: {params.reference_fit}")
+                if fit_slope is not None and fit_intercept is not None:
+                    context_parts.append(
+                        f"Fit: {params.reference_fit} "
+                        f"(slope={float(fit_slope):.4g}, intercept={float(fit_intercept):.4g})"
+                    )
+                else:
+                    context_parts.append(f"Fit: {params.reference_fit}")
                 if mode == "dFF (motion corrected with inverted isobestic fit)":
                     context_parts.append("Iso polarity: inverted before fit")
             context_parts.append(baseline_desc)

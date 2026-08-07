@@ -74,6 +74,8 @@ class InvertedIsobesticFitTests(unittest.TestCase):
         self.assertEqual(processed.output_label, INVERTED_FIT_MODE)
         self.assertEqual(processed.output.shape, processed.time.shape)
         self.assertGreater(np.mean(np.isfinite(processed.output)), 0.95)
+        self.assertIn("slope=", processed.output_context)
+        self.assertIn("intercept=", processed.output_context)
         self.assertIn("Iso polarity: inverted before fit", processed.output_context)
         self.assertIn(INVERTED_FIT_MODE, processed.outputs)
 
