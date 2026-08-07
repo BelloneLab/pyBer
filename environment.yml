@@ -1,12 +1,14 @@
 # Create with:
 #   conda env create -f environment.yml
 #   conda activate pyBer
+#   Rscript scripts/install_fastfmm.R
 #
-# Optional FLMM backend:
-#   Rscript -e "install.packages('fastFMM', repos='https://cloud.r-project.org')"
+# Or, on Windows, run the full helper:
+#   powershell -ExecutionPolicy Bypass -File scripts/create_pyber_env.ps1
 #
-# The R package is installed after environment creation because fastFMM is a
-# CRAN package, not a conda package.
+# fastFMM is installed after environment creation because it is a CRAN package,
+# not a conda package. The helper uses CRAN Windows binaries because compiling
+# the newest source release is brittle on Windows.
 name: pyBer
 channels:
   - conda-forge
@@ -42,7 +44,7 @@ dependencies:
   - matplotlib>=3.8
 
   # FLMM backend via R fastFMM/rpy2.
-  - r-base>=4.4
+  - r-base=4.4
   - rpy2>=3.6
 
   # Windows R/rpy2 startup uses sh/make when validating R's config.

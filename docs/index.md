@@ -11,14 +11,14 @@ Install Miniforge or Anaconda, open an Anaconda/Miniforge Prompt, then run:
 
 ```powershell
 cd C:\Analysis\app_project\pyBer
-conda env create -f environment.yml
+powershell -ExecutionPolicy Bypass -File .\scripts\create_pyber_env.ps1
 conda activate pyBer
-Rscript -e "install.packages('fastFMM', repos='https://cloud.r-project.org')"
 python .\pyBer\main.py
 ```
 
-The `fastFMM` command installs the R package used by the FLMM temporal modeling
-panel. It can take a few minutes the first time because R downloads dependencies.
+The helper creates or updates the `pyBer` environment, installs R, and installs
+the CRAN `fastFMM` binary used by the FLMM temporal modeling panel. It can take a
+few minutes the first time because R downloads dependencies.
 
 ### Update an existing environment
 
@@ -27,7 +27,7 @@ If the environment already exists:
 ```powershell
 conda activate pyBer
 conda env update -f environment.yml --prune
-Rscript -e "install.packages('fastFMM', repos='https://cloud.r-project.org')"
+Rscript scripts/install_fastfmm.R
 ```
 
 ### Test the install
@@ -230,7 +230,7 @@ The environment installs R and rpy2. Install fastFMM with:
 
 ```powershell
 conda activate pyBer
-Rscript -e "install.packages('fastFMM', repos='https://cloud.r-project.org')"
+Rscript scripts/install_fastfmm.R
 ```
 
 The FLMM output includes:
@@ -342,7 +342,7 @@ Run:
 
 ```powershell
 conda activate pyBer
-Rscript -e "install.packages('fastFMM', repos='https://cloud.r-project.org')"
+Rscript scripts/install_fastfmm.R
 ```
 
 Then restart pyBer.

@@ -54,14 +54,13 @@ Install [Miniforge](https://github.com/conda-forge/miniforge) or Anaconda first,
 
 ```powershell
 cd path\to\pyBer
-conda env create -f environment.yml
+powershell -ExecutionPolicy Bypass -File .\scripts\create_pyber_env.ps1
 conda activate pyBer
-Rscript -e "install.packages('fastFMM', repos='https://cloud.r-project.org')"
 python .\pyBer\main.py
 ```
 
-The `fastFMM` step is only needed for the FLMM temporal modeling panel. Everything
-else works without it.
+The helper creates or updates the `pyBer` environment, installs R, and installs
+the CRAN `fastFMM` binary used by the FLMM temporal modeling panel.
 
 ## Launch from VS Code
 
@@ -72,6 +71,7 @@ else works without it.
 
 ```powershell
 conda activate pyBer
+Rscript scripts/install_fastfmm.R
 python .\pyBer\main.py
 ```
 
