@@ -27,6 +27,8 @@ from analysis_core import (  # noqa: E402
     read_processed_sidecar,
 )
 
+INVERTED_FIT_MODE = "dFF (motion corrected with inverted isobestic fit)"
+
 
 def _make_proc(n=40, multi=False):
     rng = np.arange(n, dtype=float)
@@ -65,6 +67,8 @@ class ColumnNamingTests(unittest.TestCase):
     def test_family_and_variant_mapping(self):
         self.assertEqual(ac.output_family("dFF (motion corrected with fitted ref)"), "dFF")
         self.assertEqual(ac.output_variant_key("dFF (motion corrected with fitted ref)"), "fitref")
+        self.assertEqual(ac.output_family(INVERTED_FIT_MODE), "dFF")
+        self.assertEqual(ac.output_variant_key(INVERTED_FIT_MODE), "invfitref")
         self.assertEqual(ac.output_family("zscore (subtractions)"), "z-score")
         self.assertEqual(ac.output_variant_key("zscore (subtractions)"), "zdiff")
         self.assertEqual(ac.output_family("Raw signal (465)"), "signal_465")
@@ -76,6 +80,13 @@ class ColumnNamingTests(unittest.TestCase):
             "zscore (motion corrected with fitted ref)",
         ])
         self.assertEqual([n for _, n in names], ["dFF", "dFF__nomc", "z-score"])
+
+    def test_inverted_fit_disambiguates_same_family_outputs(self):
+        names = ac.assign_output_column_names([
+            INVERTED_FIT_MODE,
+            "dFF (motion corrected with fitted ref)",
+        ])
+        self.assertEqual([n for _, n in names], ["dFF", "dFF__fitref"])
 
 
 class CsvWriterTests(unittest.TestCase):
@@ -153,6 +164,32 @@ class SidecarTests(unittest.TestCase):
         self.assertEqual(roles["raw_465"], "raw_signal")
         self.assertEqual(roles["DIO01"], "trigger")
         self.assertEqual(side["triggers"], ["DIO01", "DIO02"])
+
+    def test_sidecar_records_inverted_fit_variant_and_params(self):
+        proc = _make_proc(multi=True)
+        rng = np.arange(proc.time.size, dtype=float)
+        proc.output = 0.03 * rng
+        proc.output_label = INVERTED_FIT_MODE
+        proc.outputs = {
+            INVERTED_FIT_MODE: 0.03 * rng,
+            "dFF (motion corrected with fitted ref)": 0.01 * rng,
+        }
+        params = ProcessingParams()
+        params.reference_fit = "RLM (HuberT)"
+        path = os.path.join(self.dir, "rec_inverted.csv")
+        export_processed_csv(path, proc, params=params,
+                             selection=_full_selection([
+                                 INVERTED_FIT_MODE,
+                                 "dFF (motion corrected with fitted ref)",
+                             ]))
+        side = read_processed_sidecar(path)
+        self.assertIsNotNone(side)
+        self.assertEqual(side["primary_output"], "dFF")
+        self.assertEqual(side["outputs"]["dFF"]["label"], INVERTED_FIT_MODE)
+        self.assertEqual(side["outputs"]["dFF"]["variant"], "invfitref")
+        self.assertEqual(side["outputs"]["dFF"]["motion_correction"], "inverted_fitted_ref")
+        self.assertEqual(side["outputs"]["dFF"]["reference_fit"], "RLM (HuberT)")
+        self.assertEqual(side["outputs"]["dFF__fitref"]["variant"], "fitref")
 
 
 class H5WriterTests(unittest.TestCase):

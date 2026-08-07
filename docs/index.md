@@ -85,6 +85,7 @@ picked is always recorded in the sidecar metadata (see [Export](#8-export)).
 | z-score with motion correction by subtraction | `z-score` | `sub` |
 | z-score signal minus z-score reference | `z-score` | `zdiff` |
 | dFF with fitted reference | `dFF` | `fitref` |
+| dFF with inverted isobestic fit | `dFF` | `invfitref` |
 | z-score with fitted reference | `z-score` | `fitref` |
 | prominence-normalized (fitted reference) | `prominence` | `fitref` |
 | raw processed 465 signal | `signal_465` | `raw` |
@@ -98,6 +99,11 @@ each extra same-family output gets a `family__variant` name (for example
 For fitted-reference modes, pyBer fits the reference channel to the signal before
 computing dFF. The usual choice is OLS. Lasso and robust Huber fitting are also
 available.
+
+If the isobestic trace is inverted relative to the calcium signal, choose
+**dFF (motion corrected with inverted isobestic fit)**. pyBer fits `-ref_f` onto
+`sig_f`, then computes `(sig_f - fitted_ref) / fitted_ref` and records the
+variant as `invfitref` in export metadata.
 
 ## 4. Artifact Handling
 

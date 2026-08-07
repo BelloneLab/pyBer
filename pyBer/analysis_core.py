@@ -71,11 +71,13 @@ OUTPUT_MODES = [
     "zscore (subtractions)",
     # 6) dFF motion corrected with fitted ref = (sig_f - fitted_ref) / fitted_ref
     "dFF (motion corrected with fitted ref)",
-    # 7) zscore of that fitted-ref dFF
+    # 7) dFF motion corrected after inverting the isobestic before fitting
+    "dFF (motion corrected with inverted isobestic fit)",
+    # 8) zscore of that fitted-ref dFF
     "zscore (motion corrected with fitted ref)",
-    # 8) prominence-normalized fitted-ref dFF
+    # 9) prominence-normalized fitted-ref dFF
     "prominence normalized (motion corrected with fitted ref)",
-    # 9) raw signal (processed 465 trace after artifact handling/filtering/resampling)
+    # 10) raw signal (processed 465 trace after artifact handling/filtering/resampling)
     "Raw signal (465)",
 ]
 
@@ -461,6 +463,7 @@ _OUTPUT_MODE_INFO: Dict[str, Tuple[str, str]] = {
     "zscore (motion corrected via subtraction)": ("z-score", "sub"),
     "zscore (subtractions)": ("z-score", "zdiff"),
     "dFF (motion corrected with fitted ref)": ("dFF", "fitref"),
+    "dFF (motion corrected with inverted isobestic fit)": ("dFF", "invfitref"),
     "zscore (motion corrected with fitted ref)": ("z-score", "fitref"),
     "prominence normalized (motion corrected with fitted ref)": ("prominence", "fitref"),
     "Raw signal (465)": ("signal_465", "raw"),
@@ -471,6 +474,7 @@ _VARIANT_MOTION_CORRECTION = {
     "sub": "subtraction",
     "zdiff": "zscore_subtraction",
     "fitref": "fitted_ref",
+    "invfitref": "inverted_fitted_ref",
     "raw": "none",
 }
 
@@ -729,7 +733,7 @@ def build_processed_metadata(
             "primary": bool(c.get("primary")),
             "motion_correction": _VARIANT_MOTION_CORRECTION.get(variant, ""),
         }
-        if variant == "fitref" and params is not None:
+        if variant in ("fitref", "invfitref") and params is not None:
             entry["reference_fit"] = str(getattr(params, "reference_fit", "") or "")
         outputs[c["name"]] = entry
 
@@ -2666,6 +2670,30 @@ def safe_divide(num: np.ndarray, den: np.ndarray) -> np.ndarray:
     return num / den
 
 
+def _compute_fitted_reference_dff(
+    ref: np.ndarray,
+    sig: np.ndarray,
+    params: ProcessingParams,
+    *,
+    invert_reference: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, float, float]:
+    """
+    Fit the isobestic trace onto the calcium trace, then compute dF/F.
+
+    When invert_reference is True, the reference is multiplied by -1 before
+    fitting. This documents and enforces the intended polarity for sessions
+    where the isobestic artifact moves opposite to the 465 nm signal.
+    """
+    sig_arr = np.asarray(sig, float)
+    ref_for_fit = np.asarray(ref, float)
+    if invert_reference:
+        ref_for_fit = -ref_for_fit
+    a, b = fit_reference_to_signal(ref_for_fit, sig_arr, params)
+    fitted_ref = a * ref_for_fit + b
+    dff_fit = safe_divide(sig_arr - fitted_ref, fitted_ref)
+    return dff_fit, fitted_ref, a, b
+
+
 # =============================================================================
 # Worker task (stable)
 # =============================================================================
@@ -3100,35 +3128,45 @@ class PhotometryProcessor:
             # 2) Compute dFF using fitted reference denominator:
             #    dFF = (sig_filtered - fitted_ref) / fitted_ref
             if has_reference:
-                a, b = fit_reference_to_signal(ref2, sig2, params)
-                fitted_ref = a * ref2 + b
-                out = safe_divide(sig2 - fitted_ref, fitted_ref)
+                out, _, _, _ = _compute_fitted_reference_dff(ref2, sig2, params)
+            else:
+                out = dff_sig
+                no_reference_fallback = True
+
+        elif mode == "dFF (motion corrected with inverted isobestic fit)":
+            # (7) dFF (motion corrected with inverted isobestic fit)
+            # 1) Invert the isobestic before fitting: fitted_ref = a*(-ref_filtered) + b
+            # 2) Compute dFF using the fitted reference in 465 signal units:
+            #    dFF = (sig_filtered - fitted_ref) / fitted_ref
+            if has_reference:
+                out, _, _, _ = _compute_fitted_reference_dff(
+                    ref2,
+                    sig2,
+                    params,
+                    invert_reference=True,
+                )
             else:
                 out = dff_sig
                 no_reference_fallback = True
 
         elif mode == "zscore (motion corrected with fitted ref)":
-            # (7) zscore (motion corrected with fitted ref)
+            # (8) zscore (motion corrected with fitted ref)
             # zscore( (sig_filtered - fitted_ref) / fitted_ref )
             if has_reference:
-                a, b = fit_reference_to_signal(ref2, sig2, params)
-                fitted_ref = a * ref2 + b
-                dff_fit = safe_divide(sig2 - fitted_ref, fitted_ref)
+                dff_fit, _, _, _ = _compute_fitted_reference_dff(ref2, sig2, params)
                 out = zscore_median_std(dff_fit)
             else:
                 out = zscore_median_std(dff_sig)
                 no_reference_fallback = True
 
         elif mode == "prominence normalized (motion corrected with fitted ref)":
-            # (8) prominence-normalized fitted-ref dFF
+            # (9) prominence-normalized fitted-ref dFF
             # 1) Fit reference and compute fitted-ref dFF.
             # 2) Exclude event windows from the selected trigger channel.
             # 3) Detect baseline peaks by prominence, average the top fraction,
             #    then scale like a z-score using peak prominence instead of std.
             if has_reference:
-                a, b = fit_reference_to_signal(ref2, sig2, params)
-                fitted_ref = a * ref2 + b
-                dff_fit = safe_divide(sig2 - fitted_ref, fitted_ref)
+                dff_fit, _, _, _ = _compute_fitted_reference_dff(ref2, sig2, params)
             else:
                 dff_fit = dff_sig
                 no_reference_fallback = True
@@ -3136,7 +3174,7 @@ class PhotometryProcessor:
             out, prominence_stats = prominence_normalize(dff_fit, t2, event_times, params, fs_used)
 
         elif mode == "Raw signal (465)":
-            # (9) raw signal (processed 465 trace)
+            # (10) raw signal (processed 465 trace)
             # Directly expose the filtered/resampled 465 channel.
             out = np.asarray(sig2, float)
 
@@ -3155,10 +3193,13 @@ class PhotometryProcessor:
             baseline_desc = f"Baseline: {params.baseline_method} (lambda={float(params.baseline_lambda):.2e})"
             if mode in (
                 "dFF (motion corrected with fitted ref)",
+                "dFF (motion corrected with inverted isobestic fit)",
                 "zscore (motion corrected with fitted ref)",
                 "prominence normalized (motion corrected with fitted ref)",
             ):
                 context_parts.append(f"Fit: {params.reference_fit}")
+                if mode == "dFF (motion corrected with inverted isobestic fit)":
+                    context_parts.append("Iso polarity: inverted before fit")
             context_parts.append(baseline_desc)
             if prominence_stats is not None:
                 mean_amp = prominence_stats.get("mean_amplitude", np.nan)

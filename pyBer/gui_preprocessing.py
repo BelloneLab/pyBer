@@ -62,6 +62,7 @@ def _compact_combo(combo: QtWidgets.QComboBox, min_chars: int = 6) -> None:
 
 _FITTED_REF_MODES = {
     "dFF (motion corrected with fitted ref)",
+    "dFF (motion corrected with inverted isobestic fit)",
     "zscore (motion corrected with fitted ref)",
     "prominence normalized (motion corrected with fitted ref)",
 }
@@ -73,6 +74,7 @@ _OUTPUT_DEFINITIONS: Dict[str, str] = {
     "zscore (motion corrected via subtraction)": "z = zscore(dFF_sig - dFF_ref)",
     "zscore (subtractions)": "z = zscore(dFF_sig) - zscore(dFF_ref)",
     "dFF (motion corrected with fitted ref)": "dFF = (sig_f - fitted_ref) / fitted_ref",
+    "dFF (motion corrected with inverted isobestic fit)": "dFF = (sig_f - fit(-ref_f -> sig_f)) / fit(-ref_f -> sig_f)",
     "zscore (motion corrected with fitted ref)": "z = zscore((sig_f - fitted_ref) / fitted_ref)",
     "prominence normalized (motion corrected with fitted ref)": "p = (dFF_fit - median_baseline) / mean(top baseline peak prominences)",
     "Raw signal (465)": "output = filtered/resampled 465 signal",
@@ -82,6 +84,7 @@ _DFF_OUTPUT_MODES = {
     "dFF (non motion corrected)",
     "dFF (motion corrected via subtraction)",
     "dFF (motion corrected with fitted ref)",
+    "dFF (motion corrected with inverted isobestic fit)",
 }
 
 
