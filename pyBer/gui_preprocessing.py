@@ -60,6 +60,17 @@ def _first_not_none(d: dict, *keys, default=None):
     return default
 
 
+def raw_plot_title_for_sensor(sensor_label: object = "") -> str:
+    """Return the raw plot title for the selected sensor."""
+    label = str(sensor_label or "").strip()
+    if not label or label.lower() == "raw signal":
+        return "raw signal"
+    suffix = " - raw signal"
+    if label.lower().endswith(suffix):
+        return label
+    return f"{label}{suffix}"
+
+
 def _compact_combo(combo: QtWidgets.QComboBox, min_chars: int = 6) -> None:
     combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
     combo.setMinimumContentsLength(min_chars)
@@ -3793,6 +3804,9 @@ class PlotDashboard(QtWidgets.QWidget):
     def set_title(self, text: str) -> None:
         self.lbl_title.setText(text)
 
+    def set_raw_title(self, text: str) -> None:
+        self.plot_raw.setTitle(str(text or "raw signal"))
+
     def set_status(self, text: str) -> None:
         self.lbl_status.setText(text or "")
 
@@ -4022,6 +4036,10 @@ class PlotDashboard(QtWidgets.QWidget):
                 except Exception:
                     kwargs.pop(key, None)
 
+        title = _first_not_none(kwargs, "title", "file_label", "sensor_label", "raw_label")
+        if title is not None:
+            self.set_raw_title(str(title))
+
         # Positional support: (time, sig, ref)
         t = s = r = None
         if len(args) >= 3:
@@ -4119,10 +4137,6 @@ class PlotDashboard(QtWidgets.QWidget):
         dio_time = _first_not_none(kwargs, "trig_time", "trigger_time", "dio_time", default=t)
         dio_name = _first_not_none(kwargs, "dio_name", "digital_name", "trigger_name", default="") or ""
         self._set_dio(np.asarray(dio_time, float), dio, str(dio_name))
-
-        title = _first_not_none(kwargs, "title", "file_label", "sensor_label", "raw_label")
-        if title is not None:
-            self.set_title(str(title))
 
     def show_processing(self, *args, **kwargs) -> None:
         """
@@ -4261,7 +4275,7 @@ class PlotDashboard(QtWidgets.QWidget):
             raw_dio_time = raw_t
 
         kept_xrange = self.current_xrange() if preserve_view else None
-        raw_title = str(getattr(processed, "sensor_label", "") or "raw signal")
+        raw_title = raw_plot_title_for_sensor(getattr(processed, "sensor_label", ""))
         self.show_raw(
             raw_t, raw_signal, raw_reference,
             dio=raw_dio, dio_time=raw_dio_time, dio_name=processed.dio_name,

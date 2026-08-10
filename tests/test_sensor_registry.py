@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(ROOT, "pyBer"))
 
 import analysis_core as ac  # noqa: E402
 import sensor_registry as sr  # noqa: E402
+from gui_preprocessing import raw_plot_title_for_sensor  # noqa: E402
 
 
 def _trial(fs: float = 200.0, duration: float = 12.0) -> ac.LoadedTrial:
@@ -57,6 +58,11 @@ class SensorRegistryTests(unittest.TestCase):
         self.assertIn("0.09", ach.rise)
         self.assertIn("0.91", ach.decay)
         self.assertIn("sensor characterization", ach.kinetics_context)
+
+    def test_raw_plot_title_uses_sensor_when_selected(self):
+        self.assertEqual(raw_plot_title_for_sensor(""), "raw signal")
+        self.assertEqual(raw_plot_title_for_sensor("dLight1.3b"), "dLight1.3b - raw signal")
+        self.assertEqual(raw_plot_title_for_sensor("dLight1.3b - raw signal"), "dLight1.3b - raw signal")
 
     def test_trace_check_detects_sensor_polarity_mismatch(self):
         t = np.arange(0.0, 20.0, 0.02)

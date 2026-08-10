@@ -138,6 +138,7 @@ from gui_preprocessing import (
     MetadataDialog,
     ArtifactPanel,
     AdvancedOptionsDialog,
+    raw_plot_title_for_sensor,
 )
 from gui_sensors import SensorDialog
 from gui_postprocessing import PostProcessingPanel
@@ -6044,7 +6045,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _current_sensor_label(self) -> str:
         sensor = get_sensor(self._current_sensor_id())
-        return sensor.name if sensor.sensor_id != SENSOR_UNKNOWN else "raw signal"
+        return raw_plot_title_for_sensor(sensor.name if sensor.sensor_id != SENSOR_UNKNOWN else "")
 
     def _update_sensor_button(self) -> None:
         btn = getattr(self, "btn_sensor", None)
@@ -6096,6 +6097,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         self._apply_sensor_to_current_metadata(sensor_id)
         self._update_sensor_button()
+        self.plots.set_raw_title(self._current_sensor_label())
         self._record_pre_history_change()
         self._refresh_preprocessing_recommendation()
         self._update_raw_plot(preserve_view=True)
@@ -7734,7 +7736,7 @@ class MainWindow(QtWidgets.QMainWindow):
             raw405 = -np.asarray(raw405, float)
 
         raw_title = self._current_sensor_label()
-        self.plots.set_title(raw_title)
+        self.plots.set_raw_title(raw_title)
         self.plots.show_raw(
             time=trial.time,
             raw465=raw465,
