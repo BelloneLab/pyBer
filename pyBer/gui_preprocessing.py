@@ -17,6 +17,7 @@ from analysis_core import (
     ProcessingParams,
     PreprocessingRecommendation,
     ProcessedTrial,
+    SectionAdvice,
     OUTPUT_MODES,
     BASELINE_METHODS,
     REFERENCE_FIT_METHODS,
@@ -199,6 +200,223 @@ class CheckableListWidget(QtWidgets.QListWidget):
                 )
         finally:
             self.blockSignals(False)
+
+
+# Colour of the per-panel recommendation frames. Green reads as "here is what
+# to do with these settings", whatever the data turns out to look like.
+_RECO_GREEN = "#5dd39e"
+
+# Which ProcessingParams fields each settings panel owns. Used to apply the
+# advice of one panel without touching what the user tuned in the others.
+_RECO_SECTION_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "artifacts": (
+        "artifact_detection_enabled",
+        "artifact_mode",
+        "artifact_handling",
+        "mad_k",
+        "adaptive_window_s",
+        "artifact_pad_s",
+    ),
+    "filtering": (
+        "target_fs_hz",
+        "lowpass_hz",
+        "filter_order",
+        "smoothing_enabled",
+        "smoothing_method",
+        "smoothing_window_s",
+        "smoothing_polyorder",
+        "invert_polarity",
+    ),
+    "baseline": (
+        "baseline_method",
+        "baseline_lambda",
+        "baseline_diff_order",
+        "baseline_max_iter",
+        "baseline_tol",
+        "asls_p",
+    ),
+    "output": (
+        "output_mode",
+        "reference_fit",
+        "band_limited_reference_window_s",
+        "lasso_alpha",
+        "rlm_huber_t",
+        "rlm_max_iter",
+        "rlm_tol",
+    ),
+}
+
+
+def _reco_tint(color: str, alpha_pct: int) -> str:
+    """Return a Qt stylesheet ``rgba()`` string for ``color`` at ``alpha_pct``.
+
+    Qt parses eight-digit hex as ``#AARRGGBB`` (alpha first), so appending an
+    alpha suffix to ``#rrggbb`` silently yields a different colour - a faint
+    green tint comes out olive. Building rgba() text keeps the tint honest.
+    """
+    text = str(color or "").lstrip("#")
+    if len(text) != 6:
+        return str(color)
+    try:
+        r, g, b = int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+    except ValueError:
+        return str(color)
+    return f"rgba({r}, {g}, {b}, {max(0, min(100, int(alpha_pct)))}%)"
+
+
+class RecommendationPanel(QtWidgets.QFrame):
+    """Green "Recommendations" frame pinned to the bottom of a settings panel.
+
+    Shows three things for the panel it belongs to: one plain-language
+    instruction, the concrete values to dial in, and a separate *why* block with
+    the evidence behind them. It stays hidden until a recording is loaded.
+
+    ``applyRequested`` fires when the user accepts the advice; the owning
+    :class:`ParameterPanel` then writes only this section's fields.
+    """
+
+    applyRequested = QtCore.Signal()
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("recoPanel")
+        self.setStyleSheet(
+            f"QFrame#recoPanel {{ background: {_reco_tint(_RECO_GREEN, 8)};"
+            f" border: 1px solid {_RECO_GREEN}; border-radius: 10px; }}"
+            "QFrame#recoPanel QLabel { background: transparent; border: 0; }"
+        )
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum
+        )
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(6)
+
+        title = QtWidgets.QLabel("Recommendations")
+        title.setStyleSheet(
+            f"color: {_RECO_GREEN}; font-size: 9.6pt; font-weight: 800;"
+            " letter-spacing: 0.6px; text-transform: uppercase;"
+        )
+        root.addWidget(title)
+
+        self.lbl_headline = QtWidgets.QLabel("")
+        self.lbl_headline.setWordWrap(True)
+        self.lbl_headline.setStyleSheet("color: #eef1f7; font-size: 9.2pt; font-weight: 600;")
+        root.addWidget(self.lbl_headline)
+
+        # Settings to dial in, as a two-column label/value grid.
+        self._settings_host = QtWidgets.QWidget()
+        self._settings_host.setStyleSheet("background: transparent;")
+        self._settings_grid = QtWidgets.QGridLayout(self._settings_host)
+        self._settings_grid.setContentsMargins(0, 2, 0, 2)
+        self._settings_grid.setHorizontalSpacing(10)
+        self._settings_grid.setVerticalSpacing(2)
+        self._settings_grid.setColumnStretch(1, 1)
+        root.addWidget(self._settings_host)
+
+        self.lbl_why_header = QtWidgets.QLabel("Why")
+        self.lbl_why_header.setStyleSheet(
+            "color: #aab4c5; font-size: 8.3pt; letter-spacing: 0.5px;"
+            " text-transform: uppercase; padding-top: 4px;"
+        )
+        root.addWidget(self.lbl_why_header)
+
+        self._why_host = QtWidgets.QWidget()
+        self._why_host.setStyleSheet("background: transparent;")
+        self._why_layout = QtWidgets.QVBoxLayout(self._why_host)
+        self._why_layout.setContentsMargins(0, 0, 0, 0)
+        self._why_layout.setSpacing(4)
+        root.addWidget(self._why_host)
+
+        # Accepting the advice writes only this section's fields, so the other
+        # panels keep whatever the user set by hand.
+        self.btn_apply = QtWidgets.QPushButton("Apply these settings")
+        self.btn_apply.setProperty("class", "compactSmall")
+        self.btn_apply.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.btn_apply.clicked.connect(self.applyRequested.emit)
+        apply_row = QtWidgets.QHBoxLayout()
+        apply_row.setContentsMargins(0, 4, 0, 0)
+        apply_row.addStretch(1)
+        apply_row.addWidget(self.btn_apply)
+        root.addLayout(apply_row)
+
+        self.setVisible(False)
+
+    # ------------------------------------------------------------------ #
+    def set_advice(self, advice: Optional[object]) -> None:
+        """Fill the panel from a ``SectionAdvice`` (or hide it when there is none)."""
+        headline = str(getattr(advice, "headline", "") or "").strip()
+        settings = list(getattr(advice, "settings", []) or [])
+        why = [str(w).strip() for w in (getattr(advice, "why", []) or []) if str(w).strip()]
+        if not headline and not settings and not why:
+            self.clear()
+            return
+
+        self.lbl_headline.setText(headline)
+        self.lbl_headline.setVisible(bool(headline))
+
+        self._clear_layout(self._settings_grid)
+        for row, entry in enumerate(settings):
+            try:
+                name, value = entry
+            except Exception:
+                continue
+            key = QtWidgets.QLabel(f"{name}")
+            key.setStyleSheet("color: #98a3b6; font-size: 8.5pt;")
+            key.setAlignment(
+                QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop
+            )
+            val = QtWidgets.QLabel(str(value))
+            val.setWordWrap(True)
+            val.setStyleSheet(f"color: {_RECO_GREEN}; font-size: 8.5pt; font-weight: 700;")
+            self._settings_grid.addWidget(key, row, 0)
+            self._settings_grid.addWidget(val, row, 1)
+        self._settings_host.setVisible(bool(settings))
+
+        self._clear_layout(self._why_layout)
+        for text in why:
+            self._why_layout.addWidget(self._bullet(text))
+        self.lbl_why_header.setVisible(bool(why))
+        self._why_host.setVisible(bool(why))
+
+        self.setVisible(True)
+
+    def clear(self) -> None:
+        """Hide the panel and drop whatever it was showing."""
+        self.lbl_headline.setText("")
+        self._clear_layout(self._settings_grid)
+        self._clear_layout(self._why_layout)
+        self.setVisible(False)
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _clear_layout(layout: QtWidgets.QLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    @staticmethod
+    def _bullet(text: str) -> QtWidgets.QWidget:
+        """One why-line with a hanging bullet, so wrapped text stays aligned."""
+        row = QtWidgets.QWidget()
+        row.setStyleSheet("background: transparent;")
+        lay = QtWidgets.QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        dot = QtWidgets.QLabel("•")
+        dot.setFixedWidth(10)
+        dot.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        dot.setStyleSheet("color: #8d97a9; font-size: 8.5pt;")
+        lay.addWidget(dot, 0)
+        body = QtWidgets.QLabel(text)
+        body.setWordWrap(True)
+        body.setStyleSheet("color: #cfd7e5; font-size: 8.5pt;")
+        lay.addWidget(body, 1)
+        return row
 
 
 class CollapsibleSection(QtWidgets.QWidget):
@@ -1732,6 +1950,24 @@ class ParameterPanel(QtWidgets.QGroupBox):
         lbl.setVisible(False)
         return lbl
 
+    @staticmethod
+    def _section_content(form_widget: QtWidgets.QWidget,
+                         panel: RecommendationPanel) -> QtWidgets.QWidget:
+        """Stack a settings form and its recommendation panel in one card body.
+
+        The stretch between them pushes the green panel to the bottom of the
+        card, so it fills the empty space under short forms instead of hugging
+        the last control.
+        """
+        box = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(form_widget, 0)
+        lay.addStretch(1)
+        lay.addWidget(panel, 0)
+        return box
+
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1797,8 +2033,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_pad.setRange(0.0, 10.0)
         self.spin_pad.setValue(0.25)
 
-        art_content = QtWidgets.QWidget()
-        art_form = QtWidgets.QFormLayout(art_content)
+        art_form_widget = QtWidgets.QWidget()
+        art_form = QtWidgets.QFormLayout(art_form_widget)
         art_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         art_form.addRow(self.cb_artifact)
         art_form.addRow(self.cb_show_artifact_overlay)
@@ -1807,8 +2043,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         art_form.addRow(self._label_with_help("MAD threshold (k)", "mad_k"), self.spin_mad)
         art_form.addRow(self._label_with_help("Adaptive window (s)", "adaptive_window_s"), self.spin_adapt_win)
         art_form.addRow(self._label_with_help("Artifact pad (s)", "artifact_pad_s"), self.spin_pad)
-        self.lbl_reco_artifacts = self._recommendation_label()
-        art_form.addRow(self.lbl_reco_artifacts)
+        self.reco_artifacts = RecommendationPanel()
+        art_content = self._section_content(art_form_widget, self.reco_artifacts)
 
         # Filtering controls
         self.cb_filtering = QtWidgets.QCheckBox("Enable filtering")
@@ -1839,8 +2075,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
             "Flips both raw channels before artifact detection, filtering, baseline, and output computation."
         )
 
-        filt_content = QtWidgets.QWidget()
-        filt_form = QtWidgets.QFormLayout(filt_content)
+        filt_form_widget = QtWidgets.QWidget()
+        filt_form = QtWidgets.QFormLayout(filt_form_widget)
         filt_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         filt_form.addRow(self.cb_filtering)
         filt_form.addRow(self._label_with_help("Low-pass cutoff (Hz)", "lowpass_hz"), self.spin_lowpass)
@@ -1851,8 +2087,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         filt_form.addRow(self._label_with_help("Smoothing window (s)", "smoothing_window_s"), self.spin_smoothing_window)
         filt_form.addRow(self._label_with_help("Savitzky polyorder", "smoothing_polyorder"), self.spin_smoothing_poly)
         filt_form.addRow(self._label_with_help("Invert signal polarity", "invert_polarity"), self.cb_invert)
-        self.lbl_reco_filtering = self._recommendation_label()
-        filt_form.addRow(self.lbl_reco_filtering)
+        self.reco_filtering = RecommendationPanel()
+        filt_content = self._section_content(filt_form_widget, self.reco_filtering)
 
         # Baseline controls
         self.combo_baseline = QtWidgets.QComboBox()
@@ -1900,15 +2136,15 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.btn_toggle_advanced.setProperty("class", "compactSmall")
         self.btn_toggle_advanced.clicked.connect(self._toggle_advanced_baseline)
 
-        base_content = QtWidgets.QWidget()
-        base_form = QtWidgets.QFormLayout(base_content)
+        base_form_widget = QtWidgets.QWidget()
+        base_form = QtWidgets.QFormLayout(base_form_widget)
         base_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         base_form.addRow(self._label_with_help("Method", "baseline_method"), self.combo_baseline)
         base_form.addRow(self._label_with_help("Lambda", "baseline_lambda"), lam_widget)
         base_form.addRow(self.btn_toggle_advanced)
         base_form.addRow(self.baseline_advanced_group)
-        self.lbl_reco_baseline = self._recommendation_label()
-        base_form.addRow(self.lbl_reco_baseline)
+        self.reco_baseline = RecommendationPanel()
+        base_content = self._section_content(base_form_widget, self.reco_baseline)
 
         # Output controls
         self.combo_output = QtWidgets.QComboBox()
@@ -2073,8 +2309,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         )
         self.btn_prominence_event_file.clicked.connect(self._pick_prominence_event_file)
 
-        out_content = QtWidgets.QWidget()
-        out_form = QtWidgets.QFormLayout(out_content)
+        out_form_widget = QtWidgets.QWidget()
+        out_form = QtWidgets.QFormLayout(out_form_widget)
         out_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.lbl_output_mode = self._label_with_help("Output mode", "output_mode")
         self.lbl_reference_fit = self._label_with_help("Reference fit method", "reference_fit")
@@ -2085,8 +2321,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         out_form.addRow(self.lbl_band_ref_window, self.spin_band_ref_window)
         out_form.addRow(self.output_params_stack)
         out_form.addRow(self.prominence_params_group)
-        self.lbl_reco_output = self._recommendation_label()
-        out_form.addRow(self.lbl_reco_output)
+        self.reco_output = RecommendationPanel()
+        out_content = self._section_content(out_form_widget, self.reco_output)
 
         # QC + Export card
         self.btn_artifacts_panel = QtWidgets.QPushButton("Artifacts")
@@ -2512,6 +2748,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.combo_output.currentIndexChanged.connect(lambda *_: self._sync_export_outputs_to_current_mode())
         self.combo_ref_fit.currentIndexChanged.connect(lambda *_: self._update_output_controls())
         self.btn_apply_recommendation.clicked.connect(self.apply_recommendation)
+        for section_key, panel in self._recommendation_panels().items():
+            panel.applyRequested.connect(
+                lambda key=section_key: self.apply_recommendation_section(key)
+            )
 
         # Keep collapsed card summaries synchronized with current values.
         for w in widgets:
@@ -2693,10 +2933,32 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._pending_export_output_modes = modes
         self.list_export_outputs.set_checked_values(modes)
 
-    def _set_recommendation_text(self, label: QtWidgets.QLabel, text: str) -> None:
-        value = str(text or "").strip()
-        label.setText(value)
-        label.setVisible(bool(value))
+    def _recommendation_panels(self) -> Dict[str, RecommendationPanel]:
+        """Map each settings panel to its green recommendation frame."""
+        return {
+            "artifacts": self.reco_artifacts,
+            "filtering": self.reco_filtering,
+            "baseline": self.reco_baseline,
+            "output": self.reco_output,
+        }
+
+    def apply_recommendation_section(self, key: str) -> None:
+        """Apply the recommended values for one settings panel only.
+
+        Everything the user tuned by hand in the other panels is preserved, so
+        accepting the baseline advice cannot silently reset the output mode.
+        """
+        if self._recommended_params is None:
+            return
+        fields = _RECO_SECTION_FIELDS.get(str(key), ())
+        if not fields:
+            return
+        params = self.get_params()
+        for name in fields:
+            if hasattr(self._recommended_params, name) and hasattr(params, name):
+                setattr(params, name, getattr(self._recommended_params, name))
+        self.set_params(params)
+        self.paramsChanged.emit()
 
     def set_recommendation(self, recommendation: Optional[PreprocessingRecommendation]) -> None:
         """Display data-driven recommended settings without applying them."""
@@ -2707,13 +2969,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
             )
             self.lbl_recommendation_details.setText("")
             self.btn_apply_recommendation.setEnabled(False)
-            for label in (
-                self.lbl_reco_artifacts,
-                self.lbl_reco_filtering,
-                self.lbl_reco_baseline,
-                self.lbl_reco_output,
-            ):
-                self._set_recommendation_text(label, "")
+            for panel in self._recommendation_panels().values():
+                panel.clear()
             self.card_recommendation.set_summary("No data")
             return
 
@@ -2734,11 +2991,17 @@ class ParameterPanel(QtWidgets.QGroupBox):
                     pass
         self.lbl_recommendation_details.setText(" ".join(details))
         self.btn_apply_recommendation.setEnabled(True)
+
+        # Per-panel advice. Older recommendations only carry flat section text,
+        # so fall back to it as a single headline when `advice` is missing.
+        advice = getattr(recommendation, "advice", {}) or {}
         sections = getattr(recommendation, "sections", {}) or {}
-        self._set_recommendation_text(self.lbl_reco_artifacts, sections.get("artifacts", ""))
-        self._set_recommendation_text(self.lbl_reco_filtering, sections.get("filtering", ""))
-        self._set_recommendation_text(self.lbl_reco_baseline, sections.get("baseline", ""))
-        self._set_recommendation_text(self.lbl_reco_output, sections.get("output", ""))
+        for key, panel in self._recommendation_panels().items():
+            entry = advice.get(key)
+            if entry is None:
+                text = str(sections.get(key, "") or "").strip()
+                entry = SectionAdvice(headline=text) if text else None
+            panel.set_advice(entry)
         self.card_recommendation.set_summary(f"confidence={float(recommendation.confidence):.0%}")
 
     def apply_recommendation(self) -> None:

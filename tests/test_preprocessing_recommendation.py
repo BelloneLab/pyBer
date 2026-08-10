@@ -74,6 +74,21 @@ class PreprocessingRecommendationTests(unittest.TestCase):
         self.assertLess(abs(_corr(band_hp, ref_hp)), abs(_corr(non_hp, ref_hp)))
         self.assertIn("Band-limited inverted 405", band.output_context)
 
+    def test_advice_carries_headline_settings_and_why_per_panel(self):
+        rec = ac.recommend_preprocessing_settings(_mixed_drift_trial())
+
+        for key in ("artifacts", "filtering", "baseline", "output"):
+            advice = rec.advice[key]
+            self.assertTrue(advice.headline.strip(), f"{key} headline is empty")
+            self.assertTrue(advice.settings, f"{key} has no settings to apply")
+            self.assertTrue(advice.why, f"{key} has no why entries")
+            for name, value in advice.settings:
+                self.assertTrue(str(name).strip())
+                self.assertTrue(str(value).strip())
+            # The flat section text stays in sync for anything reading it.
+            self.assertEqual(rec.sections[key], advice.as_text())
+            self.assertIn(advice.headline.strip(), rec.sections[key])
+
     def test_no_reference_recommends_signal_only_dff(self):
         t = np.arange(0.0, 120.0, 0.1)
         sig = 100.0 + np.sin(2.0 * np.pi * 0.2 * t)

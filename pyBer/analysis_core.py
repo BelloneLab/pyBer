@@ -189,12 +189,31 @@ class ProcessingParams:
 
 
 @dataclass
+class SectionAdvice:
+    """Advice for one settings panel, split into what to do and why.
+
+    ``headline`` is a single plain-language instruction, ``settings`` are the
+    concrete values to dial in (label, value), and ``why`` holds the evidence
+    behind them, one self-contained sentence per entry.
+    """
+    headline: str = ""
+    settings: List[Tuple[str, str]] = field(default_factory=list)
+    why: List[str] = field(default_factory=list)
+
+    def as_text(self) -> str:
+        """Flatten to the one-line form kept in ``PreprocessingRecommendation.sections``."""
+        parts = [self.headline.strip()] + [w.strip() for w in self.why]
+        return " ".join(p for p in parts if p)
+
+
+@dataclass
 class PreprocessingRecommendation:
     """Data-driven preprocessing recommendation for one raw recording."""
     params: ProcessingParams
     confidence: float
     summary: str
     sections: Dict[str, str] = field(default_factory=dict)
+    advice: Dict[str, SectionAdvice] = field(default_factory=dict)
     metrics: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
@@ -2375,16 +2394,30 @@ def recommend_preprocessing_settings(
     n = min(t.size, sig.size)
     if n < 20:
         p.output_mode = "dFF (non motion corrected)"
+        short_advice = {
+            "artifacts": SectionAdvice(
+                headline="Too few samples to judge the artifact burden.",
+                why=["Load a longer recording and the adviser will measure it."],
+            ),
+            "filtering": SectionAdvice(
+                headline="Too few samples to measure the sampling rate and noise.",
+                why=["Load a longer recording and the adviser will measure it."],
+            ),
+            "baseline": SectionAdvice(
+                headline="Keep the default baseline until a longer trace is loaded.",
+                why=["Drift cannot be estimated from this many samples."],
+            ),
+            "output": SectionAdvice(
+                headline="Use dFF (non motion corrected).",
+                why=["The 405 reference cannot be evaluated on a trace this short."],
+            ),
+        }
         return PreprocessingRecommendation(
             params=p,
             confidence=0.0,
             summary="Recording is too short for automatic recommendations.",
-            sections={
-                "artifacts": "Too few samples to estimate artifact burden.",
-                "filtering": "Too few samples to estimate sampling and noise structure.",
-                "baseline": "Keep defaults until a longer trace is loaded.",
-                "output": "Use non-motion dFF because the reference cannot be evaluated.",
-            },
+            sections={key: adv.as_text() for key, adv in short_advice.items()},
+            advice=short_advice,
             metrics={"n_samples": int(n)},
             warnings=["Too few samples for reliable automatic settings."],
         )
@@ -2485,28 +2518,39 @@ def recommend_preprocessing_settings(
     output_reason = ""
     if not has_reference:
         p.output_mode = "dFF (non motion corrected)"
-        output_reason = "No stable 405 reference was detected, so motion correction would be unreliable."
+        output_reason = (
+            "There is no usable 405 reference in this file, so there is nothing to correct "
+            "movement with."
+        )
     elif np.isfinite(hp_corr) and hp_corr < -0.25 and frac_neg >= 0.60:
         mixed_drift = bool(np.isfinite(raw_corr) and raw_corr > 0.20 and abs(raw_corr - hp_corr) > 0.45)
         if mixed_drift:
             p.output_mode = BAND_LIMITED_INVERTED_ISO_MODE
             p.band_limited_reference_window_s = hp_window_s
             output_reason = (
-                "410 and 470 share slow drift but their short-timescale fluctuations are anti-correlated, "
-                "so correct only the band-limited inverted 410 component."
+                "The two channels bleach together but their fast fluctuations move in opposite "
+                "directions, so only the band-limited inverted 405 component should be "
+                "subtracted; the shared slow drift is left to the baseline."
             )
         else:
             p.output_mode = "dFF (motion corrected with inverted isobestic fit)"
             output_reason = (
-                "Short-timescale 410 and 470 fluctuations are consistently anti-correlated, "
-                "so the isobestic should be inverted before fitted-reference correction."
+                "Fast 405 and 465 fluctuations consistently move in opposite directions, so the "
+                "isobestic has to be flipped before it is fitted and subtracted."
             )
     elif has_reference and ((np.isfinite(hp_corr) and hp_corr > 0.20 and frac_pos >= 0.50) or (np.isfinite(raw_corr) and raw_corr > 0.35)):
         p.output_mode = "dFF (motion corrected with fitted ref)"
-        output_reason = "The 405 channel tracks the 465 channel with positive coupling, so fitted-reference dFF is appropriate."
+        output_reason = (
+            "The 405 channel follows the 465 channel with positive coupling, so it is a good "
+            "movement estimate: fitting and subtracting it removes movement without removing "
+            "your signal."
+        )
     else:
         p.output_mode = "dFF (non motion corrected)"
-        output_reason = "The 405 reference is weak or inconsistent, so signal-only dFF is safer than forcing a correction."
+        output_reason = (
+            "The 405 reference is weak or inconsistent here, so forcing a correction would add "
+            "noise instead of removing movement."
+        )
 
     p.reference_fit = "RLM (HuberT)" if artifact_fraction > 0.02 else "OLS (recommended)"
     p.lasso_alpha = 1e-3
@@ -2525,9 +2569,11 @@ def recommend_preprocessing_settings(
         confidence = min(confidence, 0.55)
 
     polarity_text = (
-        "Signal polarity looks inverted; enable full 465/405 polarity inversion."
+        "Signal polarity looks inverted (the trace sits below zero and its excursions point "
+        "down), so switch the full 465/405 inversion on."
         if signal_inverted else
-        "Signal polarity looks normal; keep full 465/405 polarity inversion off."
+        "Signal polarity looks normal (the trace sits above zero and its peaks point up), so "
+        "keep the full 465/405 inversion off."
     )
 
     summary = (
@@ -2535,26 +2581,142 @@ def recommend_preprocessing_settings(
         f"Fs {fs:.2f} Hz, raw corr={_format_metric(raw_corr)}, "
         f"detrended corr={_format_metric(hp_corr)}, confidence={confidence:.0%}."
     )
-    sections = {
-        "artifacts": (
-            f"Smart detector burden at k=8 is {artifact_fraction * 100.0:.2f}% "
-            f"across amplitude, slope, dropout, and 405/465 shared evidence. "
-            f"Recommend {p.artifact_mode}, {p.artifact_handling}, pad {p.artifact_pad_s:.2g}s."
+
+    # ---------------------------------------------------------------- #
+    # Per-panel advice: one instruction, the values to dial in, and the
+    # evidence behind them. The GUI renders this in the green
+    # "Recommendations" frame at the bottom of each settings panel.
+    # ---------------------------------------------------------------- #
+    art_pct = artifact_fraction * 100.0
+    if artifact_fraction <= 0.0005:
+        art_headline = (f"This recording is clean - only {art_pct:.2f}% of samples look like "
+                        f"artifact. Leave detection on as a safety net.")
+    elif artifact_fraction < 0.05:
+        art_headline = (f"About {art_pct:.2f}% of the samples look like artifact. Detect them and "
+                        f"repair the gaps by interpolation.")
+    else:
+        art_headline = (f"About {art_pct:.2f}% of the samples look like artifact - too much to "
+                        f"interpolate honestly. Smooth those stretches instead.")
+
+    art_why = [
+        "The smart detector only flags a sample when several kinds of evidence agree (a jump in "
+        "amplitude, an impossible slope, a dropout, and the same event appearing in both 405 and "
+        "465), so it catches hardware hits without eating real transients.",
+        (f"{art_pct:.2f}% of samples are flagged. Interpolating is honest below about 5%; above "
+         f"that it would invent more data than it repairs, which is why a local low-pass is the "
+         f"gentler repair here."
+         if artifact_fraction >= 0.05 else
+         f"{art_pct:.2f}% of samples are flagged, well under the ~5% where interpolation starts "
+         f"inventing more than it repairs."),
+        f"The {p.adaptive_window_s:.0f} s window is roughly a thirtieth of the session, so the "
+        f"threshold follows slow changes in noise instead of applying one global cutoff.",
+        f"The {p.artifact_pad_s:.2g} s pad covers the filter ringing on each side of a hit, which "
+        f"is otherwise left behind after the artifact itself is repaired.",
+    ]
+
+    filt_headline = (f"Resample to {p.target_fs_hz:.1f} Hz and low-pass at {p.lowpass_hz:.3g} Hz.")
+    filt_why = [
+        (f"The file is sampled at {fs:.2f} Hz. Coming down to {p.target_fs_hz:.1f} Hz keeps "
+         f"everything the sensor can actually report and makes the rest of the pipeline faster."
+         if fs > p.target_fs_hz + 0.5 else
+         f"The file is sampled at {fs:.2f} Hz, so the native rate is kept."),
+        f"{p.lowpass_hz:.3g} Hz sits below the {p.target_fs_hz / 2.0:.0f} Hz Nyquist limit of that "
+        f"target rate, so nothing aliases. Sensor transients rise over hundreds of milliseconds "
+        f"and pass through untouched.",
+        (f"Sample-to-sample jitter is {noise_ratio:.1f}x the size of the trace's own fluctuations, "
+         f"so a {p.smoothing_window_s:.2f} s Savitzky-Golay window is worth switching on."
+         if p.smoothing_enabled else
+         f"Sample-to-sample jitter is only {noise_ratio:.1f}x the trace's own fluctuations, so "
+         f"extra smoothing would blur transients for no real gain - leave it off."),
+        polarity_text,
+    ]
+
+    base_headline = (f"Use the {p.baseline_method} baseline with lambda = {p.baseline_lambda:.1e}.")
+    base_why = [
+        f"The session lasts {duration_s:.0f} s and its slow drift is {drift_score:.2g}x the size "
+        f"of the fast fluctuations, so the baseline has to follow a large, slow curve.",
+        f"Lambda sets how stiff that curve is. {p.baseline_lambda:.1e} is stiff enough to track "
+        f"bleaching but too stiff to bend into a transient and subtract your signal away.",
+        "airPLS re-weights toward the bottom of the trace on every pass, so upward transients pull "
+        "the baseline much less than they would with a plain polynomial fit.",
+    ]
+    if n < 6000:
+        base_why.append(
+            f"Only {n} samples are available, so a softer lambda is used to avoid over-fitting a "
+            f"short trace."
+        )
+
+    out_headline = f"Use {p.output_mode}."
+    out_why = [output_reason]
+    if has_reference:
+        out_why.append(
+            f"Across rolling 30 s windows the two channels correlate at "
+            f"{_format_metric(rolling.get('median', float('nan')))}; {frac_neg * 100.0:.0f}% of "
+            f"windows go negative and {strong_neg * 100.0:.0f}% go strongly negative, so the "
+            f"coupling is consistent enough to trust."
+        )
+        out_why.append(
+            f"{'A robust (Huber) fit is used because ' if p.reference_fit.startswith('RLM') else 'Ordinary least squares is enough because only '}"
+            f"{art_pct:.2f}% of the samples are artifact"
+            f"{'; robust fitting stops leftover spikes from tilting the fit.' if p.reference_fit.startswith('RLM') else '; above ~2% a robust fit would be the safer choice.'}"
+        )
+
+    advice: Dict[str, SectionAdvice] = {
+        "artifacts": SectionAdvice(
+            headline=art_headline,
+            settings=[
+                ("Detection", "on" if p.artifact_detection_enabled else "off"),
+                ("Method", str(p.artifact_mode)),
+                ("Handling", str(p.artifact_handling)),
+                ("Sensitivity (k)", f"{p.mad_k:.1f}"),
+                ("Window", f"{p.adaptive_window_s:.0f} s"),
+                ("Pad", f"{p.artifact_pad_s:.2g} s"),
+            ],
+            why=art_why,
         ),
-        "filtering": (
-            f"Raw Fs is {fs:.2f} Hz. Use target {p.target_fs_hz:.1f} Hz and low-pass "
-            f"{p.lowpass_hz:.2g} Hz to stay below Nyquist. {polarity_text}"
+        "filtering": SectionAdvice(
+            headline=filt_headline,
+            settings=[
+                ("Target Fs", f"{p.target_fs_hz:.1f} Hz"),
+                ("Low-pass", f"{p.lowpass_hz:.3g} Hz"),
+                ("Filter order", f"{p.filter_order}"),
+                ("Smoothing", (f"{p.smoothing_method}, {p.smoothing_window_s:.2f} s"
+                               if p.smoothing_enabled else "off")),
+                ("Invert polarity", "on" if p.invert_polarity else "off"),
+            ],
+            why=filt_why,
         ),
-        "baseline": (
-            f"Duration is {duration_s:.1f}s with drift score {drift_score:.2g}. "
-            f"Use {p.baseline_method} with lambda={p.baseline_lambda:.1e}."
+        "baseline": SectionAdvice(
+            headline=base_headline,
+            settings=[
+                ("Method", str(p.baseline_method)),
+                ("Lambda", f"{p.baseline_lambda:.1e}"),
+                ("diff_order", f"{p.baseline_diff_order}"),
+                ("max_iter", f"{p.baseline_max_iter}"),
+            ],
+            why=base_why,
         ),
-        "output": (
-            f"{output_reason} Rolling 30s correlations: median={_format_metric(rolling.get('median', float('nan')))}, "
-            f"negative windows={frac_neg * 100.0:.0f}%, strong negative={strong_neg * 100.0:.0f}%."
+        "output": SectionAdvice(
+            headline=out_headline,
+            settings=(
+                [("Output mode", str(p.output_mode)), ("Reference fit", str(p.reference_fit))]
+                + ([("Band window", f"{p.band_limited_reference_window_s:.0f} s")]
+                   if p.output_mode == BAND_LIMITED_INVERTED_ISO_MODE else [])
+            ),
+            why=out_why,
         ),
-        "qc": "Verify by comparing non-motion dFF, recommended output, and event-aligned averages before exporting a full batch.",
+        "qc": SectionAdvice(
+            headline="Check the result before you export a whole batch.",
+            settings=[],
+            why=[
+                "Compare the recommended output against a plain non-motion dFF: if the transients "
+                "survive the correction, the correction is doing its job.",
+                "Look at an event-aligned average too - real responses stay put when the "
+                "preprocessing changes, artifacts do not.",
+            ],
+        ),
     }
+    sections = {key: adv.as_text() for key, adv in advice.items()}
     warnings: List[str] = []
     if has_reference and np.isfinite(raw_corr) and np.isfinite(hp_corr) and np.sign(raw_corr) != np.sign(hp_corr):
         warnings.append("Slow drift and fast reference coupling have opposite signs.")
@@ -2585,6 +2747,7 @@ def recommend_preprocessing_settings(
         confidence=confidence,
         summary=summary,
         sections=sections,
+        advice=advice,
         metrics=metrics,
         warnings=warnings,
     )
