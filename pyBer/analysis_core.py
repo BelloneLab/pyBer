@@ -853,6 +853,7 @@ def build_processed_metadata(
         "notes": sensor.notes,
         "paper_url": sensor.paper_url,
         "source": sensor.source,
+        "kinetics_context": sensor.kinetics_context,
         "trace_check": sensor_check if isinstance(sensor_check, dict) else {},
     }
 
@@ -2450,6 +2451,9 @@ def recommend_preprocessing_settings(
                 ("Target", sensor.target),
                 ("Expected direction", sensor.direction),
                 ("Isobestic", sensor.isobestic_nm),
+                ("Rise", sensor.rise),
+                ("Decay", sensor.decay),
+                ("Kinetics basis", sensor.kinetics_context or sensor.source),
                 ("Paper", sensor.source),
             ],
             why=[
@@ -2720,6 +2724,8 @@ def recommend_preprocessing_settings(
             f"{sensor.recommended_fs_hz:.0f} Hz and the low-pass near "
             f"{sensor.recommended_lowpass_hz:.3g} Hz when the raw file allows it."
         )
+        if sensor.kinetics_context:
+            bandwidth_text += f" Kinetics basis: {sensor.kinetics_context}"
     else:
         bandwidth_text = (
             f"{p.lowpass_hz:.3g} Hz sits below the {p.target_fs_hz / 2.0:.0f} Hz Nyquist limit "
@@ -2802,6 +2808,7 @@ def recommend_preprocessing_settings(
                 ("Isobestic", f"{sensor.isobestic_nm} nm"),
                 ("Rise", sensor.rise),
                 ("Decay", sensor.decay),
+                ("Kinetics basis", sensor.kinetics_context or sensor.source),
                 ("Recommended Fs", f"{sensor.recommended_fs_hz:.0f} Hz"),
                 ("Recommended LP", f"{sensor.recommended_lowpass_hz:.3g} Hz"),
             ],
@@ -2896,6 +2903,9 @@ def recommend_preprocessing_settings(
             "family": sensor.family,
             "target": sensor.target,
             "direction": sensor.direction,
+            "rise": sensor.rise,
+            "decay": sensor.decay,
+            "kinetics_context": sensor.kinetics_context,
             "trace_check": sensor_check if isinstance(sensor_check, dict) else {},
         },
     }

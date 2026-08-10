@@ -42,6 +42,22 @@ class SensorRegistryTests(unittest.TestCase):
         for expected in ("Calcium", "Dopamine", "Serotonin", "Norepinephrine", "Glutamate"):
             self.assertIn(expected, families)
 
+    def test_registry_has_precise_kinetic_values_and_context(self):
+        j8f = sr.get_sensor("jgcamp8f")
+        self.assertIn("7.1", j8f.rise)
+        self.assertIn("67.4", j8f.decay)
+        self.assertIn("cultured neuron", j8f.kinetics_context)
+
+        dlight = sr.get_sensor("dlight12")
+        self.assertIn("10 ms", dlight.rise)
+        self.assertIn("100 ms", dlight.decay)
+        self.assertIn("sensor speed", dlight.kinetics_context)
+
+        ach = sr.get_sensor("grabach30")
+        self.assertIn("0.09", ach.rise)
+        self.assertIn("0.91", ach.decay)
+        self.assertIn("sensor characterization", ach.kinetics_context)
+
     def test_trace_check_detects_sensor_polarity_mismatch(self):
         t = np.arange(0.0, 20.0, 0.02)
         upward = np.sin(2.0 * np.pi * 0.2 * t)
@@ -97,6 +113,8 @@ class SensorRegistryTests(unittest.TestCase):
         self.assertIsNotNone(sidecar)
         self.assertEqual(sidecar["sensor"]["id"], "dlight12")
         self.assertEqual(sidecar["sensor"]["name"], "dLight1.2")
+        self.assertIn("10 ms", sidecar["sensor"]["rise"])
+        self.assertIn("kinetics_context", sidecar["sensor"])
         self.assertIn("trace_check", sidecar["sensor"])
 
 

@@ -99,9 +99,9 @@ ATP, histamine, oxytocin, and GRAB neuropeptide sensors.
 
 Each row records the sensor family, target, color, expected fluorescence
 direction, excitation, isobestic or control wavelength, emission, rise and decay
-notes, affinity, dynamic range, recommended sampling rate, recommended
-low-pass cutoff, source, and a paper link. Click **Open paper** from the dialog
-to open the source in your browser.
+values, a kinetics basis note, affinity, dynamic range, recommended sampling
+rate, recommended low-pass cutoff, source, and a paper link. Click **Open paper**
+from the dialog to open the source in your browser.
 
 After a sensor is selected:
 

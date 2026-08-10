@@ -1,8 +1,8 @@
 # sensor_registry.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from dataclasses import dataclass, replace
+from typing import Dict, List
 
 import numpy as np
 
@@ -29,6 +29,7 @@ class SensorInfo:
     notes: str
     paper_url: str
     source: str
+    kinetics_context: str = ""
 
 
 SENSOR_UNKNOWN = "unspecified"
@@ -778,8 +779,8 @@ SENSORS: List[SensorInfo] = [
         20.0,
         4.0,
         "N/OFQ opioid peptide sensor. In vivo fiber photometry validates slow endogenous peptide dynamics.",
-        "https://pmc.ncbi.nlm.nih.gov/articles/PMC11199706/",
-        "Development of NOPLight, 2024",
+        "https://www.nature.com/articles/s41467-024-49712-0",
+        "Zhou et al. NOPLight, 2024",
     ),
     _s(
         "grabado10",
@@ -1022,6 +1023,383 @@ SENSORS: List[SensorInfo] = [
         "Patriarchi lab expanded dLight palette",
     ),
 ]
+
+
+_KINETIC_OVERRIDES: Dict[str, Dict[str, str]] = {
+    "gcamp3": {
+        "rise": "t1/2 rise 83 +/- 2 ms",
+        "decay": "t1/2 decay 610 +/- 32 ms",
+        "kinetics_context": (
+            "Cultured hippocampal slice AP response from Tian et al. GCaMP3 work; "
+            "bulk photometry events can be broader."
+        ),
+    },
+    "gcamp6f": {
+        "rise": "tau_rise 50-100 ms",
+        "decay": "tau_decay 200-300 ms",
+        "kinetics_context": (
+            "Simultaneous spikes/imaging estimates for 1-5 AP GCaMP6f events; "
+            "population photometry and brain temperature can broaden decay."
+        ),
+    },
+    "gcamp6m": {
+        "rise": "intermediate 6f/6s, assay dependent",
+        "decay": "t1/2 decay ~0.73 s at 37 C",
+        "kinetics_context": (
+            "GCaMP6m is the middle 6-series variant. A dopamine-neuron imaging benchmark "
+            "reported median half-life near 0.725 s at 37 C, but rise values vary by preparation."
+        ),
+    },
+    "gcamp6s": {
+        "rise": "tau_rise 150-200 ms",
+        "decay": "tau_decay ~750 ms",
+        "kinetics_context": (
+            "Slow-sensitive GCaMP6 estimate from simultaneous spikes/imaging reports for "
+            "multi-AP events; fiber photometry can be slower."
+        ),
+    },
+    "jgcamp7f": {
+        "rise": "1AP half-rise ~25-27 ms",
+        "decay": "1AP half-decay ~180 ms; 10AP ~520 ms",
+        "kinetics_context": (
+            "Janelia/Dana jGCaMP7 measurements. Exact decay depends on 1AP versus train "
+            "and cultured screen versus in vivo single-cell assay."
+        ),
+    },
+    "jgcamp7s": {
+        "rise": "1AP half-rise ~56 ms",
+        "decay": "10AP half-decay ~1.69 s",
+        "kinetics_context": (
+            "Dana et al. jGCaMP7s measurements. This is a high-SNR slow variant, so "
+            "photometry peaks should not be treated as millisecond timing markers."
+        ),
+    },
+    "jgcamp8f": {
+        "rise": "half-rise 7.1 +/- 0.74 ms",
+        "decay": "half-decay 67.4 +/- 11.2 ms",
+        "kinetics_context": (
+            "Janelia field-stimulated cultured neuron screen, 1 AP at 80 Hz context; "
+            "in vivo fiber photometry is release and population filtered."
+        ),
+    },
+    "jgcamp8m": {
+        "rise": "half-rise 7.1 +/- 0.61 ms",
+        "decay": "half-decay 118.3 +/- 13.2 ms",
+        "kinetics_context": (
+            "Janelia field-stimulated cultured neuron screen, 1 AP at 80 Hz context; "
+            "8m trades fast rise for slower decay and better sensitivity than 8f."
+        ),
+    },
+    "jgcamp8s": {
+        "rise": "half-rise 10.1 +/- 0.86 ms",
+        "decay": "half-decay 306.7 +/- 32.2 ms",
+        "kinetics_context": (
+            "Janelia field-stimulated cultured neuron screen, 1 AP at 80 Hz context; "
+            "8s is sensitive but its decay is still calcium-limited."
+        ),
+    },
+    "jrgeco1a": {
+        "rise": "2AP half-rise similar to GCaMP6f",
+        "decay": "2AP half-decay similar to GCaMP6s",
+        "kinetics_context": (
+            "Dana et al. report jRGECO1a rise/decay comparable to GCaMP6f/GCaMP6s, "
+            "not one universal fiber-photometry tau."
+        ),
+    },
+    "dlight11": {
+        "rise": "on ~10 ms",
+        "decay": "off ~100 ms",
+        "kinetics_context": (
+            "dLight1 family in vitro kinetics. In vivo photometry peaks are additionally "
+            "shaped by dopamine release, uptake, and optical averaging."
+        ),
+    },
+    "dlight12": {
+        "rise": "on ~10 ms",
+        "decay": "off ~100 ms",
+        "kinetics_context": (
+            "dLight1.1/1.2 family kinetics from Patriarchi et al.; treat 10/100 ms "
+            "as sensor speed, not guaranteed in vivo event width."
+        ),
+    },
+    "dlight13b": {
+        "rise": "peak ~10 ms single-stim; ~45 ms 2-stim",
+        "decay": "tau ~120 ms single; 182 +/- 44 ms 2-stim",
+        "kinetics_context": (
+            "dLight1.3b hotspot line-scan measurements. Bulk fiber photometry may be "
+            "slower because it averages release sites and uptake."
+        ),
+    },
+    "rdlight1": {
+        "rise": "tau_on 126 +/- 15 ms",
+        "decay": "tau_off 320 +/- 42 ms",
+        "kinetics_context": (
+            "Expanded dLight palette paper measured RdLight1 rise and decay by fitting "
+            "the average response; red-channel controls must be validated separately."
+        ),
+    },
+    "grabda1m": {
+        "rise": "tau_on ~60 ms",
+        "decay": "tau_off ~0.7 s",
+        "kinetics_context": (
+            "First-generation GRAB-DA medium-affinity values from rapid DA application "
+            "and slice/cell characterization."
+        ),
+    },
+    "grabda1h": {
+        "rise": "tau_on ~130 ms",
+        "decay": "tau_off ~2.5 s",
+        "kinetics_context": (
+            "First-generation high-affinity GRAB-DA is slower off than GRAB-DA1m, "
+            "consistent with tighter ligand binding."
+        ),
+    },
+    "grabda2m": {
+        "rise": "tau_on ~80 ms",
+        "decay": "tau_off ~0.6-3 s",
+        "kinetics_context": (
+            "Dual-color GRAB-DA comparison reports roughly 80 ms on kinetics and "
+            "0.6-3 s off kinetics across affinity variants."
+        ),
+    },
+    "grabda2h": {
+        "rise": "tau_on ~80 ms",
+        "decay": "tau_off ~0.6-3 s",
+        "kinetics_context": (
+            "Dual-color GRAB-DA comparison reports roughly 80 ms on kinetics and "
+            "0.6-3 s off kinetics across affinity variants; high-affinity traces can linger."
+        ),
+    },
+    "grab5ht10": {
+        "rise": "tau_on ~0.2 s",
+        "decay": "tau_off ~3.1 s",
+        "kinetics_context": (
+            "GRAB-5HT1.0 response to 5-HT application; stimulation-evoked tissue "
+            "decay also reflects transporter clearance."
+        ),
+    },
+    "grab5ht30": {
+        "rise": "rise ~0.25 s",
+        "decay": "decay ~1.39 s",
+        "kinetics_context": (
+            "GRAB5HT3.0 hippocampal photometry report gives a shorter rise than decay; "
+            "exact time course still depends on region and SERT."
+        ),
+    },
+    "rgrab5ht30": {
+        "rise": "subsecond, variant dependent",
+        "decay": "seconds to tens of seconds in vivo",
+        "kinetics_context": (
+            "Improved red GRAB-5HT variants have assay-specific kinetics; red in vivo "
+            "washout and endogenous release can be much slower than sensor binding."
+        ),
+    },
+    "sdarken": {
+        "rise": "<1 s response in patch-clamp fluorometry",
+        "decay": "tau_off 1.24 s in in vivo fit",
+        "kinetics_context": (
+            "sDarken is a darkening 5-HT sensor. The 1.24 s value is an in vivo "
+            "movement-stop fluorescence decay fit, not a universal ligand-off constant."
+        ),
+    },
+    "grabne1m": {
+        "rise": "subsecond, exact tau assay dependent",
+        "decay": "subsecond to seconds, exact tau assay dependent",
+        "kinetics_context": (
+            "Original GRAB-NE reports high temporal resolution, but comparable absolute "
+            "on/off constants are not consistently standardized across registry sources."
+        ),
+    },
+    "grabne2m": {
+        "rise": "tau_on 0.12 s",
+        "decay": "tau_off 1.72 s",
+        "kinetics_context": (
+            "GRAB-NE2m next-generation characterization. GRAB-NE2h reports similar "
+            "on kinetics and tau_off around 1.93 s."
+        ),
+    },
+    "nlightg": {
+        "rise": "about 8x faster than GRAB-NE",
+        "decay": "about 3x faster than GRAB-NE",
+        "kinetics_context": (
+            "nLightG paper reports relative speed improvement over GRAB-NE; absolute "
+            "in vivo photometry kinetics remain dominated by NE clearance."
+        ),
+    },
+    "grabach30": {
+        "rise": "tau_on ~0.09 s",
+        "decay": "tau_off ~0.91 s",
+        "kinetics_context": (
+            "GRAB-ACh3.0 sensor characterization. Endogenous stimulation protocols can "
+            "show slower decay if acetylcholine clearance is limiting."
+        ),
+    },
+    "iachsnfr": {
+        "rise": "tau_on 280 +/- 32 ms",
+        "decay": "tau_off 762 +/- 75 ms",
+        "kinetics_context": (
+            "iAChSnFR activation and inactivation constants from the original sensor "
+            "characterization/preprint assay; in vivo waveforms remain release dependent."
+        ),
+    },
+    "iglusnfr": {
+        "rise": "fast synaptic reporter, variant specific",
+        "decay": "10-100x slower than glutamate lifetime",
+        "kinetics_context": (
+            "SF-iGluSnFR has faster fluorescence than calcium indicators, but synaptic "
+            "optical decays vary strongly with expression, localization, and uptake."
+        ),
+    },
+    "iglusnfr3": {
+        "rise": "1AP rise 18.9 +/- 0.5 ms",
+        "decay": "decay tau <30 ms benchmark",
+        "kinetics_context": (
+            "iGluSnFR3.v857 cultured-neuron field stimulation reports faster 1AP rise "
+            "than WT; later benchmarks put iGluSnFR3 decay near 29 ms."
+        ),
+    },
+    "igabasnfr": {
+        "rise": "slower than glutamate, assay dependent",
+        "decay": "paper and expression dependent",
+        "kinetics_context": (
+            "Original iGABASnFR kinetics are harder to summarize with one tau because "
+            "tissue GABA clearance and sensor expression strongly shape decay."
+        ),
+    },
+    "igabasnfr2": {
+        "rise": "rise 72 +/- 8 ms",
+        "decay": "tau_off ~73 ms class",
+        "kinetics_context": (
+            "iGABASnFR2 screening/eLife report; alternate 10-AP tests report about "
+            "38 +/- 10 ms rise, so pyBer treats it as moderate-bandwidth."
+        ),
+    },
+    "grabecb20": {
+        "rise": "tau_rise ~1.0 s",
+        "decay": "tau_decay ~6.3 s",
+        "kinetics_context": (
+            "GRAB-eCB2.0 in vivo/slice seizure model fit. Endocannabinoid events are "
+            "seconds scale compared with monoamine sensors."
+        ),
+    },
+    "oxlight1": {
+        "rise": "subsecond activation, assay dependent",
+        "decay": "seconds, release/clearance dependent",
+        "kinetics_context": (
+            "OxLight1 supports fast orexin detection for a neuropeptide sensor, but the "
+            "published in vivo photometry traces should be interpreted on behavior timescales."
+        ),
+    },
+    "klight": {
+        "rise": "seconds, ligand and variant dependent",
+        "decay": "tens of seconds to minutes",
+        "kinetics_context": (
+            "kLight variants differ in off kinetics; published dynorphin measurements "
+            "reflect slow peptide diffusion and clearance as much as sensor binding."
+        ),
+    },
+    "noplight": {
+        "rise": "tau_on 595 +/- 69 ms",
+        "decay": "tau_off 30-60 s in tissue",
+        "kinetics_context": (
+            "NOPLight activation measured with direct N/OFQ application; tissue off "
+            "kinetics were 30.9 +/- 4.5 to 53.1 +/- 6.6 s across concentrations."
+        ),
+    },
+    "grabado10": {
+        "rise": "in vivo Ado rise ~30 s reported",
+        "decay": "seconds to tens of seconds, ENT dependent",
+        "kinetics_context": (
+            "GRAB-Ado reports slow extracellular adenosine dynamics in vivo; this row "
+            "uses biological release/clearance times because a universal sensor tau is not standardized."
+        ),
+    },
+    "iado": {
+        "rise": "seconds, cell-type and event dependent",
+        "decay": "seconds to tens of seconds, cell-type dependent",
+        "kinetics_context": (
+            "HypnoS/iAdo reports intracellular adenosine; seizure and sleep-wake kinetics "
+            "depend on cell type and metabolic pathway."
+        ),
+    },
+    "grabatp10": {
+        "rise": "tau_on ~28 ms",
+        "decay": "tau_off ~283 ms",
+        "kinetics_context": (
+            "GRAB-ATP1.0 rapid response kinetics from the Neuron sensor characterization; "
+            "extracellular ATP release itself can be slower in tissue."
+        ),
+    },
+    "grabha": {
+        "rise": "rise 0.3-0.6 s",
+        "decay": "decay 1.4-2.3 s",
+        "kinetics_context": (
+            "GRAB-HA histamine sensor characterization reports this rise/decay range; "
+            "sleep-wake photometry can be slower due to state dynamics."
+        ),
+    },
+    "ot10": {
+        "rise": "tau_on 480 +/- 84 ms",
+        "decay": "seconds, compartment dependent",
+        "kinetics_context": (
+            "OT1.0 has a reported subsecond on constant in slice assays. Decay depends "
+            "on compartment, stimulus train, and peptide clearance."
+        ),
+    },
+    "grabnp_sst": {
+        "rise": "tau_on 300-400 ms class",
+        "decay": "tau_off 3-12 s class",
+        "kinetics_context": (
+            "GRAB neuropeptide toolkit reports general on/off ranges for peptide sensors; "
+            "individual ligand/receptor rows should be validated experimentally."
+        ),
+    },
+    "grabnp_crf": {
+        "rise": "tau_on 300-400 ms class",
+        "decay": "tau_off 3-12 s class",
+        "kinetics_context": (
+            "GRAB neuropeptide toolkit reports general on/off ranges for peptide sensors; "
+            "CRF release measurements can be behavior and stress-state dependent."
+        ),
+    },
+    "grabnp_cck": {
+        "rise": "tau_on 300-400 ms class",
+        "decay": "tau_off 3-12 s class",
+        "kinetics_context": (
+            "GRAB neuropeptide toolkit reports general on/off ranges for peptide sensors; "
+            "CCK release should be interpreted on slow neuromodulatory timescales."
+        ),
+    },
+    "grabnp_npy": {
+        "rise": "tau_on 300-400 ms class",
+        "decay": "tau_off 3-12 s class",
+        "kinetics_context": (
+            "GRAB neuropeptide toolkit kinetics are the best comparable prior; GRAB-NPY1.0 "
+            "papers emphasize activation and endogenous detection more than one universal tau."
+        ),
+    },
+    "grabnp_nts": {
+        "rise": "tau_on 300-400 ms class",
+        "decay": "tau_off 3-12 s class",
+        "kinetics_context": (
+            "GRAB neuropeptide toolkit reports general on/off ranges for peptide sensors; "
+            "NTS timing is expected to be seconds scale in bulk photometry."
+        ),
+    },
+    "grabnp_vip": {
+        "rise": "tau_on 300-400 ms class",
+        "decay": "tau_off 3-12 s class",
+        "kinetics_context": (
+            "GRAB neuropeptide toolkit reports general on/off ranges for peptide sensors; "
+            "VIP timing should not be analyzed with calcium-style sharp-event assumptions."
+        ),
+    },
+}
+
+for _idx, _sensor in enumerate(SENSORS):
+    _override = _KINETIC_OVERRIDES.get(_sensor.sensor_id)
+    if _override:
+        SENSORS[_idx] = replace(_sensor, **_override)
 
 
 SENSOR_BY_ID: Dict[str, SensorInfo] = {s.sensor_id: s for s in SENSORS}

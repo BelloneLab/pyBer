@@ -22,6 +22,7 @@ class SensorDialog(QtWidgets.QDialog):
         "Emission",
         "Rise",
         "Decay",
+        "Kinetics basis",
         "Affinity",
         "Dynamic range",
         "Rec Fs",
@@ -33,7 +34,7 @@ class SensorDialog(QtWidgets.QDialog):
     def __init__(self, current_sensor_id: str = SENSOR_UNKNOWN, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Fiber photometry sensors")
-        self.resize(1180, 680)
+        self.resize(1320, 720)
         self._sensors: List[SensorInfo] = all_sensors()
         self._selected_sensor_id = str(current_sensor_id or SENSOR_UNKNOWN)
 
@@ -176,6 +177,7 @@ class SensorDialog(QtWidgets.QDialog):
             sensor.emission_nm,
             sensor.rise,
             sensor.decay,
+            sensor.kinetics_context,
             sensor.affinity,
             sensor.dynamic_range,
             f"{sensor.recommended_fs_hz:g} Hz",
@@ -191,7 +193,7 @@ class SensorDialog(QtWidgets.QDialog):
             for col, text in enumerate(values):
                 item = QtWidgets.QTableWidgetItem(str(text))
                 item.setData(QtCore.Qt.ItemDataRole.UserRole, sensor.sensor_id)
-                if col == 15:
+                if col == 16:
                     item.setForeground(QtGui.QBrush(QtGui.QColor("#9ac7ff")))
                 self.table.setItem(row, col, item)
 
@@ -233,6 +235,7 @@ class SensorDialog(QtWidgets.QDialog):
             f"Excitation: {sensor.excitation_nm} nm | Isobestic/control: {sensor.isobestic_nm} nm | "
             f"Emission: {sensor.emission_nm} nm<br>"
             f"Rise: {sensor.rise} | Decay: {sensor.decay} | Affinity: {sensor.affinity}<br>"
+            f"Kinetics basis: {sensor.kinetics_context or sensor.source}<br>"
             f"{sensor.notes}<br>"
             f"<a href=\"{link}\">{sensor.source}</a>"
         )
@@ -247,7 +250,7 @@ class SensorDialog(QtWidgets.QDialog):
             self.table.setRowHidden(row, bool(query and query not in haystack))
 
     def _on_item_double_clicked(self, item: QtWidgets.QTableWidgetItem) -> None:
-        if item.column() == 15:
+        if item.column() == 16:
             self._open_paper()
             return
         self.accept()

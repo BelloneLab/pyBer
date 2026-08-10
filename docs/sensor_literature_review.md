@@ -21,6 +21,43 @@ photometry number.
 - Sensor metadata is analysis metadata. pyBer stores the selected sensor and
   the trace-check result in the export sidecar and embedded HDF5 metadata.
 
+## Kinetic Precision Policy
+
+The sensor table now separates the compact rise/decay value from the
+experimental basis for that value. This is deliberate. A 10 ms dLight on-rate,
+a 300 ms jGCaMP8s half-decay, and a 30 s NOPLight tissue off-rate are all real
+numbers, but they answer different questions. The registry therefore records
+one short number for the GUI and a kinetics-basis note that says whether the
+number came from purified protein, cultured neurons, slice, rapid ligand
+application, or in vivo photometry.
+
+Representative values now stored in the app:
+
+- GCaMP3: t1/2 rise 83 +/- 2 ms, t1/2 decay 610 +/- 32 ms.
+- GCaMP6f: tau_rise 50-100 ms, tau_decay 200-300 ms for 1-5 AP style events.
+- GCaMP6s: tau_rise 150-200 ms, tau_decay about 750 ms.
+- jGCaMP8f: half-rise 7.1 +/- 0.74 ms, half-decay 67.4 +/- 11.2 ms.
+- jGCaMP8m: half-rise 7.1 +/- 0.61 ms, half-decay 118.3 +/- 13.2 ms.
+- jGCaMP8s: half-rise 10.1 +/- 0.86 ms, half-decay 306.7 +/- 32.2 ms.
+- dLight1.1/1.2: on about 10 ms, off about 100 ms.
+- RdLight1: tau_on 126 +/- 15 ms, tau_off 320 +/- 42 ms.
+- GRAB-DA1m: tau_on about 60 ms, tau_off about 0.7 s.
+- GRAB-DA1h: tau_on about 130 ms, tau_off about 2.5 s.
+- GRAB-DA2 family: tau_on about 80 ms, tau_off about 0.6-3 s across affinity variants.
+- GRAB-5HT1.0: tau_on about 0.2 s, tau_off about 3.1 s.
+- GRAB5HT3.0: rise about 0.25 s, decay about 1.39 s in a hippocampal photometry report.
+- sDarken: subsecond response by patch-clamp fluorometry, tau_off 1.24 s in an in vivo fit.
+- GRAB-NE2m: tau_on 0.12 s, tau_off 1.72 s.
+- GRAB-ACh3.0: tau_on about 0.09 s, tau_off about 0.91 s.
+- iAChSnFR: tau_on 280 +/- 32 ms, tau_off 762 +/- 75 ms from the sensor assay.
+- iGluSnFR3.v857: 1 AP rise 18.9 +/- 0.5 ms and a benchmark decay near 29 ms.
+- iGABASnFR2: rise 72 +/- 8 ms, with alternate 10 AP assays near 38 +/- 10 ms.
+- GRAB-eCB2.0: tau_rise about 1.0 s, tau_decay about 6.3 s.
+- NOPLight: tau_on 595 +/- 69 ms, tissue off kinetics around 30-60 s.
+- GRAB-ATP1.0: tau_on about 28 ms, tau_off about 283 ms.
+- GRAB-HA: rise 0.3-0.6 s, decay 1.4-2.3 s.
+- GRAB neuropeptide toolkit sensors: on kinetics around 300-400 ms and off kinetics around 3-12 s.
+
 ## Calcium Sensors
 
 GCaMP sensors remain the default activity reporters for many fiber photometry
@@ -98,7 +135,7 @@ Key sources:
 - GRAB-eCB2.0: Dong et al. 2021, Nature Biotechnology, https://pubmed.ncbi.nlm.nih.gov/34764491/
 - OxLight1: Duffet et al. 2022, Nature Methods, https://pmc.ncbi.nlm.nih.gov/articles/PMC8831244/
 - Opioid peptide sensors including kLight: Massengill et al. 2024, Nature Neuroscience, https://www.nature.com/articles/s41593-024-01697-1
-- NOPLight: https://pmc.ncbi.nlm.nih.gov/articles/PMC11199706/
+- NOPLight: https://www.nature.com/articles/s41467-024-49712-0
 - GRABAdo and in vivo adenosine work: https://www.pnas.org/doi/10.1073/pnas.2212387120
 - iAdo: https://www.nature.com/articles/s41467-025-59530-7
 - GRAB-ATP1.0: https://www.yulonglilab.org/pdfs/A%20sensitive%20GRAB%20sensor%20for%20detecting%20extracellular%20ATP%20in%20vitro%20and%20in%20vivo.pdf
