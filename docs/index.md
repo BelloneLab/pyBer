@@ -88,6 +88,40 @@ Each preprocessing card also receives a short explanation:
 - Output: why signal-only dFF, fitted-reference dFF, inverted isobestic fit, or
   band-limited inverted correction was selected.
 
+### Sensor library
+
+Use **Sensor** beside **Plot style** to select the expressed indicator before
+final preprocessing. The searchable sensor table includes calcium indicators
+(GCaMP3, GCaMP6, jGCaMP7, jGCaMP8, jRGECO), dopamine sensors (dLight and
+GRAB-DA variants), serotonin sensors (GRAB-5HT and sDarken), norepinephrine,
+acetylcholine, glutamate, GABA, endocannabinoid, orexin, opioid, adenosine,
+ATP, histamine, oxytocin, and GRAB neuropeptide sensors.
+
+Each row records the sensor family, target, color, expected fluorescence
+direction, excitation, isobestic or control wavelength, emission, rise and decay
+notes, affinity, dynamic range, recommended sampling rate, recommended
+low-pass cutoff, source, and a paper link. Click **Open paper** from the dialog
+to open the source in your browser.
+
+After a sensor is selected:
+
+- The top raw plot title changes from `raw signal` to the selected sensor name.
+- The recommendation engine caps target sampling rate and low-pass cutoff using
+  the selected sensor kinetics.
+- The auto-polarity check compares the raw trace direction with the expected
+  sensor response direction, including darkening sensors such as sDarken.
+- Export sidecars and embedded HDF5 metadata include the selected sensor, source
+  link, optical wavelengths, kinetics, and trace-check result.
+
+Brutal practical point: many sensor papers report kinetics under different
+conditions (cell culture, slice, one-photon imaging, two-photon imaging, or
+in vivo photometry). pyBer therefore uses conservative photometry-oriented
+recommendations and writes qualitative fields when a single universal number
+would be dishonest.
+
+See [Fiber Photometry Sensor Literature Review](sensor_literature_review.md)
+for the source-level review behind the registry.
+
 ### Output definitions
 
 pyBer exposes explicit output modes so exported traces are reproducible. Each

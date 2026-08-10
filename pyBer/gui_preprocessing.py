@@ -26,6 +26,7 @@ from analysis_core import (
     ARTIFACT_HANDLING_MODES,
     SMART_ARTIFACT_MODE,
 )
+from sensor_registry import SENSOR_UNKNOWN
 
 
 def _optimize_plot(w: pg.PlotWidget) -> None:
@@ -1766,6 +1767,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._help_texts = self._build_help_texts()
         self._config_state_exporter: Optional[Callable[[], Dict[str, object]]] = None
         self._config_state_importer: Optional[Callable[[Dict[str, object]], None]] = None
+        self._sensor_id = SENSOR_UNKNOWN
         self._build_ui()
         self._wire()
 
@@ -2989,6 +2991,22 @@ class ParameterPanel(QtWidgets.QGroupBox):
                     details.append(f"Recording: {float(duration):.1f}s at {float(fs):.2f} Hz.")
                 except Exception:
                     pass
+            sensor_meta = metrics.get("sensor")
+            if isinstance(sensor_meta, dict):
+                sensor_name = str(sensor_meta.get("name", "") or "").strip()
+                direction = str(sensor_meta.get("direction", "") or "").strip()
+                target = str(sensor_meta.get("target", "") or "").strip()
+                trace_check = sensor_meta.get("trace_check", {})
+                msg = str(trace_check.get("message", "") or "").strip() if isinstance(trace_check, dict) else ""
+                if sensor_name:
+                    sensor_line = f"Sensor: {sensor_name}"
+                    if target:
+                        sensor_line += f" ({target})"
+                    if direction:
+                        sensor_line += f", expected {direction} response."
+                    details.append(sensor_line)
+                if msg:
+                    details.append(msg)
         self.lbl_recommendation_details.setText(" ".join(details))
         self.btn_apply_recommendation.setEnabled(True)
 
@@ -3150,11 +3168,13 @@ class ParameterPanel(QtWidgets.QGroupBox):
             prominence_event_file_path=str(self._prominence_event_file_path or ""),
             prominence_show_peaks_overlay=bool(self.cb_prominence_show_peaks.isChecked()),
             invert_polarity=self.cb_invert.isChecked(),
+            sensor_id=str(self._sensor_id or SENSOR_UNKNOWN),
         )
 
     def set_params(self, params: ProcessingParams) -> None:
         if not params:
             return
+        self._sensor_id = str(getattr(params, "sensor_id", SENSOR_UNKNOWN) or SENSOR_UNKNOWN)
         self.cb_artifact.setChecked(bool(getattr(params, "artifact_detection_enabled", True)))
         artifact_mode = str(params.artifact_mode)
         if artifact_mode == "Global MAD (dx)":
@@ -3222,6 +3242,15 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._update_output_controls()
         self._update_smoothing_controls(emit_signal=False)
         self._update_section_summaries()
+
+    def set_sensor_id(self, sensor_id: str, emit_signal: bool = True) -> None:
+        """Set the selected sensor while keeping the visual controls unchanged."""
+        self._sensor_id = str(sensor_id or SENSOR_UNKNOWN)
+        if emit_signal:
+            self.paramsChanged.emit()
+
+    def sensor_id(self) -> str:
+        return str(self._sensor_id or SENSOR_UNKNOWN)
 
     def set_fs_info(self, fs_actual: float, fs_target: float, fs_used: float) -> None:
         self.lbl_fs.setText(f"FS: actual={fs_actual:.2f} Hz -> used={fs_used:.2f} Hz (target={fs_target:.2f})")
@@ -4091,7 +4120,7 @@ class PlotDashboard(QtWidgets.QWidget):
         dio_name = _first_not_none(kwargs, "dio_name", "digital_name", "trigger_name", default="") or ""
         self._set_dio(np.asarray(dio_time, float), dio, str(dio_name))
 
-        title = _first_not_none(kwargs, "title", "file_label")
+        title = _first_not_none(kwargs, "title", "file_label", "sensor_label", "raw_label")
         if title is not None:
             self.set_title(str(title))
 
@@ -4232,11 +4261,13 @@ class PlotDashboard(QtWidgets.QWidget):
             raw_dio_time = raw_t
 
         kept_xrange = self.current_xrange() if preserve_view else None
+        raw_title = str(getattr(processed, "sensor_label", "") or "raw signal")
         self.show_raw(
             raw_t, raw_signal, raw_reference,
             dio=raw_dio, dio_time=raw_dio_time, dio_name=processed.dio_name,
             thr_hi=raw_thr_hi, thr_lo=raw_thr_lo,
             ref_thr_hi=raw_ref_thr_hi, ref_thr_lo=raw_ref_thr_lo,
+            title=raw_title,
             preserve_view=preserve_view,
         )
         self.show_processing(
@@ -4326,4 +4357,3 @@ class PlotDashboard(QtWidgets.QWidget):
                 self._prom_baseline_regions.append(region)
             except Exception:
                 continue
-

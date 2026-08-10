@@ -130,6 +130,7 @@ from analysis_core import (
     _lowpass_sos,
     coerce_time_value,
 )
+from sensor_registry import SENSOR_UNKNOWN, get_sensor
 from gui_preprocessing import (
     FileQueuePanel,
     ParameterPanel,
@@ -138,6 +139,7 @@ from gui_preprocessing import (
     ArtifactPanel,
     AdvancedOptionsDialog,
 )
+from gui_sensors import SensorDialog
 from gui_postprocessing import PostProcessingPanel
 from numeric_controls import install_spinbox_scrubbers
 from onboarding import (
@@ -2416,6 +2418,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_workflow_qc = QtWidgets.QPushButton("QC")
         self.btn_workflow_export = QtWidgets.QPushButton("Export")
         self.btn_plot_style = QtWidgets.QPushButton("Plot style")
+        self.btn_sensor = QtWidgets.QPushButton("Sensor")
+        self.btn_sensor.setToolTip("Select the expressed photometry sensor")
         self.btn_toggle_data = QtWidgets.QToolButton(); self.btn_toggle_data.setText("Data")
         self.btn_toggle_data.setCheckable(True)
         self.btn_toggle_data.setChecked(True)
@@ -2428,10 +2432,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_workflow_qc,
             self.btn_workflow_export,
             self.btn_plot_style,
+            self.btn_sensor,
         ):
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
             b.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
-        for b in (self.btn_workflow_artifacts, self.btn_workflow_qc, self.btn_plot_style):
+        for b in (self.btn_workflow_artifacts, self.btn_workflow_qc, self.btn_plot_style, self.btn_sensor):
             b.setProperty("class", "blueSecondarySmall")
 
         self.menu_plot_style = QtWidgets.QMenu(self.btn_plot_style)
@@ -2543,6 +2548,7 @@ class MainWindow(QtWidgets.QMainWindow):
         transport_layout.addWidget(self.btn_workflow_export)
         transport_layout.addSpacing(8)
         transport_layout.addWidget(self.btn_plot_style)
+        transport_layout.addWidget(self.btn_sensor)
         transport_layout.addStretch(1)
         # Redundant duplicate: 'Detected artifacts' workflow button is covered
         # by the artifact-list rail button. Hide from layout but keep instance
@@ -2681,6 +2687,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_workflow_artifacts.clicked.connect(self._toggle_artifacts_panel)
         self.btn_workflow_qc.clicked.connect(self._run_qc_dialog)
         self.btn_workflow_export.clicked.connect(self._export_selected_or_all)
+        self.btn_sensor.clicked.connect(self._open_sensor_dialog)
 
         # Section popup controls
         self._setup_section_popups()
@@ -2715,6 +2722,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plots.set_artifact_overlay_visible(self.param_panel.artifact_overlay_visible())
         self.plots.set_artifact_thresholds_visible(True)
         self._update_plot_status()
+        self._update_sensor_button()
         self.setAcceptDrops(True)
 
         # ----- UX polish: toasts, dirty-title, shortcuts, tutorial -----
@@ -4601,6 +4609,7 @@ class MainWindow(QtWidgets.QMainWindow):
             params = state.get("params")
             if isinstance(params, dict):
                 self.param_panel.set_params(ProcessingParams.from_dict(params))
+                self._update_sensor_button()
             if "artifact_overlay_visible" in state:
                 visible = bool(state.get("artifact_overlay_visible"))
                 self.param_panel.set_artifact_overlay_visible(visible)
@@ -4923,6 +4932,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.settings.setValue("params_json", json.dumps(d))
                 p = ProcessingParams.from_dict(d)
                 self.param_panel.set_params(p)
+                self._update_sensor_button()
                 self._update_plot_status(fs_target=float(p.target_fs_hz))
         except Exception:
             pass
@@ -5382,6 +5392,7 @@ class MainWindow(QtWidgets.QMainWindow):
             params = config.get("parameters")
             if isinstance(params, dict):
                 self.param_panel.set_params(ProcessingParams.from_dict(params))
+                self._update_sensor_button()
             if "artifact_detection_enabled" in config:
                 self.param_panel.cb_artifact.setChecked(bool(config.get("artifact_detection_enabled")))
             if "artifact_overlay_visible" in config:
@@ -6018,6 +6029,80 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._current_path or not self._current_channel:
             return None
         return (self._current_path, self._current_channel)
+
+    def _current_sensor_id(self) -> str:
+        panel = getattr(self, "param_panel", None)
+        if panel is not None and hasattr(panel, "sensor_id"):
+            try:
+                return str(panel.sensor_id() or SENSOR_UNKNOWN)
+            except Exception:
+                pass
+        try:
+            return str(getattr(panel.get_params(), "sensor_id", SENSOR_UNKNOWN) or SENSOR_UNKNOWN)
+        except Exception:
+            return SENSOR_UNKNOWN
+
+    def _current_sensor_label(self) -> str:
+        sensor = get_sensor(self._current_sensor_id())
+        return sensor.name if sensor.sensor_id != SENSOR_UNKNOWN else "raw signal"
+
+    def _update_sensor_button(self) -> None:
+        btn = getattr(self, "btn_sensor", None)
+        if btn is None:
+            return
+        sensor = get_sensor(self._current_sensor_id())
+        if sensor.sensor_id == SENSOR_UNKNOWN:
+            btn.setText("Sensor")
+            btn.setToolTip("Select the expressed photometry sensor")
+            return
+        short = sensor.name if len(sensor.name) <= 18 else sensor.name[:17] + "..."
+        btn.setText(f"Sensor: {short}")
+        btn.setToolTip(
+            f"{sensor.name}\n"
+            f"Target: {sensor.target}\n"
+            f"Expected response: {sensor.direction}\n"
+            f"Isobestic/control: {sensor.isobestic_nm}"
+        )
+
+    def _apply_sensor_to_current_metadata(self, sensor_id: str) -> None:
+        key = self._current_key()
+        if not key:
+            return
+        sensor = get_sensor(sensor_id)
+        md = dict(self._metadata_by_key.get(key, {}) or {})
+        if sensor.sensor_id == SENSOR_UNKNOWN:
+            for field in ("sensor", "sensor_id", "sensor_target", "sensor_family"):
+                md.pop(field, None)
+        else:
+            md["sensor"] = sensor.name
+            md["sensor_id"] = sensor.sensor_id
+            md["sensor_target"] = sensor.target
+            md["sensor_family"] = sensor.family
+        self._metadata_by_key[key] = md
+
+    def _open_sensor_dialog(self) -> None:
+        dlg = SensorDialog(current_sensor_id=self._current_sensor_id(), parent=self)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        sensor_id = dlg.selected_sensor_id()
+        try:
+            params = self.param_panel.get_params()
+            params.sensor_id = sensor_id
+            self.param_panel.set_params(params)
+        except Exception:
+            try:
+                self.param_panel.set_sensor_id(sensor_id, emit_signal=False)
+            except Exception:
+                pass
+        self._apply_sensor_to_current_metadata(sensor_id)
+        self._update_sensor_button()
+        self._record_pre_history_change()
+        self._refresh_preprocessing_recommendation()
+        self._update_raw_plot(preserve_view=True)
+        self._trigger_preview(preserve_view=True)
+        sensor = get_sensor(sensor_id)
+        label = "No sensor selected" if sensor.sensor_id == SENSOR_UNKNOWN else f"Sensor set to {sensor.name}"
+        self._show_status_message(label, 5000)
 
     def _focus_data_browser(self) -> None:
         if not self.file_panel.isVisible():
@@ -7648,7 +7733,8 @@ class MainWindow(QtWidgets.QMainWindow):
             raw465 = -np.asarray(raw465, float)
             raw405 = -np.asarray(raw405, float)
 
-        self.plots.set_title("raw signal")
+        raw_title = self._current_sensor_label()
+        self.plots.set_title(raw_title)
         self.plots.show_raw(
             time=trial.time,
             raw465=raw465,
@@ -7657,6 +7743,7 @@ class MainWindow(QtWidgets.QMainWindow):
             trig=trial.trigger,
             trig_label=self._current_trigger or "",
             manual_regions=manual,
+            title=raw_title,
             preserve_view=preserve_view,
         )
         self._update_plot_status(fs_actual=float(trial.sampling_rate), fs_target=float(params.target_fs_hz))
@@ -7681,6 +7768,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             self._trigger_preview(preserve_view=True)
             return
+        self._update_sensor_button()
         self._update_plot_status(fs_target=float(params.target_fs_hz))
         sig = self._artifact_param_signature(params)
         if self._last_artifact_params is None:

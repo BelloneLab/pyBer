@@ -27,6 +27,8 @@ try:
 except Exception:
     from pybaselines import Baseline
 
+from sensor_registry import SENSOR_UNKNOWN, assess_sensor_trace, get_sensor
+
 
 # =============================================================================
 # Data models and user-facing option lists
@@ -140,6 +142,7 @@ class ProcessingParams:
     # Signal polarity
     # -------------------------
     invert_polarity: bool = False
+    sensor_id: str = SENSOR_UNKNOWN
 
     # -------------------------
     # Reference fit options (used by "fitted ref" output modes)
@@ -387,6 +390,8 @@ class ProcessedTrial:
     output_label: str = ""
     output_context: str = ""
     outputs: Dict[str, np.ndarray] = field(default_factory=dict)
+    sensor_label: str = ""
+    sensor_check: Dict[str, Any] = field(default_factory=dict)
 
     artifact_regions_sec: Optional[List[Tuple[float, float]]] = None
     artifact_regions_auto_sec: Optional[List[Tuple[float, float]]] = None
@@ -827,6 +832,30 @@ def build_processed_metadata(
     else:
         processing = {}
 
+    sensor = get_sensor(str(processing.get("sensor_id", SENSOR_UNKNOWN)))
+    sensor_check = getattr(processed, "sensor_check", {}) or {}
+    sensor_meta = {
+        "id": sensor.sensor_id,
+        "name": sensor.name,
+        "family": sensor.family,
+        "target": sensor.target,
+        "color": sensor.color,
+        "direction": sensor.direction,
+        "excitation_nm": sensor.excitation_nm,
+        "emission_nm": sensor.emission_nm,
+        "isobestic_nm": sensor.isobestic_nm,
+        "rise": sensor.rise,
+        "decay": sensor.decay,
+        "affinity": sensor.affinity,
+        "dynamic_range": sensor.dynamic_range,
+        "recommended_fs_hz": _json_float(sensor.recommended_fs_hz),
+        "recommended_lowpass_hz": _json_float(sensor.recommended_lowpass_hz),
+        "notes": sensor.notes,
+        "paper_url": sensor.paper_url,
+        "source": sensor.source,
+        "trace_check": sensor_check if isinstance(sensor_check, dict) else {},
+    }
+
     return {
         "pyber_format": PYBER_FORMAT_KIND,
         "pyber_format_version": PYBER_FORMAT_VERSION,
@@ -853,6 +882,7 @@ def build_processed_metadata(
         "triggers": triggers,
         "output_context": str(getattr(processed, "output_context", "") or ""),
         "processing": processing,
+        "sensor": sensor_meta,
         "sync": (getattr(processed, "sync_report", {}) or {}),
     }
 
@@ -931,8 +961,15 @@ def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
 
     output_context = ""
     output_label = ""
+    sensor_label = ""
+    sensor_check: Dict[str, Any] = {}
     if sidecar is not None:
         output_context = str(sidecar.get("output_context", "") or "")
+        sensor_meta = sidecar.get("sensor", {})
+        if isinstance(sensor_meta, dict):
+            sensor_label = str(sensor_meta.get("name", "") or "")
+            check = sensor_meta.get("trace_check", {})
+            sensor_check = check if isinstance(check, dict) else {}
     if not output_context:
         for r in rows:
             if r and str(r[0]).strip().lower().startswith("# output_context:"):
@@ -1141,6 +1178,8 @@ def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
         output=out,
         output_label=output_label,
         output_context=output_context,
+        sensor_label=sensor_label,
+        sensor_check=sensor_check,
         sync_aligned_time=sync_aligned,
         sync_report={"status": "imported", "method": "imported time_aligned"} if sync_aligned is not None else {},
         artifact_regions_sec=None,
@@ -1260,6 +1299,14 @@ def load_processed_h5(path: str) -> Optional[ProcessedTrial]:
             if not output_label:
                 output_label = "Imported H5"
             output_context = str(gattrs.get("output_context", "") or "")
+            sensor_label = ""
+            sensor_check: Dict[str, Any] = {}
+            if isinstance(meta, dict):
+                sensor_meta = meta.get("sensor", {})
+                if isinstance(sensor_meta, dict):
+                    sensor_label = str(sensor_meta.get("name", "") or "")
+                    check = sensor_meta.get("trace_check", {})
+                    sensor_check = check if isinstance(check, dict) else {}
             fs_actual = float(gattrs.get("fs_actual", np.nan))
             fs_target = float(gattrs.get("fs_target", np.nan))
             fs_used = float(gattrs.get("fs_used", np.nan))
@@ -1295,6 +1342,8 @@ def load_processed_h5(path: str) -> Optional[ProcessedTrial]:
         output=out,
         output_label=output_label,
         output_context=output_context,
+        sensor_label=sensor_label,
+        sensor_check=sensor_check,
         sync_aligned_time=sync_aligned,
         sync_report=sync_report,
         artifact_regions_sec=None,
@@ -2385,6 +2434,7 @@ def recommend_preprocessing_settings(
     them, but the GUI lets the user decide whether to apply them.
     """
     p = ProcessingParams.from_dict(base_params.to_dict()) if hasattr(base_params, "to_dict") else ProcessingParams()
+    sensor = get_sensor(str(getattr(p, "sensor_id", SENSOR_UNKNOWN) or SENSOR_UNKNOWN))
 
     t = np.asarray(getattr(trial, "time", np.array([], float)), float)
     sig = np.asarray(getattr(trial, "signal_465", np.array([], float)), float)
@@ -2394,7 +2444,21 @@ def recommend_preprocessing_settings(
     n = min(t.size, sig.size)
     if n < 20:
         p.output_mode = "dFF (non motion corrected)"
+        sensor_adv = SectionAdvice(
+            headline=f"{sensor.name}: select the sensor before interpreting this trace.",
+            settings=[
+                ("Target", sensor.target),
+                ("Expected direction", sensor.direction),
+                ("Isobestic", sensor.isobestic_nm),
+                ("Paper", sensor.source),
+            ],
+            why=[
+                "The recording is too short for a trace-shape check, but pyBer will still store the selected sensor in exports.",
+                sensor.notes,
+            ],
+        )
         short_advice = {
+            "sensor": sensor_adv,
             "artifacts": SectionAdvice(
                 headline="Too few samples to judge the artifact burden.",
                 why=["Load a longer recording and the adviser will measure it."],
@@ -2418,7 +2482,7 @@ def recommend_preprocessing_settings(
             summary="Recording is too short for automatic recommendations.",
             sections={key: adv.as_text() for key, adv in short_advice.items()},
             advice=short_advice,
-            metrics={"n_samples": int(n)},
+            metrics={"n_samples": int(n), "sensor": {"id": sensor.sensor_id, "name": sensor.name}},
             warnings=["Too few samples for reliable automatic settings."],
         )
     t = t[:n]
@@ -2458,12 +2522,24 @@ def recommend_preprocessing_settings(
     sig_pos = _safe_quantile(sig_hp, 0.99, 0.0)
     sig_neg = -_safe_quantile(sig_hp, 0.01, 0.0)
     sig_median = float(np.nanmedian(sig[np.isfinite(sig)])) if np.isfinite(sig).any() else float("nan")
+    sensor_check = assess_sensor_trace(sensor.sensor_id, t, sig)
+    sensor_check_metrics = dict(sensor_check.get("metrics", {}) or {}) if isinstance(sensor_check, dict) else {}
+    expected_down = sensor.direction.lower().startswith("decrease")
+    sensor_pos_tail = float(sensor_check_metrics.get("positive_tail_z", sig_pos) or sig_pos)
+    sensor_neg_tail = float(sensor_check_metrics.get("negative_tail_z", sig_neg) or sig_neg)
+    sensor_direction_inverted = bool(
+        sensor.sensor_id != SENSOR_UNKNOWN
+        and (
+            (expected_down and sensor_pos_tail > max(1.75 * sensor_neg_tail, 2.0))
+            or ((not expected_down) and sensor_neg_tail > max(1.75 * sensor_pos_tail, 2.0))
+        )
+    )
     signal_inverted = bool(
         np.isfinite(sig_median)
         and sig_median < 0.0
         and sig_neg > max(1.25 * sig_pos, 3.0 * sig_scale)
     )
-    p.invert_polarity = signal_inverted
+    p.invert_polarity = bool(signal_inverted or sensor_direction_inverted)
 
     # Artifact burden from the same smart detector used by preprocessing.
     smart_probe = detect_artifacts_smart(
@@ -2488,11 +2564,15 @@ def recommend_preprocessing_settings(
     p.artifact_pad_s = float(_clip_float(max(0.25, 1.5 / fs), 0.10, 0.75))
     p.artifact_handling = "Interpolate" if artifact_fraction < 0.05 else "Strong local low-pass"
 
-    target_fs = float(fs if fs <= 100.0 else 100.0)
+    if sensor.sensor_id != SENSOR_UNKNOWN:
+        target_fs = min(float(fs), max(5.0, float(sensor.recommended_fs_hz)))
+    else:
+        target_fs = float(fs if fs <= 100.0 else 100.0)
     target_fs = float(max(1.0, round(target_fs, 1)))
     p.target_fs_hz = target_fs
     p.filter_order = 3
-    p.lowpass_hz = float(_clip_float(min(12.0, 0.40 * target_fs), 0.1, max(0.1, 0.45 * target_fs)))
+    lowpass_cap = float(sensor.recommended_lowpass_hz) if sensor.sensor_id != SENSOR_UNKNOWN else 12.0
+    p.lowpass_hz = float(_clip_float(min(lowpass_cap, 0.40 * target_fs), 0.1, max(0.1, 0.45 * target_fs)))
     noise_ratio = float(_mad(np.diff(sig_hp)) / max(_mad(sig_hp), 1e-12)) if sig_hp.size > 5 else 0.0
     p.smoothing_enabled = bool(fs >= 20.0 and noise_ratio > 1.8)
     p.smoothing_method = "Savitzky-Golay"
@@ -2568,16 +2648,34 @@ def recommend_preprocessing_settings(
     if p.output_mode == "dFF (non motion corrected)" and has_reference:
         confidence = min(confidence, 0.55)
 
-    polarity_text = (
-        "Signal polarity looks inverted (the trace sits below zero and its excursions point "
-        "down), so switch the full 465/405 inversion on."
-        if signal_inverted else
-        "Signal polarity looks normal (the trace sits above zero and its peaks point up), so "
-        "keep the full 465/405 inversion off."
-    )
+    if sensor_direction_inverted:
+        expected_word = "downward" if expected_down else "upward"
+        observed_word = "upward" if sensor_pos_tail > sensor_neg_tail else "downward"
+        polarity_text = (
+            f"{sensor.name} is expected to report {expected_word} biological events, but this "
+            f"trace is dominated by {observed_word} excursions. The adviser switches full "
+            f"465/405 polarity inversion on so the preview matches the selected sensor."
+        )
+    elif signal_inverted:
+        polarity_text = (
+            "Signal polarity looks electrically inverted (the trace sits below zero and its "
+            "excursions point down), so switch the full 465/405 inversion on."
+        )
+    elif sensor.sensor_id != SENSOR_UNKNOWN:
+        expected_word = "downward" if expected_down else "upward"
+        polarity_text = (
+            f"{sensor.name} expects {expected_word} biological events and the raw trace is "
+            "broadly compatible with that direction, so full 465/405 inversion stays off."
+        )
+    else:
+        polarity_text = (
+            "Signal polarity looks normal (the trace sits above zero and its peaks point up), "
+            "so keep the full 465/405 inversion off."
+        )
 
+    sensor_summary_prefix = f"{sensor.name}: " if sensor.sensor_id != SENSOR_UNKNOWN else ""
     summary = (
-        f"Recommended: {p.output_mode}. "
+        f"{sensor_summary_prefix}Recommended: {p.output_mode}. "
         f"Fs {fs:.2f} Hz, raw corr={_format_metric(raw_corr)}, "
         f"detrended corr={_format_metric(hp_corr)}, confidence={confidence:.0%}."
     )
@@ -2615,14 +2713,26 @@ def recommend_preprocessing_settings(
     ]
 
     filt_headline = (f"Resample to {p.target_fs_hz:.1f} Hz and low-pass at {p.lowpass_hz:.3g} Hz.")
+    if sensor.sensor_id != SENSOR_UNKNOWN:
+        bandwidth_text = (
+            f"{sensor.name} reports {sensor.target} with {sensor.rise} rise and {sensor.decay} "
+            f"decay. The recommendation therefore caps the target rate near "
+            f"{sensor.recommended_fs_hz:.0f} Hz and the low-pass near "
+            f"{sensor.recommended_lowpass_hz:.3g} Hz when the raw file allows it."
+        )
+    else:
+        bandwidth_text = (
+            f"{p.lowpass_hz:.3g} Hz sits below the {p.target_fs_hz / 2.0:.0f} Hz Nyquist limit "
+            "of that target rate, so nothing aliases. Generic sensor transients pass through "
+            "without assuming a specific reporter."
+        )
+
     filt_why = [
         (f"The file is sampled at {fs:.2f} Hz. Coming down to {p.target_fs_hz:.1f} Hz keeps "
          f"everything the sensor can actually report and makes the rest of the pipeline faster."
          if fs > p.target_fs_hz + 0.5 else
          f"The file is sampled at {fs:.2f} Hz, so the native rate is kept."),
-        f"{p.lowpass_hz:.3g} Hz sits below the {p.target_fs_hz / 2.0:.0f} Hz Nyquist limit of that "
-        f"target rate, so nothing aliases. Sensor transients rise over hundreds of milliseconds "
-        f"and pass through untouched.",
+        bandwidth_text,
         (f"Sample-to-sample jitter is {noise_ratio:.1f}x the size of the trace's own fluctuations, "
          f"so a {p.smoothing_window_s:.2f} s Savitzky-Golay window is worth switching on."
          if p.smoothing_enabled else
@@ -2660,8 +2770,43 @@ def recommend_preprocessing_settings(
             f"{art_pct:.2f}% of the samples are artifact"
             f"{'; robust fitting stops leftover spikes from tilting the fit.' if p.reference_fit.startswith('RLM') else '; above ~2% a robust fit would be the safer choice.'}"
         )
+        if sensor.sensor_id != SENSOR_UNKNOWN and "not a standard 405" in sensor.isobestic_nm.lower():
+            out_why.append(
+                f"{sensor.name} is listed as {sensor.color} with '{sensor.isobestic_nm}' for the "
+                "control wavelength. Treat any 405 correction as empirical unless your optical "
+                "setup validated that wavelength for this reporter."
+            )
+
+    sensor_headline = (
+        f"{sensor.name}: expected {sensor.direction} response for {sensor.target}."
+        if sensor.sensor_id != SENSOR_UNKNOWN else
+        "No sensor selected. pyBer is using generic photometry assumptions."
+    )
+    sensor_why = [
+        sensor.notes,
+        str(sensor_check.get("message", "Sensor check unavailable.") if isinstance(sensor_check, dict) else "Sensor check unavailable."),
+        (
+            f"Primary literature/source: {sensor.source}. The paper link is available in the "
+            "Sensor table and is stored in export metadata."
+        ),
+    ]
 
     advice: Dict[str, SectionAdvice] = {
+        "sensor": SectionAdvice(
+            headline=sensor_headline,
+            settings=[
+                ("Family", sensor.family),
+                ("Target", sensor.target),
+                ("Direction", sensor.direction),
+                ("Excitation", f"{sensor.excitation_nm} nm"),
+                ("Isobestic", f"{sensor.isobestic_nm} nm"),
+                ("Rise", sensor.rise),
+                ("Decay", sensor.decay),
+                ("Recommended Fs", f"{sensor.recommended_fs_hz:.0f} Hz"),
+                ("Recommended LP", f"{sensor.recommended_lowpass_hz:.3g} Hz"),
+            ],
+            why=sensor_why,
+        ),
         "artifacts": SectionAdvice(
             headline=art_headline,
             settings=[
@@ -2720,6 +2865,10 @@ def recommend_preprocessing_settings(
     warnings: List[str] = []
     if has_reference and np.isfinite(raw_corr) and np.isfinite(hp_corr) and np.sign(raw_corr) != np.sign(hp_corr):
         warnings.append("Slow drift and fast reference coupling have opposite signs.")
+    if isinstance(sensor_check, dict) and str(sensor_check.get("status", "")) == "warn":
+        msg = str(sensor_check.get("message", "") or "").strip()
+        if msg:
+            warnings.append(msg)
     if confidence < 0.50:
         warnings.append("Recommendation confidence is low. Inspect the raw and corrected traces manually.")
 
@@ -2741,6 +2890,14 @@ def recommend_preprocessing_settings(
         "signal_hp_mad": sig_scale,
         "noise_ratio": noise_ratio,
         "recommended_output": p.output_mode,
+        "sensor": {
+            "id": sensor.sensor_id,
+            "name": sensor.name,
+            "family": sensor.family,
+            "target": sensor.target,
+            "direction": sensor.direction,
+            "trace_check": sensor_check if isinstance(sensor_check, dict) else {},
+        },
     }
     return PreprocessingRecommendation(
         params=p,
@@ -3967,6 +4124,8 @@ class PhotometryProcessor:
         fs = float(trial.sampling_rate) if np.isfinite(trial.sampling_rate) else (
             1.0 / float(np.nanmedian(np.diff(t))) if t.size > 2 else np.nan
         )
+        sensor = get_sensor(str(getattr(params, "sensor_id", SENSOR_UNKNOWN) or SENSOR_UNKNOWN))
+        sensor_check = assess_sensor_trace(sensor.sensor_id, t, sig)
 
         # ---------------------------------------------------------------------
         # 2) Display envelope on raw 465 (computed pre-masking for user context)
@@ -4307,6 +4466,12 @@ class PhotometryProcessor:
             out = dff_sig
 
         context_parts = []
+        if sensor.sensor_id != SENSOR_UNKNOWN:
+            context_parts.append(f"Sensor: {sensor.name} ({sensor.target})")
+            if isinstance(sensor_check, dict) and str(sensor_check.get("status", "")) == "warn":
+                msg = str(sensor_check.get("message", "") or "").strip()
+                if msg:
+                    context_parts.append(f"Sensor check: {msg}")
         if np.any(mask):
             context_parts.append(f"Artifacts: {artifact_handling}")
             if smart_artifact_summary:
@@ -4396,6 +4561,8 @@ class PhotometryProcessor:
             output_label=mode,
             output_context=output_context,
             outputs={mode: np.asarray(out, float)} if out is not None else {},
+            sensor_label=(sensor.name if sensor.sensor_id != SENSOR_UNKNOWN else ""),
+            sensor_check=sensor_check if isinstance(sensor_check, dict) else {},
             artifact_regions_sec=final_regions,
             artifact_regions_auto_sec=auto_regions,
             artifact_regions_auto_core_sec=auto_core_regions,
