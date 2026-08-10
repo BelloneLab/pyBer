@@ -21,7 +21,9 @@ from analysis_core import (
     BASELINE_METHODS,
     REFERENCE_FIT_METHODS,
     SMOOTHING_METHODS,
+    ARTIFACT_DETECTION_MODES,
     ARTIFACT_HANDLING_MODES,
+    SMART_ARTIFACT_MODE,
 )
 
 
@@ -566,7 +568,7 @@ class ArtifactPanel(QtWidgets.QDialog):
         layout.setSpacing(10)
         table_min_height = 260
 
-        auto_group = QtWidgets.QGroupBox("Auto-detected (threshold)")
+        auto_group = QtWidgets.QGroupBox("Auto-detected artifacts")
         auto_group.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -579,7 +581,7 @@ class ArtifactPanel(QtWidgets.QDialog):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
-        self.table_auto.setHorizontalHeaderLabels(["ID", "Use", "Src", "Core", "Start", "End"])
+        self.table_auto.setHorizontalHeaderLabels(["ID", "Use", "Evidence", "Core", "Start", "End"])
         auto_header = self.table_auto.horizontalHeader()
         auto_header.setStretchLastSection(False)
         auto_header.setHighlightSections(False)
@@ -592,11 +594,13 @@ class ArtifactPanel(QtWidgets.QDialog):
         self.table_auto.setAlternatingRowColors(True)
         self.table_auto.setShowGrid(False)
         self.table_auto.setWordWrap(False)
-        for col, width in ((0, 36), (1, 44), (2, 48)):
+        for col, width in ((0, 36), (1, 44)):
             auto_header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Fixed)
             self.table_auto.setColumnWidth(col, width)
-        for col in (3, 4, 5):
-            auto_header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        auto_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for col, width in ((3, 110), (4, 78), (5, 78)):
+            auto_header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self.table_auto.setColumnWidth(col, width)
         auto_layout.addWidget(self.table_auto, 1)
         layout.addWidget(auto_group, 1)
 
@@ -761,8 +765,10 @@ class ArtifactPanel(QtWidgets.QDialog):
                 source = self._auto_sources[i - 1] if i - 1 < len(self._auto_sources) else ""
                 source_item = QtWidgets.QTableWidgetItem(source)
                 source_item.setFlags(source_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-                source_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                source_item.setToolTip("Channel that crossed its MAD envelope.")
+                source_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft)
+                source_item.setToolTip(
+                    source or "Detector evidence. Examples: amplitude, slope, curvature, dropout, or shared 405/465 evidence."
+                )
                 self.table_auto.setItem(r, 2, source_item)
 
                 core = self._auto_core_regions[i - 1] if i - 1 < len(self._auto_core_regions) else (a, b)
@@ -1548,9 +1554,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
     def _build_help_texts(self) -> Dict[str, str]:
         return {
             "artifact_mode": (
-                "Artifact detection mode uses the raw-signal MAD envelope shown on the plot.\n"
-                "- Global MAD: single threshold for the full trace (fast, stable).\n"
-                "- Adaptive MAD: threshold computed in sliding windows (handles drift)."
+                "Artifact detection mode.\n"
+                "- Smart multi-evidence: combines local Hampel residuals, slope shocks, curvature, dropouts, level shifts, and shared 405/465 evidence.\n"
+                "- Adaptive MAD: threshold computed in sliding windows.\n"
+                "- Global MAD: one robust threshold for the full trace."
             ),
             "artifact_handling": (
                 "How detected/manual artifact windows affect processing:\n"
@@ -1560,12 +1567,12 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 "- Do nothing: keep the samples unchanged; overlays still show detected artifacts."
             ),
             "mad_k": (
-                "MAD threshold (k) scales the visible raw-signal envelope.\n"
+                "Sensitivity threshold (k). In Smart mode it scales amplitude, slope, curvature, and level-shift gates.\n"
                 "Higher k = fewer artifacts flagged; lower k = more sensitive."
             ),
             "adaptive_window_s": (
-                "Adaptive window length in seconds for windowed MAD.\n"
-                "Shorter windows follow local noise; longer windows are smoother."
+                "Local robust window length in seconds.\n"
+                "In Smart mode this controls the local median and MAD context used to score artifacts."
             ),
             "artifact_pad_s": (
                 "Pad (seconds) added around detected artifacts.\n"
@@ -1775,7 +1782,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
             "Toggle detected artifact interval overlays on the raw plot."
         )
         self.combo_artifact = QtWidgets.QComboBox()
-        self.combo_artifact.addItems(["Global MAD (raw)", "Adaptive MAD (windowed)"])
+        self.combo_artifact.addItems(ARTIFACT_DETECTION_MODES)
         _compact_combo(self.combo_artifact, min_chars=6)
         self.combo_artifact_handling = QtWidgets.QComboBox()
         self.combo_artifact_handling.addItems(ARTIFACT_HANDLING_MODES)
@@ -2392,16 +2399,21 @@ class ParameterPanel(QtWidgets.QGroupBox):
         handling = self.combo_artifact_handling.currentText()
         if self.cb_artifact.isChecked():
             mode = self.combo_artifact.currentText()
-            method = "Adaptive MAD" if mode.startswith("Adaptive") else "Global MAD"
-            if mode.startswith("Adaptive"):
+            if mode == SMART_ARTIFACT_MODE:
                 summary = (
-                    f"{method}, k={self._fmt_num(self.spin_mad.value(), 2)}, "
+                    f"Smart, k={self._fmt_num(self.spin_mad.value(), 2)}, "
+                    f"window={self._fmt_num(self.spin_adapt_win.value(), 2)}s, "
+                    f"pad={self._fmt_num(self.spin_pad.value(), 2)}s, {handling}"
+                )
+            elif mode.startswith("Adaptive"):
+                summary = (
+                    f"Adaptive MAD, k={self._fmt_num(self.spin_mad.value(), 2)}, "
                     f"window={self._fmt_num(self.spin_adapt_win.value(), 2)}s, "
                     f"pad={self._fmt_num(self.spin_pad.value(), 2)}s, {handling}"
                 )
             else:
                 summary = (
-                    f"{method}, k={self._fmt_num(self.spin_mad.value(), 2)}, "
+                    f"Global MAD, k={self._fmt_num(self.spin_mad.value(), 2)}, "
                     f"pad={self._fmt_num(self.spin_pad.value(), 2)}s, {handling}"
                 )
         else:
@@ -2884,6 +2896,12 @@ class ParameterPanel(QtWidgets.QGroupBox):
         artifact_mode = str(params.artifact_mode)
         if artifact_mode == "Global MAD (dx)":
             artifact_mode = "Global MAD (raw)"
+        if artifact_mode == "Adaptive MAD (windowed dx)" or artifact_mode == "adaptive_mad":
+            artifact_mode = "Adaptive MAD (windowed)"
+        if artifact_mode == "global_mad":
+            artifact_mode = "Global MAD (raw)"
+        if artifact_mode not in ARTIFACT_DETECTION_MODES:
+            artifact_mode = SMART_ARTIFACT_MODE
         self.combo_artifact.setCurrentText(artifact_mode)
         self.combo_artifact_handling.setCurrentText(str(getattr(params, "artifact_handling", "Interpolate")))
         self.spin_mad.setValue(float(params.mad_k))
@@ -3107,7 +3125,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.btn_thresholds = QtWidgets.QPushButton("Thresholds: ON")
         self.btn_thresholds.setCheckable(True)
         self.btn_thresholds.setChecked(True)
-        self.btn_thresholds.setToolTip("Show the MAD envelopes used for artifact detection on both 465 and 405.")
+        self.btn_thresholds.setToolTip("Show the robust local envelopes used to visualize artifact detection on both 465 and 405.")
         for b in (
             self.btn_add_region,
             self.btn_clear_regions,

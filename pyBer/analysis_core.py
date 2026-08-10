@@ -12,7 +12,7 @@ import numpy as np
 import h5py
 
 from scipy.signal import butter, sosfiltfilt, resample_poly, savgol_filter, find_peaks
-from scipy.ndimage import uniform_filter1d, median_filter
+from scipy.ndimage import uniform_filter1d, median_filter, maximum_filter1d
 from PySide6 import QtCore  # for QRunnable signals
 
 # Optional: Lasso (requires scikit-learn). If unavailable, we fall back to OLS.
@@ -57,6 +57,13 @@ ARTIFACT_HANDLING_MODES = [
     "Do nothing",
 ]
 
+SMART_ARTIFACT_MODE = "Smart multi-evidence"
+ARTIFACT_DETECTION_MODES = [
+    SMART_ARTIFACT_MODE,
+    "Adaptive MAD (windowed)",
+    "Global MAD (raw)",
+]
+
 BAND_LIMITED_INVERTED_ISO_MODE = "dFF (motion corrected with band-limited inverted isobestic)"
 
 # Output modes
@@ -92,7 +99,7 @@ class ProcessingParams:
     # Artifact detection
     # -------------------------
     artifact_detection_enabled: bool = True
-    artifact_mode: str = "Global MAD (raw)"  # or "Adaptive MAD (windowed)"
+    artifact_mode: str = SMART_ARTIFACT_MODE
     artifact_handling: str = "Interpolate"
     mad_k: float = 8.0
     adaptive_window_s: float = 5.0
@@ -190,6 +197,23 @@ class PreprocessingRecommendation:
     sections: Dict[str, str] = field(default_factory=dict)
     metrics: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ArtifactDetectionResult:
+    """Structured result from the smart artifact detector."""
+    mask: np.ndarray
+    core_mask: np.ndarray
+    signal_core_mask: np.ndarray
+    reference_core_mask: np.ndarray
+    score: np.ndarray
+    signal_score: np.ndarray
+    reference_score: np.ndarray
+    regions: List[Tuple[float, float]] = field(default_factory=list)
+    core_regions: List[Tuple[float, float]] = field(default_factory=list)
+    region_sources: List[str] = field(default_factory=list)
+    region_scores: List[float] = field(default_factory=list)
+    summary: str = ""
 
 
 @dataclass
@@ -1481,6 +1505,18 @@ def _normalize_artifact_handling(value: object) -> str:
     return "Interpolate"
 
 
+def _normalize_artifact_mode(value: object) -> str:
+    text = str(value or "").strip()
+    low = text.lower()
+    if "smart" in low or "multi" in low:
+        return SMART_ARTIFACT_MODE
+    if low in {"adaptive_mad", "adaptive mad", "adaptive mad (windowed dx)"} or low.startswith("adaptive"):
+        return "Adaptive MAD (windowed)"
+    if low in {"global_mad", "global mad", "global mad (dx)"} or low.startswith("global"):
+        return "Global MAD (raw)"
+    return SMART_ARTIFACT_MODE
+
+
 def _strong_local_lowpass_artifacts(
     x: np.ndarray,
     mask: np.ndarray,
@@ -1794,6 +1830,443 @@ def detect_artifacts_adaptive(time: np.ndarray, x: np.ndarray, k: float, window_
     return _mask_outside_signal_envelope(t, y, hi, lo, pad_s)
 
 
+def _mask_runs_at_least(mask: np.ndarray, min_len: int) -> np.ndarray:
+    """Keep only True runs with at least min_len samples."""
+    m = np.asarray(mask, bool)
+    out = np.zeros_like(m, dtype=bool)
+    if m.size == 0:
+        return out
+    min_n = max(1, int(min_len))
+    idx = np.where(m)[0]
+    if idx.size == 0:
+        return out
+    start = int(idx[0])
+    prev = int(idx[0])
+    for raw_i in idx[1:]:
+        i = int(raw_i)
+        if i == prev + 1:
+            prev = i
+            continue
+        if prev - start + 1 >= min_n:
+            out[start:prev + 1] = True
+        start = i
+        prev = i
+    if prev - start + 1 >= min_n:
+        out[start:prev + 1] = True
+    return out
+
+
+def _expand_bool_mask_samples(mask: np.ndarray, radius: int) -> np.ndarray:
+    """Expand True samples by a fixed sample radius."""
+    m = np.asarray(mask, bool)
+    if m.size == 0 or int(radius) <= 0:
+        return m.copy()
+    width = int(radius) * 2 + 1
+    return uniform_filter1d(m.astype(float), size=width, mode="nearest") > 0.0
+
+
+def _local_median_mad(
+    y: np.ndarray,
+    fs: float,
+    window_s: float,
+    *,
+    min_window: int = 7,
+) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Rolling median and robust spread with floors to avoid brittle divisions."""
+    arr = np.asarray(y, float)
+    if arr.size == 0:
+        return arr.copy(), arr.copy(), 0
+    clean = interpolate_nans(arr)
+    if np.any(~np.isfinite(clean)):
+        fill = float(np.nanmedian(arr[np.isfinite(arr)])) if np.isfinite(arr).any() else 0.0
+        clean = np.where(np.isfinite(clean), clean, fill)
+    win = _window_samples_from_seconds(fs, window_s, minimum=min_window, require_odd=True)
+    win = min(max(int(win), min_window), max(min_window, int(clean.size) // 2 * 2 + 1))
+    if win >= clean.size:
+        center = np.full_like(clean, float(np.nanmedian(clean)), dtype=float)
+    else:
+        center = np.asarray(median_filter(clean, size=win, mode="nearest"), float)
+    dev = np.abs(clean - center)
+    if win >= clean.size:
+        local_mad = np.full_like(clean, _mad(dev), dtype=float)
+    else:
+        local_mad = np.asarray(median_filter(dev, size=win, mode="nearest"), float)
+    spread = 1.4826 * local_mad
+    finite_spread = spread[np.isfinite(spread) & (spread > 0)]
+    global_floor = _mad(clean - center)
+    if not np.isfinite(global_floor) or global_floor <= 0:
+        global_floor = _mad(clean)
+    if not np.isfinite(global_floor) or global_floor <= 0:
+        global_floor = float(np.nanstd(clean))
+    if not np.isfinite(global_floor) or global_floor <= 0:
+        global_floor = 1.0
+    local_floor = float(np.nanquantile(finite_spread, 0.20)) if finite_spread.size else global_floor
+    floor = max(1e-12, 0.10 * float(global_floor), 0.25 * float(local_floor))
+    spread = np.where(np.isfinite(spread) & (spread > floor), spread, floor)
+    return center, spread, int(win)
+
+
+def _smart_channel_artifact_features(
+    time: np.ndarray,
+    y: np.ndarray,
+    fs: float,
+    k: float,
+    window_s: float,
+    *,
+    channel_label: str,
+    protect_positive_transients: bool,
+) -> Dict[str, np.ndarray]:
+    """Compute robust channel-level artifact evidence masks and scores."""
+    t = np.asarray(time, float)
+    raw = np.asarray(y, float)
+    n = min(t.size, raw.size)
+    t = t[:n]
+    raw = raw[:n]
+    if n == 0:
+        empty = np.array([], dtype=bool)
+        return {
+            "core": empty,
+            "candidate": empty,
+            "score": np.array([], dtype=float),
+            "amp": empty,
+            "amp_pos": empty,
+            "amp_neg": empty,
+            "slope": empty,
+            "curve": empty,
+            "level": empty,
+            "plateau": empty,
+            "dropout": empty,
+            "nonfinite": empty,
+            "label": np.array([], dtype=object),
+        }
+
+    finite = np.isfinite(raw)
+    clean = interpolate_nans(raw)
+    if np.any(~np.isfinite(clean)):
+        fill = float(np.nanmedian(raw[finite])) if np.any(finite) else 0.0
+        clean = np.where(np.isfinite(clean), clean, fill)
+
+    win_s = float(window_s)
+    if not np.isfinite(win_s) or win_s <= 0:
+        win_s = 5.0
+    win_s = float(_clip_float(win_s, max(0.25, 8.0 / max(float(fs), 1e-9)), 60.0))
+    center, spread, _ = _local_median_mad(clean, fs, win_s, min_window=7)
+    residual = clean - center
+    amp_z = np.abs(residual) / spread
+
+    step = np.empty_like(clean)
+    step[0] = 0.0
+    step[1:] = np.diff(clean)
+    slope_window_s = float(_clip_float(min(win_s, 1.0), max(0.20, 5.0 / max(float(fs), 1e-9)), 5.0))
+    slope_center, slope_spread, _ = _local_median_mad(step, fs, slope_window_s, min_window=5)
+    slope_z = np.abs(step - slope_center) / slope_spread
+
+    curve = np.empty_like(clean)
+    curve[0] = 0.0
+    curve[1:] = np.diff(step)
+    curve_center, curve_spread, _ = _local_median_mad(curve, fs, slope_window_s, min_window=5)
+    curve_z = np.abs(curve - curve_center) / curve_spread
+
+    fast_center, _, _ = _local_median_mad(clean, fs, max(0.25, min(1.0, win_s * 0.25)), min_window=5)
+    slow_center, slow_spread, _ = _local_median_mad(clean, fs, max(win_s, 2.0), min_window=9)
+    level_z = np.abs(fast_center - slow_center) / slow_spread
+
+    k_val = float(k)
+    if not np.isfinite(k_val) or k_val <= 0:
+        k_val = 8.0
+    amp_thr = max(5.0, k_val)
+    slope_thr = max(5.0, 0.75 * k_val)
+    curve_thr = max(6.0, 0.85 * k_val)
+    level_thr = max(4.0, 0.65 * k_val)
+
+    edge_n = _window_samples_from_seconds(fs, 0.15, minimum=2)
+    if edge_n > 0 and slope_z.size > 2 * edge_n:
+        slope_z[:edge_n] = 0.0
+        slope_z[-edge_n:] = 0.0
+        curve_z[:edge_n] = 0.0
+        curve_z[-edge_n:] = 0.0
+
+    amp_pos = (residual > 0) & (amp_z >= amp_thr)
+    amp_neg = (residual < 0) & (amp_z >= amp_thr)
+    amp = amp_pos | amp_neg
+    slope = slope_z >= slope_thr
+    curve_mask = curve_z >= curve_thr
+    if edge_n > 0 and slope.size > 2 * edge_n:
+        slope[:edge_n] = False
+        slope[-edge_n:] = False
+        curve_mask[:edge_n] = False
+        curve_mask[-edge_n:] = False
+    level = _mask_runs_at_least(level_z >= level_thr, _window_samples_from_seconds(fs, 0.20, minimum=1))
+
+    finite_clean = clean[np.isfinite(clean)]
+    if finite_clean.size:
+        q01 = float(np.nanquantile(finite_clean, 0.01))
+        q99 = float(np.nanquantile(finite_clean, 0.99))
+        dyn = max(float(q99 - q01), 1e-12)
+    else:
+        q01 = q99 = 0.0
+        dyn = 1.0
+    flat_step = np.abs(step) <= max(1e-12, 1e-5 * dyn)
+    flat_run = _mask_runs_at_least(flat_step, _window_samples_from_seconds(fs, 0.25, minimum=3))
+    plateau = flat_run & ((clean <= q01) | (clean >= q99) | (amp_z >= max(4.0, 0.70 * amp_thr)))
+    dropout = finite & (clean <= q01) & (amp_z >= max(4.0, 0.70 * amp_thr))
+    nonfinite = ~finite
+
+    abrupt_with_amplitude = (slope | curve_mask) & (amp_z >= 0.60 * amp_thr)
+    if protect_positive_transients:
+        level_artifact = level & (amp_neg | abrupt_with_amplitude | dropout | plateau | nonfinite)
+        channel_core = amp_neg | abrupt_with_amplitude | level_artifact | plateau | dropout | nonfinite
+    else:
+        level_artifact = level & ((amp_z >= 0.60 * amp_thr) | dropout | plateau | nonfinite)
+        channel_core = amp | abrupt_with_amplitude | level_artifact | plateau | dropout | nonfinite
+
+    candidate = (
+        (amp_z >= 0.85 * amp_thr)
+        | (slope_z >= 0.85 * slope_thr)
+        | (curve_z >= 0.85 * curve_thr)
+        | (level_z >= 0.90 * level_thr)
+        | plateau
+        | dropout
+        | nonfinite
+    )
+
+    score = np.nanmax(
+        np.vstack([
+            amp_z / max(amp_thr, 1e-12),
+            slope_z / max(slope_thr, 1e-12),
+            curve_z / max(curve_thr, 1e-12),
+            level_z / max(level_thr, 1e-12),
+            plateau.astype(float),
+            dropout.astype(float),
+            nonfinite.astype(float),
+        ]),
+        axis=0,
+    )
+    score = np.where(np.isfinite(score), score, 0.0)
+    labels = np.full(n, str(channel_label), dtype=object)
+    return {
+        "core": np.asarray(channel_core, bool),
+        "candidate": np.asarray(candidate, bool),
+        "score": np.asarray(score, float),
+        "amp": np.asarray(amp, bool),
+        "amp_pos": np.asarray(amp_pos, bool),
+        "amp_neg": np.asarray(amp_neg, bool),
+        "slope": np.asarray(slope, bool),
+        "curve": np.asarray(curve_mask, bool),
+        "level": np.asarray(level, bool),
+        "plateau": np.asarray(plateau, bool),
+        "dropout": np.asarray(dropout, bool),
+        "nonfinite": np.asarray(nonfinite, bool),
+        "label": labels,
+    }
+
+
+def _smart_region_sources(
+    time: np.ndarray,
+    regions: List[Tuple[float, float]],
+    core_regions: List[Tuple[float, float]],
+    sig_feat: Dict[str, np.ndarray],
+    ref_feat: Dict[str, np.ndarray],
+    shared_mask: np.ndarray,
+    score: np.ndarray,
+) -> Tuple[List[str], List[float]]:
+    """Build compact human-readable evidence labels for artifact regions."""
+    t = np.asarray(time, float)
+    names = [
+        ("amp", "amp"),
+        ("slope", "slope"),
+        ("curve", "curve"),
+        ("level", "level"),
+        ("plateau", "plateau"),
+        ("dropout", "drop"),
+        ("nonfinite", "nan"),
+    ]
+    sources: List[str] = []
+    scores: List[float] = []
+    for idx, (a, b) in enumerate(regions):
+        if idx < len(core_regions):
+            ca, cb = core_regions[idx]
+        else:
+            ca, cb = a, b
+        in_core = (t >= float(ca)) & (t <= float(cb))
+        if not np.any(in_core):
+            in_core = (t >= float(a)) & (t <= float(b))
+        parts: List[str] = []
+        for prefix, feat in (("465", sig_feat), ("405", ref_feat)):
+            tags = [tag for key, tag in names if np.any(np.asarray(feat.get(key, []), bool) & in_core)]
+            if tags:
+                parts.append(f"{prefix}:{'+'.join(tags[:3])}")
+        if np.any(np.asarray(shared_mask, bool) & in_core):
+            parts.append("shared")
+        local_score = float(np.nanmax(score[in_core])) if np.any(in_core) else 0.0
+        if np.isfinite(local_score):
+            parts.append(f"Q={local_score:.2g}")
+            scores.append(local_score)
+        else:
+            scores.append(0.0)
+        sources.append("; ".join(parts) if parts else "smart")
+    return sources, scores
+
+
+def detect_artifacts_smart(
+    time: np.ndarray,
+    signal_465: np.ndarray,
+    reference_405: Optional[np.ndarray] = None,
+    *,
+    k: float = 8.0,
+    window_s: float = 5.0,
+    pad_s: float = 0.25,
+    fs: Optional[float] = None,
+) -> ArtifactDetectionResult:
+    """
+    Detect fiber photometry artifacts using multi-evidence robust scoring.
+
+    Evidence channels:
+    - local Hampel-style amplitude residuals
+    - derivative and curvature shocks
+    - sustained level shifts
+    - flat extreme plateaus and dropouts
+    - temporally shared 405/465 evidence
+
+    The 465 channel is protected against ordinary slow positive transients unless
+    the evidence is abrupt, very large, or also appears in the reference channel.
+    """
+    t = np.asarray(time, float)
+    sig = np.asarray(signal_465, float)
+    n = min(t.size, sig.size)
+    t = t[:n]
+    sig = sig[:n]
+    if reference_405 is None:
+        ref = np.full(n, np.nan, dtype=float)
+    else:
+        ref_arr = np.asarray(reference_405, float)
+        if ref_arr.size < n:
+            ref = np.full(n, np.nan, dtype=float)
+        else:
+            ref = ref_arr[:n]
+    if n == 0:
+        empty_bool = np.array([], dtype=bool)
+        empty_float = np.array([], dtype=float)
+        return ArtifactDetectionResult(
+            mask=empty_bool,
+            core_mask=empty_bool,
+            signal_core_mask=empty_bool,
+            reference_core_mask=empty_bool,
+            score=empty_float,
+            signal_score=empty_float,
+            reference_score=empty_float,
+        )
+
+    fs_val = float(fs) if fs is not None and np.isfinite(float(fs)) and float(fs) > 0 else np.nan
+    if not np.isfinite(fs_val) or fs_val <= 0:
+        fs_val = 1.0 / float(np.nanmedian(np.diff(t))) if t.size > 2 else 10.0
+    if not np.isfinite(fs_val) or fs_val <= 0:
+        fs_val = 10.0
+
+    finite_ref = ref[np.isfinite(ref)]
+    has_reference = bool(finite_ref.size >= max(10, int(0.02 * n)) and np.nanstd(finite_ref) > 1e-12)
+    sig_feat = _smart_channel_artifact_features(
+        t,
+        sig,
+        fs_val,
+        k,
+        window_s,
+        channel_label="465",
+        protect_positive_transients=True,
+    )
+    if has_reference:
+        ref_feat = _smart_channel_artifact_features(
+            t,
+            ref,
+            fs_val,
+            k,
+            window_s,
+            channel_label="405",
+            protect_positive_transients=False,
+        )
+    else:
+        ref_feat = {
+            "core": np.zeros(n, dtype=bool),
+            "candidate": np.zeros(n, dtype=bool),
+            "score": np.zeros(n, dtype=float),
+            "amp": np.zeros(n, dtype=bool),
+            "amp_pos": np.zeros(n, dtype=bool),
+            "amp_neg": np.zeros(n, dtype=bool),
+            "slope": np.zeros(n, dtype=bool),
+            "curve": np.zeros(n, dtype=bool),
+            "level": np.zeros(n, dtype=bool),
+            "plateau": np.zeros(n, dtype=bool),
+            "dropout": np.zeros(n, dtype=bool),
+            "nonfinite": np.zeros(n, dtype=bool),
+        }
+
+    near_radius = _window_samples_from_seconds(fs_val, 0.12, minimum=1)
+    near_width = int(max(1, 2 * near_radius + 1))
+    sig_score = np.asarray(sig_feat["score"], float)
+    ref_score = np.asarray(ref_feat["score"], float)
+    sig_near_ref = _expand_bool_mask_samples(np.asarray(sig_feat["candidate"], bool), near_radius)
+    ref_near_sig = _expand_bool_mask_samples(np.asarray(ref_feat["candidate"], bool), near_radius)
+    sig_score_near = maximum_filter1d(sig_score, size=near_width, mode="nearest") if sig_score.size else sig_score
+    ref_score_near = maximum_filter1d(ref_score, size=near_width, mode="nearest") if ref_score.size else ref_score
+    shared = (
+        np.asarray(sig_feat["candidate"], bool)
+        & ref_near_sig
+        & (sig_score >= 0.90)
+        & (ref_score_near >= 0.90)
+        & ((sig_score >= 1.00) | (ref_score_near >= 1.00))
+    ) | (
+        np.asarray(ref_feat["candidate"], bool)
+        & sig_near_ref
+        & (ref_score >= 0.90)
+        & (sig_score_near >= 0.90)
+        & ((ref_score >= 1.00) | (sig_score_near >= 1.00))
+    )
+    sig_core = np.asarray(sig_feat["core"], bool) | shared
+    ref_core = np.asarray(ref_feat["core"], bool) | shared
+    core = sig_core | ref_core
+
+    score = np.maximum(sig_score, ref_score)
+    score = np.where(shared, np.maximum(score, 1.00), score)
+
+    core_fraction = float(np.mean(core)) if core.size else 0.0
+    if core_fraction > 0.20:
+        stricter = core & (score >= 1.25)
+        if np.any(stricter):
+            core = stricter
+            sig_core = sig_core & core
+            ref_core = ref_core & core
+
+    padded = _pad_mask_by_seconds(t, core, float(pad_s))
+    regions = regions_from_mask(t, padded)
+    core_regions: List[Tuple[float, float]] = []
+    for a, b in regions:
+        in_region = (t >= float(a)) & (t <= float(b)) & core
+        if np.any(in_region):
+            idx = np.where(in_region)[0]
+            core_regions.append((float(t[idx[0]]), float(t[idx[-1]])))
+        else:
+            core_regions.append((float(a), float(b)))
+    sources, region_scores = _smart_region_sources(t, regions, core_regions, sig_feat, ref_feat, shared, score)
+    summary = (
+        f"smart artifacts: n={len(regions)}, "
+        f"core={float(np.mean(core)) * 100.0:.2f}%, padded={float(np.mean(padded)) * 100.0:.2f}%"
+    )
+    return ArtifactDetectionResult(
+        mask=np.asarray(padded, bool),
+        core_mask=np.asarray(core, bool),
+        signal_core_mask=np.asarray(sig_core, bool),
+        reference_core_mask=np.asarray(ref_core, bool),
+        score=np.asarray(score, float),
+        signal_score=np.asarray(sig_feat["score"], float),
+        reference_score=np.asarray(ref_feat["score"], float),
+        regions=regions,
+        core_regions=core_regions,
+        region_sources=sources,
+        region_scores=region_scores,
+        summary=summary,
+    )
+
+
 def _robust_corr(x: np.ndarray, y: np.ndarray) -> float:
     xx = np.asarray(x, float)
     yy = np.asarray(y, float)
@@ -1959,20 +2432,25 @@ def recommend_preprocessing_settings(
     )
     p.invert_polarity = signal_inverted
 
-    # Artifact burden at the same envelope the GUI shows.
-    hi_sig_g, lo_sig_g = _compute_signal_envelope(t, sig, 8.0, "Global MAD (raw)", 0.0)
-    hi_ref_g, lo_ref_g = _compute_signal_envelope(t, ref, 8.0, "Global MAD (raw)", 0.0)
-    mask_global = _mask_outside_signal_envelope(t, sig, hi_sig_g, lo_sig_g, 0.0)
-    if has_reference:
-        mask_global |= _mask_outside_signal_envelope(t, ref, hi_ref_g, lo_ref_g, 0.0)
+    # Artifact burden from the same smart detector used by preprocessing.
+    smart_probe = detect_artifacts_smart(
+        t,
+        sig,
+        ref if has_reference else None,
+        k=8.0,
+        window_s=float(_clip_float(max(5.0, min(30.0, duration_s / 30.0)), 5.0, 30.0)),
+        pad_s=0.0,
+        fs=fs,
+    )
+    mask_global = np.asarray(smart_probe.core_mask, bool)
     artifact_fraction = float(np.mean(mask_global)) if mask_global.size else 0.0
     drift_sig = float(np.nanstd(sig_trend) / max(np.nanstd(sig_hp), 1e-12))
     drift_ref = float(np.nanstd(ref_trend) / max(np.nanstd(ref_hp), 1e-12)) if has_reference else 0.0
     drift_score = max(drift_sig, drift_ref)
 
     p.artifact_detection_enabled = artifact_fraction > 0.0005
-    p.artifact_mode = "Adaptive MAD (windowed)" if (duration_s > 240.0 and drift_score > 2.5) else "Global MAD (raw)"
-    p.mad_k = 8.0 if artifact_fraction < 0.02 else 10.0
+    p.artifact_mode = SMART_ARTIFACT_MODE
+    p.mad_k = 7.0 if artifact_fraction < 0.02 else 8.5
     p.adaptive_window_s = float(_clip_float(max(5.0, min(30.0, duration_s / 30.0)), 5.0, 30.0))
     p.artifact_pad_s = float(_clip_float(max(0.25, 1.5 / fs), 0.10, 0.75))
     p.artifact_handling = "Interpolate" if artifact_fraction < 0.05 else "Strong local low-pass"
@@ -2059,7 +2537,8 @@ def recommend_preprocessing_settings(
     )
     sections = {
         "artifacts": (
-            f"Artifact burden at k=8 is {artifact_fraction * 100.0:.2f}%. "
+            f"Smart detector burden at k=8 is {artifact_fraction * 100.0:.2f}% "
+            f"across amplitude, slope, dropout, and 405/465 shared evidence. "
             f"Recommend {p.artifact_mode}, {p.artifact_handling}, pad {p.artifact_pad_s:.2g}s."
         ),
         "filtering": (
@@ -3329,18 +3808,20 @@ class PhotometryProcessor:
         # ---------------------------------------------------------------------
         # 2) Display envelope on raw 465 (computed pre-masking for user context)
         # ---------------------------------------------------------------------
+        artifact_mode = _normalize_artifact_mode(getattr(params, "artifact_mode", SMART_ARTIFACT_MODE))
+        envelope_mode = "Adaptive MAD (windowed)" if artifact_mode == SMART_ARTIFACT_MODE else artifact_mode
         hi_raw, lo_raw = _compute_signal_envelope(
             t,
             sig,
             float(params.mad_k),
-            str(params.artifact_mode),
+            envelope_mode,
             float(params.adaptive_window_s),
         )
         hi_ref_raw, lo_ref_raw = _compute_signal_envelope(
             t,
             ref,
             float(params.mad_k),
-            str(params.artifact_mode),
+            envelope_mode,
             float(params.adaptive_window_s),
         )
 
@@ -3369,42 +3850,67 @@ class PhotometryProcessor:
         mask_ref = np.zeros_like(t, dtype=bool)
         core_sig = np.zeros_like(t, dtype=bool)
         core_ref = np.zeros_like(t, dtype=bool)
+        auto_regions: List[Tuple[float, float]] = []
+        auto_core_regions: List[Tuple[float, float]] = []
+        auto_sources: List[str] = []
+        smart_artifact_summary = ""
         if bool(getattr(params, "artifact_detection_enabled", True)):
-            core_sig = _mask_outside_signal_envelope(t, sig, hi_raw, lo_raw, 0.0)
-            core_ref = _mask_outside_signal_envelope(t, ref, hi_ref_raw, lo_ref_raw, 0.0)
-            pad_s = float(params.artifact_pad_s)
-            mask_sig = _pad_mask_by_seconds(t, core_sig, pad_s)
-            mask_ref = _pad_mask_by_seconds(t, core_ref, pad_s)
-            mask = np.asarray(mask_sig, bool) | np.asarray(mask_ref, bool)
+            if artifact_mode == SMART_ARTIFACT_MODE:
+                smart_result = detect_artifacts_smart(
+                    t,
+                    sig,
+                    ref,
+                    k=float(params.mad_k),
+                    window_s=float(params.adaptive_window_s),
+                    pad_s=float(params.artifact_pad_s),
+                    fs=fs,
+                )
+                core_sig = np.asarray(smart_result.signal_core_mask, bool)
+                core_ref = np.asarray(smart_result.reference_core_mask, bool)
+                mask = np.asarray(smart_result.mask, bool)
+                mask_sig = mask & (core_sig | np.asarray(smart_result.core_mask, bool))
+                mask_ref = mask & (core_ref | np.asarray(smart_result.core_mask, bool))
+                auto_regions = list(smart_result.regions)
+                auto_core_regions = list(smart_result.core_regions)
+                auto_sources = list(smart_result.region_sources)
+                smart_artifact_summary = str(smart_result.summary or "")
+            else:
+                core_sig = _mask_outside_signal_envelope(t, sig, hi_raw, lo_raw, 0.0)
+                core_ref = _mask_outside_signal_envelope(t, ref, hi_ref_raw, lo_ref_raw, 0.0)
+                pad_s = float(params.artifact_pad_s)
+                mask_sig = _pad_mask_by_seconds(t, core_sig, pad_s)
+                mask_ref = _pad_mask_by_seconds(t, core_ref, pad_s)
+                mask = np.asarray(mask_sig, bool) | np.asarray(mask_ref, bool)
         else:
             mask = np.zeros_like(t, dtype=bool)
 
-        auto_regions = regions_from_mask(t, mask)
         core_mask = np.asarray(core_sig, bool) | np.asarray(core_ref, bool)
         core_regions = regions_from_mask(t, core_mask)
-        auto_core_regions: List[Tuple[float, float]] = []
-        auto_sources: List[str] = []
-        for a, b in auto_regions:
-            in_region = (t >= float(a)) & (t <= float(b))
-            sig_hit = bool(np.any(np.asarray(core_sig, bool) & in_region))
-            ref_hit = bool(np.any(np.asarray(core_ref, bool) & in_region))
-            if sig_hit and ref_hit:
-                auto_sources.append("465 + 405")
-            elif sig_hit:
-                auto_sources.append("465")
-            elif ref_hit:
-                auto_sources.append("405")
-            else:
-                auto_sources.append("")
-            overlapping_core = [
-                (max(float(ca), float(a)), min(float(cb), float(b)))
-                for ca, cb in core_regions
-                if float(cb) >= float(a) and float(ca) <= float(b)
-            ]
-            if overlapping_core:
-                auto_core_regions.append((overlapping_core[0][0], overlapping_core[-1][1]))
-            else:
-                auto_core_regions.append((float(a), float(b)))
+        if artifact_mode != SMART_ARTIFACT_MODE:
+            auto_regions = regions_from_mask(t, mask)
+            auto_core_regions = []
+            auto_sources = []
+            for a, b in auto_regions:
+                in_region = (t >= float(a)) & (t <= float(b))
+                sig_hit = bool(np.any(np.asarray(core_sig, bool) & in_region))
+                ref_hit = bool(np.any(np.asarray(core_ref, bool) & in_region))
+                if sig_hit and ref_hit:
+                    auto_sources.append("465 + 405")
+                elif sig_hit:
+                    auto_sources.append("465")
+                elif ref_hit:
+                    auto_sources.append("405")
+                else:
+                    auto_sources.append("")
+                overlapping_core = [
+                    (max(float(ca), float(a)), min(float(cb), float(b)))
+                    for ca, cb in core_regions
+                    if float(cb) >= float(a) and float(ca) <= float(b)
+                ]
+                if overlapping_core:
+                    auto_core_regions.append((overlapping_core[0][0], overlapping_core[-1][1]))
+                else:
+                    auto_core_regions.append((float(a), float(b)))
         if manual_exclude_regions_sec:
             mask = remove_manual_regions(t, mask, manual_exclude_regions_sec or [])
         mask = apply_manual_regions(t, mask, manual_regions_sec or [])
@@ -3640,6 +4146,8 @@ class PhotometryProcessor:
         context_parts = []
         if np.any(mask):
             context_parts.append(f"Artifacts: {artifact_handling}")
+            if smart_artifact_summary:
+                context_parts.append(smart_artifact_summary)
         if no_reference_fallback:
             context_parts.append("No 405 reference; using signal-only output")
         if mode == "Raw signal (465)":

@@ -141,6 +141,11 @@ drift.
 
 Artifact settings let you choose how masked windows are handled:
 
+- Smart multi-evidence: combines local robust residuals, slope shocks,
+  curvature, dropouts, level shifts, and shared 405/465 evidence. This is the
+  recommended default for raw preprocessing.
+- Adaptive MAD: uses a sliding local median/MAD envelope.
+- Global MAD: uses one full-trace median/MAD envelope.
 - Interpolation: replace artifact samples by linear interpolation.
 - Cut: keep artifact samples as NaN so downstream analysis ignores them.
 - Strong local low-pass filtering: smooth only inside the artifact window.
@@ -148,6 +153,12 @@ Artifact settings let you choose how masked windows are handled:
 
 Use interpolation when you need continuous traces. Use cut when the artifact
 window should not contribute to statistics.
+
+Smart detection is intentionally conservative around possible neural events:
+smooth positive transients that appear only in the 465 channel are not masked
+unless they are abrupt, extreme, or supported by 405/reference evidence. The
+Artifacts panel lists the evidence for each region, such as `465:amp+slope`,
+`405:drop`, or `shared`, plus a quality score `Q`.
 
 ## 5. Postprocessing Workflow
 
