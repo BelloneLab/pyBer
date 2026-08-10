@@ -12,8 +12,10 @@ from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
 from analysis_core import (
+    BAND_LIMITED_INVERTED_ISO_MODE,
     ExportSelection,
     ProcessingParams,
+    PreprocessingRecommendation,
     ProcessedTrial,
     OUTPUT_MODES,
     BASELINE_METHODS,
@@ -67,6 +69,10 @@ _FITTED_REF_MODES = {
     "prominence normalized (motion corrected with fitted ref)",
 }
 
+_BAND_LIMITED_REF_MODES = {
+    BAND_LIMITED_INVERTED_ISO_MODE,
+}
+
 _OUTPUT_DEFINITIONS: Dict[str, str] = {
     "dFF (non motion corrected)": "dFF = (sig_f - b_sig) / b_sig",
     "zscore (non motion corrected)": "z = zscore(dFF)",
@@ -75,6 +81,7 @@ _OUTPUT_DEFINITIONS: Dict[str, str] = {
     "zscore (subtractions)": "z = zscore(dFF_sig) - zscore(dFF_ref)",
     "dFF (motion corrected with fitted ref)": "dFF = (sig_f - fitted_ref) / fitted_ref",
     "dFF (motion corrected with inverted isobestic fit)": "dFF = (sig_f - fit(-ref_f -> sig_f)) / fit(-ref_f -> sig_f)",
+    BAND_LIMITED_INVERTED_ISO_MODE: "dFF = dFF_sig - beta * highpass(-dFF_ref), beta >= 0",
     "zscore (motion corrected with fitted ref)": "z = zscore((sig_f - fitted_ref) / fitted_ref)",
     "prominence normalized (motion corrected with fitted ref)": "p = (dFF_fit - median_baseline) / mean(top baseline peak prominences)",
     "Raw signal (465)": "output = filtered/resampled 465 signal",
@@ -85,6 +92,7 @@ _DFF_OUTPUT_MODES = {
     "dFF (motion corrected via subtraction)",
     "dFF (motion corrected with fitted ref)",
     "dFF (motion corrected with inverted isobestic fit)",
+    BAND_LIMITED_INVERTED_ISO_MODE,
 }
 
 
@@ -1638,6 +1646,12 @@ class ParameterPanel(QtWidgets.QGroupBox):
                 "- RLM (HuberT): robust fit with Huber weighting.\n"
                 "Affects how the 405 reference is fit to the 465 signal."
             ),
+            "band_limited_reference_window_s": (
+                "Window used by the band-limited inverted isobestic correction.\n"
+                "pyBer subtracts a rolling median over this window from dFF_405 and dFF_470, "
+                "fits only the short-timescale inverted 405 component, then removes that component from dFF_470.\n"
+                "Use this when slow bleaching is shared but fast 405/470 motion-like fluctuations are anti-correlated."
+            ),
             "lasso_alpha": (
                 "Lasso alpha controls regularization strength (only for Lasso).\n"
                 "Higher alpha = stronger shrinkage; lower alpha = closer to OLS.\n"
@@ -1704,10 +1718,38 @@ class ParameterPanel(QtWidgets.QGroupBox):
         h.addWidget(btn)
         return w
 
+    def _recommendation_label(self) -> QtWidgets.QLabel:
+        lbl = QtWidgets.QLabel("")
+        lbl.setWordWrap(True)
+        lbl.setProperty("class", "hint")
+        lbl.setVisible(False)
+        return lbl
+
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
+        self._recommended_params: Optional[ProcessingParams] = None
+
+        # Data-driven recommendation summary.
+        reco_content = QtWidgets.QWidget()
+        reco_layout = QtWidgets.QVBoxLayout(reco_content)
+        reco_layout.setContentsMargins(0, 0, 0, 0)
+        reco_layout.setSpacing(6)
+        self.lbl_recommendation_summary = QtWidgets.QLabel(
+            "Load a recording to compute recommended preprocessing settings."
+        )
+        self.lbl_recommendation_summary.setWordWrap(True)
+        self.lbl_recommendation_summary.setProperty("class", "hint")
+        self.lbl_recommendation_details = QtWidgets.QLabel("")
+        self.lbl_recommendation_details.setWordWrap(True)
+        self.lbl_recommendation_details.setProperty("class", "hint")
+        self.btn_apply_recommendation = QtWidgets.QPushButton("Apply recommended settings")
+        self.btn_apply_recommendation.setProperty("class", "compactPrimarySmall")
+        self.btn_apply_recommendation.setEnabled(False)
+        reco_layout.addWidget(self.lbl_recommendation_summary)
+        reco_layout.addWidget(self.lbl_recommendation_details)
+        reco_layout.addWidget(self.btn_apply_recommendation)
 
         def mk_dspin(minw=60, decimals=3) -> QtWidgets.QDoubleSpinBox:
             s = QtWidgets.QDoubleSpinBox()
@@ -1758,6 +1800,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         art_form.addRow(self._label_with_help("MAD threshold (k)", "mad_k"), self.spin_mad)
         art_form.addRow(self._label_with_help("Adaptive window (s)", "adaptive_window_s"), self.spin_adapt_win)
         art_form.addRow(self._label_with_help("Artifact pad (s)", "artifact_pad_s"), self.spin_pad)
+        self.lbl_reco_artifacts = self._recommendation_label()
+        art_form.addRow(self.lbl_reco_artifacts)
 
         # Filtering controls
         self.cb_filtering = QtWidgets.QCheckBox("Enable filtering")
@@ -1800,6 +1844,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         filt_form.addRow(self._label_with_help("Smoothing window (s)", "smoothing_window_s"), self.spin_smoothing_window)
         filt_form.addRow(self._label_with_help("Savitzky polyorder", "smoothing_polyorder"), self.spin_smoothing_poly)
         filt_form.addRow(self._label_with_help("Invert signal polarity", "invert_polarity"), self.cb_invert)
+        self.lbl_reco_filtering = self._recommendation_label()
+        filt_form.addRow(self.lbl_reco_filtering)
 
         # Baseline controls
         self.combo_baseline = QtWidgets.QComboBox()
@@ -1854,6 +1900,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         base_form.addRow(self._label_with_help("Lambda", "baseline_lambda"), lam_widget)
         base_form.addRow(self.btn_toggle_advanced)
         base_form.addRow(self.baseline_advanced_group)
+        self.lbl_reco_baseline = self._recommendation_label()
+        base_form.addRow(self.lbl_reco_baseline)
 
         # Output controls
         self.combo_output = QtWidgets.QComboBox()
@@ -1874,6 +1922,13 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.combo_ref_fit.addItems(REFERENCE_FIT_METHODS)
         _compact_combo(self.combo_ref_fit, min_chars=6)
         self.combo_ref_fit.setToolTip("Used only for fitted-reference motion correction modes.")
+        self.spin_band_ref_window = mk_dspin(decimals=2)
+        self.spin_band_ref_window.setRange(5.0, 600.0)
+        self.spin_band_ref_window.setValue(60.0)
+        self.spin_band_ref_window.setSuffix(" s")
+        self.spin_band_ref_window.setToolTip(
+            "Rolling-median window used before fitting the short-timescale inverted 405 component."
+        )
         self.spin_lasso = mk_dspin(decimals=6)
         self.spin_lasso.setRange(1e-6, 1.0)
         self.spin_lasso.setValue(1e-3)
@@ -2016,11 +2071,15 @@ class ParameterPanel(QtWidgets.QGroupBox):
         out_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.lbl_output_mode = self._label_with_help("Output mode", "output_mode")
         self.lbl_reference_fit = self._label_with_help("Reference fit method", "reference_fit")
+        self.lbl_band_ref_window = self._label_with_help("Band-limited window", "band_limited_reference_window_s")
         out_form.addRow(self.lbl_output_mode, self.combo_output)
         out_form.addRow("Definition", self.ed_output_definition)
         out_form.addRow(self.lbl_reference_fit, self.combo_ref_fit)
+        out_form.addRow(self.lbl_band_ref_window, self.spin_band_ref_window)
         out_form.addRow(self.output_params_stack)
         out_form.addRow(self.prominence_params_group)
+        self.lbl_reco_output = self._recommendation_label()
+        out_form.addRow(self.lbl_reco_output)
 
         # QC + Export card
         self.btn_artifacts_panel = QtWidgets.QPushButton("Artifacts")
@@ -2140,6 +2199,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         # Cards
         self.card_artifacts = CollapsibleSection("Artifacts")
         self.card_artifacts.set_content_widget(art_content)
+        self.card_recommendation = CollapsibleSection("Recommended for your data")
+        self.card_recommendation.set_content_widget(reco_content)
         self.card_filtering = CollapsibleSection("Filtering")
         self.card_filtering.set_content_widget(filt_content)
         self.card_baseline = CollapsibleSection("Baseline")
@@ -2156,6 +2217,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.card_baseline.set_expanded(True)
         self.card_output.set_expanded(True)
 
+        root.addWidget(self.card_recommendation)
         root.addWidget(self.card_artifacts)
         root.addWidget(self.card_filtering)
         root.addWidget(self.card_baseline)
@@ -2223,10 +2285,14 @@ class ParameterPanel(QtWidgets.QGroupBox):
 
     def _update_output_controls(self) -> None:
         fitted_mode = self._is_fitted_output_mode()
+        band_mode = self.combo_output.currentText().strip() in _BAND_LIMITED_REF_MODES
         prominence_mode = self._is_prominence_output_mode()
         self.lbl_reference_fit.setVisible(fitted_mode)
         self.combo_ref_fit.setVisible(fitted_mode)
         self.combo_ref_fit.setEnabled(fitted_mode)
+        self.lbl_band_ref_window.setVisible(band_mode)
+        self.spin_band_ref_window.setVisible(band_mode)
+        self.spin_band_ref_window.setEnabled(band_mode)
         self.prominence_params_group.setVisible(prominence_mode)
 
         if not fitted_mode:
@@ -2367,6 +2433,10 @@ class ParameterPanel(QtWidgets.QGroupBox):
         summary = f"{self.combo_baseline.currentText()}, lambda={self._lambda_value():.2e}"
         self.card_baseline.set_summary(summary)
         output_summary = self.combo_output.currentText()
+        if self.combo_output.currentText().strip() in _BAND_LIMITED_REF_MODES:
+            output_summary = (
+                f"{output_summary} | window={self._fmt_num(self.spin_band_ref_window.value(), 2)}s"
+            )
         if self._is_prominence_output_mode():
             output_summary = (
                 f"{output_summary} | top={self._fmt_num(self.spin_prominence_top.value(), 3)}, "
@@ -2399,6 +2469,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
             self.spin_asls_p,
             self.combo_output,
             self.combo_ref_fit,
+            self.spin_band_ref_window,
             self.spin_lasso,
             self.spin_rlm_huber_t,
             self.spin_rlm_max_iter,
@@ -2428,6 +2499,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.combo_output.currentIndexChanged.connect(lambda *_: self._update_output_controls())
         self.combo_output.currentIndexChanged.connect(lambda *_: self._sync_export_outputs_to_current_mode())
         self.combo_ref_fit.currentIndexChanged.connect(lambda *_: self._update_output_controls())
+        self.btn_apply_recommendation.clicked.connect(self.apply_recommendation)
 
         # Keep collapsed card summaries synchronized with current values.
         for w in widgets:
@@ -2609,6 +2681,61 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._pending_export_output_modes = modes
         self.list_export_outputs.set_checked_values(modes)
 
+    def _set_recommendation_text(self, label: QtWidgets.QLabel, text: str) -> None:
+        value = str(text or "").strip()
+        label.setText(value)
+        label.setVisible(bool(value))
+
+    def set_recommendation(self, recommendation: Optional[PreprocessingRecommendation]) -> None:
+        """Display data-driven recommended settings without applying them."""
+        if recommendation is None:
+            self._recommended_params = None
+            self.lbl_recommendation_summary.setText(
+                "Load a recording to compute recommended preprocessing settings."
+            )
+            self.lbl_recommendation_details.setText("")
+            self.btn_apply_recommendation.setEnabled(False)
+            for label in (
+                self.lbl_reco_artifacts,
+                self.lbl_reco_filtering,
+                self.lbl_reco_baseline,
+                self.lbl_reco_output,
+            ):
+                self._set_recommendation_text(label, "")
+            self.card_recommendation.set_summary("No data")
+            return
+
+        self._recommended_params = ProcessingParams.from_dict(recommendation.params.to_dict())
+        self.lbl_recommendation_summary.setText(str(recommendation.summary or "Recommendation ready."))
+        warnings = list(getattr(recommendation, "warnings", []) or [])
+        details = []
+        if warnings:
+            details.append("Warnings: " + " ".join(str(w) for w in warnings if str(w).strip()))
+        metrics = getattr(recommendation, "metrics", {}) or {}
+        if metrics:
+            fs = metrics.get("fs_hz")
+            duration = metrics.get("duration_s")
+            if fs is not None and duration is not None:
+                try:
+                    details.append(f"Recording: {float(duration):.1f}s at {float(fs):.2f} Hz.")
+                except Exception:
+                    pass
+        self.lbl_recommendation_details.setText(" ".join(details))
+        self.btn_apply_recommendation.setEnabled(True)
+        sections = getattr(recommendation, "sections", {}) or {}
+        self._set_recommendation_text(self.lbl_reco_artifacts, sections.get("artifacts", ""))
+        self._set_recommendation_text(self.lbl_reco_filtering, sections.get("filtering", ""))
+        self._set_recommendation_text(self.lbl_reco_baseline, sections.get("baseline", ""))
+        self._set_recommendation_text(self.lbl_reco_output, sections.get("output", ""))
+        self.card_recommendation.set_summary(f"confidence={float(recommendation.confidence):.0%}")
+
+    def apply_recommendation(self) -> None:
+        """Apply the latest recommended processing parameters."""
+        if self._recommended_params is None:
+            return
+        self.set_params(ProcessingParams.from_dict(self._recommended_params.to_dict()))
+        self.paramsChanged.emit()
+
     def auto_export_enabled(self) -> bool:
         return bool(self.chk_auto_export.isChecked())
 
@@ -2733,6 +2860,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
             output_mode=self.combo_output.currentText(),
             reference_fit=self.combo_ref_fit.currentText(),
             lasso_alpha=float(self.spin_lasso.value()),
+            band_limited_reference_window_s=float(self.spin_band_ref_window.value()),
             rlm_huber_t=float(self.spin_rlm_huber_t.value()),
             rlm_max_iter=int(self.spin_rlm_max_iter.value()),
             rlm_tol=float(self.spin_rlm_tol.value()),
@@ -2786,6 +2914,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.combo_output.setCurrentText(str(params.output_mode))
         self.combo_ref_fit.setCurrentText(str(params.reference_fit))
         self.spin_lasso.setValue(float(params.lasso_alpha))
+        self.spin_band_ref_window.setValue(float(getattr(params, "band_limited_reference_window_s", 60.0)))
         self.spin_rlm_huber_t.setValue(float(getattr(params, "rlm_huber_t", 1.345)))
         self.spin_rlm_max_iter.setValue(int(getattr(params, "rlm_max_iter", 50)))
         self.spin_rlm_tol.setValue(float(getattr(params, "rlm_tol", 1e-6)))

@@ -57,6 +57,8 @@ ARTIFACT_HANDLING_MODES = [
     "Do nothing",
 ]
 
+BAND_LIMITED_INVERTED_ISO_MODE = "dFF (motion corrected with band-limited inverted isobestic)"
+
 # Output modes
 OUTPUT_MODES = [
     # 1) dFF (non motion corrected)
@@ -73,11 +75,13 @@ OUTPUT_MODES = [
     "dFF (motion corrected with fitted ref)",
     # 7) dFF motion corrected after inverting the isobestic before fitting
     "dFF (motion corrected with inverted isobestic fit)",
-    # 8) zscore of that fitted-ref dFF
+    # 8) dFF corrected by fitting only the short-timescale inverted isobestic component
+    BAND_LIMITED_INVERTED_ISO_MODE,
+    # 9) zscore of that fitted-ref dFF
     "zscore (motion corrected with fitted ref)",
-    # 9) prominence-normalized fitted-ref dFF
+    # 10) prominence-normalized fitted-ref dFF
     "prominence normalized (motion corrected with fitted ref)",
-    # 10) raw signal (processed 465 trace after artifact handling/filtering/resampling)
+    # 11) raw signal (processed 465 trace after artifact handling/filtering/resampling)
     "Raw signal (465)",
 ]
 
@@ -138,6 +142,11 @@ class ProcessingParams:
     # Lasso hyperparameter (only used if reference_fit == "Lasso")
     lasso_alpha: float = 1e-3
 
+    # Window used by the band-limited inverted isobestic correction. The trace
+    # is high-passed by subtracting a rolling median over this window before the
+    # reference coupling is estimated.
+    band_limited_reference_window_s: float = 60.0
+
     # Robust regression (Huber) hyperparameters (only used if reference_fit == "RLM (HuberT)")
     rlm_huber_t: float = 1.345  # classic Huber threshold (in sigma units)
     rlm_max_iter: int = 50
@@ -170,6 +179,17 @@ class ProcessingParams:
             if hasattr(p, k):
                 setattr(p, k, v)
         return p
+
+
+@dataclass
+class PreprocessingRecommendation:
+    """Data-driven preprocessing recommendation for one raw recording."""
+    params: ProcessingParams
+    confidence: float
+    summary: str
+    sections: Dict[str, str] = field(default_factory=dict)
+    metrics: Dict[str, Any] = field(default_factory=dict)
+    warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -464,6 +484,7 @@ _OUTPUT_MODE_INFO: Dict[str, Tuple[str, str]] = {
     "zscore (subtractions)": ("z-score", "zdiff"),
     "dFF (motion corrected with fitted ref)": ("dFF", "fitref"),
     "dFF (motion corrected with inverted isobestic fit)": ("dFF", "invfitref"),
+    BAND_LIMITED_INVERTED_ISO_MODE: ("dFF", "bandinvfitref"),
     "zscore (motion corrected with fitted ref)": ("z-score", "fitref"),
     "prominence normalized (motion corrected with fitted ref)": ("prominence", "fitref"),
     "Raw signal (465)": ("signal_465", "raw"),
@@ -475,6 +496,7 @@ _VARIANT_MOTION_CORRECTION = {
     "zdiff": "zscore_subtraction",
     "fitref": "fitted_ref",
     "invfitref": "inverted_fitted_ref",
+    "bandinvfitref": "band_limited_inverted_fitted_ref",
     "raw": "none",
 }
 
@@ -733,8 +755,12 @@ def build_processed_metadata(
             "primary": bool(c.get("primary")),
             "motion_correction": _VARIANT_MOTION_CORRECTION.get(variant, ""),
         }
-        if variant in ("fitref", "invfitref") and params is not None:
+        if variant in ("fitref", "invfitref", "bandinvfitref") and params is not None:
             entry["reference_fit"] = str(getattr(params, "reference_fit", "") or "")
+            if variant == "bandinvfitref":
+                entry["band_limited_reference_window_s"] = _json_float(
+                    getattr(params, "band_limited_reference_window_s", np.nan)
+                )
         outputs[c["name"]] = entry
 
     col_list: List[Dict[str, Any]] = []
@@ -1768,6 +1794,323 @@ def detect_artifacts_adaptive(time: np.ndarray, x: np.ndarray, k: float, window_
     return _mask_outside_signal_envelope(t, y, hi, lo, pad_s)
 
 
+def _robust_corr(x: np.ndarray, y: np.ndarray) -> float:
+    xx = np.asarray(x, float)
+    yy = np.asarray(y, float)
+    m = np.isfinite(xx) & np.isfinite(yy)
+    if np.sum(m) < 10:
+        return float("nan")
+    if np.nanstd(xx[m]) <= 1e-12 or np.nanstd(yy[m]) <= 1e-12:
+        return float("nan")
+    return float(np.corrcoef(xx[m], yy[m])[0, 1])
+
+
+def _safe_quantile(x: np.ndarray, q: float, default: float = float("nan")) -> float:
+    arr = np.asarray(x, float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return float(default)
+    return float(np.quantile(arr, float(q)))
+
+
+def _clip_float(value: float, lo: float, hi: float) -> float:
+    v = float(value)
+    if not np.isfinite(v):
+        return float(lo)
+    return float(max(lo, min(hi, v)))
+
+
+def _rolling_correlation_summary(
+    t: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    fs: float,
+    *,
+    window_s: float = 30.0,
+    step_s: float = 5.0,
+) -> Dict[str, float]:
+    tt = np.asarray(t, float)
+    xx = np.asarray(x, float)
+    yy = np.asarray(y, float)
+    n = min(tt.size, xx.size, yy.size)
+    if n < 20 or not np.isfinite(fs) or fs <= 0:
+        return {
+            "median": float("nan"),
+            "q10": float("nan"),
+            "q90": float("nan"),
+            "fraction_negative": 0.0,
+            "fraction_positive": 0.0,
+            "fraction_strong_negative": 0.0,
+            "fraction_strong_positive": 0.0,
+        }
+    win = int(max(10, round(float(window_s) * float(fs))))
+    step = int(max(1, round(float(step_s) * float(fs))))
+    if win >= n:
+        c = _robust_corr(xx[:n], yy[:n])
+        vals = np.asarray([c], float) if np.isfinite(c) else np.asarray([], float)
+    else:
+        vals_list: List[float] = []
+        for start in range(0, n - win + 1, step):
+            c = _robust_corr(xx[start:start + win], yy[start:start + win])
+            if np.isfinite(c):
+                vals_list.append(float(c))
+        vals = np.asarray(vals_list, float)
+    if vals.size == 0:
+        return {
+            "median": float("nan"),
+            "q10": float("nan"),
+            "q90": float("nan"),
+            "fraction_negative": 0.0,
+            "fraction_positive": 0.0,
+            "fraction_strong_negative": 0.0,
+            "fraction_strong_positive": 0.0,
+        }
+    return {
+        "median": float(np.nanmedian(vals)),
+        "q10": float(np.nanquantile(vals, 0.10)),
+        "q90": float(np.nanquantile(vals, 0.90)),
+        "fraction_negative": float(np.mean(vals < 0.0)),
+        "fraction_positive": float(np.mean(vals > 0.0)),
+        "fraction_strong_negative": float(np.mean(vals < -0.30)),
+        "fraction_strong_positive": float(np.mean(vals > 0.30)),
+    }
+
+
+def _format_metric(value: float, digits: int = 3) -> str:
+    if not np.isfinite(float(value)):
+        return "n/a"
+    return f"{float(value):.{int(digits)}g}"
+
+
+def recommend_preprocessing_settings(
+    trial: LoadedTrial,
+    base_params: Optional[ProcessingParams] = None,
+) -> PreprocessingRecommendation:
+    """
+    Recommend preprocessing settings from raw recording properties.
+
+    The adviser is intentionally conservative: it proposes settings and explains
+    them, but the GUI lets the user decide whether to apply them.
+    """
+    p = ProcessingParams.from_dict(base_params.to_dict()) if hasattr(base_params, "to_dict") else ProcessingParams()
+
+    t = np.asarray(getattr(trial, "time", np.array([], float)), float)
+    sig = np.asarray(getattr(trial, "signal_465", np.array([], float)), float)
+    ref = np.asarray(getattr(trial, "reference_405", np.array([], float)), float)
+    if ref.size == 0:
+        ref = np.full_like(sig, np.nan, dtype=float)
+    n = min(t.size, sig.size)
+    if n < 20:
+        p.output_mode = "dFF (non motion corrected)"
+        return PreprocessingRecommendation(
+            params=p,
+            confidence=0.0,
+            summary="Recording is too short for automatic recommendations.",
+            sections={
+                "artifacts": "Too few samples to estimate artifact burden.",
+                "filtering": "Too few samples to estimate sampling and noise structure.",
+                "baseline": "Keep defaults until a longer trace is loaded.",
+                "output": "Use non-motion dFF because the reference cannot be evaluated.",
+            },
+            metrics={"n_samples": int(n)},
+            warnings=["Too few samples for reliable automatic settings."],
+        )
+    t = t[:n]
+    sig = sig[:n]
+    if ref.size < n:
+        ref = np.full(n, np.nan, dtype=float)
+    else:
+        ref = ref[:n]
+    fs = float(getattr(trial, "sampling_rate", np.nan))
+    if not np.isfinite(fs) or fs <= 0:
+        fs = 1.0 / float(np.nanmedian(np.diff(t))) if t.size > 2 else np.nan
+    if not np.isfinite(fs) or fs <= 0:
+        fs = 10.0
+    duration_s = float(np.nanmax(t) - np.nanmin(t)) if t.size else 0.0
+
+    if np.any(~np.isfinite(sig)):
+        sig = interpolate_nans(sig)
+    if np.any(~np.isfinite(ref)):
+        ref = interpolate_nans(ref)
+
+    finite_ref = ref[np.isfinite(ref)]
+    has_reference = bool(finite_ref.size >= 20 and np.nanstd(finite_ref) > 1e-12)
+
+    hp_window_s = 60.0 if duration_s >= 180.0 else _clip_float(duration_s / 4.0, 10.0, 45.0)
+    sig_hp, sig_trend, _ = _rolling_median_highpass(sig, fs, hp_window_s)
+    if has_reference:
+        ref_hp, ref_trend, _ = _rolling_median_highpass(ref, fs, hp_window_s)
+    else:
+        ref_hp = np.full_like(sig_hp, np.nan, dtype=float)
+        ref_trend = np.full_like(sig_trend, np.nan, dtype=float)
+    raw_corr = _robust_corr(ref, sig) if has_reference else float("nan")
+    hp_corr = _robust_corr(ref_hp, sig_hp) if has_reference else float("nan")
+    rolling = _rolling_correlation_summary(t, ref_hp, sig_hp, fs) if has_reference else {}
+
+    sig_scale = max(_mad(sig_hp), 1e-12)
+    ref_scale = max(_mad(ref_hp), 1e-12) if has_reference else 0.0
+    sig_pos = _safe_quantile(sig_hp, 0.99, 0.0)
+    sig_neg = -_safe_quantile(sig_hp, 0.01, 0.0)
+    sig_median = float(np.nanmedian(sig[np.isfinite(sig)])) if np.isfinite(sig).any() else float("nan")
+    signal_inverted = bool(
+        np.isfinite(sig_median)
+        and sig_median < 0.0
+        and sig_neg > max(1.25 * sig_pos, 3.0 * sig_scale)
+    )
+    p.invert_polarity = signal_inverted
+
+    # Artifact burden at the same envelope the GUI shows.
+    hi_sig_g, lo_sig_g = _compute_signal_envelope(t, sig, 8.0, "Global MAD (raw)", 0.0)
+    hi_ref_g, lo_ref_g = _compute_signal_envelope(t, ref, 8.0, "Global MAD (raw)", 0.0)
+    mask_global = _mask_outside_signal_envelope(t, sig, hi_sig_g, lo_sig_g, 0.0)
+    if has_reference:
+        mask_global |= _mask_outside_signal_envelope(t, ref, hi_ref_g, lo_ref_g, 0.0)
+    artifact_fraction = float(np.mean(mask_global)) if mask_global.size else 0.0
+    drift_sig = float(np.nanstd(sig_trend) / max(np.nanstd(sig_hp), 1e-12))
+    drift_ref = float(np.nanstd(ref_trend) / max(np.nanstd(ref_hp), 1e-12)) if has_reference else 0.0
+    drift_score = max(drift_sig, drift_ref)
+
+    p.artifact_detection_enabled = artifact_fraction > 0.0005
+    p.artifact_mode = "Adaptive MAD (windowed)" if (duration_s > 240.0 and drift_score > 2.5) else "Global MAD (raw)"
+    p.mad_k = 8.0 if artifact_fraction < 0.02 else 10.0
+    p.adaptive_window_s = float(_clip_float(max(5.0, min(30.0, duration_s / 30.0)), 5.0, 30.0))
+    p.artifact_pad_s = float(_clip_float(max(0.25, 1.5 / fs), 0.10, 0.75))
+    p.artifact_handling = "Interpolate" if artifact_fraction < 0.05 else "Strong local low-pass"
+
+    target_fs = float(fs if fs <= 100.0 else 100.0)
+    target_fs = float(max(1.0, round(target_fs, 1)))
+    p.target_fs_hz = target_fs
+    p.filter_order = 3
+    p.lowpass_hz = float(_clip_float(min(12.0, 0.40 * target_fs), 0.1, max(0.1, 0.45 * target_fs)))
+    noise_ratio = float(_mad(np.diff(sig_hp)) / max(_mad(sig_hp), 1e-12)) if sig_hp.size > 5 else 0.0
+    p.smoothing_enabled = bool(fs >= 20.0 and noise_ratio > 1.8)
+    p.smoothing_method = "Savitzky-Golay"
+    p.smoothing_window_s = float(_clip_float(0.20 if fs >= 20.0 else 1.0 / fs, 0.02, 0.50))
+    p.smoothing_polyorder = 2
+
+    p.baseline_method = "airpls"
+    if n < 1500:
+        lam_exp = 7
+    elif n < 6000:
+        lam_exp = 9
+    else:
+        lam_exp = 10 if fs > 100.0 else 9
+    p.baseline_lambda = float(10.0 ** lam_exp)
+    p.baseline_diff_order = 2
+    p.baseline_max_iter = 50
+    p.baseline_tol = 1e-3
+    p.asls_p = 0.01
+
+    frac_neg = float(rolling.get("fraction_negative", 0.0) or 0.0)
+    frac_pos = float(rolling.get("fraction_positive", 0.0) or 0.0)
+    strong_neg = float(rolling.get("fraction_strong_negative", 0.0) or 0.0)
+    output_reason = ""
+    if not has_reference:
+        p.output_mode = "dFF (non motion corrected)"
+        output_reason = "No stable 405 reference was detected, so motion correction would be unreliable."
+    elif np.isfinite(hp_corr) and hp_corr < -0.25 and frac_neg >= 0.60:
+        mixed_drift = bool(np.isfinite(raw_corr) and raw_corr > 0.20 and abs(raw_corr - hp_corr) > 0.45)
+        if mixed_drift:
+            p.output_mode = BAND_LIMITED_INVERTED_ISO_MODE
+            p.band_limited_reference_window_s = hp_window_s
+            output_reason = (
+                "410 and 470 share slow drift but their short-timescale fluctuations are anti-correlated, "
+                "so correct only the band-limited inverted 410 component."
+            )
+        else:
+            p.output_mode = "dFF (motion corrected with inverted isobestic fit)"
+            output_reason = (
+                "Short-timescale 410 and 470 fluctuations are consistently anti-correlated, "
+                "so the isobestic should be inverted before fitted-reference correction."
+            )
+    elif has_reference and ((np.isfinite(hp_corr) and hp_corr > 0.20 and frac_pos >= 0.50) or (np.isfinite(raw_corr) and raw_corr > 0.35)):
+        p.output_mode = "dFF (motion corrected with fitted ref)"
+        output_reason = "The 405 channel tracks the 465 channel with positive coupling, so fitted-reference dFF is appropriate."
+    else:
+        p.output_mode = "dFF (non motion corrected)"
+        output_reason = "The 405 reference is weak or inconsistent, so signal-only dFF is safer than forcing a correction."
+
+    p.reference_fit = "RLM (HuberT)" if artifact_fraction > 0.02 else "OLS (recommended)"
+    p.lasso_alpha = 1e-3
+    p.rlm_huber_t = 1.345
+    p.rlm_max_iter = 50
+    p.rlm_tol = 1e-6
+
+    conf_terms = [
+        min(1.0, abs(hp_corr)) if np.isfinite(hp_corr) else 0.0,
+        max(frac_neg, frac_pos),
+        min(1.0, duration_s / 300.0),
+        1.0 if has_reference else 0.25,
+    ]
+    confidence = float(_clip_float(0.15 + 0.25 * sum(conf_terms), 0.0, 1.0))
+    if p.output_mode == "dFF (non motion corrected)" and has_reference:
+        confidence = min(confidence, 0.55)
+
+    polarity_text = (
+        "Signal polarity looks inverted; enable full 465/405 polarity inversion."
+        if signal_inverted else
+        "Signal polarity looks normal; keep full 465/405 polarity inversion off."
+    )
+
+    summary = (
+        f"Recommended: {p.output_mode}. "
+        f"Fs {fs:.2f} Hz, raw corr={_format_metric(raw_corr)}, "
+        f"detrended corr={_format_metric(hp_corr)}, confidence={confidence:.0%}."
+    )
+    sections = {
+        "artifacts": (
+            f"Artifact burden at k=8 is {artifact_fraction * 100.0:.2f}%. "
+            f"Recommend {p.artifact_mode}, {p.artifact_handling}, pad {p.artifact_pad_s:.2g}s."
+        ),
+        "filtering": (
+            f"Raw Fs is {fs:.2f} Hz. Use target {p.target_fs_hz:.1f} Hz and low-pass "
+            f"{p.lowpass_hz:.2g} Hz to stay below Nyquist. {polarity_text}"
+        ),
+        "baseline": (
+            f"Duration is {duration_s:.1f}s with drift score {drift_score:.2g}. "
+            f"Use {p.baseline_method} with lambda={p.baseline_lambda:.1e}."
+        ),
+        "output": (
+            f"{output_reason} Rolling 30s correlations: median={_format_metric(rolling.get('median', float('nan')))}, "
+            f"negative windows={frac_neg * 100.0:.0f}%, strong negative={strong_neg * 100.0:.0f}%."
+        ),
+        "qc": "Verify by comparing non-motion dFF, recommended output, and event-aligned averages before exporting a full batch.",
+    }
+    warnings: List[str] = []
+    if has_reference and np.isfinite(raw_corr) and np.isfinite(hp_corr) and np.sign(raw_corr) != np.sign(hp_corr):
+        warnings.append("Slow drift and fast reference coupling have opposite signs.")
+    if confidence < 0.50:
+        warnings.append("Recommendation confidence is low. Inspect the raw and corrected traces manually.")
+
+    metrics: Dict[str, Any] = {
+        "n_samples": int(n),
+        "duration_s": duration_s,
+        "fs_hz": float(fs),
+        "has_reference": bool(has_reference),
+        "raw_corr_405_465": raw_corr,
+        "detrended_corr_405_465": hp_corr,
+        "rolling_corr": dict(rolling),
+        "artifact_fraction": artifact_fraction,
+        "drift_score": drift_score,
+        "signal_positive_q99": sig_pos,
+        "signal_negative_q01_abs": sig_neg,
+        "signal_median": sig_median,
+        "signal_polarity_inverted": bool(signal_inverted),
+        "reference_hp_mad": ref_scale,
+        "signal_hp_mad": sig_scale,
+        "noise_ratio": noise_ratio,
+        "recommended_output": p.output_mode,
+    }
+    return PreprocessingRecommendation(
+        params=p,
+        confidence=confidence,
+        summary=summary,
+        sections=sections,
+        metrics=metrics,
+        warnings=warnings,
+    )
+
+
 def zscore_median_std(x: np.ndarray) -> np.ndarray:
     """
     Z-score using median centering and standard deviation scaling.
@@ -2718,6 +3061,72 @@ def _compute_fitted_reference_dff(
     return dff_fit, fitted_ref, a, b
 
 
+def _rolling_median_highpass(x: np.ndarray, fs: float, window_s: float) -> Tuple[np.ndarray, np.ndarray, int]:
+    """
+    Split a trace into rolling-median trend and residual components.
+
+    The residual is used for band-limited reference correction so slow bleaching
+    or session drift does not dominate the reference fit.
+    """
+    y = np.asarray(x, float)
+    if y.size == 0:
+        return y.copy(), y.copy(), 0
+    if np.any(~np.isfinite(y)):
+        y = interpolate_nans(y)
+    n = _window_samples_from_seconds(float(fs), float(window_s), minimum=5, require_odd=True)
+    if n >= y.size:
+        fallback = np.full_like(y, float(np.nanmedian(y)), dtype=float)
+        return y - fallback, fallback, int(y.size)
+    trend = np.asarray(median_filter(y, size=int(n), mode="nearest"), float)
+    return y - trend, trend, int(n)
+
+
+def _fit_nonnegative_no_intercept(x: np.ndarray, y: np.ndarray) -> float:
+    """Fit y = beta*x with beta constrained to be nonnegative."""
+    xx = np.asarray(x, float)
+    yy = np.asarray(y, float)
+    m = np.isfinite(xx) & np.isfinite(yy)
+    if np.sum(m) < 10:
+        return 0.0
+    den = float(np.sum(xx[m] * xx[m]))
+    if not np.isfinite(den) or den <= 1e-12:
+        return 0.0
+    beta = float(np.sum(xx[m] * yy[m]) / den)
+    if not np.isfinite(beta) or beta < 0.0:
+        return 0.0
+    return beta
+
+
+def _compute_band_limited_reference_dff(
+    dff_sig: np.ndarray,
+    dff_ref: np.ndarray,
+    fs: float,
+    params: ProcessingParams,
+    *,
+    invert_reference: bool = True,
+) -> Tuple[np.ndarray, float, int]:
+    """
+    Correct dFF using only the short-timescale reference component.
+
+    This is designed for recordings where slow 410/470 drift is positively
+    shared but motion-like fluctuations are anti-correlated. A rolling median
+    removes slow drift from both dFF traces, a nonnegative no-intercept beta is
+    fit in the selected polarity, and only that band-limited reference component
+    is subtracted from the original signal dFF.
+    """
+    sig_arr = np.asarray(dff_sig, float)
+    ref_arr = np.asarray(dff_ref, float)
+    window_s = float(getattr(params, "band_limited_reference_window_s", 60.0) or 60.0)
+    if not np.isfinite(window_s) or window_s <= 0:
+        window_s = 60.0
+    sig_hp, _, win_n = _rolling_median_highpass(sig_arr, fs, window_s)
+    ref_hp, _, _ = _rolling_median_highpass(ref_arr, fs, window_s)
+    reg = -ref_hp if bool(invert_reference) else ref_hp
+    beta = _fit_nonnegative_no_intercept(reg, sig_hp)
+    corrected = sig_arr - beta * reg
+    return np.asarray(corrected, float), float(beta), int(win_n)
+
+
 # =============================================================================
 # Worker task (stable)
 # =============================================================================
@@ -3103,6 +3512,8 @@ class PhotometryProcessor:
         no_reference_fallback = False
         fit_slope: Optional[float] = None
         fit_intercept: Optional[float] = None
+        band_ref_beta: Optional[float] = None
+        band_ref_window_n: Optional[int] = None
 
         # --- Compute baseline-referenced dFFs (building blocks) ---
         # dFF_sig = (sig_filtered - baseline_sig) / baseline_sig
@@ -3175,8 +3586,26 @@ class PhotometryProcessor:
                 out = dff_sig
                 no_reference_fallback = True
 
+        elif mode == BAND_LIMITED_INVERTED_ISO_MODE:
+            # (8) band-limited inverted isobestic correction
+            # 1) Compute dFF for signal and reference.
+            # 2) High-pass both with a rolling median window.
+            # 3) Fit beta >= 0 from -dFF_ref_hp to dFF_sig_hp.
+            # 4) Subtract only that short-timescale inverted reference component.
+            if has_reference:
+                out, band_ref_beta, band_ref_window_n = _compute_band_limited_reference_dff(
+                    dff_sig,
+                    dff_ref,
+                    fs_used,
+                    params,
+                    invert_reference=True,
+                )
+            else:
+                out = dff_sig
+                no_reference_fallback = True
+
         elif mode == "zscore (motion corrected with fitted ref)":
-            # (8) zscore (motion corrected with fitted ref)
+            # (9) zscore (motion corrected with fitted ref)
             # zscore( (sig_filtered - fitted_ref) / fitted_ref )
             if has_reference:
                 dff_fit, _, fit_slope, fit_intercept = _compute_fitted_reference_dff(ref2, sig2, params)
@@ -3186,7 +3615,7 @@ class PhotometryProcessor:
                 no_reference_fallback = True
 
         elif mode == "prominence normalized (motion corrected with fitted ref)":
-            # (9) prominence-normalized fitted-ref dFF
+            # (10) prominence-normalized fitted-ref dFF
             # 1) Fit reference and compute fitted-ref dFF.
             # 2) Exclude event windows from the selected trigger channel.
             # 3) Detect baseline peaks by prominence, average the top fraction,
@@ -3200,7 +3629,7 @@ class PhotometryProcessor:
             out, prominence_stats = prominence_normalize(dff_fit, t2, event_times, params, fs_used)
 
         elif mode == "Raw signal (465)":
-            # (10) raw signal (processed 465 trace)
+            # (11) raw signal (processed 465 trace)
             # Directly expose the filtered/resampled 465 channel.
             out = np.asarray(sig2, float)
 
@@ -3220,17 +3649,24 @@ class PhotometryProcessor:
             if mode in (
                 "dFF (motion corrected with fitted ref)",
                 "dFF (motion corrected with inverted isobestic fit)",
+                BAND_LIMITED_INVERTED_ISO_MODE,
                 "zscore (motion corrected with fitted ref)",
                 "prominence normalized (motion corrected with fitted ref)",
             ):
-                if fit_slope is not None and fit_intercept is not None:
+                if mode == BAND_LIMITED_INVERTED_ISO_MODE and band_ref_beta is not None:
+                    window_s = float(getattr(params, "band_limited_reference_window_s", 60.0) or 60.0)
+                    context_parts.append(
+                        f"Band-limited inverted 405: beta={float(band_ref_beta):.4g}, "
+                        f"window={window_s:.4g}s, n={int(band_ref_window_n or 0)}"
+                    )
+                elif fit_slope is not None and fit_intercept is not None:
                     context_parts.append(
                         f"Fit: {params.reference_fit} "
                         f"(slope={float(fit_slope):.4g}, intercept={float(fit_intercept):.4g})"
                     )
                 else:
                     context_parts.append(f"Fit: {params.reference_fit}")
-                if mode == "dFF (motion corrected with inverted isobestic fit)":
+                if mode in ("dFF (motion corrected with inverted isobestic fit)", BAND_LIMITED_INVERTED_ISO_MODE):
                     context_parts.append("Iso polarity: inverted before fit")
             context_parts.append(baseline_desc)
             if prominence_stats is not None:

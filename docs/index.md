@@ -70,6 +70,24 @@ Use Preprocessing when you want to clean and export photometry traces.
 7. Preview the result.
 8. Export CSV or HDF5.
 
+### Recommended settings
+
+When a raw preprocessing file is selected, pyBer analyzes the active channel and
+time window, then shows **Recommended for your data** above the settings cards.
+The recommendation estimates sampling rate, drift, artifact burden, 405/470
+coupling, rolling short-timescale correlation, and full acquisition polarity. It
+does not overwrite your settings automatically. Press **Apply recommended
+settings** to accept the proposed parameters.
+
+Each preprocessing card also receives a short explanation:
+
+- Artifacts: detected outlier burden and why global or adaptive MAD is proposed.
+- Filtering: raw sampling rate, target sampling rate, low-pass cutoff, smoothing,
+  and whether full 465/405 polarity inversion appears necessary.
+- Baseline: duration, drift score, baseline method, and lambda.
+- Output: why signal-only dFF, fitted-reference dFF, inverted isobestic fit, or
+  band-limited inverted correction was selected.
+
 ### Output definitions
 
 pyBer exposes explicit output modes so exported traces are reproducible. Each
@@ -86,6 +104,7 @@ picked is always recorded in the sidecar metadata (see [Export](#8-export)).
 | z-score signal minus z-score reference | `z-score` | `zdiff` |
 | dFF with fitted reference | `dFF` | `fitref` |
 | dFF with inverted isobestic fit | `dFF` | `invfitref` |
+| dFF with band-limited inverted isobestic | `dFF` | `bandinvfitref` |
 | z-score with fitted reference | `z-score` | `fitref` |
 | prominence-normalized (fitted reference) | `prominence` | `fitref` |
 | raw processed 465 signal | `signal_465` | `raw` |
@@ -109,6 +128,14 @@ variant as `invfitref` in export metadata. If the un-inverted reference is
 anti-correlated, the normal fitted-reference mode will not use a negative slope;
 the inverted mode is the efficient correction. The preprocessing output context
 reports the fitted slope and intercept so this is visible.
+
+If slow 405/470 bleaching drift is positively shared but fast 405/470
+fluctuations are anti-correlated, choose **dFF (motion corrected with
+band-limited inverted isobestic)**. This mode subtracts a rolling median from
+both dFF traces, fits only the short-timescale `-dFF_ref` component with
+`beta >= 0`, and removes that component from `dFF_sig`. It is intended for mixed
+polarity recordings where a single whole-session raw fit is dominated by slow
+drift.
 
 ## 4. Artifact Handling
 

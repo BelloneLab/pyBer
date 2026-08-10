@@ -120,6 +120,7 @@ from analysis_core import (
     load_processed_h5,
     load_rwd_csv,
     is_rwd_events_csv,
+    recommend_preprocessing_settings,
     safe_stem_from_metadata,
     detect_artifacts_adaptive,
     interpolate_nans,
@@ -238,7 +239,7 @@ _CSV_NONE_LABEL = "(none)"
 _PRE_PROJECT_TYPE = "pyber_preprocessing_project"
 _PRE_PROJECT_VERSION = 1
 _SUPPORTED_DATA_EXTS = (".doric", ".h5", ".hdf5", ".csv")
-_RWD_FLUORESCENCE_CSV_NAMES = frozenset({"fluorescence.csv", "fluorescence-unaligned.csv"})
+_RWD_FLUORESCENCE_CSV_STEMS = ("fluorescence", "fluorescence-unaligned")
 _FOLDER_DISCOVERY_SKIP_DIRS = frozenset({
     ".git",
     ".pytest_cache",
@@ -253,7 +254,10 @@ _LOG = logging.getLogger(__name__)
 
 def _is_rwd_fluorescence_csv_name(path: str) -> bool:
     name = os.path.basename(str(path or "")).strip().lower()
-    return name in _RWD_FLUORESCENCE_CSV_NAMES
+    stem, ext = os.path.splitext(name)
+    if ext != ".csv":
+        return False
+    return any(stem == base or stem.startswith(base + "_") for base in _RWD_FLUORESCENCE_CSV_STEMS)
 
 
 def _is_supported_preprocessing_folder_file(path: str, *, include_generic_csv: bool = False) -> bool:
@@ -6042,6 +6046,38 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             return None
 
+    def _refresh_preprocessing_recommendation(self) -> None:
+        panel = getattr(self, "param_panel", None)
+        if panel is None or not hasattr(panel, "set_recommendation"):
+            return
+        if not self._current_path or not self._current_channel:
+            try:
+                panel.set_recommendation(None)
+            except Exception:
+                pass
+            return
+        doric = self._loaded_files.get(self._current_path)
+        if doric is None:
+            try:
+                panel.set_recommendation(None)
+            except Exception:
+                pass
+            return
+        try:
+            trial = doric.make_trial(self._current_channel, trigger_name=self._current_trigger)
+            trial = self._apply_time_window(trial)
+            key = (self._current_path, self._current_channel)
+            cutouts = self._cutout_regions_by_key.get(key, [])
+            trial = self._apply_cutouts(trial, cutouts)
+            recommendation = recommend_preprocessing_settings(trial, panel.get_params())
+            panel.set_recommendation(recommendation)
+        except Exception as exc:
+            try:
+                panel.set_recommendation(None)
+            except Exception:
+                pass
+            self._show_status_message(f"Recommendation unavailable: {exc}", 6000)
+
     def _pump_export_progress_events(self) -> None:
         app = QtWidgets.QApplication.instance()
         if app is None:
@@ -6158,6 +6194,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_channel = None
                 self._current_trigger = None
                 self.plots.set_title("No file loaded")
+                self._refresh_preprocessing_recommendation()
                 self._post_get_current_dio_list()
                 self._update_plot_status()
             return
@@ -6190,6 +6227,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.file_panel.set_trigger("")
         self._update_export_summary_label()
 
+        self._refresh_preprocessing_recommendation()
         self._update_raw_plot()
         self._trigger_preview()
 
@@ -6208,6 +6246,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     preferred=self.param_panel.export_channel_names(),
                 )
                 self._update_export_summary_label()
+        self._refresh_preprocessing_recommendation()
         self._update_raw_plot()
         self._trigger_preview()
         self.post_tab.set_current_source_label(os.path.basename(self._current_path or ""), self._current_channel or "")
@@ -6238,6 +6277,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.artifact_panel.set_auto_regions(auto_win, checked_regions=checked_auto)
             self.artifact_panel.set_regions(manual_win)
         self._record_pre_history_change()
+        self._refresh_preprocessing_recommendation()
         self._update_raw_plot()
         self._trigger_preview()
         self._update_plot_status()

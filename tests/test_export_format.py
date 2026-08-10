@@ -28,6 +28,7 @@ from analysis_core import (  # noqa: E402
 )
 
 INVERTED_FIT_MODE = "dFF (motion corrected with inverted isobestic fit)"
+BAND_LIMITED_INVERTED_MODE = ac.BAND_LIMITED_INVERTED_ISO_MODE
 
 
 def _make_proc(n=40, multi=False):
@@ -69,6 +70,8 @@ class ColumnNamingTests(unittest.TestCase):
         self.assertEqual(ac.output_variant_key("dFF (motion corrected with fitted ref)"), "fitref")
         self.assertEqual(ac.output_family(INVERTED_FIT_MODE), "dFF")
         self.assertEqual(ac.output_variant_key(INVERTED_FIT_MODE), "invfitref")
+        self.assertEqual(ac.output_family(BAND_LIMITED_INVERTED_MODE), "dFF")
+        self.assertEqual(ac.output_variant_key(BAND_LIMITED_INVERTED_MODE), "bandinvfitref")
         self.assertEqual(ac.output_family("zscore (subtractions)"), "z-score")
         self.assertEqual(ac.output_variant_key("zscore (subtractions)"), "zdiff")
         self.assertEqual(ac.output_family("Raw signal (465)"), "signal_465")
@@ -85,8 +88,9 @@ class ColumnNamingTests(unittest.TestCase):
         names = ac.assign_output_column_names([
             INVERTED_FIT_MODE,
             "dFF (motion corrected with fitted ref)",
+            BAND_LIMITED_INVERTED_MODE,
         ])
-        self.assertEqual([n for _, n in names], ["dFF", "dFF__fitref"])
+        self.assertEqual([n for _, n in names], ["dFF", "dFF__fitref", "dFF__bandinvfitref"])
 
 
 class CsvWriterTests(unittest.TestCase):
@@ -190,6 +194,23 @@ class SidecarTests(unittest.TestCase):
         self.assertEqual(side["outputs"]["dFF"]["motion_correction"], "inverted_fitted_ref")
         self.assertEqual(side["outputs"]["dFF"]["reference_fit"], "RLM (HuberT)")
         self.assertEqual(side["outputs"]["dFF__fitref"]["variant"], "fitref")
+
+    def test_sidecar_records_band_limited_inverted_variant_and_window(self):
+        proc = _make_proc(multi=True)
+        rng = np.arange(proc.time.size, dtype=float)
+        proc.output = 0.04 * rng
+        proc.output_label = BAND_LIMITED_INVERTED_MODE
+        proc.outputs = {BAND_LIMITED_INVERTED_MODE: 0.04 * rng}
+        params = ProcessingParams()
+        params.band_limited_reference_window_s = 45.0
+        path = os.path.join(self.dir, "rec_band_inverted.csv")
+        export_processed_csv(path, proc, params=params,
+                             selection=_full_selection([BAND_LIMITED_INVERTED_MODE]))
+        side = read_processed_sidecar(path)
+        self.assertIsNotNone(side)
+        self.assertEqual(side["outputs"]["dFF"]["variant"], "bandinvfitref")
+        self.assertEqual(side["outputs"]["dFF"]["motion_correction"], "band_limited_inverted_fitted_ref")
+        self.assertEqual(side["outputs"]["dFF"]["band_limited_reference_window_s"], 45.0)
 
 
 class H5WriterTests(unittest.TestCase):

@@ -106,9 +106,11 @@ class RecursiveFolderDiscoveryTests(unittest.TestCase):
 
             paths_to_create = [
                 os.path.join(animal_a, "Fluorescence.csv"),
+                os.path.join(animal_a, "Fluorescence_souris_3_40_fps_noise_121225.csv"),
                 os.path.join(animal_a, "Events.csv"),
                 os.path.join(animal_a, "behavior.csv"),
                 os.path.join(animal_b, "Fluorescence-unaligned.csv"),
+                os.path.join(animal_b, "Fluorescence-unaligned_souris_57_5fps_160725.csv"),
                 os.path.join(animal_b, "Events.csv"),
                 os.path.join(animal_b, "recording.doric"),
             ]
@@ -121,7 +123,9 @@ class RecursiveFolderDiscoveryTests(unittest.TestCase):
 
             self.assertEqual(names, [
                 "animal_a/session_1/Fluorescence.csv",
+                "animal_a/session_1/Fluorescence_souris_3_40_fps_noise_121225.csv",
                 "animal_b/session_2/Fluorescence-unaligned.csv",
+                "animal_b/session_2/Fluorescence-unaligned_souris_57_5fps_160725.csv",
                 "animal_b/session_2/recording.doric",
                 "manual_raw.csv",
             ])
