@@ -15,6 +15,7 @@ import os
 import json
 import logging
 import sys
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -534,11 +535,35 @@ def _qc_robust_sigma(values: np.ndarray) -> float:
     return std if np.isfinite(std) else float("nan")
 
 
-# Per-metric tiering: PASS / WARN / FAIL. The thresholds below are drawn from
-# the fiber-photometry literature and lab practice (Patel et al. 2020 on motion
-# correction, De Jong et al. 2019 on artifact rates, common SNR conventions).
-# The FAIL boundary on motion bleed is set at 0.9 (not 0.85) because some GRAB
-# sensors carry intrinsically noisier 405 references that can inflate |r|.
+# ----------------------------------------------------------------------------
+# Strict per-metric thresholds: (WARN boundary, FAIL boundary).
+#
+# Every metric is graded PASS / WARN / FAIL against these absolute boundaries;
+# there are no user-tunable weights anywhere in the verdict. The values are
+# deliberately tighter than the permissive set used before, because that set let
+# visibly compromised recordings land on GOOD. Each boundary now sits at the
+# conservative end of the fiber-photometry literature and of common lab
+# practice (Patel et al. 2020 on motion correction, De Jong et al. 2019 on
+# artifact rates, Sherathiya et al. 2021 and Bruno et al. 2021 on SNR,
+# bleaching and reference stability).
+# ----------------------------------------------------------------------------
+_QC_T_ARTIFACT = (2.0, 8.0)      # % of samples flagged as artifact
+_QC_T_MOTION_R = (0.40, 0.80)    # |r| between signal dF/F and isobestic dF/F
+_QC_T_SNR = (6.0, 3.0)           # event amplitude / noise floor (higher is better)
+_QC_T_SIG_NOISE = (0.30, 0.60)   # signal high-frequency noise, % dF/F
+_QC_T_REF_NOISE = (0.30, 0.60)   # isobestic high-frequency noise, % dF/F
+_QC_T_ROLL_STD = (0.12, 0.25)    # std of the rolling reference correlation
+_QC_T_BLEACH = (8.0, 20.0)       # |baseline drift| across the session, %
+_QC_T_CUT_FRAC = (5.0, 20.0)     # % of the session that should be cut out
+
+# Corrected-output distribution boundaries (heavy tails / off-centre median).
+_QC_T_Z5_FAIL = 1.00             # % of corrected samples beyond |z| > 5
+_QC_T_Z5NEG_FAIL = 0.25          # % of corrected samples below z = -5 (artifact)
+_QC_T_Z3_WARN = 3.0              # % of corrected samples beyond |z| > 3
+_QC_T_MEDIAN_WARN = 0.20         # |median| of the corrected z distribution
+_QC_T_KURT_WARN = 6.0            # |excess kurtosis| of the corrected distribution
+_QC_T_KURT_FAIL = 20.0
+
 _QC_PASS_SCORE = 88.0
 _QC_WARN_SCORE = 55.0
 _QC_FAIL_SCORE = 22.0
@@ -565,6 +590,270 @@ def _qc_decide_tier(value: float, warn_thr: float, fail_thr: float,
         return "FAIL", _QC_FAIL_SCORE
 
 
+# ----------------------------------------------------------------------------
+# Time-resolved problem detection.
+#
+# The tiered metrics above summarise the whole session with a single number, so
+# they cannot tell the user that "the recording is fine except for 90 seconds in
+# the middle". The helpers below scan the session in short bins and return the
+# concrete time spans that should be cut out (Advanced Options -> Cut out
+# regions), which is what the recommendation panel shows.
+# ----------------------------------------------------------------------------
+
+_QC_SEG_MIN_S = 2.0          # ignore flagged spans shorter than this
+_QC_SEG_MAX_REPORTED = 8     # keep the recommendation list readable
+
+# Human-readable label for each detector.
+_QC_SEG_LABELS = {
+    "bleach_in": "Bleach-in",
+    "artifact": "Artifact burst",
+    "decoupled": "Reference decoupled",
+    "noise": "Noise burst",
+    "flat": "Flat / dead signal",
+}
+
+
+def _qc_fmt_span(a: float, b: float) -> str:
+    """Format a time span in seconds, the unit the cut-out table expects."""
+    if (b - a) >= 10.0:
+        return f"{a:.0f}-{b:.0f} s"
+    return f"{a:.1f}-{b:.1f} s"
+
+
+def _qc_merge_spans(spans: List[Tuple[float, float]], gap_s: float) -> List[Tuple[float, float]]:
+    """Merge overlapping spans, and spans separated by less than ``gap_s``."""
+    ordered = sorted(
+        (float(a), float(b))
+        for a, b in spans
+        if np.isfinite(a) and np.isfinite(b) and b > a
+    )
+    merged: List[Tuple[float, float]] = []
+    for a, b in ordered:
+        if merged and (a - merged[-1][1]) <= gap_s:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _qc_span_total(spans: List[Tuple[float, float]]) -> float:
+    """Total covered time of a set of spans, counting overlaps only once."""
+    return float(sum(b - a for a, b in _qc_merge_spans(spans, 0.0)))
+
+
+def _qc_bins(t: np.ndarray, bin_s: float) -> List[Tuple[int, int, float, float]]:
+    """Split a time vector into consecutive bins.
+
+    Returns a list of ``(index_lo, index_hi, t_start, t_end)`` tuples. Bins with
+    fewer than four samples are dropped so that per-bin robust statistics stay
+    meaningful.
+    """
+    arr = np.asarray(t, float)
+    if arr.size < 8 or not np.isfinite(bin_s) or bin_s <= 0:
+        return []
+    t0, t1 = float(arr[0]), float(arr[-1])
+    if not (np.isfinite(t0) and np.isfinite(t1)) or t1 <= t0:
+        return []
+    count = int(min(4000, max(1, np.ceil((t1 - t0) / bin_s))))
+    edges = t0 + bin_s * np.arange(count + 1, dtype=float)
+    edges[-1] = max(float(edges[-1]), t1)
+    idx = np.searchsorted(arr, edges, side="left")
+    out: List[Tuple[int, int, float, float]] = []
+    for i in range(count):
+        lo, hi = int(idx[i]), int(idx[i + 1])
+        if hi - lo >= 4:
+            out.append((lo, hi, float(edges[i]), float(min(edges[i + 1], t1))))
+    return out
+
+
+def _qc_seg(start: float, end: float, kind: str, severity: float, detail: str) -> Dict[str, object]:
+    """Build one flagged-span record."""
+    return {
+        "start": float(start),
+        "end": float(end),
+        "kind": str(kind),
+        "label": _QC_SEG_LABELS.get(kind, kind),
+        "severity": float(severity),
+        "detail": str(detail),
+    }
+
+
+def _qc_detect_bad_segments(qc: Dict[str, object]) -> List[Dict[str, object]]:
+    """Find the stretches of a recording that are not worth analysing.
+
+    Five independent detectors run over the session:
+
+    1. ``bleach_in``  - the steep fluorescence drop at the very start, which no
+       baseline model handles gracefully.
+    2. ``artifact``   - bins where the smart artifact detector flags a quarter
+       or more of the samples.
+    3. ``decoupled``  - bins where the isobestic reference stops tracking the
+       signal (or flips sign), so motion correction would *inject* artifact.
+    4. ``noise``      - bins whose high-frequency noise is several times the
+       typical noise floor of the same recording.
+    5. ``flat``       - bins with almost no variance at all (fibre unplugged,
+       LED off, or a saturated detector).
+
+    Returns the flagged spans sorted by start time.
+    """
+    t = np.asarray(qc.get("t", []), float)
+    if t.size < 16:
+        return []
+    duration = float(t[-1] - t[0])
+    if not np.isfinite(duration) or duration <= 0:
+        return []
+
+    # Bin width: ~1/60th of the session, clamped to a sane 5-30 s range.
+    bin_s = float(np.clip(duration / 60.0, 5.0, 30.0))
+    bins = _qc_bins(t, bin_s)
+    has_reference = bool(qc.get("has_reference", True))
+    segments: List[Dict[str, object]] = []
+
+    # --- 1) Bleach-in transient at the start of the session -----------------
+    base = np.asarray(qc.get("sig_base", []), float)
+    fs = _qc_float(qc, "fs", float("nan"))
+    if base.size == t.size and base.size > 32 and np.isfinite(fs) and fs > 0:
+        step = max(1, int(round(fs)))                      # coarse ~1 s grid
+        tb = t[::step]
+        bb = base[::step]
+        finite = np.isfinite(bb)
+        if int(np.sum(finite)) > 8:
+            tb, bb = tb[finite], bb[finite]
+            start_level = float(bb[0])
+            end_level = float(np.nanmedian(bb[max(1, bb.size // 2):]))
+            drop = start_level - end_level
+            # Only meaningful when the session actually loses >=3% of its
+            # fluorescence and the trace starts high (i.e. a real bleach-in).
+            if start_level > 1e-9 and drop > 0 and (drop / start_level) >= 0.03:
+                frac_done = (start_level - bb) / drop      # share of the total drop
+                reached50 = np.flatnonzero(frac_done >= 0.5)
+                if reached50.size:
+                    i50 = int(reached50[0])
+                    # A bleach-in is "front-loaded": half the whole session drop
+                    # happens inside the first 15% of the recording.
+                    if (tb[i50] - tb[0]) <= 0.15 * duration:
+                        reached80 = np.flatnonzero(frac_done >= 0.8)
+                        i80 = int(reached80[0]) if reached80.size else i50
+                        cut_to = min(float(tb[i80]), float(tb[0] + 0.15 * duration))
+                        cut_to = max(cut_to, float(tb[i50]))
+                        span = cut_to - float(tb[0])
+                        if span >= _QC_SEG_MIN_S:
+                            lost = (start_level - float(np.interp(cut_to, tb, bb))) / start_level * 100.0
+                            share = float(np.interp(cut_to, tb, frac_done)) * 100.0
+                            segments.append(_qc_seg(
+                                float(tb[0]), cut_to, "bleach_in",
+                                severity=min(1.0, share / 100.0),
+                                detail=(f"fluorescence falls {lost:.0f}% here, which is "
+                                        f"{share:.0f}% of the whole session's drop"),
+                            ))
+
+    # --- 2) Artifact-dense stretches ----------------------------------------
+    art_mask = np.asarray(qc.get("art_mask", []), bool)
+    if bins and art_mask.size == t.size:
+        hot = [(a, b) for lo, hi, a, b in bins if float(np.mean(art_mask[lo:hi])) >= 0.25]
+        for a, b in _qc_merge_spans(hot, bin_s * 0.6):
+            lo = int(np.searchsorted(t, a, side="left"))
+            hi = int(np.searchsorted(t, b, side="right"))
+            frac = float(np.mean(art_mask[lo:hi])) if hi > lo else 0.0
+            if (b - a) >= _QC_SEG_MIN_S:
+                segments.append(_qc_seg(
+                    a, b, "artifact", severity=frac,
+                    detail=f"{frac * 100:.0f}% of the samples here are flagged as artifact",
+                ))
+
+    # --- 3) Reference decoupling / sign flips -------------------------------
+    r_roll = np.asarray(qc.get("r_roll", []), float)
+    centers = np.asarray(qc.get("r_centers", []), int)
+    r_win_s = _qc_float(qc, "r_win_s", 10.0)
+    if has_reference and r_roll.size and centers.size == r_roll.size:
+        tc = t[np.clip(centers, 0, t.size - 1)]
+        finite = np.isfinite(r_roll)
+        if int(np.sum(finite)) > 4:
+            typical = float(np.nanmedian(r_roll[finite]))
+            strong_branch = abs(typical) < 0.30
+            if not strong_branch:
+                # The reference normally tracks the signal, so the broken windows
+                # are the ones where the correlation actually flips sign: there,
+                # regressing the reference out *adds* variance instead of
+                # removing movement.
+                bad = finite & (np.sign(typical) * r_roll < 0.0)
+                reason = "the isobestic reference stops tracking the signal (correlation flips sign)"
+            else:
+                # The reference normally carries nothing, so windows of strong
+                # coupling are movement bursts.
+                bad = finite & (np.abs(r_roll) > 0.70)
+                reason = "a burst of strong signal/reference coupling (movement)"
+            half = max(0.5, float(r_win_s) * 0.5)
+            spans = [(float(tc[i] - half), float(tc[i] + half)) for i in np.flatnonzero(bad)]
+            # Require more than a single rolling window so that one noisy
+            # estimate does not turn into a recommendation to cut.
+            for a, b in _qc_merge_spans(spans, float(r_win_s)):
+                if (b - a) < max(_QC_SEG_MIN_S, 1.5 * r_win_s):
+                    continue
+                sel = (tc >= a) & (tc <= b) & finite
+                detail = reason
+                if np.any(sel):
+                    vals = r_roll[sel]
+                    # Quote the most telling rolling-r value inside the span: the
+                    # strongest coupling for a movement burst, the deepest
+                    # sign flip for a decoupling.
+                    worst = (float(vals[int(np.argmax(np.abs(vals)))]) if strong_branch
+                             else float(vals[int(np.argmin(np.sign(typical) * vals))]))
+                    if np.isfinite(worst):
+                        detail += f" (rolling r reaches {worst:+.2f})"
+                segments.append(_qc_seg(
+                    max(a, float(t[0])), min(b, float(t[-1])), "decoupled",
+                    severity=0.6, detail=detail,
+                ))
+
+    # --- 4) Noise bursts and 5) flat / dead stretches ------------------------
+    hf = np.asarray(qc.get("hf_sig_pct", []), float)
+    if len(bins) >= 6 and hf.size == t.size:
+        sigmas = np.array([_qc_robust_sigma(hf[lo:hi]) for lo, hi, _a, _b in bins], float)
+        good = np.isfinite(sigmas)
+        med = float(np.nanmedian(sigmas[good])) if np.any(good) else float("nan")
+        if np.isfinite(med) and med > 1e-6:
+            noisy = [(a, b) for (lo, hi, a, b), s in zip(bins, sigmas)
+                     if np.isfinite(s) and s >= 3.0 * med]
+            for a, b in _qc_merge_spans(noisy, bin_s * 0.6):
+                sel = [(s, lo, hi) for (lo, hi, ba, bb_), s in zip(bins, sigmas)
+                       if np.isfinite(s) and not (bb_ <= a or ba >= b)]
+                worst = max((s for s, _lo, _hi in sel), default=float("nan"))
+                if (b - a) >= _QC_SEG_MIN_S and np.isfinite(worst):
+                    segments.append(_qc_seg(
+                        a, b, "noise", severity=min(1.0, worst / (10.0 * med)),
+                        detail=(f"noise here is {worst / med:.1f}x the rest of the "
+                                f"recording ({worst:.2f}% dF/F)"),
+                    ))
+            dead = [(a, b) for (lo, hi, a, b), s in zip(bins, sigmas)
+                    if np.isfinite(s) and s <= 0.12 * med]
+            for a, b in _qc_merge_spans(dead, bin_s * 0.6):
+                if (b - a) >= max(_QC_SEG_MIN_S, bin_s):
+                    segments.append(_qc_seg(
+                        a, b, "flat", severity=0.8,
+                        detail="almost no signal variance - check for an unplugged "
+                               "patch cord, LED dropout or detector saturation",
+                    ))
+
+    # A bleach-in span already swallows whatever else happens at the very start
+    # of the session, so drop anything mostly hidden inside it: showing the same
+    # seconds three times only makes the recommendation list harder to read.
+    bleach_spans = [(float(s["start"]), float(s["end"])) for s in segments if s["kind"] == "bleach_in"]
+    if bleach_spans:
+        def _mostly_inside(seg: Dict[str, object]) -> bool:
+            if seg["kind"] == "bleach_in":
+                return False
+            a, b = float(seg["start"]), float(seg["end"])
+            span = max(b - a, 1e-9)
+            covered = sum(max(0.0, min(b, hi) - max(a, lo)) for lo, hi in bleach_spans)
+            return (covered / span) >= 0.8
+
+        segments = [s for s in segments if not _mostly_inside(s)]
+
+    segments.sort(key=lambda s: float(s["start"]))
+    return segments
+
+
 # Map overall verdict tier to a representative score for the headline card.
 _QC_TIER_SCORE = {
     "EXCELLENT": 92.0,
@@ -575,18 +864,216 @@ _QC_TIER_SCORE = {
 }
 
 
-def _evaluate_qc(qc: Dict[str, object]) -> Tuple[float, str, str, List[Tuple[str, float, float, str, str]]]:
-    """Score the quality of a fiber-photometry recording with a tiered veto.
+# Short, jargon-free description of what a failing metric actually means. Used
+# to build the "why this verdict" sentence out of the metrics that went wrong.
+_QC_PLAIN_PROBLEM = {
+    "Artifact load": "too much of the trace is artifact",
+    "Motion bleed": "the signal mostly repeats what the 405 reference does",
+    "Usable SNR": "transients barely rise above the noise",
+    "Isobestic noise": "the 405 reference is too noisy to correct with",
+    "Usable coverage": "a large part of the session has to be thrown away",
+    "Signal noise floor": "the signal itself is noisy",
+    "Temporal stability": "the reference coupling changes during the session",
+    "Corrected output": "outliers survive into the corrected trace",
+    "Photobleach": "the baseline drifts a lot across the session",
+}
 
-    Each metric is classified PASS / WARN / FAIL against literature-derived
-    absolute thresholds (no user-chosen weights). The overall verdict is
-    determined by the worst critical-metric tier; secondary metrics only
-    refine the verdict when no critical issue is present.
+# What the user should physically do with the file, per overall tier.
+# (chip label, chip colour, one-sentence instruction)
+_QC_ACTION_BY_TIER = {
+    "EXCELLENT": ("KEEP", "#5dd39e",
+                  "Keep this recording as it is. Every check passed."),
+    "GOOD": ("KEEP", "#5dd39e",
+             "Keep this recording. Anything below is optional polish."),
+    "FAIR": ("USE WITH CARE", "#f5c542",
+             "Usable, but clean it up before pooling it with the rest of the dataset, "
+             "and say in the methods what you did."),
+    "MARGINAL": ("REPAIR FIRST", "#f0915e",
+                 "Do not analyse this file as it stands. Apply the fixes below and run "
+                 "the check again; if the verdict does not improve, leave the file out."),
+    "POOR": ("EXCLUDE", "#ee6471",
+             "Leave this recording out of the analysis. Too many core checks failed for "
+             "the result to mean anything."),
+}
 
-    Returns ``(overall_score, tier_label, tier_color, sub_metrics)`` where
-    ``sub_metrics`` is a list of ``(name, score, criticality, explanation, tier)``
-    tuples. ``criticality`` is 1.0 for critical, 0.5 for secondary, 0.0 for
-    info-only diagnostic rows.
+
+@dataclass
+class QcVerdict:
+    """Everything the quality panel needs to show, in one object."""
+
+    score: float                                   # representative 0-100 score
+    tier: str                                      # EXCELLENT ... POOR
+    color: str                                     # colour for the tier
+    metrics: List[Tuple[str, float, float, str, str]]  # (name, score, criticality, why, tier)
+    why: str = ""                                  # friendly "why this verdict"
+    counts: str = ""                               # dim one-liner with the tallies
+    action_kind: str = "KEEP"                      # KEEP / USE WITH CARE / ...
+    action_color: str = "#5dd39e"
+    headline: str = ""                             # what to do with the file
+    actions: List[str] = field(default_factory=list)     # concrete fixes
+    segments: List[Dict[str, object]] = field(default_factory=list)  # spans to cut
+    cut_seconds: float = 0.0
+    cut_fraction: float = 0.0
+    duration_s: float = float("nan")
+
+
+def _qc_build_recommendations(
+    qc: Dict[str, object],
+    tiers: Dict[str, str],
+    tier_name: str,
+    segments: List[Dict[str, object]],
+    cut_seconds: float,
+    cut_fraction: float,
+    duration_s: float,
+) -> Tuple[str, str, str, List[str]]:
+    """Turn the graded metrics into plain-language, actionable advice.
+
+    Returns ``(action_kind, action_color, headline, actions)``. Each action is a
+    complete sentence the user can act on without knowing the metric names.
+    """
+    kind, color, headline = _QC_ACTION_BY_TIER.get(tier_name, _QC_ACTION_BY_TIER["FAIR"])
+    actions: List[str] = []
+
+    def bad(name: str) -> bool:
+        return tiers.get(name) in ("WARN", "FAIL")
+
+    def failed(name: str) -> bool:
+        return tiers.get(name) == "FAIL"
+
+    r_abs = abs(_qc_float(qc, "r", float("nan")))
+    snr = _qc_float(qc, "usable_snr", float("nan"))
+    art_pct = _qc_float(qc, "art_frac", 0.0) * 100.0
+    ref_noise = _qc_float(qc, "ref_hf_noise_pct", float("nan"))
+    sig_noise = _qc_float(qc, "hf_noise_pct", float("nan"))
+    roll_std = _qc_float(qc, "r_roll_std", float("nan"))
+    bleach = _qc_float(qc, "bleach_pct", float("nan"))
+    frac_gt3 = _qc_float(qc, "frac_gt3", 0.0)
+    frac_gt5 = _qc_float(qc, "frac_gt5", 0.0)
+    frac_neg5 = _qc_float(qc, "frac_neg5", 0.0)
+    kurt = _qc_float(qc, "kurt", 0.0)
+    kept_s = duration_s - cut_seconds if np.isfinite(duration_s) else float("nan")
+
+    # --- Escalations that override the tier-based headline -------------------
+    # If most of the session has to be cut, or almost nothing survives, the file
+    # is not salvageable no matter how good the surviving part looks.
+    if cut_fraction >= 0.35:
+        kind, color = "EXCLUDE", "#ee6471"
+        headline = (f"Leave this recording out: about {cut_fraction * 100:.0f}% of the session "
+                    f"has to be cut, so what is left is no longer a fair sample of it.")
+    elif np.isfinite(kept_s) and kept_s < 60.0 and np.isfinite(duration_s) and duration_s > 60.0:
+        kind, color = "EXCLUDE", "#ee6471"
+        headline = (f"Leave this recording out: only about {max(kept_s, 0.0):.0f} s survive the "
+                    f"cuts below, which is too short to analyse.")
+
+    # --- Cutting advice ------------------------------------------------------
+    if segments:
+        n_seg = len(segments)
+        actions.append(
+            f"Cut the {n_seg} {'span' if n_seg == 1 else 'spans'} listed below "
+            f"({cut_seconds:.0f} s in total, {cut_fraction * 100:.0f}% of the session) in "
+            f"Advanced Options -> Cut out regions, then run this check again."
+        )
+        kinds = {str(s.get("kind", "")) for s in segments}
+        if "bleach_in" in kinds:
+            actions.append(
+                "The start of the session is a steep bleach-in. No baseline model handles "
+                "that cleanly, so trimming it is almost always better than fitting through it."
+            )
+        if "flat" in kinds:
+            actions.append(
+                "At least one stretch has essentially no signal variance. Check the patch cord, "
+                "the LED and the detector gain for that period before trusting anything around it."
+            )
+
+    # --- Per-metric advice ---------------------------------------------------
+    if bad("Artifact load"):
+        actions.append(
+            f"Artifacts cover {art_pct:.1f}% of the samples. Keep artifact handling on "
+            f"'Interpolate' for short hits, and cut the long ones instead of interpolating "
+            f"across them."
+        )
+    if failed("Motion bleed"):
+        actions.append(
+            f"The 465 and 405 traces move together almost perfectly (|r|={r_abs:.2f}, "
+            f"{r_abs * r_abs * 100:.0f}% shared variance). Use a fitted-reference dF/F output, "
+            f"then look at the corrected trace: if the transients disappear with the reference, "
+            f"this recording is measuring movement rather than your sensor and should be dropped."
+        )
+    elif bad("Motion bleed"):
+        actions.append(
+            f"There is real movement bleed (|r|={r_abs:.2f}). Keep the fitted-reference dF/F "
+            f"output so the shared component is regressed out before you score events."
+        )
+    if failed("Usable SNR"):
+        actions.append(
+            f"Transients are only {snr:.1f}x the noise floor, so event amplitudes here are "
+            f"mostly noise. Exclude the file, and for the next session raise LED power, check "
+            f"the fibre coupling, and confirm the implant is on target."
+        )
+    elif bad("Usable SNR"):
+        actions.append(
+            f"Signal-to-noise is modest ({snr:.1f}x). Lower the low-pass cutoff or widen the "
+            f"smoothing window before scoring events, and avoid reading anything into small peaks."
+        )
+    if failed("Isobestic noise"):
+        actions.append(
+            f"The 405 reference is too noisy to correct with ({ref_noise:.2f}% dF/F). Switch the "
+            f"output to a signal-only dF/F: subtracting this reference would add noise rather "
+            f"than remove movement. Ignore the motion-bleed number above as well."
+        )
+    elif bad("Isobestic noise"):
+        actions.append(
+            f"The 405 reference is noisy ({ref_noise:.2f}% dF/F). Compare corrected and "
+            f"uncorrected traces side by side before you commit to motion correction."
+        )
+    if bad("Signal noise floor"):
+        actions.append(
+            f"The signal noise floor is high ({sig_noise:.2f}% dF/F). Check the fibre connection "
+            f"and ambient light, and consider a lower low-pass cutoff."
+        )
+    if bad("Temporal stability"):
+        actions.append(
+            f"Movement coupling is not stable over the session (rolling-r std={roll_std:.2f}), "
+            f"which usually means the fibre or the animal moved. Either cut the unstable spans, "
+            f"or split the file into sections and process them separately."
+        )
+    if bad("Corrected output"):
+        tail = (f" {frac_neg5:.2f}% of it dips below z=-5, which no sensor produces."
+                if frac_neg5 > 0.05 else "")
+        actions.append(
+            f"The corrected trace still has heavy tails ({frac_gt3:.2f}% beyond |z|>3, "
+            f"{frac_gt5:.2f}% beyond |z|>5, kurtosis {kurt:+.0f}).{tail} Re-run artifact detection "
+            f"at a higher sensitivity, otherwise these spikes will be counted as events."
+        )
+    if failed("Photobleach"):
+        actions.append(
+            f"Fluorescence changes {bleach:+.0f}% across the session. Cut the bleach-in, keep an "
+            f"adaptive baseline (airPLS), and never compare raw amplitudes between the start and "
+            f"the end of this file. Lower the LED power next time."
+        )
+    elif bad("Photobleach"):
+        actions.append(
+            f"Fluorescence drifts {bleach:+.0f}% across the session. Keep the adaptive baseline on "
+            f"and be careful comparing early and late events."
+        )
+
+    if not actions:
+        actions.append("Nothing to fix. Process it with your standard settings.")
+
+    return kind, color, headline, actions
+
+
+def _evaluate_qc(qc: Dict[str, object]) -> QcVerdict:
+    """Grade a fiber-photometry recording and say what to do with it.
+
+    Every metric is classified PASS / WARN / FAIL against the strict absolute
+    thresholds defined above (no user-chosen weights anywhere). The overall
+    verdict is set by the worst *critical* metric; advisory metrics can only
+    pull the verdict down, never lift it.
+
+    On top of the grade, the returned :class:`QcVerdict` carries a
+    plain-language explanation, a list of concrete fixes, and the exact time
+    spans that should be cut out of the session.
     """
     art_frac_pct = _qc_float(qc, "art_frac", 0.0) * 100.0
     has_reference = bool(qc.get("has_reference", True))
@@ -595,194 +1082,299 @@ def _evaluate_qc(qc: Dict[str, object]) -> Tuple[float, str, str, List[Tuple[str
     usable_snr = _qc_float(qc, "usable_snr", float("nan"))
     frac_gt3 = _qc_float(qc, "frac_gt3", 0.0)
     frac_gt5 = _qc_float(qc, "frac_gt5", 0.0)
+    frac_neg5 = _qc_float(qc, "frac_neg5", 0.0)
     r_abs = abs(_qc_float(qc, "r", float("nan")))
     r_roll_std = _qc_float(qc, "r_roll_std", 0.0)
     bleach_pct = _qc_float(qc, "bleach_pct", 0.0)
     bleach_abs = abs(bleach_pct)
     median = abs(_qc_float(qc, "q50", 0.0))
     kurt = _qc_float(qc, "kurt", 0.0)
+    skew = _qc_float(qc, "skew", 0.0)
+
+    # Time-resolved scan: which stretches of the session are unusable.
+    t_arr = np.asarray(qc.get("t", []), float)
+    duration_s = float(t_arr[-1] - t_arr[0]) if t_arr.size >= 2 else float("nan")
+    segments = _qc_detect_bad_segments(qc)
+    cut_seconds = _qc_span_total([(float(s["start"]), float(s["end"])) for s in segments])
+    cut_fraction = (cut_seconds / duration_s) if (np.isfinite(duration_s) and duration_s > 0) else 0.0
+    cut_pct = cut_fraction * 100.0
 
     # 5-tuple: (name, score, criticality, why, tier)
     metrics: List[Tuple[str, float, float, str, str]] = []
 
     # ---- Critical metrics (gate the verdict) -------------------------------
 
-    # 1) Artifact load - hard threshold at 15% (typical literature cutoff).
-    tier_art, score_art = _qc_decide_tier(art_frac_pct, warn_thr=5.0, fail_thr=15.0)
+    # 1) Artifact load. Tightened from 5/15% to 2/8%: above ~8% flagged samples
+    # the interpolated trace is mostly invention, not measurement.
+    warn, fail = _QC_T_ARTIFACT
+    tier_art, score_art = _qc_decide_tier(art_frac_pct, warn_thr=warn, fail_thr=fail)
     why_art = {
-        "PASS": f"{art_frac_pct:.2f}% flagged samples - clean recording (PASS < 5%).",
-        "WARN": f"{art_frac_pct:.2f}% flagged samples - moderate disruption (WARN 5-15%).",
-        "FAIL": f"{art_frac_pct:.2f}% flagged samples - heavily disrupted (FAIL >= 15%).",
+        "PASS": f"Only {art_frac_pct:.2f}% of samples are artifact - clean trace (pass below {warn:.0f}%).",
+        "WARN": f"{art_frac_pct:.2f}% of samples are artifact - the trace is being patched in places "
+                f"(warn {warn:.0f}-{fail:.0f}%).",
+        "FAIL": f"{art_frac_pct:.2f}% of samples are artifact - too much of this trace is "
+                f"reconstructed rather than measured (fail above {fail:.0f}%).",
     }[tier_art]
     metrics.append(("Artifact load", score_art, 1.0, why_art, tier_art))
 
-    # 2) Motion bleed |r| - FAIL boundary at 0.9 (relaxed for noisy-reference
-    # GRAB sensors; standard ~0.6 elsewhere in the literature). Note: when the
-    # isobestic channel itself is too noisy (FAIL below) the |r| reading
-    # becomes uninterpretable; we add a caveat to the explanation rather than
-    # silently force a tier change, because a clearly motion-dominated trace
-    # should still register that fact.
+    # 2) Motion bleed |r|. Tightened from 0.45/0.90 to 0.40/0.80. At |r|=0.8 the
+    # reference already explains ~64% of the signal variance, which is the point
+    # where "correctable movement" turns into "the signal is the movement".
+    # When the isobestic channel is itself too noisy the |r| reading stops being
+    # interpretable, so a caveat is appended instead of silently retiering it.
     if has_reference:
-        ref_unreliable = (
-            np.isfinite(ref_hf_noise_pct) and ref_hf_noise_pct >= 0.90
-        )
+        warn, fail = _QC_T_MOTION_R
+        ref_unreliable = np.isfinite(ref_hf_noise_pct) and ref_hf_noise_pct >= _QC_T_REF_NOISE[1]
         if not np.isfinite(r_abs):
             tier_mot, score_mot = "WARN", _QC_WARN_SCORE
-            why_mot = "Reference correlation unavailable - inspect rolling-r plot manually."
+            why_mot = "Signal/reference correlation could not be computed - check the rolling-r plot by eye."
         else:
-            tier_mot, score_mot = _qc_decide_tier(r_abs, warn_thr=0.45, fail_thr=0.9)
+            tier_mot, score_mot = _qc_decide_tier(r_abs, warn_thr=warn, fail_thr=fail)
+            shared = r_abs * r_abs * 100.0
             why_mot = {
-                "PASS": f"|r|={r_abs:.2f} - signal independent of reference (PASS < 0.45).",
-                "WARN": f"|r|={r_abs:.2f} - reference coupling, motion-correctable (WARN 0.45-0.9).",
-                "FAIL": f"|r|={r_abs:.2f} - signal dominated by reference movement (FAIL >= 0.9).",
+                "PASS": f"|r|={r_abs:.2f} - the signal moves on its own, independently of the "
+                        f"reference (pass below {warn:.2f}).",
+                "WARN": f"|r|={r_abs:.2f} - {shared:.0f}% of the signal is shared with the reference; "
+                        f"correctable movement (warn {warn:.2f}-{fail:.2f}).",
+                "FAIL": f"|r|={r_abs:.2f} - {shared:.0f}% of the signal is shared with the reference, "
+                        f"so it is mostly movement, not biology (fail above {fail:.2f}).",
             }[tier_mot]
         if ref_unreliable:
-            why_mot = (
-                why_mot + " Reading is unreliable: isobestic noise is too high to "
-                "make |r| meaningful (treat the recording as signal-only)."
-            )
+            why_mot += (" Treat this number with suspicion: the reference is too noisy for "
+                        "|r| to mean much.")
         metrics.append(("Motion bleed", score_mot, 1.0, why_mot, tier_mot))
 
-    # 3) Usable SNR - field convention; SNR < 1.5 is unusable.
+    # 3) Usable SNR. Tightened from 4/1.5 to 6/3: below ~3x the noise floor,
+    # peak amplitudes and event counts are dominated by noise.
+    warn, fail = _QC_T_SNR
     if not np.isfinite(usable_snr):
         tier_snr, score_snr = "WARN", _QC_WARN_SCORE
-        why_snr = "Usable SNR unavailable - likely too short or invalid trace."
+        why_snr = "Signal-to-noise could not be computed - the trace may be too short or invalid."
     else:
-        tier_snr, score_snr = _qc_decide_tier(usable_snr, warn_thr=4.0, fail_thr=1.5,
+        tier_snr, score_snr = _qc_decide_tier(usable_snr, warn_thr=warn, fail_thr=fail,
                                               higher_is_worse=False)
         why_snr = {
-            "PASS": f"SNR~{usable_snr:.2f} - strong dynamics above noise (PASS >= 4).",
-            "WARN": f"SNR~{usable_snr:.2f} - usable but not robust (WARN 1.5-4).",
-            "FAIL": f"SNR~{usable_snr:.2f} - dynamics near noise floor (FAIL < 1.5).",
+            "PASS": f"Transients are ~{usable_snr:.1f}x the noise floor - clearly readable "
+                    f"(pass above {warn:.0f}x).",
+            "WARN": f"Transients are ~{usable_snr:.1f}x the noise floor - readable but not robust "
+                    f"(warn {fail:.0f}-{warn:.0f}x).",
+            "FAIL": f"Transients are only ~{usable_snr:.1f}x the noise floor - amplitudes here are "
+                    f"mostly noise (fail below {fail:.0f}x).",
         }[tier_snr]
     metrics.append(("Usable SNR", score_snr, 1.0, why_snr, tier_snr))
 
-    # ---- Secondary metrics (advisory only) ---------------------------------
-
-    # 4) Signal HF noise floor.
-    if not np.isfinite(hf_noise_pct):
-        tier_nse, score_nse = "WARN", _QC_WARN_SCORE
-        why_nse = "Signal noise floor unavailable - inspect raw trace manually."
-    else:
-        tier_nse, score_nse = _qc_decide_tier(hf_noise_pct, warn_thr=0.45, fail_thr=0.90)
-        why_nse = {
-            "PASS": f"signal HF noise={hf_noise_pct:.3g}% dF/F - low noise (PASS < 0.45%).",
-            "WARN": f"signal HF noise={hf_noise_pct:.3g}% dF/F - noisy (WARN 0.45-0.9%).",
-            "FAIL": f"signal HF noise={hf_noise_pct:.3g}% dF/F - signal dominated by noise (FAIL >= 0.9%).",
-        }[tier_nse]
-    metrics.append(("Signal noise floor", score_nse, 0.5, why_nse, tier_nse))
-
-    # 5) Isobestic HF noise (only when a reference channel exists). This is
-    # CRITICAL: if the 405 reference is itself too noisy, motion correction
-    # cannot recover real signal dynamics and the |r| reading above becomes
-    # meaningless. A failed reference effectively forces the recording to be
-    # treated as signal-only.
+    # 4) Isobestic HF noise (critical). If the 405 reference is itself noisy,
+    # motion correction adds noise instead of removing movement, and the |r|
+    # reading above becomes meaningless. Tightened from 0.45/0.90 to 0.30/0.60.
     if has_reference:
+        warn, fail = _QC_T_REF_NOISE
         if not np.isfinite(ref_hf_noise_pct):
             tier_ref, score_ref = "WARN", _QC_WARN_SCORE
-            why_ref = "Isobestic noise floor unavailable - inspect reference trace manually."
+            why_ref = "Reference noise could not be measured - inspect the 405 trace by eye."
         else:
-            tier_ref, score_ref = _qc_decide_tier(ref_hf_noise_pct, warn_thr=0.45, fail_thr=0.90)
+            tier_ref, score_ref = _qc_decide_tier(ref_hf_noise_pct, warn_thr=warn, fail_thr=fail)
             why_ref = {
-                "PASS": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - stable reference, "
-                        f"motion correction will work (PASS < 0.45%).",
-                "WARN": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - noisy reference, "
-                        f"motion correction is unreliable (WARN 0.45-0.9%).",
-                "FAIL": f"isobestic HF noise={ref_hf_noise_pct:.3g}% dF/F - reference unusable; "
-                        f"drop it from analysis and treat the recording as signal-only "
-                        f"(FAIL >= 0.9%).",
+                "PASS": f"The 405 reference is quiet ({ref_hf_noise_pct:.2f}% dF/F), so motion "
+                        f"correction will work (pass below {warn:.2f}%).",
+                "WARN": f"The 405 reference is noisy ({ref_hf_noise_pct:.2f}% dF/F); correcting with "
+                        f"it also injects some of that noise (warn {warn:.2f}-{fail:.2f}%).",
+                "FAIL": f"The 405 reference is too noisy to correct with ({ref_hf_noise_pct:.2f}% dF/F) "
+                        f"- use a signal-only output instead (fail above {fail:.2f}%).",
             }[tier_ref]
         metrics.append(("Isobestic noise", score_ref, 1.0, why_ref, tier_ref))
 
-    # 6) Temporal stability of motion coupling.
+    # 5) Usable coverage (critical, new). Summarises the time-resolved scan: how
+    # much of the session has to be thrown away before analysis. This is what
+    # turns "some metric is bad" into "cut these spans / drop this file".
+    warn, fail = _QC_T_CUT_FRAC
+    tier_cov, score_cov = _qc_decide_tier(cut_pct, warn_thr=warn, fail_thr=fail)
+    kept_s = duration_s - cut_seconds if np.isfinite(duration_s) else float("nan")
+    kept_txt = f"{max(kept_s, 0.0):.0f} s usable" if np.isfinite(kept_s) else "usable length unknown"
+    why_cov = {
+        "PASS": f"Nothing worth cutting ({cut_pct:.1f}% flagged, {kept_txt}).",
+        "WARN": f"{cut_pct:.0f}% of the session should be cut ({cut_seconds:.0f} s, {kept_txt}) "
+                f"- see the spans below (warn {warn:.0f}-{fail:.0f}%).",
+        "FAIL": f"{cut_pct:.0f}% of the session should be cut ({cut_seconds:.0f} s, {kept_txt}) "
+                f"- what is left may no longer represent the session (fail above {fail:.0f}%).",
+    }[tier_cov]
+    metrics.append(("Usable coverage", score_cov, 1.0, why_cov, tier_cov))
+
+    # ---- Advisory metrics (can only pull the verdict down) ------------------
+
+    # 6) Signal HF noise floor. Tightened from 0.45/0.90 to 0.30/0.60.
+    warn, fail = _QC_T_SIG_NOISE
+    if not np.isfinite(hf_noise_pct):
+        tier_nse, score_nse = "WARN", _QC_WARN_SCORE
+        why_nse = "Signal noise could not be measured - inspect the raw trace by eye."
+    else:
+        tier_nse, score_nse = _qc_decide_tier(hf_noise_pct, warn_thr=warn, fail_thr=fail)
+        why_nse = {
+            "PASS": f"Signal noise is low ({hf_noise_pct:.2f}% dF/F, pass below {warn:.2f}%).",
+            "WARN": f"Signal noise is high ({hf_noise_pct:.2f}% dF/F) - small events will be hard "
+                    f"to trust (warn {warn:.2f}-{fail:.2f}%).",
+            "FAIL": f"Signal noise dominates the trace ({hf_noise_pct:.2f}% dF/F, "
+                    f"fail above {fail:.2f}%).",
+        }[tier_nse]
+    metrics.append(("Signal noise floor", score_nse, 0.5, why_nse, tier_nse))
+
+    # 7) Temporal stability of the movement coupling. Tightened from 0.20/0.35
+    # to 0.12/0.25: a coupling that wanders means one global correction cannot
+    # be right everywhere in the session.
     if has_reference:
-        tier_roll, score_roll = _qc_decide_tier(r_roll_std, warn_thr=0.20, fail_thr=0.35)
+        warn, fail = _QC_T_ROLL_STD
+        tier_roll, score_roll = _qc_decide_tier(r_roll_std, warn_thr=warn, fail_thr=fail)
         why_roll = {
-            "PASS": f"rolling-r std={r_roll_std:.2f} - motion coupling is stationary (PASS < 0.20).",
-            "WARN": f"rolling-r std={r_roll_std:.2f} - coupling varies over time (WARN 0.20-0.35).",
-            "FAIL": f"rolling-r std={r_roll_std:.2f} - intermittent disturbances (FAIL >= 0.35).",
+            "PASS": f"Movement coupling stays the same all session (rolling-r std={r_roll_std:.2f}, "
+                    f"pass below {warn:.2f}).",
+            "WARN": f"Movement coupling drifts during the session (rolling-r std={r_roll_std:.2f}) - "
+                    f"one global correction fits some parts better than others "
+                    f"(warn {warn:.2f}-{fail:.2f}).",
+            "FAIL": f"Movement coupling jumps around (rolling-r std={r_roll_std:.2f}) - the fibre or "
+                    f"the animal moved; process in sections or cut the unstable spans "
+                    f"(fail above {fail:.2f}).",
         }[tier_roll]
         metrics.append(("Temporal stability", score_roll, 0.5, why_roll, tier_roll))
 
-    # 7) Corrected output distribution (heavy tails / bias).
-    if frac_gt5 > 1.0:
+    # 8) Corrected output distribution (heavy tails / off-centre median).
+    # Tightened: WARN at 3% beyond |z|>3 (was 10%), median 0.20 (was 0.35),
+    # kurtosis 6 (was 10). The FAIL rule leans on the *negative* tail, because a
+    # large upward excursion can be a genuine transient while a fast five-sigma
+    # drop below baseline is artifact almost by definition. A heavy but clearly
+    # one-sided positive tail is therefore treated as strong signal, not as a
+    # failure - otherwise the best recordings would be penalised for having
+    # large events.
+    neg_heavy = frac_neg5 > _QC_T_Z5NEG_FAIL
+    pos_heavy = frac_gt5 > _QC_T_Z5_FAIL
+    transient_like = (skew >= 1.0) and (frac_neg5 <= 0.05)
+    if neg_heavy or abs(kurt) > _QC_T_KURT_FAIL or (pos_heavy and not transient_like):
         tier_dist, score_dist = "FAIL", _QC_FAIL_SCORE
-        why_dist = f"{frac_gt5:.2f}% |Z|>5 - extreme outliers remain in corrected trace (FAIL)."
-    elif frac_gt3 > 10.0 or median > 0.35 or abs(kurt) > 10.0:
+        if neg_heavy:
+            why_dist = (f"{frac_neg5:.2f}% of the corrected trace drops below z=-5. Sensors do "
+                        f"not do that, so this is leftover artifact and it will be scored as "
+                        f"events.")
+        else:
+            why_dist = (f"Extreme values survive the correction: {frac_gt5:.2f}% beyond |z|>5, "
+                        f"kurtosis {kurt:+.0f}, and the tails are symmetric rather than "
+                        f"transient-shaped.")
+    elif frac_gt3 > _QC_T_Z3_WARN or median > _QC_T_MEDIAN_WARN or abs(kurt) > _QC_T_KURT_WARN:
         tier_dist, score_dist = "WARN", _QC_WARN_SCORE
-        why_dist = (f"{frac_gt3:.2f}% |Z|>3, median={median:.2f}, kurt={kurt:+.1f} - "
-                    f"biased / heavy-tailed corrected distribution (WARN).")
+        why_dist = (f"The corrected trace is lopsided: {frac_gt3:.2f}% beyond |z|>3, "
+                    f"median {median:.2f}, kurtosis {kurt:+.0f} - check for leftover artifact "
+                    f"before you trust event counts.")
     else:
         tier_dist, score_dist = "PASS", _QC_PASS_SCORE
-        why_dist = f"{frac_gt3:.2f}% |Z|>3 - corrected distribution is well behaved (PASS)."
+        why_dist = (f"The corrected trace is well behaved ({frac_gt3:.2f}% beyond |z|>3, "
+                    f"median {median:.2f}).")
     metrics.append(("Corrected output", score_dist, 0.5, why_dist, tier_dist))
 
-    # 8) Photobleach over the recording.
-    tier_bl, score_bl = _qc_decide_tier(bleach_abs, warn_thr=10.0, fail_thr=30.0)
+    # 9) Photobleach across the session. Tightened from 10/30% to 8/20%.
+    warn, fail = _QC_T_BLEACH
+    tier_bl, score_bl = _qc_decide_tier(bleach_abs, warn_thr=warn, fail_thr=fail)
     why_bl = {
-        "PASS": f"{bleach_pct:+.1f}% baseline drift - stable fluorescence (PASS < 10%).",
-        "WARN": f"{bleach_pct:+.1f}% baseline drift - moderate drift (WARN 10-30%).",
-        "FAIL": f"{bleach_pct:+.1f}% baseline drift - severe drift / saturation risk (FAIL >= 30%).",
+        "PASS": f"Fluorescence is stable ({bleach_pct:+.1f}% across the session, "
+                f"pass below {warn:.0f}%).",
+        "WARN": f"Fluorescence drifts {bleach_pct:+.1f}% across the session - early and late events "
+                f"are not directly comparable (warn {warn:.0f}-{fail:.0f}%).",
+        "FAIL": f"Fluorescence changes {bleach_pct:+.1f}% across the session - heavy bleaching or "
+                f"saturation (fail above {fail:.0f}%).",
     }[tier_bl]
     metrics.append(("Photobleach", score_bl, 0.5, why_bl, tier_bl))
 
-    # ---- Aggregation: worst-critical wins; secondaries refine -------------
-    critical_tiers = [tier for _name, _s, crit, _w, tier in metrics if crit >= 1.0]
-    secondary_tiers = [tier for _name, _s, crit, _w, tier in metrics if 0.0 < crit < 1.0]
+    # Keep critical rows above advisory rows so the panel shows one clean split.
+    metrics.sort(key=lambda m: -float(m[2]))
+
+    # ---- Aggregation: worst critical metric wins; advisory rows can only
+    # ---- pull the verdict down. Stricter than before at every step.
+    tiers_by_name = {name: tier for name, _s, _c, _w, tier in metrics}
+    critical_tiers = [tier for _n, _s, crit, _w, tier in metrics if crit >= 1.0]
+    advisory_tiers = [tier for _n, _s, crit, _w, tier in metrics if 0.0 < crit < 1.0]
 
     n_crit_fail = critical_tiers.count("FAIL")
     n_crit_warn = critical_tiers.count("WARN")
-    n_sec_fail = secondary_tiers.count("FAIL")
-    n_sec_warn = secondary_tiers.count("WARN")
+    n_sec_fail = advisory_tiers.count("FAIL")
+    n_sec_warn = advisory_tiers.count("WARN")
 
     if n_crit_fail >= 2:
         tier_name = "POOR"
-        rationale = f"{n_crit_fail} critical metrics in FAIL - recording is not usable."
     elif n_crit_fail == 1:
-        # A single critical FAIL caps at MARGINAL or POOR depending on context.
-        if n_sec_fail >= 2:
-            tier_name = "POOR"
-            rationale = "Critical FAIL plus multiple secondary FAILs - recording is not usable."
-        else:
-            tier_name = "MARGINAL"
-            rationale = "One critical metric in FAIL - results require very cautious interpretation."
-    elif n_crit_warn >= 2:
-        tier_name = "FAIR"
-        rationale = f"{n_crit_warn} critical metrics in WARN - usable with motion correction."
+        # One critical failure already disqualifies the file as it stands, but
+        # it is often repairable (cut the bad spans, change the output mode), so
+        # it lands on MARGINAL. It only drops to POOR when the rest of the
+        # recording is also coming apart.
+        tier_name = "POOR" if (n_sec_fail >= 2 or n_crit_warn >= 2) else "MARGINAL"
+    elif n_crit_warn >= 3:
+        tier_name = "MARGINAL"
+    elif n_crit_warn == 2:
+        tier_name = "MARGINAL" if n_sec_fail >= 1 else "FAIR"
     elif n_crit_warn == 1:
-        if n_sec_fail >= 2:
-            tier_name = "FAIR"
-            rationale = "One critical WARN plus secondary FAILs - usable but check carefully."
-        else:
-            tier_name = "GOOD"
-            rationale = "One critical metric in WARN, otherwise clean - typical good recording."
+        tier_name = "FAIR" if (n_sec_fail >= 1 or n_sec_warn >= 2) else "GOOD"
     else:
-        # All critical metrics PASS - secondary tier count refines the verdict.
+        # All critical checks pass - only advisory rows are left to weigh.
         if n_sec_fail >= 2:
             tier_name = "FAIR"
-            rationale = "All critical metrics pass but multiple secondary FAILs - investigate before reporting."
-        elif n_sec_fail == 1:
+        elif n_sec_fail == 1 or n_sec_warn >= 2:
             tier_name = "GOOD"
-            rationale = "Critical metrics pass; one secondary FAIL - solid recording."
-        elif n_sec_warn >= 2:
+        elif n_sec_warn == 1:
             tier_name = "GOOD"
-            rationale = "Critical metrics pass; minor secondary warnings - solid recording."
-        elif n_sec_warn >= 1:
-            tier_name = "EXCELLENT"
-            rationale = "All critical metrics pass; nearly perfect recording."
         else:
             tier_name = "EXCELLENT"
-            rationale = "All metrics pass - textbook recording."
+
+    # ---- Plain-language explanation ----------------------------------------
+    failing = [name for name, _s, _c, _w, tier in metrics if tier == "FAIL"]
+    warning = [name for name, _s, _c, _w, tier in metrics if tier == "WARN"]
+
+    def _plain(names: List[str], limit: int = 3) -> str:
+        """Join the plain-language problems, keeping the sentence readable."""
+        parts = [_QC_PLAIN_PROBLEM.get(n, n.lower()) for n in names]
+        extra = max(0, len(parts) - limit)
+        parts = parts[:limit]
+        if len(parts) == 1:
+            text = parts[0]
+        else:
+            text = ", ".join(parts[:-1]) + " and " + parts[-1]
+        if extra:
+            text += f" (+{extra} more)"
+        return text
+
+    if failing:
+        why = f"What is wrong: {_plain(failing)}."
+        if warning:
+            why += f" Also worth watching: {_plain(warning)}."
+    elif warning:
+        why = f"Nothing failed outright. Worth watching: {_plain(warning)}."
+    else:
+        why = "Every check passed: clean signal, quiet reference, stable baseline."
+
+    if n_crit_fail:
+        why += " The grade is set by the worst critical check."
+
+    n_total = len(metrics)
+    counts = (f"{n_crit_fail} critical failed, {n_crit_warn} critical warned, "
+              f"{n_sec_fail} advisory failed, {n_sec_warn} advisory warned, "
+              f"out of {n_total} checks.")
+
+    action_kind, action_color, headline, actions = _qc_build_recommendations(
+        qc, tiers_by_name, tier_name, segments, cut_seconds, cut_fraction, duration_s
+    )
 
     overall_score = _QC_TIER_SCORE.get(tier_name, 0.0)
     _tier_name_dbg, tier_color = _qc_tier_for(overall_score)
-    # Insert a top-of-list rationale row so the user sees WHY this verdict.
-    metrics.insert(0, ("Verdict rationale", overall_score, 0.0,
-                       (f"{rationale} "
-                        f"({n_crit_fail} critical FAIL, {n_crit_warn} critical WARN, "
-                        f"{n_sec_fail} secondary FAIL, {n_sec_warn} secondary WARN)"),
-                       ""))
-    return overall_score, tier_name, tier_color, metrics
+    return QcVerdict(
+        score=overall_score,
+        tier=tier_name,
+        color=tier_color,
+        metrics=metrics,
+        why=why,
+        counts=counts,
+        action_kind=action_kind,
+        action_color=action_color,
+        headline=headline,
+        actions=actions,
+        segments=segments,
+        cut_seconds=cut_seconds,
+        cut_fraction=cut_fraction,
+        duration_s=duration_s,
+    )
 
 
 _QC_TIER_BADGE_COLORS = {
@@ -793,18 +1385,36 @@ _QC_TIER_BADGE_COLORS = {
 }
 
 
-class QualityVerdictCard(QtWidgets.QFrame):
-    """Big bottom-left card with overall verdict + per-metric tier rows."""
+# Colour of the recommendation panel. Green reads as "here is what to do",
+# independently of how bad the recording turned out to be; the severity itself
+# is carried by the KEEP / USE WITH CARE / REPAIR FIRST / EXCLUDE chip inside.
+_QC_REC_GREEN = "#5dd39e"
 
-    def __init__(
-        self,
-        score: float,
-        tier_name: str,
-        tier_color: str,
-        metrics: List[Tuple[str, float, float, str, str]],
-        parent: Optional[QtWidgets.QWidget] = None,
-    ):
+
+def _qc_tint(color: str, alpha_pct: int) -> str:
+    """Return a Qt stylesheet ``rgba()`` string for ``color`` at ``alpha_pct``.
+
+    Qt parses eight-digit hex as ``#AARRGGBB`` (alpha first), so appending an
+    alpha suffix to a ``#rrggbb`` value silently produces a completely different
+    colour - a faint green tint comes out olive, for instance. Building the
+    rgba() text explicitly keeps the tint predictable.
+    """
+    text = str(color or "").lstrip("#")
+    if len(text) != 6:
+        return str(color)
+    try:
+        r, g, b = int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+    except ValueError:
+        return str(color)
+    return f"rgba({r}, {g}, {b}, {max(0, min(100, int(alpha_pct)))}%)"
+
+
+class QualityVerdictCard(QtWidgets.QFrame):
+    """Left-hand card: overall verdict, why, per-metric tiers, recommendations."""
+
+    def __init__(self, verdict: QcVerdict, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
+        tier_color = verdict.color
         self.setObjectName("qcVerdictCard")
         self.setStyleSheet(
             "QFrame#qcVerdictCard { background: #1a1d26; border: 1px solid #2c3240;"
@@ -815,11 +1425,16 @@ class QualityVerdictCard(QtWidgets.QFrame):
         outer.setContentsMargins(16, 14, 16, 14)
         outer.setSpacing(10)
 
-        # Header strip: big tier + score
+        # ---- Header strip: the one-word verdict ----------------------------
+        # QLabel derives from QFrame, so a bare "QFrame { border: ... }" rule
+        # would draw a box around every label inside as well. Scope the rules by
+        # object name and clear the border on the children.
         head = QtWidgets.QFrame()
+        head.setObjectName("qcVerdictHead")
         head.setStyleSheet(
-            f"QFrame {{ background: {tier_color}22; border: 1px solid {tier_color};"
-            f" border-radius: 10px; }}"
+            f"QFrame#qcVerdictHead {{ background: {_qc_tint(tier_color, 13)};"
+            f" border: 1px solid {tier_color}; border-radius: 10px; }}"
+            "QFrame#qcVerdictHead QLabel { background: transparent; border: 0; }"
         )
         head_lay = QtWidgets.QHBoxLayout(head)
         head_lay.setContentsMargins(14, 10, 14, 10)
@@ -828,44 +1443,50 @@ class QualityVerdictCard(QtWidgets.QFrame):
         col = QtWidgets.QVBoxLayout()
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(0)
-        verdict = QtWidgets.QLabel(tier_name)
-        verdict.setStyleSheet(f"color: {tier_color}; font-size: 26pt; font-weight: 800; letter-spacing: 1px;")
-        col.addWidget(verdict)
+        verdict_lbl = QtWidgets.QLabel(verdict.tier)
+        verdict_lbl.setStyleSheet(
+            f"color: {tier_color}; font-size: 26pt; font-weight: 800; letter-spacing: 1px;"
+        )
+        col.addWidget(verdict_lbl)
         sub = QtWidgets.QLabel("Overall quality")
-        sub.setStyleSheet("color: #aab4c5; font-size: 8.8pt; letter-spacing: 0.5px; text-transform: uppercase;")
+        sub.setStyleSheet(
+            "color: #aab4c5; font-size: 8.8pt; letter-spacing: 0.5px; text-transform: uppercase;"
+        )
         col.addWidget(sub)
         head_lay.addLayout(col, 1)
         outer.addWidget(head)
 
-        # Diagnostic rows (criticality == 0). The verdict rationale row is the
-        # first such row; render it as a tinted callout so it reads as a
-        # headline explanation rather than a metric.
-        info_metrics = [m for m in metrics if m[2] <= 0.0]
-        regular_metrics = [m for m in metrics if m[2] > 0.0]
-        for entry in info_metrics:
-            name, _sub_score, _crit, why, _ = entry
-            note = QtWidgets.QFrame()
-            note.setStyleSheet(
-                f"QFrame {{ background: {tier_color}18; border: 1px solid {tier_color};"
-                " border-radius: 8px; }}"
-                "QLabel { background: transparent; }"
-            )
-            note_lay = QtWidgets.QVBoxLayout(note)
-            note_lay.setContentsMargins(10, 8, 10, 8)
-            note_lay.setSpacing(3)
-            title = QtWidgets.QLabel(name)
-            title.setStyleSheet(f"color: {tier_color}; font-size: 9.5pt; font-weight: 800;"
-                                " letter-spacing: 0.4px; text-transform: uppercase;")
-            note_lay.addWidget(title)
-            detail = QtWidgets.QLabel(why)
-            detail.setWordWrap(True)
-            detail.setStyleSheet("color: #d8deea; font-size: 8.6pt;")
-            note_lay.addWidget(detail)
-            outer.addWidget(note)
+        # ---- Why this verdict ----------------------------------------------
+        note = QtWidgets.QFrame()
+        note.setObjectName("qcVerdictWhy")
+        note.setStyleSheet(
+            f"QFrame#qcVerdictWhy {{ background: {_qc_tint(tier_color, 9)};"
+            f" border: 1px solid {tier_color}; border-radius: 8px; }}"
+            "QFrame#qcVerdictWhy QLabel { background: transparent; border: 0; }"
+        )
+        note_lay = QtWidgets.QVBoxLayout(note)
+        note_lay.setContentsMargins(10, 8, 10, 8)
+        note_lay.setSpacing(4)
+        note_title = QtWidgets.QLabel("Why this verdict")
+        note_title.setStyleSheet(
+            f"color: {tier_color}; font-size: 9.5pt; font-weight: 800;"
+            " letter-spacing: 0.4px; text-transform: uppercase;"
+        )
+        note_lay.addWidget(note_title)
+        note_why = QtWidgets.QLabel(verdict.why)
+        note_why.setWordWrap(True)
+        note_why.setStyleSheet("color: #eef1f7; font-size: 9.0pt;")
+        note_lay.addWidget(note_why)
+        note_counts = QtWidgets.QLabel(verdict.counts)
+        note_counts.setWordWrap(True)
+        note_counts.setStyleSheet("color: #98a3b6; font-size: 8.1pt;")
+        note_lay.addWidget(note_counts)
+        outer.addWidget(note)
 
-        # Critical vs secondary header (only if we have any metric rows).
-        if regular_metrics:
-            crit_header = QtWidgets.QLabel("Per-metric tiers")
+        # ---- Per-metric rows -------------------------------------------------
+        rows = [m for m in verdict.metrics if m[2] > 0.0]
+        if rows:
+            crit_header = QtWidgets.QLabel("The checks, one by one")
             crit_header.setStyleSheet(
                 "color: #aab4c5; font-size: 8.7pt; letter-spacing: 0.5px;"
                 " text-transform: uppercase; padding-top: 2px;"
@@ -873,11 +1494,11 @@ class QualityVerdictCard(QtWidgets.QFrame):
             outer.addWidget(crit_header)
 
         last_was_critical: Optional[bool] = None
-        for name, sub_score, criticality, why, tier in regular_metrics:
+        for name, sub_score, criticality, why, tier in rows:
             is_critical = criticality >= 1.0
-            # Insert a subtle divider when switching from critical to secondary.
+            # Single divider between the gating checks and the advisory ones.
             if last_was_critical is True and not is_critical:
-                sep_label = QtWidgets.QLabel("Advisory (does not gate the verdict)")
+                sep_label = QtWidgets.QLabel("Advisory (does not set the grade)")
                 sep_label.setStyleSheet(
                     "color: #6f7a8e; font-size: 8.0pt; letter-spacing: 0.4px;"
                     " text-transform: uppercase; padding-top: 6px;"
@@ -908,7 +1529,7 @@ class QualityVerdictCard(QtWidgets.QFrame):
             tier_color_chip = _QC_TIER_BADGE_COLORS.get(tier or "", "#6f7a8e")
             tier_chip = QtWidgets.QLabel(tier or "-")
             tier_chip.setStyleSheet(
-                f"color: {tier_color_chip}; background: {tier_color_chip}22;"
+                f"color: {tier_color_chip}; background: {_qc_tint(tier_color_chip, 13)};"
                 f" border: 1px solid {tier_color_chip}; border-radius: 6px;"
                 " padding: 1px 8px; font-weight: 800; font-size: 8.4pt;"
                 " letter-spacing: 0.5px;"
@@ -936,10 +1557,127 @@ class QualityVerdictCard(QtWidgets.QFrame):
         outer.addStretch(1)
 
 
+class QcRecommendationCard(QtWidgets.QFrame):
+    """Green 'what to do with this file' panel, shown under the checks.
+
+    Kept separate from :class:`QualityVerdictCard` so that it can sit in its own
+    pane at the bottom of the left column: the advice stays on screen even when
+    the list of checks above it has to be scrolled.
+    """
+
+    def __init__(self, verdict: QcVerdict, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("qcRecommendations")
+        self.setStyleSheet(
+            f"QFrame#qcRecommendations {{ background: {_qc_tint(_QC_REC_GREEN, 8)};"
+            f" border: 1px solid {_QC_REC_GREEN}; border-radius: 10px; }}"
+            "QFrame#qcRecommendations QLabel { background: transparent; border: 0; }"
+        )
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 12)
+        lay.setSpacing(6)
+
+        title = QtWidgets.QLabel("Recommendations")
+        title.setStyleSheet(
+            f"color: {_QC_REC_GREEN}; font-size: 9.8pt; font-weight: 800;"
+            " letter-spacing: 0.6px; text-transform: uppercase;"
+        )
+        lay.addWidget(title)
+
+        # Verdict chip: what to physically do with the file.
+        chip = QtWidgets.QLabel(verdict.action_kind)
+        chip.setStyleSheet(
+            f"color: {verdict.action_color}; background: {_qc_tint(verdict.action_color, 15)};"
+            f" border: 1px solid {verdict.action_color}; border-radius: 6px;"
+            " padding: 2px 10px; font-weight: 800; font-size: 8.6pt; letter-spacing: 0.6px;"
+        )
+        chip_row = QtWidgets.QHBoxLayout()
+        chip_row.setContentsMargins(0, 0, 0, 0)
+        chip_row.addWidget(chip, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+        chip_row.addStretch(1)
+        lay.addLayout(chip_row)
+
+        headline = QtWidgets.QLabel(verdict.headline)
+        headline.setWordWrap(True)
+        headline.setStyleSheet("color: #eef1f7; font-size: 9.2pt; font-weight: 600;")
+        lay.addWidget(headline)
+
+        for text in verdict.actions:
+            lay.addWidget(self._bullet_row("•", text, "#cfd7e5", lead_width=12))
+
+        # Concrete spans to cut, with the exact seconds to type into
+        # Advanced Options -> Cut out regions.
+        if verdict.segments:
+            shown = sorted(
+                verdict.segments,
+                key=lambda s: (-float(s.get("severity", 0.0)), float(s.get("start", 0.0))),
+            )[:_QC_SEG_MAX_REPORTED]
+            shown.sort(key=lambda s: float(s.get("start", 0.0)))
+
+            sub = QtWidgets.QLabel("Parts of the recording to cut")
+            sub.setStyleSheet(
+                "color: #aab4c5; font-size: 8.3pt; letter-spacing: 0.5px;"
+                " text-transform: uppercase; padding-top: 4px;"
+            )
+            lay.addWidget(sub)
+
+            for seg in shown:
+                span = _qc_fmt_span(float(seg["start"]), float(seg["end"]))
+                lay.addWidget(self._bullet_row(
+                    span,
+                    f"{seg['label']} - {seg['detail']}",
+                    "#cfd7e5",
+                    lead_width=92,
+                    lead_color=_QC_REC_GREEN,
+                    lead_bold=True,
+                ))
+
+            hidden = len(verdict.segments) - len(shown)
+            if hidden > 0:
+                more = QtWidgets.QLabel(f"... and {hidden} shorter span(s) not listed.")
+                more.setWordWrap(True)
+                more.setStyleSheet("color: #8d97a9; font-size: 8.1pt;")
+                lay.addWidget(more)
+
+        lay.addStretch(1)
+
+    @staticmethod
+    def _bullet_row(
+        lead: str,
+        text: str,
+        color: str,
+        *,
+        lead_width: int = 12,
+        lead_color: str = "#8d97a9",
+        lead_bold: bool = False,
+    ) -> QtWidgets.QWidget:
+        """One hanging-indent line: fixed-width lead (bullet or time span) + text."""
+        row = QtWidgets.QWidget()
+        row.setStyleSheet("background: transparent;")
+        lay = QtWidgets.QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        lead_lbl = QtWidgets.QLabel(lead)
+        lead_lbl.setFixedWidth(int(lead_width))
+        lead_lbl.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop
+        )
+        lead_lbl.setStyleSheet(
+            f"color: {lead_color}; font-size: 8.5pt;"
+            f" font-weight: {'800' if lead_bold else '400'};"
+        )
+        lay.addWidget(lead_lbl, 0)
+        body = QtWidgets.QLabel(text)
+        body.setWordWrap(True)
+        body.setStyleSheet(f"color: {color}; font-size: 8.6pt;")
+        lay.addWidget(body, 1)
+        return row
+
+
 class QcDialog(QtWidgets.QDialog):
     def __init__(self, qc: Dict[str, object], parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Quality Check (noise-aware)")
+        self.setWindowTitle("Quality Check (strict, noise-aware)")
         self.resize(1280, 900)
         self._qc = qc
         self._navigation_delta = 0
@@ -1102,26 +1840,51 @@ class QcDialog(QtWidgets.QDialog):
         self.lbl_stats.setProperty("class", "hint")
         self.lbl_stats.setWordWrap(True)
         self.lbl_method = QtWidgets.QLabel(
-            "Verdict uses tiered veto rules with literature-derived thresholds (no user-chosen weights). "
-            "Four critical metrics gate the verdict: artifact load (FAIL >= 15%), "
-            "motion bleed |r| (FAIL >= 0.9, relaxed for noisy-reference GRAB sensors), "
-            "usable SNR (FAIL < 1.5), and isobestic noise (FAIL >= 0.9% dF/F - a too-noisy 405 "
-            "reference makes motion correction impossible and |r| meaningless). "
-            "Secondary metrics (signal noise floor, temporal stability, corrected-output distribution, "
-            "photobleach) refine the verdict only when all critical metrics pass. Overall tier = worst "
-            "critical-metric tier."
+            "Strict grading: every check is PASS / WARN / FAIL against fixed thresholds, with no "
+            "user-chosen weights. Five critical checks set the grade - artifact load (fail above 8%), "
+            "motion bleed |r| (fail above 0.80), usable SNR (fail below 3x the noise floor), "
+            "isobestic noise (fail above 0.60% dF/F, at which point the 405 reference adds more noise "
+            "than it removes), and usable coverage (fail when more than 20% of the session has to be "
+            "cut). Four advisory checks (signal noise, coupling stability, corrected-output shape, "
+            "photobleach) can pull the grade down but never lift it. The grade equals the worst "
+            "critical check; the green panel on the left says what to do with the file and which "
+            "time spans to cut."
         )
         self.lbl_method.setProperty("class", "hint")
         self.lbl_method.setWordWrap(True)
 
-        # Quality verdict (bottom-left, next to rolling-corr).
-        score, tier_name, tier_color, sub_metrics = _evaluate_qc(qc)
-        self._qc_score = score
-        self._qc_tier = tier_name
-        self._qc_sub_metrics = sub_metrics
-        self.verdict_card = QualityVerdictCard(score, tier_name, tier_color, sub_metrics)
-        self.verdict_card.setMinimumWidth(395)
-        self.verdict_card.setMaximumWidth(430)
+        # Quality verdict (left column, scrollable because the recommendation
+        # panel grows with the number of problems found).
+        verdict = _evaluate_qc(qc)
+        self._verdict = verdict
+        self._qc_score = verdict.score
+        self._qc_tier = verdict.tier
+        self._qc_sub_metrics = verdict.metrics
+        self.verdict_card = QualityVerdictCard(verdict)
+        self.recommendation_card = QcRecommendationCard(verdict)
+
+        def _scrolled(widget: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
+            """Wrap a card so long content scrolls instead of overflowing."""
+            area = QtWidgets.QScrollArea()
+            area.setWidget(widget)
+            area.setWidgetResizable(True)
+            area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            area.setStyleSheet("QScrollArea { background: transparent; border: 0; }")
+            return area
+
+        # Left column: the graded checks on top, the green recommendation panel
+        # pinned lower down so the advice is always visible without scrolling.
+        self.verdict_scroll = _scrolled(self.verdict_card)
+        self.recommendation_scroll = _scrolled(self.recommendation_card)
+        self.verdict_column = QtWidgets.QWidget()
+        column = QtWidgets.QVBoxLayout(self.verdict_column)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(8)
+        column.addWidget(self.verdict_scroll, 5)
+        column.addWidget(self.recommendation_scroll, 4)
+        self.verdict_column.setMinimumWidth(455)
+        self.verdict_column.setMaximumWidth(500)
 
         btn_row = QtWidgets.QHBoxLayout()
         self.btn_prev_file = QtWidgets.QPushButton("Previous file")
@@ -1139,7 +1902,7 @@ class QcDialog(QtWidgets.QDialog):
 
         content = QtWidgets.QHBoxLayout()
         content.setSpacing(10)
-        content.addWidget(self.verdict_card)
+        content.addWidget(self.verdict_column)
 
         plots_col = QtWidgets.QVBoxLayout()
         plots_col.setSpacing(8)
@@ -1272,23 +2035,40 @@ class QcDialog(QtWidgets.QDialog):
             pass
         try:
             with open(txt_path, "w") as f:
-                score, tier_name, _tier_color, metrics = _evaluate_qc(self._qc)
-                f.write(f"Overall quality: {tier_name} ({score:.0f}/100 representative)\n")
-                for entry in metrics:
+                verdict = getattr(self, "_verdict", None) or _evaluate_qc(self._qc)
+                f.write(f"Overall quality: {verdict.tier} "
+                        f"({verdict.score:.0f}/100 representative)\n")
+                f.write(f"Decision: {verdict.action_kind} - {verdict.headline}\n\n")
+                f.write(f"Why: {verdict.why}\n")
+                f.write(f"Tally: {verdict.counts}\n\n")
+
+                f.write("Checks:\n")
+                for entry in verdict.metrics:
                     # 5-tuple (name, score, criticality, why, tier)
                     name = entry[0]
                     sub_score = float(entry[1])
                     criticality = float(entry[2])
                     why = str(entry[3])
                     tier = str(entry[4]) if len(entry) > 4 else ""
-                    if criticality >= 1.0:
-                        kind = "critical"
-                    elif criticality > 0:
-                        kind = "advisory"
-                    else:
-                        kind = "rationale"
+                    kind = "critical" if criticality >= 1.0 else "advisory"
                     tier_tag = f" [{tier}]" if tier else ""
                     f.write(f"- {name} ({kind}){tier_tag}: {sub_score:.0f}/100 - {why}\n")
+
+                f.write("\nRecommendations:\n")
+                for action in verdict.actions:
+                    f.write(f"- {action}\n")
+
+                if verdict.segments:
+                    f.write(
+                        f"\nParts to cut ({verdict.cut_seconds:.0f} s total, "
+                        f"{verdict.cut_fraction * 100:.0f}% of the session):\n"
+                    )
+                    for seg in verdict.segments:
+                        f.write(
+                            f"- {_qc_fmt_span(float(seg['start']), float(seg['end']))}: "
+                            f"{seg['label']} - {seg['detail']}\n"
+                        )
+
                 f.write("\n")
                 f.write(str(self._qc.get("stats", "")))
         except Exception:
@@ -6444,6 +7224,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
 
         # Artifact removal (adaptive MAD)
+        duration_s = float(np.nanmax(t) - np.nanmin(t)) if t.size else 0.0
         mask_sig = detect_artifacts_adaptive(t, sig, k=6.0, window_s=1.0, pad_s=0.2)
         mask_ref = detect_artifacts_adaptive(t, ref, k=6.0, window_s=1.0, pad_s=0.2) if has_reference else np.zeros_like(mask_sig, dtype=bool)
         mask = mask_sig | mask_ref
@@ -6509,19 +7290,26 @@ class MainWindow(QtWidgets.QMainWindow):
         m2 = np.isfinite(dff_sig_metric) & np.isfinite(dff_ref_metric) if has_reference else np.zeros_like(dff_sig_metric, dtype=bool)
         r = float(np.corrcoef(dff_ref_metric[m2], dff_sig_metric[m2])[0, 1]) if has_reference and np.sum(m2) >= 10 else np.nan
         win = int(max(10, round(fs * 10.0))) if np.isfinite(fs) and fs > 0 else 5000
+        # Rolling-window length in seconds: needed to turn a flagged rolling-r
+        # sample back into a time span the user can cut out.
+        r_win_s = float(win / fs) if np.isfinite(fs) and fs > 0 else float("nan")
         if has_reference:
             r_roll, centers = _rolling_corr(dff_ref_metric, dff_sig_metric, win)
         else:
             r_roll, centers = np.array([], float), np.array([], int)
 
-        # Distribution stats + new shape / stability metrics
+        # Distribution stats + new shape / stability metrics. The negative tail
+        # is tracked separately: sensors do not produce large fast *downward*
+        # excursions, so deep negative outliers are the fingerprint of leftover
+        # artifact rather than of real transients.
         if Zf.size:
             q25, q50, q75 = np.quantile(Zf, [0.25, 0.5, 0.75])
             frac_gt3 = float(np.mean(np.abs(Zf) > 3.0) * 100.0)
             frac_gt5 = float(np.mean(np.abs(Zf) > 5.0) * 100.0)
+            frac_neg5 = float(np.mean(Zf < -5.0) * 100.0)
             iqr = float(q75 - q25)
         else:
-            q25 = q50 = q75 = frac_gt3 = frac_gt5 = iqr = np.nan
+            q25 = q50 = q75 = frac_gt3 = frac_gt5 = frac_neg5 = iqr = np.nan
 
         # Skewness + excess kurtosis of Zf (no scipy dependency).
         if Zf.size > 10:
@@ -6583,13 +7371,19 @@ class MainWindow(QtWidgets.QMainWindow):
             "Zf": Zf,
             "r_roll": r_roll,
             "r_centers": centers,
+            "r_win_s": r_win_s,
             "r": r,
+            # Time-resolved inputs for the "which parts should I cut" scan.
+            "art_mask": mask,
+            "sig_base": sig_base,
+            "duration_s": duration_s,
             "q25": q25,
             "q50": q50,
             "q75": q75,
             "iqr": iqr,
             "frac_gt3": frac_gt3,
             "frac_gt5": frac_gt5,
+            "frac_neg5": frac_neg5,
             "art_frac": art_frac,
             "hf_noise_pct": hf_noise_pct,
             "ref_hf_noise_pct": ref_hf_noise_pct,
