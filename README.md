@@ -62,12 +62,6 @@ python .\pyBer\main.py
 The helper creates or updates the `pyBer` environment, installs R, and installs
 the CRAN `fastFMM` binary used by the FLMM temporal modeling panel.
 
-## Launch from VS Code
-
-1. Open the repository folder in VS Code.
-2. Select the interpreter from the `pyBer` conda environment.
-3. Open `pyBer/main.py`.
-4. Press Run, or:
 
 ```powershell
 conda activate pyBer
