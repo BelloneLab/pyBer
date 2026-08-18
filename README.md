@@ -82,9 +82,7 @@ environment created from `environment.yml`.
 
 ## What you can do
 
-- **Load RWD raw CSVs** from aligned `Fluorescence.csv` exports or alternating-light
-  `Fluorescence-unaligned.csv` exports, with sibling `Events.csv` files available
-  as trigger channels.
+- **Load Doric (.doric), RWD (.csv), TDT (.tev), Neurophotometrics (.sev)...** 
 
 - 🧹 **Preprocess** raw traces: filtering, resampling, baseline correction, motion
   correction, and artifact handling.
