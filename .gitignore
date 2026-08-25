@@ -5,12 +5,15 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tmp_*/
 
 # Build and packaging output
 build/
 dist/
 release/
 *.spec
+!pyBer.spec
+!pyBer-cli.spec
 
 # Local runtime state
 panel_layout.json

@@ -92,6 +92,12 @@ class ColumnNamingTests(unittest.TestCase):
         ])
         self.assertEqual([n for _, n in names], ["dFF", "dFF__fitref", "dFF__bandinvfitref"])
 
+    def test_unknown_label_never_maps_to_generic_output(self):
+        # A label with no family hint must fall back to a non-generic name so the
+        # "never a bare 'output' column" contract holds even for re-exports.
+        self.assertEqual(ac.output_family("Imported H5"), "signal")
+        self.assertNotEqual(ac.output_family("Imported H5"), "output")
+
 
 class CsvWriterTests(unittest.TestCase):
     def setUp(self):
@@ -328,6 +334,43 @@ class LoaderRoundTripTests(unittest.TestCase):
         self.assertIsNotNone(p)
         np.testing.assert_allclose(p.output[:5], (7.0 + rng)[:5])
         np.testing.assert_allclose(p.raw_signal[:5], (100.0 + rng)[:5])
+
+    def test_non_ascii_trigger_name_roundtrips_utf8(self):
+        # A non-ASCII trigger/channel header must survive CSV export+import (the
+        # writer/reader now use UTF-8, matching the sidecar).
+        rng = self._rng()
+        proc = _make_proc()
+        proc.dio_name = "DIOα"
+        proc.triggers = {"DIOα": (rng % 10 < 2).astype(float)}
+        path = os.path.join(self.dir, "unicode.csv")
+        export_processed_csv(path, proc, selection=_full_selection([
+            "dFF (motion corrected with fitted ref)"]))
+        with open(path, "r", encoding="utf-8") as f:
+            header = f.readline()
+        self.assertIn("DIOα", header)
+        p = self.load_csv(path)
+        self.assertIsNotNone(p)
+        self.assertIn("DIOα", p.triggers)
+
+    def test_legacy_h5_dio_alias_not_double_counted(self):
+        # Old exports created a 'dio' link aliasing the real trigger; the reader
+        # must not surface a phantom duplicate 'dio' trigger.
+        import h5py
+        rng = self._rng()
+        path = os.path.join(self.dir, "legacy_alias.h5")
+        trig = (rng % 10 < 2).astype(float)
+        with h5py.File(path, "w") as f:
+            g = f.create_group("data")
+            g.create_dataset("time", data=rng / 10.0)
+            g.create_dataset("output", data=0.01 * rng)
+            g.create_dataset("DIO01", data=trig)
+            g["dio"] = g["DIO01"]  # legacy compatibility link
+            g.attrs["output_label"] = "dFF (motion corrected with fitted ref)"
+            g.attrs["dio_name"] = "DIO01"
+        p = self.load_h5(path)
+        self.assertIsNotNone(p)
+        self.assertIn("DIO01", p.triggers)
+        self.assertNotIn("dio", p.triggers, "legacy 'dio' alias must not be a separate trigger")
 
     def test_aligned_export_roundtrips_time_aligned(self):
         # The postprocessing "Export aligned files" path re-exports through the

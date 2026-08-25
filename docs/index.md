@@ -3,6 +3,43 @@
 This page is a practical guide for installing and using pyBer. It is written for
 lab users who want to process recordings without reading the code first.
 
+## Headless CLI batch workflow
+
+Version 0.45 adds `pyBer/cli.py` and a dedicated Windows executable named
+`pyBer-cli-windows.exe`. Pass one or more files or folders. Folder traversal is
+recursive unless `--no-recursive` is supplied.
+
+```powershell
+pyBer-cli-windows.exe "D:\data\experiment" --sensor jgcamp8f --channel AIN01
+```
+
+Useful options:
+
+- `--sensor ID_OR_NAME`: selects the sensor used for kinetics-aware filtering,
+  sampling, polarity checks, and export metadata.
+- `--channel NAME`: processes only that raw channel. Repeat the option or use a
+  comma-separated list. If omitted, every detected photometry channel is used.
+- `--trigger NAME`: includes a matching DIO or analog output trigger.
+- `--set NAME=VALUE`: overrides a recommended `ProcessingParams` field. Repeat
+  it for any combination of artifact, filtering, resampling, baseline,
+  reference-fit, polarity, smoothing, or output settings.
+- `--params-file PATH`: loads the same overrides from a reusable JSON object.
+  Repeatable `--set` values take precedence over the file.
+- `--format both|csv|h5`: chooses processed data formats. The default is both.
+- `--output-dir PATH`: places outputs under a chosen directory while retaining
+  relative subfolder structure.
+
+The automatic recommendation examines acquisition timing and trace statistics,
+then combines those measurements with the selected sensor's expected kinetics.
+Explicit `--set` values always take precedence. Each result includes a PNG and
+JSON preprocessing report. Batch-level CSV and JSON summaries make processing
+auditable, and `flagged_recordings.csv` is the review queue for failed, highly
+artifactual, flat, incomplete, low-confidence, or sensor-inconsistent recordings.
+
+Legacy Doric files using keys such as
+`AIN01xAOUT02-LockIn/Values` are supported alongside current files using
+`LockInAOUT02/AIN01`.
+
 ## 1. Install pyBer
 
 ### Recommended Windows install

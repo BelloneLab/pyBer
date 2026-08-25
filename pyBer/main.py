@@ -131,6 +131,7 @@ from analysis_core import (
     coerce_time_value,
 )
 from sensor_registry import SENSOR_UNKNOWN, get_sensor
+from version import __version__
 from gui_preprocessing import (
     FileQueuePanel,
     ParameterPanel,
@@ -2187,7 +2188,7 @@ class CsvChannelMappingDialog(QtWidgets.QDialog):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Pyber - Fiber Photometry Analysis")
+        self.setWindowTitle(f"pyBer {__version__} - Fiber Photometry Analysis")
         _set_qt_window_icon(self)
         self.setAcceptDrops(True)
         self._set_initial_window_size()
@@ -4618,9 +4619,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if "artifact_thresholds_visible" in state:
                 self.plots.set_artifact_thresholds_visible(bool(state.get("artifact_thresholds_visible")))
             if "export_selection" in state:
+                # ExportSelection carries output_modes, so set_export_selection
+                # already restores the extra-output checklist (primary comes from
+                # the output combo). No separate export_output_modes restore needed.
                 self.param_panel.set_export_selection(ExportSelection.from_dict(state.get("export_selection")))
-            if "export_output_modes" in state:
-                self.param_panel.set_export_output_modes(list(state.get("export_output_modes") or []), follow_current=False)
             if "export_channel_names" in state:
                 self.param_panel.set_export_channel_names(list(state.get("export_channel_names") or []))
             if "export_trigger_names" in state:

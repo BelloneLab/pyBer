@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: v0.31
+  RELEASE_VERSION: v0.45
 
 jobs:
   build-windows:
@@ -69,6 +69,7 @@ jobs:
 
           required = [
               Path("pyBer.spec"),
+              Path("pyBer-cli.spec"),
               Path("assets/pyBer_logo_big.png"),
               Path("assets/pyBer.ico"),
           ]
@@ -87,17 +88,21 @@ jobs:
       - name: Build with PyInstaller
         run: |
           python -m PyInstaller --noconfirm --clean pyBer.spec
+          python -m PyInstaller --noconfirm --clean pyBer-cli.spec
 
       - name: Smoke test built EXE
         run: |
           export PYBER_SMOKE_TEST=1
           ./dist/pyBer.exe
+          ./dist/pyBer-cli.exe --version
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: pyber-windows-exe
-          path: dist/pyBer.exe
+          path: |
+            dist/pyBer.exe
+            dist/pyBer-cli.exe
           if-no-files-found: error
 
   publish:
@@ -107,7 +112,7 @@ jobs:
         github.event_name == 'workflow_dispatch' ||
         (
           github.event_name == 'push' &&
-          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/Pyber_v0.15' || startsWith(github.ref, 'refs/tags/'))
+          startsWith(github.ref, 'refs/tags/')
         )
       )
     runs-on: ubuntu-latest
@@ -121,18 +126,20 @@ jobs:
       - name: Normalize Release Asset Name
         run: |
           set -euo pipefail
-          exe_path="$(find ./publish -type f -name '*.exe' | head -n 1 || true)"
-          if [[ -z "$exe_path" ]]; then
-            echo "No EXE found in downloaded artifact"
+          gui_path="$(find ./publish -type f -name 'pyBer.exe' | head -n 1 || true)"
+          cli_path="$(find ./publish -type f -name 'pyBer-cli.exe' | head -n 1 || true)"
+          if [[ -z "$gui_path" || -z "$cli_path" ]]; then
+            echo "Expected GUI and CLI executables were not found"
             find ./publish -maxdepth 4 -type f -print || true
             exit 1
           fi
-          cp "$exe_path" ./publish/pyBer-windows.exe
+          cp "$gui_path" ./publish/pyBer-windows.exe
+          cp "$cli_path" ./publish/pyBer-cli-windows.exe
 
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "./publish/pyBer-windows.exe"
+          artifacts: "./publish/pyBer-windows.exe,./publish/pyBer-cli-windows.exe"
           token: ${{ secrets.GITHUB_TOKEN }}
           generateReleaseNotes: true
           allowUpdates: true

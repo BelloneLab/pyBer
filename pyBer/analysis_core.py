@@ -265,6 +265,7 @@ class LoadedDoricFile:
     digital_by_name: Dict[str, np.ndarray]
     trigger_time_by_name: Dict[str, np.ndarray]
     trigger_by_name: Dict[str, np.ndarray]
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def make_trial(self, channel: str, trigger_name: Optional[str] = None, trigger_names: Optional[List[str]] = None) -> LoadedTrial:
         t = self.time_by_channel[channel]
@@ -424,7 +425,6 @@ class ExportSelection:
     dio: bool = True
     baseline_sig: bool = True
     baseline_ref: bool = True
-    csv_metadata: bool = True
     output_modes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -435,7 +435,6 @@ class ExportSelection:
             "dio": bool(self.dio),
             "baseline_sig": bool(self.baseline_sig),
             "baseline_ref": bool(self.baseline_ref),
-            "csv_metadata": bool(self.csv_metadata),
             "output_modes": list(self.output_modes or []),
         }
 
@@ -446,6 +445,8 @@ class ExportSelection:
         modes = data.get("output_modes", [])
         if not isinstance(modes, list):
             modes = []
+        # Note: a legacy "csv_metadata" key may be present in old configs; it is
+        # intentionally ignored (CSV exports no longer carry comment metadata).
         return cls(
             raw=bool(data.get("raw", True)),
             isobestic=bool(data.get("isobestic", True)),
@@ -453,7 +454,6 @@ class ExportSelection:
             dio=bool(data.get("dio", True)),
             baseline_sig=bool(data.get("baseline_sig", True)),
             baseline_ref=bool(data.get("baseline_ref", True)),
-            csv_metadata=bool(data.get("csv_metadata", True)),
             output_modes=[str(m).strip() for m in modes if str(m or "").strip()],
         )
 
@@ -578,7 +578,9 @@ def output_family(label: str) -> str:
         return "dFF"
     if "raw signal" in lab or "signal" in lab or lab.startswith("raw"):
         return "signal_465"
-    return "output"
+    # Neutral, non-generic fallback: honor the "never a bare 'output' column"
+    # contract even for re-exported imports whose label gives no family hint.
+    return "signal"
 
 
 def output_variant_key(label: str) -> str:
@@ -946,10 +948,15 @@ def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
     """Load a processed-trace CSV (pyBer v1.0 sidecar-aware, with legacy fallback)."""
     import csv
     try:
-        with open(path, "r", newline="") as f:
+        with open(path, "r", newline="", encoding="utf-8-sig") as f:
             rows = list(csv.reader(f))
     except Exception:
-        return None
+        # Fall back to the platform encoding for legacy files written before UTF-8.
+        try:
+            with open(path, "r", newline="") as f:
+                rows = list(csv.reader(f))
+        except Exception:
+            return None
     if not rows:
         return None
 
@@ -1035,7 +1042,7 @@ def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
     if output_idx is None:
         output_idx = _find_col([
             "dff", "z-score", "zscore", "z score", "prominence", "signal_465",
-            "output", "raw_signal",
+            "signal", "output", "raw_signal",
             "raw_465", "raw", "isobestic", "raw_405",
             "reference", "reference_405", "ref", "dio",
             "baseline_465", "baseline_405",
@@ -1244,7 +1251,7 @@ def load_processed_h5(path: str) -> Optional[ProcessedTrial]:
                         break
             if out is None:
                 for nm in ("output", "dFF", "z-score", "zscore", "prominence", "signal_465",
-                           "raw_465", "raw", "raw_405", "isobestic", "dio",
+                           "signal", "raw_465", "raw", "raw_405", "isobestic", "dio",
                            "baseline_465", "baseline_405"):
                     if nm in g:
                         out, out_name = _ds(nm), nm
@@ -1270,8 +1277,12 @@ def load_processed_h5(path: str) -> Optional[ProcessedTrial]:
                     if arr is not None and arr.size == t.size:
                         triggers[str(logical)] = arr
             else:
+                # "dio" is a legacy compatibility link that aliases the real
+                # trigger dataset; exclude it so it is not counted as a second
+                # phantom trigger alongside its real name (e.g. DIO01).
                 reserved = {"time", "time_aligned", "sync_aligned_time", "raw_465", "raw_405",
-                            "raw", "isobestic", "baseline_465", "baseline_405", "output", out_name}
+                            "raw", "isobestic", "baseline_465", "baseline_405", "output",
+                            "dio", out_name}
                 for nm in g.keys():
                     if nm in reserved or not _looks_like_trigger_col(nm):
                         continue
@@ -1369,7 +1380,7 @@ def export_processed_csv(
     columns, primary_output_name = plan_processed_columns(processed, selection)
     n = int(np.asarray(processed.time, float).size)
 
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow([c["name"] for c in columns])
         for i in range(n):
@@ -3985,33 +3996,139 @@ class PreviewTask(QtCore.QRunnable):
 # =============================================================================
 
 class PhotometryProcessor:
+    @staticmethod
+    def _doric_series_group(file: h5py.File) -> h5py.Group:
+        """Return the first Doric signal series across old and current layouts."""
+        preferred = "DataAcquisition/FPConsole/Signals/Series0001"
+        if preferred in file and isinstance(file[preferred], h5py.Group):
+            return file[preferred]
+
+        candidates: List[Tuple[str, h5py.Group]] = []
+
+        def _visit(name: str, obj: Any) -> None:
+            if not isinstance(obj, h5py.Group):
+                return
+            leaf = name.rsplit("/", 1)[-1]
+            if re.fullmatch(r"Series\d+", leaf, flags=re.IGNORECASE):
+                candidates.append((name, obj))
+
+        file.visititems(_visit)
+        if not candidates:
+            raise ValueError(
+                "No Doric acquisition series was found. Expected a group such as "
+                "DataAcquisition/FPConsole/Signals/Series0001."
+            )
+        return sorted(candidates, key=lambda item: item[0].lower())[0][1]
+
+    @staticmethod
+    def _read_lockin_channels(
+        base: h5py.Group,
+        output_number: int,
+    ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+        """Read demodulated channels from modern or legacy Doric HDF5 keys.
+
+        Current Doric files use ``LockInAOUT02/AIN01`` plus a shared ``Time``
+        dataset. Older files use ``AIN01xAOUT02-LockIn/Values`` and place the
+        corresponding ``Time`` dataset in that per-channel group.
+        """
+        wanted = int(output_number)
+        found: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+
+        modern_names = (f"LockInAOUT{wanted:02d}", f"LockInAOUT{wanted}")
+        modern = next(
+            (base[name] for name in modern_names if name in base and isinstance(base[name], h5py.Group)),
+            None,
+        )
+        if modern is not None:
+            shared_time = (
+                np.asarray(modern["Time"][()], float)
+                if "Time" in modern and isinstance(modern["Time"], h5py.Dataset)
+                else np.array([], float)
+            )
+            for name, obj in modern.items():
+                if not str(name).upper().startswith("AIN"):
+                    continue
+                if isinstance(obj, h5py.Dataset):
+                    values = np.asarray(obj[()], float)
+                    time_values = shared_time
+                elif isinstance(obj, h5py.Group) and "Values" in obj:
+                    values = np.asarray(obj["Values"][()], float)
+                    time_values = (
+                        np.asarray(obj["Time"][()], float) if "Time" in obj else shared_time
+                    )
+                else:
+                    continue
+                found[str(name)] = (np.asarray(time_values, float), values)
+
+        legacy_re = re.compile(
+            rf"^(AIN\d+)xAOUT0*{wanted}-LockIn$",
+            flags=re.IGNORECASE,
+        )
+
+        def _visit(name: str, obj: Any) -> None:
+            if not isinstance(obj, h5py.Group) or "Values" not in obj:
+                return
+            match = legacy_re.match(name.rsplit("/", 1)[-1])
+            if not match:
+                return
+            channel = match.group(1).upper()
+            values = np.asarray(obj["Values"][()], float)
+            time_values = (
+                np.asarray(obj["Time"][()], float)
+                if "Time" in obj and isinstance(obj["Time"], h5py.Dataset)
+                else np.array([], float)
+            )
+            found.setdefault(channel, (time_values, values))
+
+        base.visititems(_visit)
+        return found
+
+    @staticmethod
+    def _doric_metadata(file: h5py.File, base: h5py.Group) -> Dict[str, Any]:
+        """Collect compact acquisition metadata for recommendations and reports."""
+        metadata: Dict[str, Any] = {
+            "doric_series_path": str(base.name),
+        }
+        for key, value in file.attrs.items():
+            metadata[f"file_{key}"] = value.item() if hasattr(value, "item") else value
+        for path in (
+            "Configurations/FPConsole/GlobalSettings",
+            "Configurations/FPConsole/SavingSettings",
+        ):
+            if path not in file or not isinstance(file[path], h5py.Group):
+                continue
+            prefix = path.rsplit("/", 1)[-1].lower()
+            for key, value in file[path].attrs.items():
+                plain = value.item() if hasattr(value, "item") else value
+                metadata[f"{prefix}_{key}"] = plain
+        return metadata
+
     def load_file(self, path: str) -> LoadedDoricFile:
         with h5py.File(path, "r") as f:
-            base = f["DataAcquisition"]["FPConsole"]["Signals"]["Series0001"]
-
-            chans: List[str] = []
-            if "LockInAOUT02" in base:
-                for k in base["LockInAOUT02"].keys():
-                    if k.startswith("AIN"):
-                        chans.append(k)
-            chans = sorted(chans) or ["AIN01"]
-
-            def _read_time(folder: str) -> np.ndarray:
-                if folder in base and "Time" in base[folder]:
-                    return np.asarray(base[folder]["Time"][()], float)
-                return np.array([], float)
+            base = self._doric_series_group(f)
+            signal_channels = self._read_lockin_channels(base, 2)
+            reference_channels = self._read_lockin_channels(base, 1)
+            chans = sorted(signal_channels)
+            if not chans:
+                raise ValueError(
+                    f"No demodulated signal channel was found in {base.name}. "
+                    "Supported layouts include LockInAOUT02/AIN01 and "
+                    "AIN01xAOUT02-LockIn/Values."
+                )
 
             time_by: Dict[str, np.ndarray] = {}
             sig_by: Dict[str, np.ndarray] = {}
             ref_by: Dict[str, np.ndarray] = {}
 
             for ch in chans:
-                sig = np.asarray(base["LockInAOUT02"][ch][()], float)
-                t_sig = _read_time("LockInAOUT02")
+                t_sig, sig = signal_channels[ch]
+                sig = np.asarray(sig, float)
+                t_sig = np.asarray(t_sig, float)
 
-                if "LockInAOUT01" in base and ch in base["LockInAOUT01"]:
-                    ref = np.asarray(base["LockInAOUT01"][ch][()], float)
-                    t_ref = _read_time("LockInAOUT01")
+                if ch in reference_channels:
+                    t_ref, ref = reference_channels[ch]
+                    ref = np.asarray(ref, float)
+                    t_ref = np.asarray(t_ref, float)
                 else:
                     ref = np.full_like(sig, np.nan, dtype=float)
                     t_ref = np.array([], float)
@@ -4070,6 +4187,7 @@ class PhotometryProcessor:
                 digital_by_name=digital_by,
                 trigger_time_by_name=trigger_time_by,
                 trigger_by_name=trigger_by,
+                metadata=self._doric_metadata(f, base),
             )
 
     def make_preview_task(

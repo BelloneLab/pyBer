@@ -74,9 +74,55 @@ environment created from `environment.yml`.
 
 ---
 
+## Command-line batch preprocessing
+
+pyBer 0.45 includes a headless CLI for reproducible preprocessing on one file,
+several files, or a directory tree. It reads current and legacy Doric files plus
+RWD fluorescence CSV exports. Folder inputs are searched recursively by default.
+
+```powershell
+conda activate pyBer
+python .\pyBer\cli.py "D:\photometry\cohort_1" `
+  --sensor gcamp6f `
+  --channel AIN01 `
+  --trigger DIO02 `
+  --output-dir "D:\photometry\cohort_1_processed"
+```
+
+The CLI first derives recommended settings from the recording sampling rate,
+duration, signal quality, reference coupling, and selected sensor. Override any
+processing field after recommendation with repeatable `--set NAME=VALUE` options:
+
+```powershell
+python .\pyBer\cli.py recording.doric --sensor dlight12 `
+  --set target_fs_hz=50 `
+  --set lowpass_hz=10 `
+  --set artifact_handling=Interpolate `
+  --set baseline_lambda=1e9 `
+  --set output_mode="dFF (motion corrected with fitted ref)"
+```
+
+For reusable batch settings, pass the same fields as a JSON object with
+`--params-file settings.json`. Any later `--set` options take precedence.
+
+Each recording-channel pair produces processed CSV and HDF5 files, a PNG
+preprocessing report, and a JSON record of the recommendation, effective
+parameters, acquisition metadata, and QC decision. Every batch also produces
+`batch_summary.csv`, `batch_summary.json`, and `flagged_recordings.csv`. The
+flagged table collects processing failures, excessive artifact load, poor finite
+coverage, flat traces, low-confidence recommendations, and sensor-trace warnings.
+
+The Windows release contains both `pyBer-windows.exe` for the GUI and
+`pyBer-cli-windows.exe` for terminal use.
+
+---
+
 ## What you can do
 
 - **Load Doric (.doric), RWD (.csv), TDT (.tev), Neurophotometrics (.sev)...** 
+
+- **Batch from the CLI** across nested folders with sensor-aware recommended
+  parameters, explicit overrides, dual CSV/HDF5 export, and flagged-recording QC.
 
 - 🧹 **Preprocess** raw traces: filtering, resampling, baseline correction, motion
   correction, and artifact handling.
