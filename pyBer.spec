@@ -6,8 +6,11 @@ from pathlib import Path
 
 
 def _env_bin_dir() -> Path:
-    prefix = os.environ.get("CONDA_PREFIX") or sys.prefix
-    return Path(prefix) / "Library" / "bin"
+    # Bind native libraries to the interpreter running PyInstaller. A stale
+    # CONDA_PREFIX can point at base even when PyInstaller is invoked through a
+    # different environment's python.exe, producing an executable that fails
+    # before startup when _ctypes loads the wrong ffi DLL.
+    return Path(sys.prefix) / "Library" / "bin"
 
 
 def _existing_binaries(names):
@@ -37,6 +40,26 @@ a = Analysis(
         'svml_dispmd.dll',
         'libpng16.dll',
         'freetype.dll',
+        'liblzma.dll',
+        'libbz2.dll',
+        'ffi-8.dll',
+        'libexpat.dll',
+        'sqlite3.dll',
+        # conda-forge's libblas/liblapack shims resolve MKL symbols by the
+        # versioned name at runtime, so dependency scanners do not see it.
+        'mkl_rt.2.dll',
+        'mkl_core.2.dll',
+        'mkl_intel_thread.2.dll',
+        'mkl_sequential.2.dll',
+        'mkl_def.2.dll',
+        'mkl_avx2.2.dll',
+        'mkl_avx512.2.dll',
+        'mkl_mc3.2.dll',
+        'mkl_vml_avx2.2.dll',
+        'mkl_vml_avx512.2.dll',
+        'mkl_vml_cmpt.2.dll',
+        'mkl_vml_def.2.dll',
+        'mkl_vml_mc3.2.dll',
     ]),
     datas=[('assets/pyBer_logo_big.png', 'assets'), ('assets/pyBer.ico', 'assets')],
     hiddenimports=[

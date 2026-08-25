@@ -6,8 +6,9 @@ from pathlib import Path
 
 
 def _env_bin_dir() -> Path:
-    prefix = os.environ.get("CONDA_PREFIX") or sys.prefix
-    return Path(prefix) / "Library" / "bin"
+    # Use the runtime belonging to the interpreter that executes PyInstaller,
+    # even when the parent shell has a stale CONDA_PREFIX.
+    return Path(sys.prefix) / "Library" / "bin"
 
 
 def _existing_binaries(names):
@@ -22,6 +23,12 @@ a = Analysis(
         "hdf5.dll", "hdf5_hl.dll", "zlib.dll", "blosc.dll", "libblosc2.dll",
         "libmmd.dll", "libifcoremd.dll", "libifportmd.dll", "libiomp5md.dll",
         "libimalloc.dll", "svml_dispmd.dll", "libpng16.dll", "freetype.dll",
+        "liblzma.dll", "libbz2.dll", "ffi-8.dll", "libexpat.dll", "sqlite3.dll",
+        "mkl_rt.2.dll",
+        "mkl_core.2.dll", "mkl_intel_thread.2.dll", "mkl_sequential.2.dll",
+        "mkl_def.2.dll", "mkl_avx2.2.dll", "mkl_avx512.2.dll", "mkl_mc3.2.dll",
+        "mkl_vml_avx2.2.dll", "mkl_vml_avx512.2.dll", "mkl_vml_cmpt.2.dll",
+        "mkl_vml_def.2.dll", "mkl_vml_mc3.2.dll",
     ]),
     datas=[],
     hiddenimports=["matplotlib.backends.backend_agg"],

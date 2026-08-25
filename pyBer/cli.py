@@ -21,9 +21,12 @@ from analysis_core import (
     ProcessingParams,
     export_processed_csv,
     export_processed_h5,
+    interpolate_nans,
     is_rwd_events_csv,
     load_rwd_csv,
     recommend_preprocessing_settings,
+    safe_divide,
+    _lowpass_sos,
 )
 from sensor_registry import SENSOR_UNKNOWN, all_sensors, get_sensor
 from version import __version__
@@ -198,6 +201,103 @@ def _output_base(path: Path, channel: str, output_dir: Path, common_root: Path) 
     return target / f"{_safe_component(path.stem)}_{_safe_component(channel)}"
 
 
+def _robust_sigma(values: np.ndarray) -> float:
+    arr = np.asarray(values, float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size < 3:
+        return float("nan")
+    median = float(np.nanmedian(arr))
+    mad = float(np.nanmedian(np.abs(arr - median)))
+    return float(1.4826 * mad) if mad > 1e-12 else float(np.nanstd(arr))
+
+
+def _cli_signal_qc(processed: Any) -> Dict[str, float]:
+    """Measure corrected SNR and retained activity without importing the GUI."""
+    time = np.asarray(getattr(processed, "time", []), float)
+    signal = np.asarray(getattr(processed, "sig_f", None), float)
+    reference = np.asarray(getattr(processed, "ref_f", None), float)
+    baseline_signal = np.asarray(getattr(processed, "baseline_sig", None), float)
+    baseline_reference = np.asarray(getattr(processed, "baseline_ref", None), float)
+    if signal.ndim == 0 or signal.size == 0:
+        signal = np.asarray(getattr(processed, "raw_signal", []), float)
+    if reference.ndim == 0 or reference.size == 0:
+        reference = np.asarray(getattr(processed, "raw_reference", []), float)
+    n = min(time.size, signal.size, reference.size)
+    if n < 20:
+        return {}
+    time, signal, reference = time[:n], signal[:n], reference[:n]
+    finite = np.isfinite(time) & np.isfinite(signal) & np.isfinite(reference)
+    if np.sum(finite) < 20 or float(np.nanstd(reference[finite])) <= 1e-12:
+        return {}
+    signal = interpolate_nans(signal)
+    reference = interpolate_nans(reference)
+    try:
+        slope, intercept = np.polyfit(reference[finite], signal[finite], 1)
+    except Exception:
+        return {}
+    fitted_reference = slope * reference + intercept
+    corrected = interpolate_nans(safe_divide(signal - fitted_reference, fitted_reference))
+
+    if baseline_signal.ndim == 0 or baseline_signal.size < n:
+        return {}
+    baseline_signal = baseline_signal[:n]
+    dff_signal = interpolate_nans(safe_divide(signal - baseline_signal, baseline_signal))
+    if baseline_reference.ndim != 0 and baseline_reference.size >= n:
+        baseline_reference = baseline_reference[:n]
+        dff_reference = interpolate_nans(
+            safe_divide(reference - baseline_reference, baseline_reference)
+        )
+        corr_mask = np.isfinite(dff_signal) & np.isfinite(dff_reference)
+        motion_r = (
+            float(np.corrcoef(dff_signal[corr_mask], dff_reference[corr_mask])[0, 1])
+            if np.sum(corr_mask) >= 10 else float("nan")
+        )
+    else:
+        motion_r = float("nan")
+
+    dt = np.diff(time[np.isfinite(time)])
+    fs = 1.0 / float(np.nanmedian(dt)) if dt.size and np.nanmedian(dt) > 0 else float("nan")
+
+    def envelope(values: np.ndarray) -> np.ndarray:
+        if np.isfinite(fs) and fs > 1.0:
+            cutoff = min(2.0, max(0.05, fs * 0.20))
+            if cutoff < fs * 0.45:
+                try:
+                    return _lowpass_sos(values, fs, cutoff, 3)
+                except Exception:
+                    pass
+        return values
+
+    raw_envelope = envelope(dff_signal)
+    corrected_envelope = envelope(corrected)
+    corrected_noise = _robust_sigma(corrected - corrected_envelope)
+
+    def amplitude(values: np.ndarray) -> float:
+        centered = values - float(np.nanmedian(values))
+        centered = centered[np.isfinite(centered)]
+        return float(np.nanpercentile(np.abs(centered), 95)) if centered.size else float("nan")
+
+    raw_amplitude = amplitude(raw_envelope)
+    corrected_amplitude = amplitude(corrected_envelope)
+    retention = (
+        corrected_amplitude / max(raw_amplitude, 1e-12)
+        if np.isfinite(corrected_amplitude) and np.isfinite(raw_amplitude)
+        else float("nan")
+    )
+    snr = (
+        corrected_amplitude / max(corrected_noise, 1e-12)
+        if np.isfinite(corrected_amplitude) and np.isfinite(corrected_noise)
+        else float("nan")
+    )
+    return {
+        "motion_r": motion_r,
+        "signal_retention": retention,
+        "corrected_snr": snr,
+        "corrected_event_amplitude_pct": corrected_amplitude * 100.0,
+        "corrected_noise_pct": corrected_noise * 100.0,
+    }
+
+
 def evaluate_qc(processed: Any, recommendation: Any) -> Dict[str, Any]:
     """Return a conservative, transparent CLI quality verdict."""
     reasons: List[str] = []
@@ -209,6 +309,10 @@ def evaluate_qc(processed: Any, recommendation: Any) -> Dict[str, Any]:
     raw = np.asarray(getattr(processed, "raw_signal", []), float)
     raw_finite = raw[np.isfinite(raw)]
     raw_variation = float(np.nanstd(raw_finite)) if raw_finite.size else 0.0
+    signal_qc = _cli_signal_qc(processed)
+    motion_r = abs(float(signal_qc.get("motion_r", float("nan"))))
+    signal_retention = float(signal_qc.get("signal_retention", float("nan")))
+    corrected_snr = float(signal_qc.get("corrected_snr", float("nan")))
 
     if artifact_fraction >= 0.08:
         reasons.append(f"artifact burden is {artifact_fraction:.1%} (fail threshold 8%)")
@@ -218,6 +322,32 @@ def evaluate_qc(processed: Any, recommendation: Any) -> Dict[str, Any]:
         reasons.append(f"only {finite_fraction:.1%} of processed samples are finite")
     if raw_variation <= 1e-12:
         reasons.append("raw signal is flat or has no measurable variance")
+    if np.isfinite(corrected_snr):
+        if corrected_snr < 3.0:
+            reasons.append(
+                f"corrected transients are only {corrected_snr:.1f}x the noise floor "
+                "(fail threshold 3x)"
+            )
+        elif corrected_snr < 6.0:
+            warnings.append(
+                f"corrected transients are only {corrected_snr:.1f}x the noise floor "
+                "(review threshold 6x)"
+            )
+    if np.isfinite(signal_retention):
+        if signal_retention < 0.50:
+            reasons.append(
+                f"only {signal_retention:.0%} of slow signal amplitude survives reference fitting "
+                "(fail threshold 50%)"
+            )
+        elif signal_retention < 0.70:
+            warnings.append(
+                f"only {signal_retention:.0%} of slow signal amplitude survives reference fitting "
+                "(review threshold 70%)"
+            )
+    if np.isfinite(motion_r) and motion_r >= 0.80:
+        message = f"signal/reference coupling is very high (|r|={motion_r:.2f})"
+        if not any("survives reference fitting" in reason for reason in reasons):
+            warnings.append(message)
     confidence = float(getattr(recommendation, "confidence", 0.0) or 0.0)
     if confidence < 0.50:
         warnings.append(f"automatic recommendation confidence is low ({confidence:.0%})")
@@ -238,6 +368,7 @@ def evaluate_qc(processed: Any, recommendation: Any) -> Dict[str, Any]:
         "artifact_fraction": artifact_fraction,
         "finite_fraction": finite_fraction,
         "recommendation_confidence": confidence,
+        **signal_qc,
     }
 
 

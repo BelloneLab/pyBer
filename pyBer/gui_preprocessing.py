@@ -1378,6 +1378,39 @@ class FileQueuePanel(QtWidgets.QGroupBox):
             out.append(str(path if path else it.text()))
         return out
 
+    def select_path(self, path: str) -> bool:
+        """Select exactly one queued file by path and emit one stable change."""
+        wanted = os.path.normcase(os.path.abspath(str(path or "")))
+        if not wanted:
+            return False
+        target: Optional[QtWidgets.QListWidgetItem] = None
+        for i in range(self.list_files.count()):
+            item = self.list_files.item(i)
+            if item is None:
+                continue
+            stored = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            candidate = os.path.normcase(os.path.abspath(str(stored if stored else item.text())))
+            if candidate == wanted:
+                target = item
+                break
+        if target is None:
+            return False
+
+        current = self.list_files.currentItem()
+        selected = self.list_files.selectedItems()
+        if current is target and selected == [target]:
+            return True
+
+        blocker = QtCore.QSignalBlocker(self.list_files)
+        self.list_files.clearSelection()
+        self.list_files.setCurrentItem(target)
+        target.setSelected(True)
+        self.list_files.scrollToItem(target)
+        del blocker
+        self._update_remove_button()
+        self.selectionChanged.emit()
+        return True
+
     def set_available_channels(self, chans: List[str]) -> None:
         self.combo_channel.blockSignals(True)
         try:
@@ -3381,7 +3414,10 @@ class PlotDashboard(QtWidgets.QWidget):
         self._dio_overlay_visible = False
         self._plot_background_mode = "dark"
         self._plot_grid_visible = True
-        self._artifact_regions: List[pg.LinearRegionItem] = []
+        # Small region sets use pyqtgraph LinearRegionItem objects. Large sets
+        # are batched into one Qt QGraphicsPathItem, so keep the common base
+        # type here instead of assuming every overlay is a LinearRegionItem.
+        self._artifact_regions: List[QtWidgets.QGraphicsItem] = []
         self._artifact_region_bounds: List[Tuple[float, float]] = []
         self._artifact_labels: List[pg.TextItem] = []
         self._last_overlay_time: Optional[np.ndarray] = None
@@ -3902,16 +3938,22 @@ class PlotDashboard(QtWidgets.QWidget):
         tt = np.asarray(t, float)
         yy = np.asarray(raw_sig, float)
 
-        # Optimization: use a single PathItem for many regions to avoid scene graph bloat.
+        # Optimization: use one Qt path item for many regions to avoid scene
+        # graph bloat. ``pyqtgraph.PathItem`` is not a public/version-stable API
+        # and is absent from pyqtgraph 0.14, including the packaged application.
         if len(regions) > 25:
             y0, y1 = -1e12, 1e12  # Large range for vertical bars
             path = QtGui.QPainterPath()
             for a, b in regions:
                 path.addRect(QtCore.QRectF(float(a), y0, float(b - a), y1 - y0))
 
-            path_item = pg.PathItem(path, pen=self._artifact_pen_default, brush=self._artifact_brush_default)
+            path_item = QtWidgets.QGraphicsPathItem(path)
+            path_item.setPen(self._artifact_pen_default)
+            path_item.setBrush(self._artifact_brush_default)
             path_item.setZValue(8)
-            self.plot_raw.addItem(path_item)
+            # The +/-1e12 y span makes the rectangles cover any visible signal
+            # range. It is decorative and must not contaminate plot autoranging.
+            self.plot_raw.addItem(path_item, ignoreBounds=True)
             self._artifact_regions.append(path_item)
             self._artifact_region_bounds.extend(regions)
 

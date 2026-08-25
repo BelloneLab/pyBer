@@ -556,6 +556,7 @@ _QC_T_MOTION_R = (0.40, 0.80)    # |r| between signal dF/F and isobestic dF/F
 _QC_T_SNR = (6.0, 3.0)           # event amplitude / noise floor (higher is better)
 _QC_T_SIG_NOISE = (0.30, 0.60)   # signal high-frequency noise, % dF/F
 _QC_T_REF_NOISE = (0.30, 0.60)   # isobestic high-frequency noise, % dF/F
+_QC_T_RETENTION = (0.70, 0.50)    # corrected / uncorrected slow-signal amplitude
 _QC_T_ROLL_STD = (0.12, 0.25)    # std of the rolling reference correlation
 _QC_T_BLEACH = (8.0, 20.0)       # |baseline drift| across the session, %
 _QC_T_CUT_FRAC = (5.0, 20.0)     # % of the session that should be cut out
@@ -726,9 +727,13 @@ def _qc_detect_bad_segments(qc: Dict[str, object]) -> List[Dict[str, object]]:
             start_level = float(bb[0])
             end_level = float(np.nanmedian(bb[max(1, bb.size // 2):]))
             drop = start_level - end_level
-            # Only meaningful when the session actually loses >=3% of its
-            # fluorescence and the trace starts high (i.e. a real bleach-in).
-            if start_level > 1e-9 and drop > 0 and (drop / start_level) >= 0.03:
+            # A modest baseline change is what the adaptive baseline is for. Do
+            # not recommend throwing away the beginning unless the total drift
+            # is already large enough to warn the session-level bleach check.
+            # The previous 3% trigger routinely mislabeled real slow sensor
+            # activity as an 80-90 second bleach-in.
+            if (start_level > 1e-9 and drop > 0
+                    and (drop / start_level) >= (_QC_T_BLEACH[0] / 100.0)):
                 frac_done = (start_level - bb) / drop      # share of the total drop
                 reached50 = np.flatnonzero(frac_done >= 0.5)
                 if reached50.size:
@@ -874,6 +879,7 @@ _QC_PLAIN_PROBLEM = {
     "Artifact load": "too much of the trace is artifact",
     "Motion bleed": "the signal mostly repeats what the 405 reference does",
     "Usable SNR": "transients barely rise above the noise",
+    "Signal retention": "reference correction removes nearly all apparent activity",
     "Isobestic noise": "the 405 reference is too noisy to correct with",
     "Usable coverage": "a large part of the session has to be thrown away",
     "Signal noise floor": "the signal itself is noisy",
@@ -946,6 +952,7 @@ def _qc_build_recommendations(
 
     r_abs = abs(_qc_float(qc, "r", float("nan")))
     snr = _qc_float(qc, "usable_snr", float("nan"))
+    retention = _qc_float(qc, "signal_retention", float("nan"))
     art_pct = _qc_float(qc, "art_frac", 0.0) * 100.0
     ref_noise = _qc_float(qc, "ref_hf_noise_pct", float("nan"))
     sig_noise = _qc_float(qc, "hf_noise_pct", float("nan"))
@@ -1019,6 +1026,31 @@ def _qc_build_recommendations(
             f"Signal-to-noise is modest ({snr:.1f}x). Lower the low-pass cutoff or widen the "
             f"smoothing window before scoring events, and avoid reading anything into small peaks."
         )
+    if failed("Signal retention"):
+        if np.isfinite(retention):
+            actions.append(
+                f"Reference fitting removes {max(0.0, 1.0 - retention) * 100:.0f}% of the apparent "
+                f"slow activity. The remaining trace does not contain enough independent sensor "
+                f"structure to rescue this recording; exclude it rather than interpreting shared "
+                f"465/405 fluctuations as events."
+            )
+        else:
+            actions.append(
+                "Reference fitting could not be evaluated. Check that the 405 channel is valid "
+                "before interpreting the corrected output."
+            )
+    elif bad("Signal retention"):
+        if np.isfinite(retention):
+            actions.append(
+                f"Only {retention * 100:.0f}% of the apparent slow activity survives reference "
+                f"fitting. Compare corrected and uncorrected traces, and keep the file only if the "
+                f"remaining events have the expected sensor polarity and kinetics."
+            )
+        else:
+            actions.append(
+                "Signal retention could not be measured. Inspect the corrected trace and validate "
+                "the 405 channel before keeping the file."
+            )
     if failed("Isobestic noise"):
         actions.append(
             f"The 405 reference is too noisy to correct with ({ref_noise:.2f}% dF/F). Switch the "
@@ -1084,6 +1116,7 @@ def _evaluate_qc(qc: Dict[str, object]) -> QcVerdict:
     hf_noise_pct = _qc_float(qc, "hf_noise_pct", float("nan"))
     ref_hf_noise_pct = _qc_float(qc, "ref_hf_noise_pct", float("nan"))
     usable_snr = _qc_float(qc, "usable_snr", float("nan"))
+    signal_retention = _qc_float(qc, "signal_retention", float("nan"))
     frac_gt3 = _qc_float(qc, "frac_gt3", 0.0)
     frac_gt5 = _qc_float(qc, "frac_gt5", 0.0)
     frac_neg5 = _qc_float(qc, "frac_neg5", 0.0)
@@ -1167,7 +1200,36 @@ def _evaluate_qc(qc: Dict[str, object]) -> QcVerdict:
         }[tier_snr]
     metrics.append(("Usable SNR", score_snr, 1.0, why_snr, tier_snr))
 
-    # 4) Isobestic HF noise (critical). If the 405 reference is itself noisy,
+    # 4) Signal retained after reference fitting (critical). Motion correction
+    # is useful only when biologically plausible structure survives it. This
+    # ratio compares the slow-signal amplitude before and after the 405 fit.
+    # It prevents a nearly perfect common-mode trace from earning a high SNR by
+    # counting movement as an event, while remaining independent of absolute
+    # fluorescence scale and sensor expression level.
+    if has_reference:
+        warn, fail = _QC_T_RETENTION
+        if not np.isfinite(signal_retention):
+            tier_ret, score_ret = "WARN", _QC_WARN_SCORE
+            why_ret = "Signal retention could not be measured - inspect the corrected trace by eye."
+        else:
+            tier_ret, score_ret = _qc_decide_tier(
+                signal_retention, warn_thr=warn, fail_thr=fail, higher_is_worse=False
+            )
+            retained_pct = signal_retention * 100.0
+            removed_pct = max(0.0, 100.0 - retained_pct)
+            why_ret = {
+                "PASS": f"{retained_pct:.0f}% of slow signal amplitude remains after reference "
+                        f"correction (pass above {warn * 100:.0f}%).",
+                "WARN": f"Only {retained_pct:.0f}% of slow signal amplitude remains after "
+                        f"reference correction; {removed_pct:.0f}% was shared-mode contamination "
+                        f"(warn {fail * 100:.0f}-{warn * 100:.0f}%).",
+                "FAIL": f"Only {retained_pct:.0f}% of slow signal amplitude survives reference "
+                        f"correction; the apparent activity was mostly shared with the 405 channel "
+                        f"(fail below {fail * 100:.0f}%).",
+            }[tier_ret]
+        metrics.append(("Signal retention", score_ret, 1.0, why_ret, tier_ret))
+
+    # 5) Isobestic HF noise (critical). If the 405 reference is itself noisy,
     # motion correction adds noise instead of removing movement, and the |r|
     # reading above becomes meaningless. Tightened from 0.45/0.90 to 0.30/0.60.
     if has_reference:
@@ -1187,7 +1249,7 @@ def _evaluate_qc(qc: Dict[str, object]) -> QcVerdict:
             }[tier_ref]
         metrics.append(("Isobestic noise", score_ref, 1.0, why_ref, tier_ref))
 
-    # 5) Usable coverage (critical, new). Summarises the time-resolved scan: how
+    # 6) Usable coverage (critical). Summarises the time-resolved scan: how
     # much of the session has to be thrown away before analysis. This is what
     # turns "some metric is bad" into "cut these spans / drop this file".
     warn, fail = _QC_T_CUT_FRAC
@@ -1710,19 +1772,21 @@ class QcDialog(QtWidgets.QDialog):
         t = np.asarray(qc["t"], float)
         dff_sig = np.asarray(qc.get("dff_sig_pct", qc["z_sig"]), float)
         dff_ref = np.asarray(qc.get("dff_ref_pct", qc["z_ref"]), float)
-        dff_env = np.asarray(qc.get("dff_envelope_pct", dff_sig), float)
+        corrected_dff = np.asarray(qc.get("corrected_dff_pct", dff_sig), float)
+        dff_env = np.asarray(qc.get("corrected_envelope_pct", corrected_dff), float)
         noise_sigma = float(qc.get("hf_noise_pct", np.nan))
+        corrected_noise_sigma = float(qc.get("corrected_noise_pct", noise_sigma))
         ref_noise_sigma = float(qc.get("ref_hf_noise_pct", np.nan))
         self.plot_z.addLegend(offset=(8, 8))
-        if np.isfinite(noise_sigma):
+        if np.isfinite(corrected_noise_sigma):
             n = min(t.size, dff_env.size)
             if n >= 2:
                 center = dff_env[:n]
                 self._add_filled_band(
                     self.plot_z,
                     t[:n],
-                    center - noise_sigma,
-                    center + noise_sigma,
+                    center - corrected_noise_sigma,
+                    center + corrected_noise_sigma,
                     fill_rgba=(150, 150, 150, 45),
                     line_rgba=(175, 175, 175, 80),
                     z=-8.0,
@@ -1730,7 +1794,14 @@ class QcDialog(QtWidgets.QDialog):
         self.plot_z.plot(t, dff_sig, pen=pg.mkPen((90, 190, 255), width=1.0), name="signal")
         if has_reference:
             self.plot_z.plot(t, dff_ref, pen=pg.mkPen((240, 180, 80, 150), width=0.9), name="isobestic")
-        self.plot_z.plot(t, dff_env, pen=pg.mkPen((120, 245, 210), width=1.5), name="slow envelope")
+            self.plot_z.plot(
+                t, corrected_dff, pen=pg.mkPen((190, 125, 255, 190), width=1.0),
+                name="fitted-ref corrected",
+            )
+        self.plot_z.plot(
+            t, dff_env, pen=pg.mkPen((120, 245, 210), width=1.5),
+            name="corrected envelope" if has_reference else "slow envelope",
+        )
         self.plot_z.setLabel("left", "dF/F (%)")
         self.plot_z.setLabel("bottom", "Time (s)")
 
@@ -1845,8 +1916,9 @@ class QcDialog(QtWidgets.QDialog):
         self.lbl_stats.setWordWrap(True)
         self.lbl_method = QtWidgets.QLabel(
             "Strict grading: every check is PASS / WARN / FAIL against fixed thresholds, with no "
-            "user-chosen weights. Five critical checks set the grade - artifact load (fail above 8%), "
+            "user-chosen weights. Six critical checks set the grade - artifact load (fail above 8%), "
             "motion bleed |r| (fail above 0.80), usable SNR (fail below 3x the noise floor), "
+            "signal retention after reference fitting (fail below 50%), "
             "isobestic noise (fail above 0.60% dF/F, at which point the 405 reference adds more noise "
             "than it removes), and usable coverage (fail when more than 20% of the session has to be "
             "cut). Four advisory checks (signal noise, coupling stability, corrected-output shape, "
@@ -5976,8 +6048,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return paths
 
     def _add_files(self, paths: List[str], select_after: bool = True) -> None:
+        selection_target: Optional[str] = None
         for p in paths:
             if p in self._loaded_files:
+                if selection_target is None:
+                    selection_target = p
                 continue
             ext = os.path.splitext(p)[1].lower()
             if ext == ".csv":
@@ -5996,12 +6071,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     continue
                 self._loaded_files[p] = loaded_from_csv
                 self.file_panel.add_file(p)
+                if selection_target is None:
+                    selection_target = p
                 self._show_status_message(f"Loaded CSV: {os.path.basename(p)}", 5000)
                 continue
             try:
                 doric = self.processor.load_file(p)
                 self._loaded_files[p] = doric
                 self.file_panel.add_file(p)
+                if selection_target is None:
+                    selection_target = p
                 self._show_status_message(f"Loaded: {os.path.basename(p)}", 5000)
             except Exception as e:
                 loaded_from_processed: Optional[LoadedDoricFile] = None
@@ -6010,6 +6089,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 if loaded_from_processed is not None:
                     self._loaded_files[p] = loaded_from_processed
                     self.file_panel.add_file(p)
+                    if selection_target is None:
+                        selection_target = p
                     self._show_status_message(
                         f"Loaded processed H5 as preprocessing source: {os.path.basename(p)}",
                         6000,
@@ -6021,7 +6102,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # set current selection -> triggers preview
         if select_after:
-            self._on_file_selection_changed()
+            # Adding the first file already selects it inside FileQueuePanel.
+            # For every later open, explicitly move selection to the newly
+            # loaded (or reopened) file. Previously the old row stayed active,
+            # making alternate opens look as if nothing had happened.
+            if selection_target is None or not self.file_panel.select_path(selection_target):
+                self._on_file_selection_changed()
 
     # ---------------- Current selection ----------------
 
@@ -7358,20 +7444,64 @@ class MainWindow(QtWidgets.QMainWindow):
         ref_hf = dff_ref_metric - ref_envelope if has_reference else np.full_like(sig_hf, np.nan, dtype=float)
         hf_noise_pct = _qc_robust_sigma(sig_hf) * 100.0
         ref_hf_noise_pct = _qc_robust_sigma(ref_hf) * 100.0 if has_reference else float("nan")
-        env_centered = sig_envelope - float(np.nanmedian(sig_envelope)) if sig_envelope.size else sig_envelope
+
+        # Score usable activity after fitting the reference in the same way as
+        # the recommended fitted-reference dF/F output. The old implementation
+        # measured event amplitude and SNR on the uncorrected 465 dF/F, which
+        # let a clean but almost perfectly shared 465/405 movement trace look
+        # like strong biological signal.
+        corrected_dff_metric = dff_sig_metric.copy()
+        fit_slope = fit_intercept = float("nan")
+        if has_reference:
+            fit_ok = np.isfinite(sig_clean) & np.isfinite(ref_clean)
+            if np.sum(fit_ok) >= 10 and float(np.nanstd(ref_clean[fit_ok])) > 1e-12:
+                try:
+                    fit_slope, fit_intercept = np.polyfit(ref_clean[fit_ok], sig_clean[fit_ok], 1)
+                    fitted_ref = fit_slope * ref_clean + fit_intercept
+                    candidate = safe_divide(sig_clean - fitted_ref, fitted_ref)
+                    if np.sum(np.isfinite(candidate)) >= 10:
+                        corrected_dff_metric = interpolate_nans(np.asarray(candidate, float))
+                except Exception:
+                    fit_slope = fit_intercept = float("nan")
+
+        corrected_envelope = _metric_envelope(corrected_dff_metric)
+        corrected_hf = corrected_dff_metric - corrected_envelope
+        corrected_noise_pct = _qc_robust_sigma(corrected_hf) * 100.0
+        env_centered = (
+            corrected_envelope - float(np.nanmedian(corrected_envelope))
+            if corrected_envelope.size else corrected_envelope
+        )
         env_f = np.asarray(env_centered, float)
         env_f = env_f[np.isfinite(env_f)]
         event_amp_pct = float(np.nanpercentile(np.abs(env_f), 95) * 100.0) if env_f.size else float("nan")
+        raw_env_centered = sig_envelope - float(np.nanmedian(sig_envelope)) if sig_envelope.size else sig_envelope
+        raw_env_f = np.asarray(raw_env_centered, float)
+        raw_env_f = raw_env_f[np.isfinite(raw_env_f)]
+        raw_event_amp_pct = (
+            float(np.nanpercentile(np.abs(raw_env_f), 95) * 100.0)
+            if raw_env_f.size else float("nan")
+        )
+        signal_retention = (
+            event_amp_pct / max(raw_event_amp_pct, 1e-12)
+            if (has_reference and np.isfinite(fit_slope)
+                and np.isfinite(event_amp_pct) and np.isfinite(raw_event_amp_pct))
+            else float("nan")
+        )
         dff_centered = dff_sig_metric - float(np.nanmedian(dff_sig_metric)) if dff_sig_metric.size else dff_sig_metric
         dff_scale_pct = _qc_robust_sigma(dff_centered) * 100.0
         jitter_pct = _qc_robust_sigma(np.diff(dff_sig_metric)) * 100.0 if dff_sig_metric.size > 2 else float("nan")
-        usable_snr = event_amp_pct / max(hf_noise_pct, 1e-12) if np.isfinite(event_amp_pct) and np.isfinite(hf_noise_pct) else float("nan")
+        usable_snr = (
+            event_amp_pct / max(corrected_noise_pct, 1e-12)
+            if np.isfinite(event_amp_pct) and np.isfinite(corrected_noise_pct)
+            else float("nan")
+        )
         jitter_ratio = jitter_pct / max(dff_scale_pct, 1e-12) if np.isfinite(jitter_pct) and np.isfinite(dff_scale_pct) else float("nan")
 
-        # z-score
+        # Corrected-output z-score. Subtracting independently z-scored 465 and
+        # 405 traces distorts amplitudes and is not the output users analyse.
         z_sig = zscore_median_std(dff_sig)
         z_ref = zscore_median_std(dff_ref) if has_reference else np.full_like(z_sig, np.nan, dtype=float)
-        Z = z_sig - z_ref if has_reference else z_sig.copy()
+        Z = zscore_median_std(corrected_dff_metric)
         Zf = Z[np.isfinite(Z)]
 
         # Reference coupling is measured on dF/F, not on z-score, so the user
@@ -7436,8 +7566,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         stats = (
             f"artifact_frac={art_frac*100:.2f}% | HF noise={hf_noise_pct:.3g}% dF/F "
-            f"({'ref ' + format(ref_hf_noise_pct, '.3g') + '%' if has_reference else 'no isobestic'}) | event_amp={event_amp_pct:.3g}% | "
-            f"SNR~{usable_snr:.2f} | "
+            f"({'ref ' + format(ref_hf_noise_pct, '.3g') + '%' if has_reference else 'no isobestic'}) | "
+            f"corrected event_amp={event_amp_pct:.3g}% | corrected noise={corrected_noise_pct:.3g}% | "
+            f"SNR~{usable_snr:.2f} | retention={signal_retention*100:.0f}% | "
             f"r={r:.3f} (avg roll r={r_roll_mean:.2f}, std={r_roll_std:.2f}) | "
             f"Z median={q50:.3g} IQR=({q25:.3g},{q75:.3g}) | "
             f"|Z|>3: {frac_gt3:.2f}% | |Z|>5: {frac_gt5:.2f}% | "
@@ -7452,6 +7583,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "dff_sig_pct": dff_sig_metric * 100.0,
             "dff_ref_pct": dff_ref_metric * 100.0,
             "dff_envelope_pct": sig_envelope * 100.0,
+            "corrected_dff_pct": corrected_dff_metric * 100.0,
+            "corrected_envelope_pct": corrected_envelope * 100.0,
+            "corrected_hf_pct": corrected_hf * 100.0,
             "hf_sig_pct": sig_hf * 100.0,
             "hf_ref_pct": ref_hf * 100.0,
             "z_sig": z_sig,
@@ -7476,7 +7610,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "art_frac": art_frac,
             "hf_noise_pct": hf_noise_pct,
             "ref_hf_noise_pct": ref_hf_noise_pct,
+            "corrected_noise_pct": corrected_noise_pct,
             "event_amp_pct": event_amp_pct,
+            "raw_event_amp_pct": raw_event_amp_pct,
+            "signal_retention": signal_retention,
+            "fit_slope": fit_slope,
+            "fit_intercept": fit_intercept,
             "dff_scale_pct": dff_scale_pct,
             "jitter_pct": jitter_pct,
             "usable_snr": usable_snr,

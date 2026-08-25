@@ -95,6 +95,33 @@ class CliTests(unittest.TestCase):
         self.assertEqual(qc["tier"], "FAIL")
         self.assertTrue(qc["flagged"])
 
+    def test_cli_qc_rejects_common_mode_signal_removed_by_reference_fit(self):
+        fs = 20.0
+        time = np.arange(0.0, 180.0, 1.0 / fs)
+        common = 0.012 * np.sin(2.0 * np.pi * 0.18 * time)
+        reference = 0.08 * (1.0 + common)
+        signal = 0.12 * (1.0 + 0.92 * common + 0.0002 * np.sin(2.0 * np.pi * 1.3 * time))
+        processed = argparse.Namespace(
+            time=time,
+            output=np.zeros(time.size),
+            raw_signal=signal,
+            raw_reference=reference,
+            sig_f=signal,
+            ref_f=reference,
+            baseline_sig=np.full(time.size, 0.12),
+            baseline_ref=np.full(time.size, 0.08),
+            sensor_check={"status": "ok"},
+        )
+        recommendation = argparse.Namespace(
+            metrics={"artifact_fraction": 0.0}, confidence=0.9, warnings=[]
+        )
+
+        qc = evaluate_qc(processed, recommendation)
+
+        self.assertEqual(qc["tier"], "FAIL")
+        self.assertLess(qc["signal_retention"], 0.50)
+        self.assertTrue(any("reference fitting" in reason for reason in qc["reasons"]))
+
 
 if __name__ == "__main__":
     unittest.main()

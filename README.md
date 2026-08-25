@@ -5,96 +5,131 @@
 <h1 align="center">pyBer</h1>
 
 <p align="center">
-  <b>Fiber photometry, from raw photons to publishable figures, without leaving the app.</b><br>
-  Load it. Clean it. Align it. Model it. Export it. All in one polished desktop GUI.
+  <strong>Interactive and batch fiber-photometry analysis, from raw acquisition to reviewable results.</strong><br>
+  Inspect every processing decision in the desktop app, or run the same pipeline reproducibly from the CLI.
 </p>
 
 <p align="center">
+  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.45"><img src="https://img.shields.io/badge/release-v0.45-7c4dff" alt="v0.45 release"></a>
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" alt="Python 3.11">
-  <img src="https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-41cd52?logo=qt&logoColor=white" alt="PySide6 + pyqtgraph">
+  <img src="https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-41cd52?logo=qt&logoColor=white" alt="PySide6 and pyqtgraph">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white" alt="Windows">
   <img src="https://img.shields.io/badge/license-GPLv3-blue" alt="GPLv3">
-  <img src="https://img.shields.io/badge/photometry-Doric%20%7C%20RWD%20%7C%20HDF5%20%7C%20CSV-purple" alt="Formats">
+</p>
+
+<p align="center">
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.45/pyBer-windows.exe"><strong>Download the Windows GUI</strong></a>
+  &nbsp;|&nbsp;
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.45/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
+  &nbsp;|&nbsp;
+  <a href="docs/index.md"><strong>Read the full guide</strong></a>
 </p>
 
 ---
 
-## Why pyBer?
+## One application, the complete analysis path
 
-Photometry analysis usually means duct-taping five scripts together and praying your
-timestamps line up. pyBer puts the whole pipeline behind one interactive window:
-artifact cleaning, motion correction, behavior and DIO alignment, sub-millisecond
-camera-to-fiber synchronization, PSTHs, transient detection, and temporal modeling.
-Interactive workflow on top, deterministic and testable processing code underneath.
+pyBer combines a visual workflow with a deterministic processing backend. The GUI is designed for inspection and parameter discovery. The CLI is designed for unattended cohorts and reproducibility. Both use the same loaders, recommendations, signal processing, metadata schema, and exports.
 
-> Built for neuroscientists who want to *see* every step, not just trust a black box.
+| Stage | Capabilities |
+|---|---|
+| Ingest | Current and legacy Doric HDF5 layouts, generic `.h5` / `.hdf5`, RWD fluorescence CSV exports, multiple channels, DIO/AOUT triggers, and recursive folder discovery. |
+| Recommendations | Recording-aware settings from sampling rate, duration, artifact load, signal shape, 405/465 coupling, and the selected sensor's kinetics. Each recommendation explains what to use and why. |
+| Preprocessing | Time windows and sections, resampling, low-pass filtering, Savitzky-Golay or moving-window smoothing, `asls` / `arpls` / `airpls` baselines, fitted-reference motion correction, and multiple dF/F and z-score outputs. |
+| Artifact review | Smart multi-evidence detection, adaptive or global MAD modes, manual regions, interpolation, cutting, strong local low-pass repair, or annotation without modification. |
+| Quality control | Strict PASS / WARN / FAIL checks for artifact burden, motion bleed, fitted-reference signal retention, corrected-output SNR, reference noise, coverage, signal noise, coupling stability, output shape, and photobleaching. Includes report images and batch flagging. |
+| Event alignment | DIO onset or offset, behavior onset or offset, state transitions, continuous variables, individual recordings, and grouped animals. |
+| PSTH and behavior | Trial heatmaps, mean with SEM, event durations, pre/post metrics, global summaries, behavior rasters, rates, durations, and start-time distributions. |
+| Spatial analysis | Occupancy-normalized activity maps, trajectories, and velocity-aware views when tracking coordinates are available. |
+| Signal events | SciPy peak detection, manual or MAD-noise thresholds, minimum height/prominence/distance, smoothing, baseline-prominence normalization, AUC, amplitude, inter-peak interval, and rate-over-time summaries. |
+| Synchronization | Align photometry to an external signal or video ROI, detect shared TTL/barcode edges, estimate lag and drift, review matching quality, batch apply, and export `time_aligned`. |
+| Temporal models | Continuous GLM with FIR, raised-cosine, or B-spline bases and ridge/lasso/OLS fits; trial-level FLMM through `fastFMM`; block cross-validation, diagnostics, kernels, prediction, residuals, importance, and group summaries. |
+| Projects and export | Save/load postprocessing projects, autosave recovery, recent files, processed CSV and HDF5, metadata sidecars, tables, plots, model reports, and publication figures. |
 
----
+## See the real pipeline
 
-## See it in action
+These captures were generated by pyBer itself from `trial_0010.doric` and its binary behavior table `trial_0010_with_time.csv`. The script in [`scripts/generate_readme_screenshots.py`](scripts/generate_readme_screenshots.py) makes the demo reproducible. No traces, metrics, or model results were mocked.
 
-### Preprocess raw traces into clean dFF
-Raw signal, fitted-isosbestic baseline, and motion-corrected dFF, side by side, with
-DIO markers laid right over the trace. Filtering, baseline, artifact handling, and
-export all live in the rail on the left.
+### Sensor-aware preprocessing with visible reasoning
 
-![Preprocessing panel](assets/screenshots/preprocessing.png)
+The three synchronized plots show the raw signal and reference, filtered traces and baselines, and the selected output. The open drawer states the output formula, fit method, recommended values, and the evidence behind them.
 
-### Sync fiber photometry time with reference time
-Point an ROI at a sync LED in a video, extract the on/off train, or load a reference signal recorded simultaneously, and auto-align with the same signal recorded with
-photometry. 
+![Preprocessing overview with a sensor-aware output recommendation](assets/screenshots/preprocessing_overview.png)
 
-![LED barcode sync extraction](assets/screenshots/sync_extraction.png)
+### Artifact decisions are explicit and editable
 
----
+The smart detector requires multiple forms of evidence before flagging a sample. Detected regions retain their evidence, core interval, padded repair interval, and enabled state. Manual regions can be added directly from the plot.
 
-## Quick install
+![Artifact review with recommendation and detected-region table](assets/screenshots/artifact_review.png)
 
-Install [Miniforge](https://github.com/conda-forge/miniforge) or Anaconda first, then:
+### Strict QC produces an actionable verdict
+
+QC does not hide weak checks inside a weighted average. Critical and advisory checks are graded separately, the worst critical result controls the overall tier, and the recommendation card explains whether to keep, review, repair, or reject the recording.
+
+![Strict quality-control report for the demo recording](assets/screenshots/quality_control.png)
+
+### Behavior alignment, trial heatmaps, and population summaries
+
+The supplied behavior file produces 33 social-contact onset trials. pyBer displays the full recording, event-aligned heatmap, average with SEM, event-duration distribution, and pre/post summaries together.
+
+![Behavior-aligned PSTH and heatmap](assets/screenshots/behavior_psth.png)
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/signal_event_analysis.png" alt="Signal-event analyzer with detected peaks"></td>
+    <td width="50%"><img src="assets/screenshots/behavior_analysis.png" alt="Behavior metrics and distributions"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Transient detection</strong><br>MAD-noise threshold, detected peaks, amplitudes, intervals, and rate.</td>
+    <td align="center"><strong>Behavior analysis</strong><br>Per-file event count, time, duration, rate, raster, and distributions.</td>
+  </tr>
+</table>
+
+### Video, TTL, and barcode synchronization
+
+Select a video ROI or load an external reference signal, extract the shared pulse train, review edge matching and drift, then apply the alignment to the photometry timebase.
+
+![Video ROI and photometry synchronization](assets/screenshots/sync_extraction.png)
+
+### Continuous GLM and trial-level FLMM
+
+The modeling workbench consumes the current processed recordings, behavior variables, DIO channels, and PSTH events. This demo fits a ridge-regularized continuous GLM to the supplied social-contact onset and state predictors. The screenshot reports the real cross-validated fit, including an instability warning, rather than presenting an idealized result.
+
+![Continuous GLM summary and diagnostics](assets/screenshots/temporal_modeling.png)
+
+![Estimated temporal kernels for social-contact predictors](assets/screenshots/temporal_model_kernels.png)
+
+## Typical GUI workflow
+
+1. Add a recording or a folder. Folder import searches through nested folders.
+2. Select the photometry channel, optional DIO/AOUT trigger, time window, and sensor.
+3. Review the recommendation cards. Apply all recommendations or accept them one section at a time.
+4. Inspect artifacts, filtering, baseline, motion correction, and the final output on the linked plots.
+5. Run strict QC. Repair or exclude flagged intervals before exporting.
+6. Send processed recordings to Postprocessing.
+7. Load behavior, timestamps, tracking, video, or an external sync signal as needed.
+8. Compute individual or group PSTHs, spatial maps, behavior metrics, signal events, synchronization, or temporal models.
+9. Save the project and export the exact tables, HDF5 bundles, reports, and figures needed downstream.
+
+## Batch preprocessing from the CLI
+
+Version 0.45 adds `pyber-cli` for one file, many files, or an entire directory tree. Recursive discovery is on by default.
 
 ```powershell
-cd path\to\pyBer
-powershell -ExecutionPolicy Bypass -File .\scripts\create_pyber_env.ps1
-conda activate pyBer
-python .\pyBer\main.py
-```
-
-The helper creates or updates the `pyBer` environment, installs R, and installs
-the CRAN `fastFMM` binary used by the FLMM temporal modeling panel.
-
-
-```powershell
-conda activate pyBer
-Rscript scripts/install_fastfmm.R
-python .\pyBer\main.py
-```
-
-If VS Code grabs the wrong Python, run `Python: Select Interpreter` and pick the
-environment created from `environment.yml`.
-
----
-
-## Command-line batch preprocessing
-
-pyBer 0.45 includes a headless CLI for reproducible preprocessing on one file,
-several files, or a directory tree. It reads current and legacy Doric files plus
-RWD fluorescence CSV exports. Folder inputs are searched recursively by default.
-
-```powershell
-conda activate pyBer
-python .\pyBer\cli.py "D:\photometry\cohort_1" `
+pyBer-cli-windows.exe "D:\photometry\cohort_1" `
   --sensor gcamp6f `
   --channel AIN01 `
   --trigger DIO02 `
   --output-dir "D:\photometry\cohort_1_processed"
 ```
 
-The CLI first derives recommended settings from the recording sampling rate,
-duration, signal quality, reference coupling, and selected sensor. Override any
-processing field after recommendation with repeatable `--set NAME=VALUE` options:
+From a source checkout, use the same interface through Python:
 
 ```powershell
-python .\pyBer\cli.py recording.doric --sensor dlight12 `
+conda activate pyBer
+python .\pyBer\cli.py recording.doric `
+  --sensor dlight12 `
+  --format both `
   --set target_fs_hz=50 `
   --set lowpass_hz=10 `
   --set artifact_handling=Interpolate `
@@ -102,82 +137,134 @@ python .\pyBer\cli.py recording.doric --sensor dlight12 `
   --set output_mode="dFF (motion corrected with fitted ref)"
 ```
 
-For reusable batch settings, pass the same fields as a JSON object with
-`--params-file settings.json`. Any later `--set` options take precedence.
+Recommendations are computed first. A JSON parameter file is applied next, then repeatable `--set NAME=VALUE` arguments take final precedence.
 
-Each recording-channel pair produces processed CSV and HDF5 files, a PNG
-preprocessing report, and a JSON record of the recommendation, effective
-parameters, acquisition metadata, and QC decision. Every batch also produces
-`batch_summary.csv`, `batch_summary.json`, and `flagged_recordings.csv`. The
-flagged table collects processing failures, excessive artifact load, poor finite
-coverage, flat traces, low-confidence recommendations, and sensor-trace warnings.
+| CLI option | Purpose |
+|---|---|
+| `inputs` | One or more files or folders. |
+| `-o`, `--output-dir` | Destination. Defaults to `pyber_processed`. |
+| `--sensor` | Sensor ID or exact sensor name. Use `unspecified` for generic assumptions. |
+| `--channel` | Select one or more channels. Repeat or comma-separate the option. |
+| `--trigger` | Include a DIO/AOUT trigger channel. |
+| `--params-file` | JSON object containing `ProcessingParams` overrides. |
+| `--set NAME=VALUE` | Override any processing field after recommendations. Repeatable. |
+| `--format both|csv|h5` | Choose processed output formats. Defaults to both. |
+| `--no-recursive` | Restrict folder inputs to their top level. |
+| `--verbose` | Include tracebacks for failed recordings. |
 
-The Windows release contains both `pyBer-windows.exe` for the GUI and
-`pyBer-cli-windows.exe` for terminal use.
+Each recording-channel pair can produce:
 
----
+```text
+pyber_processed/
+  recording__AIN01.csv
+  recording__AIN01.h5
+  recording__AIN01.pyber.json
+  recording__AIN01_preprocessing_report.png
+  recording__AIN01_preprocessing_report.json
+  batch_summary.csv
+  batch_summary.json
+  flagged_recordings.csv
+```
 
-## What you can do
+The flagged table collects processing failures, excessive artifact load, poor finite coverage, flat traces, low corrected SNR, recordings whose apparent activity disappears during reference fitting, high motion coupling, low-confidence recommendations, and sensor/trace warnings. It is a review queue, not a substitute for inspecting the report image.
 
-- **Load Doric (.doric), RWD (.csv), TDT (.tev), Neurophotometrics (.sev)...** 
+## Supported data and outputs
 
-- **Batch from the CLI** across nested folders with sensor-aware recommended
-  parameters, explicit overrides, dual CSV/HDF5 export, and flagged-recording QC.
+| Kind | Native support |
+|---|---|
+| Raw photometry | Doric `.doric`, including current `LockInAOUT02/AIN01` and legacy `AIN01xAOUT02-LockIn/Values` layouts; compatible `.h5` / `.hdf5`; RWD fluorescence `.csv`. |
+| Behavior | Binary state tables and timestamp/event tables from `.csv`, `.tsv`, `.xlsx`, and `.xls`, including onsets, offsets, transitions, and continuous variables. |
+| Synchronization | Embedded DIO/AOUT, external timestamped signals, and video ROI intensity or barcode pulse trains. |
+| Processed data | Self-describing CSV with `.pyber.json` sidecar and HDF5 with embedded metadata. |
+| Reports | Preprocessing PNG, strict QC report images, batch summaries, flagged-recording tables, analysis CSVs, model tables, and publication figure exports. |
 
-- 🧹 **Preprocess** raw traces: filtering, resampling, baseline correction, motion
-  correction, and artifact handling.
-- 🔍 **Hunt artifacts** with interpolation, cutout, local low-pass filtering, or no-op.
-- 🎥 **Synchronize** photometry time to camera or behavior time from shared TTL/barcode
-  columns, and export a `time_aligned` column for downstream work.
-- 📊 **Align to behavior** (DIO, behavior states, onsets, or transitions) and build
-  individual or group PSTHs, heatmaps, and event-duration plots.
-- ⚡ **Detect transients** and compare amplitudes with baseline-prominence normalized
-  metrics.
-- 🧠 **Model** with a continuous GLM or trial-level FLMM, then rank feature contribution
-  with leave-one-feature-out summaries.
-- 💾 **Export** processed CSV or HDF5 with stable, self-describing column names and a
-  `.pyber.json` metadata sidecar (embedded inside the HDF5), ready for Python, MATLAB,
-  R, or Prism. What you select is what you get, and the exact output definition is
-  always recorded.
+Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.45 executables target Windows; source execution on other platforms is not part of the tested release path.
 
----
+## What changed in v0.45
 
-## Documentation
+- Added legacy Doric key discovery alongside the modern Doric HDF5 layout.
+- Added recursive raw-file discovery across multiple nested folder levels.
+- Added a standalone GUI executable and a headless CLI executable.
+- Added single-file, multi-file, and folder batch preprocessing.
+- Added sensor-aware, recording-aware recommendations with per-section explanations.
+- Added CLI parameter files and repeatable field-level overrides.
+- Added paired processed CSV/HDF5 output, preprocessing report figures, JSON provenance, batch summaries, and `flagged_recordings.csv`.
+- Hardened export naming and schema consistency so separate channels do not overwrite one another.
+- Improved DIO/AOUT discovery and aliases across Doric variants.
+- Fixed the compiled-app artifact overlay crash caused by an unavailable pyqtgraph path class.
+- Made each newly opened file become the active preview reliably.
+- Revised QC to measure SNR after fitted-reference correction, reject recordings dominated by shared 405/465 fluctuations, and stop treating mild baseline adaptation as a long bleach-in cut.
 
-The full user guide lives in [docs/index.md](docs/index.md): installation, first launch,
-preprocessing, postprocessing, transient detection, temporal modeling, group workflows,
-export, and troubleshooting.
+## Install from source
 
-## Repository layout
+Install [Miniforge](https://github.com/conda-forge/miniforge) or Anaconda, then run:
 
-| Path | What it is |
-|------|------------|
-| `pyBer/main.py` | Application entry point and preprocessing window. |
-| `pyBer/analysis_core.py` | Preprocessing and signal-processing backend. |
-| `pyBer/gui_preprocessing.py` | Preprocessing panels. |
-| `pyBer/gui_postprocessing.py` | Postprocessing, PSTH, sync, metrics, and export. |
-| `pyBer/led_extract.py` | LED / barcode sync-signal extraction. |
-| `pyBer/time_sync.py` | Edge detection, pairing, and cross-correlation alignment. |
-| `pyBer/temporal_modeling.py` | GLM and FLMM modeling panel. |
-| `environment.yml` | Conda environment for development and user installs. |
-| `pyBer.spec` | PyInstaller build configuration. |
+```powershell
+git clone https://github.com/BelloneLab/pyBer.git
+cd pyBer
+powershell -ExecutionPolicy Bypass -File .\scripts\create_pyber_env.ps1
+conda activate pyBer
+python .\pyBer\main.py
+```
 
-## Build the executable
+The helper creates or updates the `pyBer` environment, installs R, and installs the CRAN `fastFMM` package used by trial-level FLMM analysis. To repair only that R dependency:
 
-From an activated environment:
+```powershell
+conda activate pyBer
+Rscript .\scripts\install_fastfmm.R
+```
+
+If VS Code selects the wrong Python, run `Python: Select Interpreter` and choose the environment created from `environment.yml`.
+
+## Reproducibility and output contract
+
+- GUI and CLI call the same processing implementation in `analysis_core.py`.
+- Exports record the pyBer version, source file, channel, sensor, acquisition metadata, effective parameters, output definition, artifact regions, and QC decision.
+- CSV columns use stable names such as `time`, `time_aligned`, `raw_465`, `raw_405`, `baseline_465`, `baseline_405`, and the selected processed output.
+- HDF5 files embed the same metadata used by the CSV sidecar.
+- Postprocessing projects can be saved as HDF5 and recovered through autosave.
+- The exact README demo can be regenerated with:
+
+```powershell
+conda activate pyBer
+python .\scripts\generate_readme_screenshots.py `
+  --doric "C:\path\to\trial_0010.doric" `
+  --behavior "C:\path\to\trial_0010_with_time.csv"
+```
+
+## Documentation and development
+
+The [full user guide](docs/index.md) covers installation, first launch, preprocessing, sensor selection, artifacts, QC, postprocessing, synchronization, transient detection, temporal modeling, group workflows, exports, and troubleshooting.
+
+Run the test suite from the pinned environment:
+
+```powershell
+conda activate pyBer
+python -m unittest discover -s tests -v
+```
+
+Build both Windows executables:
 
 ```powershell
 conda activate pyBer
 python -m PyInstaller --noconfirm --clean pyBer.spec
+python -m PyInstaller --noconfirm --clean pyBer-cli.spec
 ```
 
-The executable is written to `dist/pyBer.exe`.
+| Path | Responsibility |
+|---|---|
+| `pyBer/main.py` | Application entry point, preprocessing shell, and strict QC. |
+| `pyBer/analysis_core.py` | Loaders, recommendations, preprocessing, and export schema. |
+| `pyBer/gui_preprocessing.py` | Interactive preprocessing panels and linked plots. |
+| `pyBer/gui_postprocessing.py` | PSTH, behavior, spatial, event, sync, project, and export workflows. |
+| `pyBer/temporal_modeling.py` | Continuous GLM and trial-level FLMM workbench. |
+| `pyBer/led_extract.py` | Video ROI and barcode signal extraction. |
+| `pyBer/time_sync.py` | Edge detection, pairing, lag, and drift estimation. |
+| `pyBer/cli.py` | Recursive batch preprocessing CLI. |
+| `tests/` | Unit, integration, GUI, legacy-format, CLI, and export regression tests. |
 
-## Notes
-
-pyBer sets `PYTHONNOUSERSITE=1` so stale packages from the user Python folder cannot
-shadow the conda environment. This keeps Qt, pyqtgraph, numpy, and rpy2 stable on Windows.
+pyBer sets `PYTHONNOUSERSITE=1` so stale packages from the user Python directory cannot shadow the conda environment. This prevents common Windows conflicts between Qt, pyqtgraph, NumPy, and rpy2.
 
 ---
 
-<p align="center"><sub>Made with 🧠 and a lot of dFF at the Bellone Lab.</sub></p>
+<p align="center"><sub>Developed for transparent fiber-photometry analysis at the Bellone Lab.</sub></p>
