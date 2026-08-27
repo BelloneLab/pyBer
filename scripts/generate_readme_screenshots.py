@@ -54,7 +54,11 @@ def _save(app: QtWidgets.QApplication, widget: QtWidgets.QWidget, path: Path) ->
     pixmap = widget.grab()
     if pixmap.isNull() or not pixmap.save(str(path), "PNG"):
         raise RuntimeError(f"Could not save screenshot: {path}")
-    print(f"saved {path.relative_to(ROOT)} ({pixmap.width()}x{pixmap.height()})")
+    try:
+        shown = path.relative_to(ROOT)
+    except ValueError:
+        shown = path
+    print(f"saved {shown} ({pixmap.width()}x{pixmap.height()})")
 
 
 def _disable_toasts(window: MainWindow) -> None:

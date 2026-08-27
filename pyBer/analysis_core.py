@@ -12,20 +12,41 @@ import numpy as np
 import h5py
 
 from scipy.signal import butter, sosfiltfilt, resample_poly, savgol_filter, find_peaks
-from scipy.ndimage import uniform_filter1d, median_filter, maximum_filter1d
+from scipy.ndimage import uniform_filter1d, median_filter, maximum_filter1d, minimum_filter1d
 from PySide6 import QtCore  # for QRunnable signals
 
-# Optional: Lasso (requires scikit-learn). If unavailable, we fall back to OLS.
-try:
-    from sklearn.linear_model import Lasso
-except Exception:
-    Lasso = None
+# Optional: Lasso (requires scikit-learn). Resolved on first use: importing
+# sklearn costs seconds of startup on slow machines and most sessions never
+# fit a Lasso model. If sklearn is unavailable, we fall back to OLS.
+_LASSO_UNRESOLVED = object()
+_LASSO_CLS: Any = _LASSO_UNRESOLVED
 
-# Baseline correction (pybaselines)
-try:
-    from pybaselines.api import Baseline
-except Exception:
-    from pybaselines import Baseline
+
+def _get_lasso_cls() -> Any:
+    global _LASSO_CLS
+    if _LASSO_CLS is _LASSO_UNRESOLVED:
+        try:
+            from sklearn.linear_model import Lasso
+            _LASSO_CLS = Lasso
+        except Exception:
+            _LASSO_CLS = None
+    return _LASSO_CLS
+
+
+# Baseline correction (pybaselines). Also resolved on first use: pybaselines
+# drags in scipy.optimize and scipy.stats, which are not needed to show the UI.
+_BASELINE_CLS: Any = None
+
+
+def _get_baseline_cls() -> Any:
+    global _BASELINE_CLS
+    if _BASELINE_CLS is None:
+        try:
+            from pybaselines.api import Baseline
+        except Exception:
+            from pybaselines import Baseline
+        _BASELINE_CLS = Baseline
+    return _BASELINE_CLS
 
 from sensor_registry import SENSOR_UNKNOWN, assess_sensor_trace, get_sensor
 
@@ -1539,6 +1560,205 @@ def _pad_mask_by_seconds(time: np.ndarray, mask: np.ndarray, pad_s: float) -> np
     return padded
 
 
+def _close_mask_gaps(time: np.ndarray, mask: np.ndarray, max_gap_s: float) -> np.ndarray:
+    """Merge mask runs separated by gaps shorter than max_gap_s.
+
+    Two artifact bridges with a sliver of raw samples between them repair worse
+    than one continuous bridge: the sliver is usually filter-smeared junk from
+    the flanking artifacts, and it anchors both bridges to contaminated values.
+    """
+    t = np.asarray(time, float)
+    m = np.asarray(mask, bool).copy()
+    gap = float(max_gap_s)
+    if m.size == 0 or t.size != m.size or not np.isfinite(gap) or gap <= 0:
+        return m
+    idx = np.where(m)[0]
+    if idx.size < 2:
+        return m
+    starts = idx[np.where(np.diff(idx) > 1)[0] + 1]
+    ends = idx[np.where(np.diff(idx) > 1)[0]]
+    for end_i, start_i in zip(ends, starts):
+        if float(t[start_i] - t[end_i]) <= gap:
+            m[end_i:start_i + 1] = True
+    return m
+
+
+def _extend_regions_to_settled(
+    time: np.ndarray,
+    channels: List[np.ndarray],
+    mask: np.ndarray,
+    fs: float,
+    *,
+    max_extend_s: float = 0.75,
+    settle_gap_s: float = 0.5,
+    settle_win_s: float = 1.5,
+    short_s: float = 0.15,
+    disp_thr: float = 3.5,
+    gap_s: float = 0.10,
+) -> np.ndarray:
+    """Grow each masked run outward over SHARED entry/exit ramps.
+
+    Artifacts rarely end where their sharp core ends: the signal enters and
+    leaves along a ramp that a fixed pad cannot cover, so repairs anchored
+    just outside the region land on a half-recovered level. For each region
+    edge this fits a line to the clean signal `settle_gap_s`..`settle_gap_s +
+    settle_win_s` beyond the edge (the settled trend, robust to bleaching
+    drift), then walks outward while the `short_s` rolling median sits more
+    than `disp_thr` settled-noise MADs off that trend in EVERY channel, with
+    the SAME sign. Requiring shared same-sign displacement is what separates
+    an artifact ramp from real physiology abutting the region: a calcium
+    transient displaces only the 465, a motion ramp displaces both. Brief
+    returns to trend shorter than `gap_s` don't stop the walk; extension is
+    capped at `max_extend_s` per side.
+    """
+    t = np.asarray(time, float)
+    m = np.asarray(mask, bool)
+    n = m.size
+    out = m.copy()
+    fs_val = float(fs) if np.isfinite(fs) and fs > 0 else 0.0
+    max_n = int(round(float(max_extend_s) * fs_val)) if fs_val > 0 else 0
+    ys = [np.asarray(c, float) for c in channels if np.asarray(c).size == n]
+    ys = [y for y in ys if np.any(np.isfinite(y))]
+    if n == 0 or max_n <= 0 or not np.any(m) or not ys:
+        return out
+    gap_n = max(1, int(round(float(gap_s) * fs_val)))
+    short_n = int(2 * (max(1, int(round(float(short_s) * fs_val))) // 2) + 1)
+    rolling = [median_filter(interpolate_nans(y), size=short_n, mode="nearest") for y in ys]
+
+    def _settled_fit(edge: int, direction: int) -> List[Optional[Tuple[float, float, float]]]:
+        """Per-channel (slope, intercept, mad) of the settled window beyond
+        the edge, or None when too few clean samples exist there."""
+        t_edge = t[edge]
+        lo = t_edge + direction * float(settle_gap_s)
+        hi = t_edge + direction * float(settle_gap_s + settle_win_s)
+        lo, hi = min(lo, hi), max(lo, hi)
+        window = (t >= lo) & (t <= hi) & (~m)
+        fits: List[Optional[Tuple[float, float, float]]] = []
+        for y in ys:
+            sel = window & np.isfinite(y)
+            if int(np.sum(sel)) < 12:
+                fits.append(None)
+                continue
+            tw = t[sel]
+            yw = y[sel]
+            try:
+                slope_c, intercept_c = np.polyfit(tw, yw, 1)
+            except Exception:
+                fits.append(None)
+                continue
+            resid = yw - (slope_c * tw + intercept_c)
+            mad = float(np.median(np.abs(resid - np.median(resid))))
+            fits.append((float(slope_c), float(intercept_c), max(mad, 1e-12)))
+        return fits
+
+    def _displaced(i: int, fits: List[Optional[Tuple[float, float, float]]]) -> bool:
+        signs: List[int] = []
+        for y_med, fit in zip(rolling, fits):
+            if fit is None:
+                continue
+            slope_c, intercept_c, mad = fit
+            dev = float(y_med[i]) - (slope_c * t[i] + intercept_c)
+            if abs(dev) > disp_thr * mad:
+                signs.append(1 if dev > 0 else -1)
+            else:
+                signs.append(0)
+        if not signs:
+            return False
+        if len(signs) == 1:
+            return signs[0] != 0
+        # Two or more channels: all must be displaced, in the same direction.
+        return 0 not in signs and len(set(signs)) == 1
+
+    idx = np.flatnonzero(m)
+    starts = idx[np.r_[True, np.diff(idx) > 1]]
+    ends = idx[np.r_[np.diff(idx) > 1, True]]
+    for s, e in zip(starts, ends):
+        for edge, direction in ((int(s), -1), (int(e), +1)):
+            fits = _settled_fit(edge, direction)
+            if all(f is None for f in fits):
+                continue
+            i = edge + direction
+            last_hit = edge
+            gap = 0
+            while 0 <= i < n and abs(i - edge) <= max_n and gap <= gap_n:
+                if m[i]:
+                    # Reached a neighbouring region while still displaced:
+                    # everything between is contaminated, so merge up to it.
+                    last_hit = i
+                    break
+                if _displaced(i, fits):
+                    last_hit = i
+                    gap = 0
+                else:
+                    gap += 1
+                i += direction
+            if direction < 0 and last_hit < edge:
+                out[last_hit:edge] = True
+            elif direction > 0 and last_hit > edge:
+                out[edge + 1:last_hit + 1] = True
+    return out
+
+
+def _bridge_masked_regions(
+    y: np.ndarray,
+    mask: np.ndarray,
+    fs: float,
+    anchor_s: float = 0.08,
+) -> np.ndarray:
+    """Replace each contiguous masked run with a straight bridge between
+    robust (median) anchors taken from short windows of clean samples on
+    either side.
+
+    Plain sample-to-sample interpolation hangs the whole bridge on the two
+    single samples at the region edges; if either sits on a noise excursion
+    (or residual artifact tail) the entire repaired span tilts. Median
+    anchors make the bridge endpoints trend-faithful.
+    """
+    out = np.asarray(y, float).copy()
+    m = np.asarray(mask, bool)
+    if out.size == 0 or m.size != out.size or not np.any(m):
+        return out
+
+    fs_val = float(fs) if np.isfinite(fs) and fs > 0 else 0.0
+    anchor_n = max(3, int(round(anchor_s * fs_val))) if fs_val > 0 else 3
+
+    def _anchor(start: int, stop: int, step: int) -> Tuple[float, float]:
+        """Median value and mean index of up to anchor_n clean samples,
+        scanning from `start` towards `stop` in direction `step`."""
+        vals: List[float] = []
+        pos: List[float] = []
+        i = start
+        while 0 <= i < out.size and i != stop and len(vals) < anchor_n:
+            if not m[i] and np.isfinite(out[i]):
+                vals.append(float(out[i]))
+                pos.append(float(i))
+            i += step
+        if not vals:
+            return float("nan"), float("nan")
+        return float(np.median(vals)), float(np.mean(pos))
+
+    idx = np.where(m)[0]
+    run_starts = [int(idx[0])] + [int(i) for i in idx[np.where(np.diff(idx) > 1)[0] + 1]]
+    run_ends = [int(i) for i in idx[np.where(np.diff(idx) > 1)[0]]] + [int(idx[-1])]
+
+    for i0, i1 in zip(run_starts, run_ends):
+        lv, li = _anchor(i0 - 1, -1, -1)
+        rv, ri = _anchor(i1 + 1, out.size, +1)
+        span = np.arange(i0, i1 + 1, dtype=float)
+        if np.isfinite(lv) and np.isfinite(rv) and ri > li:
+            out[i0:i1 + 1] = lv + (rv - lv) * (span - li) / (ri - li)
+        elif np.isfinite(lv):
+            out[i0:i1 + 1] = lv
+        elif np.isfinite(rv):
+            out[i0:i1 + 1] = rv
+        else:
+            out[i0:i1 + 1] = np.nan
+
+    if np.any(~np.isfinite(out)):
+        out = interpolate_nans(out)
+    return out
+
+
 def apply_manual_regions(time: np.ndarray, mask: np.ndarray, regions: List[Tuple[float, float]]) -> np.ndarray:
     """OR a user-provided list of regions (sec) into the artifact mask."""
     t = np.asarray(time, float)
@@ -1608,9 +1828,7 @@ def _strong_local_lowpass_artifacts(
     m = np.asarray(mask, bool)
     if y.size == 0 or m.size != y.size or not np.any(m):
         return y
-    bridged = y.copy()
-    bridged[m] = np.nan
-    bridged = interpolate_nans(bridged)
+    bridged = _bridge_masked_regions(y, m, fs)
     if np.any(~np.isfinite(bridged)):
         return y
 
@@ -1654,12 +1872,14 @@ def _apply_artifact_handling(
         # low-pass filter runs BEFORE that step - if the artifact is still
         # in the signal it gets smeared across neighbouring samples and
         # creates an even worse artefact at the cut boundary.
-        # Fill the artifact region with interpolated values so the filter
+        # Fill the artifact region with bridged values so the filter
         # sees a smooth trace; those samples are then dropped at the cut
         # step and never reach the output anyway.
-        sig_corr[m] = np.nan
-        ref_corr[m] = np.nan
-        return interpolate_nans(sig_corr), interpolate_nans(ref_corr), handling
+        return (
+            _bridge_masked_regions(sig_corr, m, fs),
+            _bridge_masked_regions(ref_corr, m, fs),
+            handling,
+        )
 
     if handling == "Strong local low-pass":
         cutoff = float(getattr(params, "lowpass_hz", 12.0))
@@ -1670,9 +1890,11 @@ def _apply_artifact_handling(
             handling,
         )
 
-    sig_corr[m] = np.nan
-    ref_corr[m] = np.nan
-    return interpolate_nans(sig_corr), interpolate_nans(ref_corr), handling
+    return (
+        _bridge_masked_regions(sig_corr, m, fs),
+        _bridge_masked_regions(ref_corr, m, fs),
+        handling,
+    )
 
 
 def _window_samples_from_seconds(
@@ -1785,11 +2007,21 @@ def _resample_pair_to_target_fs(
     up, down, fs_used = _compute_resample_ratio(fs, target_fs)
 
     def _rp(x: np.ndarray) -> np.ndarray:
+        # A high-beta Kaiser kernel (~100 dB stopband vs ~50 dB default) is
+        # essential for near-unity ratios like 120.48 -> 100 Hz: the default
+        # kernel's interpolation error beats at |fs - fs_target| (~20 Hz) with
+        # amplitude proportional to the local slope, which paints a visible
+        # sawtooth onto smooth spans such as interpolated artifact bridges.
+        # Filter length is set by the ratio, not the window, so this is free.
+        kaiser = ("kaiser", 14.0)
         # resample_poly signature differs across SciPy versions (padtype optional)
         try:
-            return resample_poly(x, up, down, padtype="line")
+            return resample_poly(x, up, down, padtype="line", window=kaiser)
         except TypeError:
-            return resample_poly(x, up, down)
+            try:
+                return resample_poly(x, up, down, window=kaiser)
+            except TypeError:
+                return resample_poly(x, up, down)
 
     y1 = _rp(x1)
     y2 = _rp(x2)
@@ -2011,6 +2243,7 @@ def _smart_channel_artifact_features(
             "amp": empty,
             "amp_pos": empty,
             "amp_neg": empty,
+            "resid_fast_z": np.array([], dtype=float),
             "slope": empty,
             "curve": empty,
             "level": empty,
@@ -2069,6 +2302,11 @@ def _smart_channel_artifact_features(
     amp_pos = (residual > 0) & (amp_z >= amp_thr)
     amp_neg = (residual < 0) & (amp_z >= amp_thr)
     amp = amp_pos | amp_neg
+    # Signed residual after a ~0.1 s median: noise-immune evidence of a real
+    # local dip/bump, used by the shared-dip tier (a raw single-sample sign
+    # test would fire on noise in the quieter channel far too often).
+    fast_n = _window_samples_from_seconds(fs, 0.10, minimum=3)
+    resid_fast_z = median_filter(residual, size=int(2 * (fast_n // 2) + 1), mode="nearest") / spread
     slope = slope_z >= slope_thr
     curve_mask = curve_z >= curve_thr
     if edge_n > 0 and slope.size > 2 * edge_n:
@@ -2131,6 +2369,7 @@ def _smart_channel_artifact_features(
         "amp": np.asarray(amp, bool),
         "amp_pos": np.asarray(amp_pos, bool),
         "amp_neg": np.asarray(amp_neg, bool),
+        "resid_fast_z": np.asarray(resid_fast_z, float),
         "slope": np.asarray(slope, bool),
         "curve": np.asarray(curve_mask, bool),
         "level": np.asarray(level, bool),
@@ -2206,7 +2445,11 @@ def detect_artifacts_smart(
     - derivative and curvature shocks
     - sustained level shifts
     - flat extreme plateaus and dropouts
-    - temporally shared 405/465 evidence
+    - temporally shared 405/465 evidence (strict tier, plus a looser tier
+      that only fires for concurrent negative dips in both channels)
+
+    Detected regions are then grown over slow recovery shoulders (level
+    displacement hysteresis) so repairs anchor on settled signal.
 
     The 465 channel is protected against ordinary slow positive transients unless
     the evidence is abrupt, very large, or also appears in the reference channel.
@@ -2272,6 +2515,7 @@ def detect_artifacts_smart(
             "amp": np.zeros(n, dtype=bool),
             "amp_pos": np.zeros(n, dtype=bool),
             "amp_neg": np.zeros(n, dtype=bool),
+            "resid_fast_z": np.zeros(n, dtype=float),
             "slope": np.zeros(n, dtype=bool),
             "curve": np.zeros(n, dtype=bool),
             "level": np.zeros(n, dtype=bool),
@@ -2301,6 +2545,33 @@ def detect_artifacts_smart(
         & (sig_score_near >= 0.90)
         & ((ref_score >= 1.00) | (sig_score_near >= 1.00))
     )
+    if has_reference:
+        # Looser second tier for CONCURRENT NEGATIVE deflections only: the
+        # isosbestic 405 does not carry calcium transients, so a simultaneous
+        # dip in both channels is near-certain motion/fiber artifact even
+        # when neither channel clears the strict thresholds alone. The dip
+        # test uses a ~0.1 s median of the signed residual, so noise wiggles
+        # in the quieter channel cannot fake concurrence.
+        sig_dip = minimum_filter1d(
+            np.asarray(sig_feat["resid_fast_z"], float), size=near_width, mode="nearest"
+        ) <= -1.25
+        ref_dip = minimum_filter1d(
+            np.asarray(ref_feat["resid_fast_z"], float), size=near_width, mode="nearest"
+        ) <= -1.25
+        shared_dip = (
+            sig_dip
+            & ref_dip
+            & (np.maximum(sig_score_near, ref_score_near) >= 1.00)
+            & (np.minimum(sig_score_near, ref_score_near) >= 0.55)
+        )
+        # Rolling medians and local MADs are boundary-biased, which can fake
+        # concurrent "dips" in both channels at once; keep the loose tier out
+        # of the first/last quarter second (the strict tiers still apply).
+        dip_edge_n = _window_samples_from_seconds(fs_val, 0.25, minimum=2)
+        if dip_edge_n > 0 and shared_dip.size > 2 * dip_edge_n:
+            shared_dip[:dip_edge_n] = False
+            shared_dip[-dip_edge_n:] = False
+        shared = shared | shared_dip
     sig_core = np.asarray(sig_feat["core"], bool) | shared
     ref_core = np.asarray(ref_feat["core"], bool) | shared
     core = sig_core | ref_core
@@ -2316,7 +2587,19 @@ def detect_artifacts_smart(
             sig_core = sig_core & core
             ref_core = ref_core & core
 
-    padded = _pad_mask_by_seconds(t, core, float(pad_s))
+    # Extend regions over slow recovery shoulders so repairs anchor on
+    # settled signal rather than on a half-recovered tail. The sanity check
+    # reverts the extension if it would swallow too much of the record.
+    ext_channels = [sig, ref] if has_reference else [sig]
+    extended = _extend_regions_to_settled(t, ext_channels, core, fs_val)
+    if float(np.mean(extended)) > 0.30:
+        extended = core
+
+    padded = _pad_mask_by_seconds(t, extended, float(pad_s))
+    # Merge regions separated by slivers shorter than the pad: the raw
+    # samples between two flanking artifacts are usually contaminated and
+    # make poor bridge anchors.
+    padded = _close_mask_gaps(t, padded, max_gap_s=max(0.15, float(pad_s)))
     regions = regions_from_mask(t, padded)
     core_regions: List[Tuple[float, float]] = []
     for a, b in regions:
@@ -3816,6 +4099,7 @@ def fit_reference_to_signal(
 
     # --- Lasso ---
     if method.startswith("Lasso"):
+        Lasso = _get_lasso_cls()
         if Lasso is None:
             return _apply_slope_constraint(*ols_fit(x, y))
         model = Lasso(
@@ -4209,7 +4493,7 @@ class PhotometryProcessor:
         - bandwidth is controlled (less baseline leakage)
         - signals are aligned and at the final timebase
         """
-        fitter = Baseline(x_data=t)
+        fitter = _get_baseline_cls()(x_data=t)
         method = (params.baseline_method or "airpls").lower()
         if method not in BASELINE_METHODS:
             method = "airpls"

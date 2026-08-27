@@ -216,8 +216,6 @@ class CheckableListWidget(QtWidgets.QListWidget):
 
 # Colour of the per-panel recommendation frames. Green reads as "here is what
 # to do with these settings", whatever the data turns out to look like.
-_RECO_GREEN = "#5dd39e"
-
 # Which ProcessingParams fields each settings panel owns. Used to apply the
 # advice of one panel without touching what the user tuned in the others.
 _RECO_SECTION_FIELDS: Dict[str, Tuple[str, ...]] = {
@@ -259,23 +257,6 @@ _RECO_SECTION_FIELDS: Dict[str, Tuple[str, ...]] = {
 }
 
 
-def _reco_tint(color: str, alpha_pct: int) -> str:
-    """Return a Qt stylesheet ``rgba()`` string for ``color`` at ``alpha_pct``.
-
-    Qt parses eight-digit hex as ``#AARRGGBB`` (alpha first), so appending an
-    alpha suffix to ``#rrggbb`` silently yields a different colour - a faint
-    green tint comes out olive. Building rgba() text keeps the tint honest.
-    """
-    text = str(color or "").lstrip("#")
-    if len(text) != 6:
-        return str(color)
-    try:
-        r, g, b = int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
-    except ValueError:
-        return str(color)
-    return f"rgba({r}, {g}, {b}, {max(0, min(100, int(alpha_pct)))}%)"
-
-
 class RecommendationPanel(QtWidgets.QFrame):
     """Green "Recommendations" frame pinned to the bottom of a settings panel.
 
@@ -291,12 +272,9 @@ class RecommendationPanel(QtWidgets.QFrame):
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
+        # Styled centrally in styles.py (QFrame#recoPanel + QLabel[reco=...])
+        # so the card follows the light / dark theme like everything else.
         self.setObjectName("recoPanel")
-        self.setStyleSheet(
-            f"QFrame#recoPanel {{ background: {_reco_tint(_RECO_GREEN, 8)};"
-            f" border: 1px solid {_RECO_GREEN}; border-radius: 10px; }}"
-            "QFrame#recoPanel QLabel { background: transparent; border: 0; }"
-        )
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum
         )
@@ -306,15 +284,12 @@ class RecommendationPanel(QtWidgets.QFrame):
         root.setSpacing(6)
 
         title = QtWidgets.QLabel("Recommendations")
-        title.setStyleSheet(
-            f"color: {_RECO_GREEN}; font-size: 9.6pt; font-weight: 800;"
-            " letter-spacing: 0.6px; text-transform: uppercase;"
-        )
+        title.setProperty("reco", "title")
         root.addWidget(title)
 
         self.lbl_headline = QtWidgets.QLabel("")
         self.lbl_headline.setWordWrap(True)
-        self.lbl_headline.setStyleSheet("color: #eef1f7; font-size: 9.2pt; font-weight: 600;")
+        self.lbl_headline.setProperty("reco", "headline")
         root.addWidget(self.lbl_headline)
 
         # Settings to dial in, as a two-column label/value grid.
@@ -328,10 +303,7 @@ class RecommendationPanel(QtWidgets.QFrame):
         root.addWidget(self._settings_host)
 
         self.lbl_why_header = QtWidgets.QLabel("Why")
-        self.lbl_why_header.setStyleSheet(
-            "color: #aab4c5; font-size: 8.3pt; letter-spacing: 0.5px;"
-            " text-transform: uppercase; padding-top: 4px;"
-        )
+        self.lbl_why_header.setProperty("reco", "why")
         root.addWidget(self.lbl_why_header)
 
         self._why_host = QtWidgets.QWidget()
@@ -375,13 +347,13 @@ class RecommendationPanel(QtWidgets.QFrame):
             except Exception:
                 continue
             key = QtWidgets.QLabel(f"{name}")
-            key.setStyleSheet("color: #98a3b6; font-size: 8.5pt;")
+            key.setProperty("reco", "key")
             key.setAlignment(
                 QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop
             )
             val = QtWidgets.QLabel(str(value))
             val.setWordWrap(True)
-            val.setStyleSheet(f"color: {_RECO_GREEN}; font-size: 8.5pt; font-weight: 700;")
+            val.setProperty("reco", "value")
             self._settings_grid.addWidget(key, row, 0)
             self._settings_grid.addWidget(val, row, 1)
         self._settings_host.setVisible(bool(settings))
@@ -422,11 +394,11 @@ class RecommendationPanel(QtWidgets.QFrame):
         dot = QtWidgets.QLabel("•")
         dot.setFixedWidth(10)
         dot.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
-        dot.setStyleSheet("color: #8d97a9; font-size: 8.5pt;")
+        dot.setProperty("reco", "key")
         lay.addWidget(dot, 0)
         body = QtWidgets.QLabel(text)
         body.setWordWrap(True)
-        body.setStyleSheet("color: #cfd7e5; font-size: 8.5pt;")
+        body.setProperty("reco", "body")
         lay.addWidget(body, 1)
         return row
 
@@ -1152,12 +1124,12 @@ class FileQueuePanel(QtWidgets.QGroupBox):
         self.setStyleSheet(
             """
             #fileQueuePanel QLabel[class="fieldLabel"] {
-                color: #d7e2f2;
+                color: #dde3f0;
                 font-weight: 650;
                 padding: 0 0 2px 1px;
             }
             #fileQueuePanel QLabel[class="pathHint"] {
-                color: #a9b7cb;
+                color: #a9b3c9;
                 padding: 2px 1px 0 1px;
             }
             #fileQueuePanel QGroupBox#fileQueueSelectionBox {
@@ -2001,17 +1973,17 @@ class ParameterPanel(QtWidgets.QGroupBox):
                          panel: RecommendationPanel) -> QtWidgets.QWidget:
         """Stack a settings form and its recommendation panel in one card body.
 
-        The stretch between them pushes the green panel to the bottom of the
-        card, so it fills the empty space under short forms instead of hugging
-        the last control.
+        The advice follows the form directly (reading order), and the stretch
+        below absorbs leftover height so short sections don't open a void
+        between their controls and the advice.
         """
         box = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(box)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
+        lay.setSpacing(10)
         lay.addWidget(form_widget, 0)
-        lay.addStretch(1)
         lay.addWidget(panel, 0)
+        lay.addStretch(1)
         return box
 
     def _build_ui(self) -> None:
@@ -3472,10 +3444,18 @@ class PlotDashboard(QtWidgets.QWidget):
             self.btn_thresholds,
         ):
             b.setProperty("class", "compactSmall")
+        def _tools_separator() -> QtWidgets.QFrame:
+            sep = QtWidgets.QFrame()
+            sep.setObjectName("toolbarSeparator")
+            return sep
+
+        # Grouped: artifact selection | history | view toggles.
         tools.addWidget(self.btn_add_region)
         tools.addWidget(self.btn_clear_regions)
+        tools.addWidget(_tools_separator())
         tools.addWidget(self.btn_undo)
         tools.addWidget(self.btn_redo)
+        tools.addWidget(_tools_separator())
         tools.addWidget(self.btn_box_select)
         tools.addWidget(self.btn_thresholds)
         tools.addStretch(1)
@@ -3491,8 +3471,14 @@ class PlotDashboard(QtWidgets.QWidget):
         # Empty-state hints removed by design - keep plots visually clean.
         self._preproc_empty_hints = []
 
-        # Raw traces share the same primary y-axis.
-        self.curve_465 = self.plot_raw.plot(pen=pg.mkPen((80, 250, 160), width=1.3))
+        # Raw traces share the same primary y-axis. The 465 signal gets a
+        # phosphor-style glow: a wide, translucent shadow pen under a crisp
+        # antialiased core, so the physiology reads like a scope trace.
+        self.curve_465 = self.plot_raw.plot(
+            pen=pg.mkPen((80, 250, 160), width=1.3),
+            shadowPen=pg.mkPen((80, 250, 160, 55), width=4.5),
+            antialias=True,
+        )
         self.curve_405 = self.plot_raw.plot(pen=pg.mkPen((160, 120, 255, 128), width=1.2))
 
         pen_env = pg.mkPen((240, 200, 90), width=1.0, style=QtCore.Qt.PenStyle.DashLine)
@@ -3502,7 +3488,11 @@ class PlotDashboard(QtWidgets.QWidget):
         self.curve_ref_thr_hi = self.plot_raw.plot(pen=pen_ref_env)
         self.curve_ref_thr_lo = self.plot_raw.plot(pen=pen_ref_env)
 
-        self.curve_f465 = self.plot_proc.plot(pen=pg.mkPen((80, 250, 160), width=1.1))
+        self.curve_f465 = self.plot_proc.plot(
+            pen=pg.mkPen((80, 250, 160), width=1.1),
+            shadowPen=pg.mkPen((80, 250, 160, 50), width=4.0),
+            antialias=True,
+        )
         self.curve_f405 = self.plot_proc.plot(pen=pg.mkPen((160, 120, 255), width=1.0))
         self.curve_b465 = self.plot_proc.plot(
             pen=pg.mkPen((220, 220, 220), width=1.0, style=QtCore.Qt.PenStyle.DashLine)
@@ -3519,7 +3509,15 @@ class PlotDashboard(QtWidgets.QWidget):
             pen=pg.mkPen((160, 160, 160, 100), width=1.0, style=QtCore.Qt.PenStyle.DashLine)
         )
 
-        self.curve_out = self.plot_out.plot(pen=pg.mkPen((90, 190, 255), width=1.2))
+        # Output dF/F: glowing core plus a soft area fill down to zero, so
+        # transients read as bright events rising from the baseline.
+        self.curve_out = self.plot_out.plot(
+            pen=pg.mkPen((90, 190, 255), width=1.2),
+            shadowPen=pg.mkPen((90, 190, 255, 55), width=4.5),
+            fillLevel=0.0,
+            fillBrush=pg.mkBrush(90, 190, 255, 26),
+            antialias=True,
+        )
         self._raw_y_curves = [self.curve_465, self.curve_405, self.curve_b465_raw, self.curve_b405_raw]
         self._proc_y_curves = [self.curve_f465, self.curve_f405, self.curve_b465, self.curve_b405]
         self._out_y_curves = [self.curve_out]
@@ -3583,16 +3581,12 @@ class PlotDashboard(QtWidgets.QWidget):
         self._plot_background_mode = self._normalize_plot_background_mode(background_mode)
         self._plot_grid_visible = bool(show_grid)
 
-        if self._plot_background_mode == "white":
-            bg = pg.mkColor("w")
-            axis_pen = pg.mkPen((35, 35, 35), width=1.0)
-            text_pen = pg.mkPen((35, 35, 35), width=1.0)
-            grid_alpha = 0.20
-        else:
-            bg = pg.mkColor((18, 22, 30))
-            axis_pen = pg.mkPen((200, 205, 215), width=1.0)
-            text_pen = pg.mkPen((200, 205, 215), width=1.0)
-            grid_alpha = 0.25
+        from styles import PLOT_THEME
+        theme = PLOT_THEME["light" if self._plot_background_mode == "white" else "dark"]
+        bg = pg.mkColor(theme["bg"])
+        axis_pen = pg.mkPen(theme["axis"], width=1.0)
+        text_pen = pg.mkPen(theme["text"], width=1.0)
+        grid_alpha = theme["grid_alpha"]
 
         for plot in (self.plot_raw, self.plot_proc, self.plot_out):
             try:
@@ -3608,6 +3602,9 @@ class PlotDashboard(QtWidgets.QWidget):
                     if axis is not None:
                         axis.setPen(axis_pen)
                         axis.setTextPen(text_pen)
+                title_label = getattr(pi, "titleLabel", None)
+                if title_label is not None and title_label.text:
+                    title_label.setText(title_label.text, color=theme["title"])
             except Exception:
                 pass
 
@@ -3921,6 +3918,44 @@ class PlotDashboard(QtWidgets.QWidget):
         self._artifact_region_bounds = []
         self._artifact_labels = []
 
+    def _artifact_label_y(
+        self,
+        t: np.ndarray,
+        raw_sig: np.ndarray,
+        start_s: float,
+        end_s: float,
+    ) -> float:
+        """Return a finite y coordinate for an artifact-number label.
+
+        Cut handling deliberately replaces every sample inside an artifact
+        region with NaN. Passing ``nanmax`` of that region to TextItem.setPos
+        gives pyqtgraph a non-finite child bound, which can corrupt autorange
+        and crash AxisItem while it converts tick positions to integers.
+        """
+        tt = np.asarray(t, float)
+        yy = np.asarray(raw_sig, float)
+        n = min(tt.size, yy.size)
+        if n:
+            finite_in_region = (
+                np.isfinite(tt[:n])
+                & np.isfinite(yy[:n])
+                & (tt[:n] >= float(start_s))
+                & (tt[:n] <= float(end_s))
+            )
+            if np.any(finite_in_region):
+                return float(np.max(yy[:n][finite_in_region]))
+
+        try:
+            y0, y1 = self.plot_raw.getViewBox().viewRange()[1]
+            y0, y1 = float(y0), float(y1)
+            if np.isfinite(y0) and np.isfinite(y1) and y1 > y0:
+                return float(y1 - 0.05 * (y1 - y0))
+        except Exception:
+            pass
+
+        finite_y = yy[np.isfinite(yy)]
+        return float(np.max(finite_y)) if finite_y.size else 0.0
+
     def _update_artifact_overlays(
         self,
         t: np.ndarray,
@@ -3959,17 +3994,12 @@ class PlotDashboard(QtWidgets.QWidget):
 
             # Limit labels to first 100 to avoid lag
             for idx, (a, b) in enumerate(regions[:100], start=1):
-                mask = (tt >= float(a)) & (tt <= float(b))
-                if np.any(mask):
-                    y_pos = float(np.nanmax(yy[mask]))
-                else:
-                    (vy0, vy1) = self.plot_raw.getViewBox().viewRange()[1]
-                    y_pos = float(vy1 - 0.05 * (vy1 - vy0))
+                y_pos = self._artifact_label_y(tt, yy, float(a), float(b))
 
                 label = pg.TextItem(str(idx), color=(240, 240, 240), anchor=(0.5, 0.5))
                 label.setPos(float((a + b) * 0.5), y_pos)
                 label.setZValue(9)
-                self.plot_raw.addItem(label)
+                self.plot_raw.addItem(label, ignoreBounds=True)
                 self._artifact_labels.append(label)
         else:
             for idx, (a, b) in enumerate(regions, start=1):
@@ -3984,17 +4014,12 @@ class PlotDashboard(QtWidgets.QWidget):
                 self._artifact_regions.append(region)
                 self._artifact_region_bounds.append((float(a), float(b)))
 
-                mask = (tt >= float(a)) & (tt <= float(b))
-                if np.any(mask) and np.any(np.isfinite(yy[mask])):
-                    y_pos = float(np.nanmax(yy[mask]))
-                else:
-                    (y0, y1) = self.plot_raw.getViewBox().viewRange()[1]
-                    y_pos = float(y1 - 0.05 * (y1 - y0))
+                y_pos = self._artifact_label_y(tt, yy, float(a), float(b))
 
                 label = pg.TextItem(str(idx), color=(240, 240, 240), anchor=(0.5, 0.5))
                 label.setPos(float((a + b) * 0.5), y_pos)
                 label.setZValue(9)
-                self.plot_raw.addItem(label)
+                self.plot_raw.addItem(label, ignoreBounds=True)
                 self._artifact_labels.append(label)
 
     def set_artifact_overlay_visible(self, visible: bool) -> None:
@@ -4353,7 +4378,7 @@ class PlotDashboard(QtWidgets.QWidget):
         if hasattr(self, "_prom_peak_scatter") and self._prom_peak_scatter is not None:
             return
         self._prom_peak_scatter = pg.ScatterPlotItem(
-            size=8, pen=pg.mkPen("#ee6471", width=1.2),
+            size=8, pen=pg.mkPen("#f26d7e", width=1.2),
             brush=pg.mkBrush(238, 100, 113, 220), symbol="o",
         )
         self._prom_peak_scatter.setZValue(20)
@@ -4405,7 +4430,7 @@ class PlotDashboard(QtWidgets.QWidget):
                 region = pg.LinearRegionItem(
                     values=(float(lo), float(hi)),
                     brush=pg.mkBrush(95, 211, 158, 35),  # green-tinted
-                    pen=pg.mkPen("#5dd39e", width=0, style=QtCore.Qt.PenStyle.SolidLine),
+                    pen=pg.mkPen("#43d9a3", width=0, style=QtCore.Qt.PenStyle.SolidLine),
                     movable=False,
                 )
                 region.setZValue(-5)

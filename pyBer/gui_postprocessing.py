@@ -83,6 +83,26 @@ def _opt_plot(w: pg.PlotWidget) -> None:
     pi.setClipToView(True)
     pi.setDownsampling(auto=True, mode="peak")
     pi.setAutoVisible(y=True)
+    # Unified default appearance so no plot ever falls back to pyqtgraph's
+    # raw black; the registered dashboard plots are re-themed afterwards by
+    # _apply_plot_style, dialogs keep this dark instrument look.
+    try:
+        from styles import PLOT_THEME
+        theme = PLOT_THEME["dark"]
+        w.setBackground(theme["bg"])
+        axis_pen = pg.mkPen(theme["axis"])
+        text_pen = pg.mkPen(theme["text"])
+        for axis_name in ("left", "right", "bottom", "top"):
+            axis = pi.getAxis(axis_name)
+            if axis is not None:
+                axis.setPen(axis_pen)
+                axis.setTextPen(text_pen)
+        title_label = getattr(pi, "titleLabel", None)
+        title_item = getattr(title_label, "item", None)
+        if title_item is not None:
+            title_item.setDefaultTextColor(QtGui.QColor(theme["title"]))
+    except Exception:
+        pass
 
 
 def _compact_combo(combo: QtWidgets.QComboBox, min_chars: int = 6) -> None:
@@ -1700,7 +1720,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "avg": (90, 190, 255),
             "sem_edge": (152, 201, 143),
             "sem_fill": (188, 230, 178, 96),
-            "plot_bg": (36, 42, 52),
+            "plot_bg": (12, 15, 22),
             "grid_enabled": True,
             "grid_alpha": 0.25,
             "heatmap_cmap": "viridis",
@@ -2356,7 +2376,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_signal_msg = QtWidgets.QLabel("")
         self.lbl_signal_msg.setProperty("class", "hint")
         # Build into Subsections instead of a 17-row flat form.
-        SIG_LABEL_W = 110
+        SIG_LABEL_W = 142  # fits "Normalize amplitude" at the 9.8pt UI font
 
         def _sig_form() -> QtWidgets.QFormLayout:
             f = QtWidgets.QFormLayout()
@@ -2538,7 +2558,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_behavior_msg.setProperty("class", "hint")
 
         # Build into clean Subsections instead of a flat 4-row form.
-        BEH_LABEL_W = 96
+        BEH_LABEL_W = 118  # fits "Aligned timeline" at the 9.8pt UI font
 
         def _beh_form() -> QtWidgets.QFormLayout:
             f = QtWidgets.QFormLayout()
@@ -2781,7 +2801,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         # Build the form into clearly-labelled subsections instead of a 15-row flat list.
         # All form labels share a fixed minimum width so columns line up across subsections.
-        FORM_LABEL_W = 96
+        FORM_LABEL_W = 108  # fits "Invert Y axis" at the 9.8pt UI font
 
         def _form() -> QtWidgets.QFormLayout:
             f = QtWidgets.QFormLayout()
@@ -3253,7 +3273,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.sync_progress.setRange(0, 100)
         self.sync_progress.setValue(0)
         self.sync_progress.setStyleSheet(
-            "QProgressBar#syncProgress{background:#1b2230;border:none;border-radius:8px;color:#e5e7eb;}"
+            "QProgressBar#syncProgress{background:#141824;border:none;border-radius:8px;color:#e5e7eb;}"
             "QProgressBar#syncProgress::chunk{background:#7c5cff;border-radius:8px;}"
         )
         self.btn_sync_cancel_extract = QtWidgets.QPushButton("Cancel")
@@ -3702,11 +3722,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_action_undo.setText("Undo")
         self.btn_action_undo.setToolTip("Undo last postprocessing setting or view action (Ctrl+Z)")
         self.btn_action_undo.setFixedSize(48, 30)
+        # toolbarIconButton QSS uses a 13pt glyph font; these two carry words.
+        self.btn_action_undo.setStyleSheet("font-size: 8.8pt; font-weight: 600;")
         self.btn_action_redo = QtWidgets.QToolButton()
         self.btn_action_redo.setObjectName("toolbarIconButton")
         self.btn_action_redo.setText("Redo")
         self.btn_action_redo.setToolTip("Redo last undone postprocessing setting or view action (Ctrl+Y)")
         self.btn_action_redo.setFixedSize(48, 30)
+        self.btn_action_redo.setStyleSheet("font-size: 8.8pt; font-weight: 600;")
         self.btn_action_help = QtWidgets.QToolButton()
         self.btn_action_help.setObjectName("toolbarIconButton")
         self.btn_action_help.setText("?")
@@ -3789,18 +3812,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_action_export.setText("Run Export")
         self.btn_action_hide.setText("Hide drawer")
 
-        # Primary group: File / Compute / Export / Reset.
-        for b in (self.btn_action_load, self.btn_action_compute, self.btn_action_export, self.btn_action_reset):
-            tb_layout.addWidget(b)
+        def _tb_separator() -> QtWidgets.QFrame:
+            sep = QtWidgets.QFrame()
+            sep.setObjectName("toolbarSeparator")
+            return sep
 
-        # Visual hairline separator between primary actions and utilities.
-        sep = QtWidgets.QFrame()
-        sep.setFixedWidth(1)
-        sep.setFixedHeight(22)
-        sep.setStyleSheet("background: #2c3240; border: 0;")
-        tb_layout.addSpacing(4)
-        tb_layout.addWidget(sep)
-        tb_layout.addSpacing(4)
+        # Grouped: file source | analysis actions | history and view utilities.
+        tb_layout.addWidget(self.btn_action_load)
+        tb_layout.addWidget(_tb_separator())
+        for b in (self.btn_action_compute, self.btn_action_export, self.btn_action_reset):
+            tb_layout.addWidget(b)
+        tb_layout.addWidget(_tb_separator())
 
         # Utility group: Undo / Redo / Plot style / Help.
         for b in (self.btn_action_undo, self.btn_action_redo, self.btn_style, self.btn_action_help):
@@ -4486,7 +4508,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _scroll_background_color(self) -> str:
         if self._app_theme_mode == "light":
             return "#f6f8fc"
-        return "#242a34"
+        return "#161a26"
 
     def _apply_scroll_theme(self, scroll: QtWidgets.QScrollArea) -> None:
         bg = self._scroll_background_color()
@@ -4513,7 +4535,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             from styles import _make_icon
         except Exception:
             return
-        icon_color = "#334155" if self._app_theme_mode == "light" else "#cdd6f4"
+        icon_color = "#3b4763" if self._app_theme_mode == "light" else "#c7d0e6"
         buttons = getattr(self, "_section_buttons", {}) or {}
         for key, painter in (getattr(self, "_post_rail_icon_painters", {}) or {}).items():
             btn = buttons.get(key)
@@ -4541,9 +4563,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             pass
 
     def _theme_plot_background(self) -> Tuple[int, int, int]:
+        from styles import PLOT_THEME
         if self._app_theme_mode == "light":
-            return (248, 250, 255)
-        return (36, 42, 52)
+            return tuple(PLOT_THEME["light"]["bg"])
+        return tuple(PLOT_THEME["dark"]["bg"])
 
     def _section_widget_map(self) -> Dict[str, Tuple[str, QtWidgets.QWidget]]:
         return {
@@ -11594,9 +11617,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             for c, val in enumerate(values):
                 item = QtWidgets.QTableWidgetItem(val)
                 if c == 5 and str(val).lower() == "ok":
-                    item.setForeground(QtGui.QBrush(QtGui.QColor("#5ee0a1")))
+                    item.setForeground(QtGui.QBrush(QtGui.QColor("#43d9a3")))
                 elif c == 5 and str(val).lower() not in ("ok", "not aligned"):
-                    item.setForeground(QtGui.QBrush(QtGui.QColor("#ffd166")))
+                    item.setForeground(QtGui.QBrush(QtGui.QColor("#f6c453")))
                 self.tbl_sync_results.setItem(r, c, item)
         try:
             self.tbl_sync_results.resizeColumnsToContents()
@@ -14060,25 +14083,31 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return tuple(out)
 
     def _apply_plot_style(self) -> None:
-        self.curve_trace.setPen(pg.mkPen(self._style_color_tuple("trace", (90, 190, 255)), width=1.1))
+        trace_color = self._style_color_tuple("trace", (90, 190, 255))
+        avg_color = self._style_color_tuple("avg", (90, 190, 255))
+        self.curve_trace.setPen(pg.mkPen(trace_color, width=1.1))
+        self.curve_trace.setShadowPen(pg.mkPen((*trace_color[:3], 50), width=4.0))
         self.curve_behavior.setPen(pg.mkPen(self._style_color_tuple("behavior", (220, 180, 80)), width=1.0))
-        self.curve_avg.setPen(pg.mkPen(self._style_color_tuple("avg", (90, 190, 255)), width=1.3))
+        self.curve_avg.setPen(pg.mkPen(avg_color, width=1.3))
+        self.curve_avg.setShadowPen(pg.mkPen((*avg_color[:3], 60), width=4.5))
         sem_edge = self._style_color_tuple("sem_edge", (152, 201, 143))
         sem_fill = self._style_color_tuple("sem_fill", (188, 230, 178, 96))
         self.curve_sem_hi.setPen(pg.mkPen(sem_edge, width=1.0))
         self.curve_sem_lo.setPen(pg.mkPen(sem_edge, width=1.0))
         if hasattr(self, "sem_band"):
             self.sem_band.setBrush(pg.mkBrush(*sem_fill))
-        bg = self._style_color_tuple("plot_bg", (36, 42, 52))
+        bg = self._style_color_tuple("plot_bg", (12, 15, 22))
         grid_enabled = bool(self._style.get("grid_enabled", True))
         try:
             grid_alpha = float(self._style.get("grid_alpha", 0.25))
         except Exception:
             grid_alpha = 0.25
         grid_alpha = max(0.0, min(1.0, grid_alpha))
+        from styles import PLOT_THEME
         light_plot = (sum(bg[:3]) / 3.0) >= 180.0
-        axis_color = (45, 55, 72) if light_plot else (182, 194, 212)
-        text_color = (31, 42, 55) if light_plot else (200, 211, 226)
+        axis_theme = PLOT_THEME["light" if light_plot else "dark"]
+        axis_color = tuple(axis_theme["axis"])
+        text_color = tuple(axis_theme["text"])
         grid_draw_alpha = max(grid_alpha, 0.22) if light_plot else grid_alpha
         for pw in (
             self.plot_trace,
@@ -14097,6 +14126,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_spatial_occupancy,
             self.plot_spatial_activity,
             self.plot_spatial_velocity,
+            self.plot_sync_signal,
+            self.plot_sync_map,
+            self.plot_sync_residual,
+            self.plot_sync_alignment_validation,
         ):
             try:
                 pw.setBackground(QtGui.QColor(*bg[:3]))
@@ -15503,7 +15536,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 "avg": (90, 190, 255),
                 "sem_edge": (152, 201, 143),
                 "sem_fill": (188, 230, 178, 96),
-                "plot_bg": (248, 250, 255) if self._app_theme_mode == "light" else (36, 42, 52),
+                "plot_bg": (250, 251, 254) if self._app_theme_mode == "light" else (12, 15, 22),
                 "grid_enabled": True,
                 "grid_alpha": 0.25,
                 "heatmap_cmap": "viridis",
@@ -15883,7 +15916,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._apply_settings(data)
             if self._app_theme_mode == "dark":
                 bg = self._style_color_tuple("plot_bg", self._theme_plot_background())
-                if (sum(bg[:3]) / 3.0) >= 180.0:
+                legacy_dark_defaults = {(36, 42, 52), (18, 22, 30), (5, 8, 13)}
+                if (sum(bg[:3]) / 3.0) >= 180.0 or tuple(bg[:3]) in legacy_dark_defaults:
                     self._style["plot_bg"] = self._theme_plot_background()
                     self._apply_plot_style()
         except Exception:
@@ -17451,7 +17485,7 @@ class ExportDialog(QtWidgets.QDialog):
         if group_labels and len(group_labels) > 1:
             info = QtWidgets.QLabel(f"Group mode: {len(group_labels)} animals - columns will be labeled by animal ID")
             info.setProperty("class", "hint")
-            info.setStyleSheet("color: #5abeFF; font-style: italic; padding: 4px 0;")
+            info.setStyleSheet("color: #4da3ff; font-style: italic; padding: 4px 0;")
             layout.addWidget(info)
 
         # --- Buttons ---
@@ -17649,7 +17683,7 @@ class StyleDialog(QtWidgets.QDialog):
         self._style["heatmap_levels_manual"] = bool(manual_levels)
         self._style["grid_enabled"] = bool(self.cb_grid.isChecked())
         self._style["grid_alpha"] = float(self.spin_grid_alpha.value())
-        self._style.setdefault("plot_bg", (36, 42, 52))
+        self._style.setdefault("plot_bg", (12, 15, 22))
         self._style.setdefault("sem_edge", (152, 201, 143))
         self._style.setdefault("sem_fill", (188, 230, 178, 96))
         return dict(self._style)

@@ -44,6 +44,28 @@ class ArtifactOverlayTests(unittest.TestCase):
         self.assertEqual(dashboard._artifact_region_bounds, [])
         dashboard.deleteLater()
 
+    def test_large_cut_overlay_keeps_label_positions_and_autorange_finite(self) -> None:
+        dashboard = PlotDashboard()
+        time = np.linspace(0.0, 60.0, 1201)
+        signal = 0.12 + 0.005 * np.sin(time)
+        regions = [(float(i), float(i) + 0.35) for i in range(30)]
+        cut_signal = signal.copy()
+        for start_s, end_s in regions:
+            cut_signal[(time >= start_s) & (time <= end_s)] = np.nan
+
+        dashboard.show_raw(time, cut_signal, cut_signal)
+        dashboard._update_artifact_overlays(time, cut_signal, regions)
+
+        self.assertEqual(len(dashboard._artifact_labels), len(regions))
+        self.assertTrue(
+            all(np.isfinite(label.pos().y()) for label in dashboard._artifact_labels)
+        )
+        dashboard.plot_raw.getViewBox().updateAutoRange()
+        x_range, y_range = dashboard.plot_raw.getViewBox().viewRange()
+        self.assertTrue(np.all(np.isfinite(x_range)))
+        self.assertTrue(np.all(np.isfinite(y_range)))
+        dashboard.deleteLater()
+
     def test_each_newly_opened_file_becomes_the_active_selection(self) -> None:
         window = MainWindow()
         first = os.path.abspath("first_open.doric")

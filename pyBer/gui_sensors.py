@@ -94,59 +94,69 @@ class SensorDialog(QtWidgets.QDialog):
         self.setStyleSheet(
             """
             QDialog {
-                background: #111722;
-                color: #e7edf6;
+                background: #161a26;
+                color: #edf0f8;
             }
             QLabel#sensorTitle {
-                color: #f3f7ff;
+                color: #f7f9fd;
+                font-family: "Segoe UI Variable Display", "Segoe UI Semibold", "Segoe UI", sans-serif;
                 font-size: 18pt;
                 font-weight: 800;
             }
             QLineEdit {
-                background: #182133;
-                border: 1px solid #2d3a54;
+                background: #141824;
+                border: 1px solid #333c56;
                 border-radius: 7px;
-                color: #e7edf6;
+                color: #edf0f8;
                 padding: 7px 10px;
             }
+            QLineEdit:focus {
+                border: 1px solid #7c5cff;
+            }
             QTableWidget {
-                background: #101722;
-                alternate-background-color: #151e2d;
-                border: 1px solid #26334b;
-                border-radius: 8px;
-                color: #e7edf6;
-                selection-background-color: #5b39d6;
+                background: #141824;
+                alternate-background-color: #171c2b;
+                border: 1px solid #232a3d;
+                border-radius: 9px;
+                color: #edf0f8;
+                selection-background-color: #372f66;
                 selection-color: #ffffff;
             }
             QHeaderView::section {
-                background: #1b2435;
-                color: #b9c7dc;
+                background: #1d2333;
+                color: #a9b3c9;
                 border: 0px;
-                border-right: 1px solid #2a3650;
+                border-right: 1px solid #232a3d;
                 padding: 7px 8px;
                 font-weight: 700;
             }
             QTextBrowser#sensorDetails {
-                background: #121b29;
-                border: 1px solid #26334b;
-                border-radius: 8px;
-                color: #dce6f5;
+                background: #141824;
+                border: 1px solid #232a3d;
+                border-radius: 9px;
+                color: #ccd4e4;
                 padding: 8px;
             }
             QPushButton {
-                background: #231b48;
-                border: 1px solid #5941a9;
-                border-radius: 7px;
-                color: #f4f2ff;
+                background: #241f42;
+                border: 1px solid #4d3fa3;
+                border-radius: 8px;
+                color: #e6def8;
                 padding: 7px 12px;
                 font-weight: 700;
             }
             QPushButton:hover {
-                background: #2e235e;
+                background: #2e2854;
+                border: 1px solid #5f4fc2;
             }
             QPushButton[class="bluePrimarySmall"] {
-                background: #7047ff;
-                border-color: #9274ff;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #8a63ff, stop:1 #6f4df2);
+                border: 1px solid #8f74ff;
+                color: #ffffff;
+            }
+            QPushButton[class="bluePrimarySmall"]:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #9a77ff, stop:1 #7d5cff);
+                border: 1px solid #a68cff;
             }
             """
         )
@@ -194,7 +204,7 @@ class SensorDialog(QtWidgets.QDialog):
                 item = QtWidgets.QTableWidgetItem(str(text))
                 item.setData(QtCore.Qt.ItemDataRole.UserRole, sensor.sensor_id)
                 if col == 16:
-                    item.setForeground(QtGui.QBrush(QtGui.QColor("#9ac7ff")))
+                    item.setForeground(QtGui.QBrush(QtGui.QColor("#a68cff")))
                 self.table.setItem(row, col, item)
 
     def _selected_row_sensor(self) -> SensorInfo:

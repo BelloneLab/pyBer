@@ -26,10 +26,10 @@ from PySide6 import QtCore, QtGui, QtWidgets
 # ============================================================================
 
 _TOAST_QSS = {
-    "info":  "background: #1f2a3a; color: #e9f0fb; border: 1px solid #355080;",
-    "warn":  "background: #3a2d1d; color: #fde6c8; border: 1px solid #8a6a3a;",
-    "error": "background: #3b1f25; color: #ffd6dc; border: 1px solid #8a3949;",
-    "ok":    "background: #1c2e22; color: #d4f4dc; border: 1px solid #2f7a4a;",
+    "info":  "background: #1a2030; color: #e2eaf8; border: 1px solid #3a5a8c;",
+    "warn":  "background: #2b2517; color: #fbe7c3; border: 1px solid #94713a;",
+    "error": "background: #2c1a20; color: #ffd3da; border: 1px solid #8f3d4d;",
+    "ok":    "background: #142a24; color: #cff2de; border: 1px solid #2a6b51;",
 }
 
 
@@ -205,18 +205,20 @@ class TutorialOverlay(QtWidgets.QWidget):
         self._callout = QtWidgets.QFrame(self)
         self._callout.setObjectName("tutorialCallout")
         self._callout.setStyleSheet(
-            "QFrame#tutorialCallout { background: #14202f; color: #e9f0fb; "
-            "border: 1px solid #2f8cff; border-radius: 12px; }"
-            "QFrame#tutorialCallout QLabel { background: transparent; color: #e9f0fb; }"
+            "QFrame#tutorialCallout { background: #1a1f2e; color: #edf0f8; "
+            "border: 1px solid #7c5cff; border-radius: 12px; }"
+            "QFrame#tutorialCallout QLabel { background: transparent; color: #edf0f8; }"
             "QFrame#tutorialCallout QLabel#tutTitle { font-weight: 700; font-size: 12pt; }"
-            "QFrame#tutorialCallout QLabel#tutStep { color: #95a5c2; font-size: 8.5pt; }"
-            "QFrame#tutorialCallout QPushButton { background: #1c2a3e; color: #e9f0fb; "
-            "border: 1px solid #355080; border-radius: 6px; padding: 5px 12px; }"
-            "QFrame#tutorialCallout QPushButton:hover { background: #233553; }"
-            "QFrame#tutorialCallout QPushButton#tutPrimary { background: #2f8cff; "
-            "border: 1px solid #46a0ff; color: white; font-weight: 700; }"
-            "QFrame#tutorialCallout QPushButton#tutPrimary:hover { background: #46a0ff; }"
-            "QFrame#tutorialCallout QPushButton#tutSkip { color: #95a5c2; border-color: transparent; }"
+            "QFrame#tutorialCallout QLabel#tutStep { color: #a9b3c9; font-size: 8.5pt; }"
+            "QFrame#tutorialCallout QPushButton { background: #222840; color: #edf0f8; "
+            "border: 1px solid #333c56; border-radius: 7px; padding: 5px 12px; }"
+            "QFrame#tutorialCallout QPushButton:hover { background: #293049; }"
+            "QFrame#tutorialCallout QPushButton#tutPrimary { background: "
+            "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #8a63ff, stop:1 #6f4df2); "
+            "border: 1px solid #8f74ff; color: white; font-weight: 700; }"
+            "QFrame#tutorialCallout QPushButton#tutPrimary:hover { background: "
+            "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #9a77ff, stop:1 #7d5cff); }"
+            "QFrame#tutorialCallout QPushButton#tutSkip { color: #a9b3c9; border-color: transparent; }"
         )
         lay = QtWidgets.QVBoxLayout(self._callout)
         lay.setContentsMargins(18, 16, 18, 14)
@@ -238,7 +240,7 @@ class TutorialOverlay(QtWidgets.QWidget):
         self._chk_dont_show = QtWidgets.QCheckBox("Don't show this tutorial automatically again")
         self._chk_dont_show.setToolTip("You can always replay it later with F1.")
         self._chk_dont_show.setStyleSheet(
-            "QCheckBox { background: transparent; color: #c5d2e3; spacing: 8px; }"
+            "QCheckBox { background: transparent; color: #ccd4e4; spacing: 8px; }"
             "QCheckBox::indicator { width: 15px; height: 15px; }"
         )
         lay.addWidget(self._chk_dont_show)
@@ -380,13 +382,13 @@ class TutorialOverlay(QtWidgets.QWidget):
             path = path.subtracted(spot)
             painter.fillPath(path, QtGui.QColor(8, 12, 22, 215))
             # Outline the target.
-            pen = QtGui.QPen(QtGui.QColor("#2f8cff"))
+            pen = QtGui.QPen(QtGui.QColor("#7c5cff"))
             pen.setWidth(2)
             painter.setPen(pen)
             painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(self._target_rect, 8, 8)
             # Optional: dashed glow inside.
-            glow = QtGui.QPen(QtGui.QColor(47, 140, 255, 120))
+            glow = QtGui.QPen(QtGui.QColor(124, 92, 255, 120))
             glow.setWidth(1)
             glow.setStyle(QtCore.Qt.PenStyle.DashLine)
             painter.setPen(glow)
@@ -429,7 +431,10 @@ def _build_legacy_default_tutorial(window: QtWidgets.QMainWindow) -> List[Tutori
             pass
 
     def _resolve_tabs(_w: QtWidgets.QMainWindow) -> Optional[QtWidgets.QWidget]:
-        return getattr(window, "tabs", None)
+        # Prefer the branded top bar (where the workflow steps live); fall
+        # back to the tab widget for layouts without one.
+        top_bar = getattr(window, "top_bar", None)
+        return top_bar if top_bar is not None else getattr(window, "tabs", None)
 
     def _resolve_pre_files(_w: QtWidgets.QMainWindow) -> Optional[QtWidgets.QWidget]:
         return getattr(window, "file_panel", None)
@@ -539,7 +544,10 @@ def build_default_tutorial(window: QtWidgets.QMainWindow) -> List[TutorialStep]:
             pass
 
     def _resolve_tabs(_w: QtWidgets.QMainWindow) -> Optional[QtWidgets.QWidget]:
-        return getattr(window, "tabs", None)
+        # Prefer the branded top bar (where the workflow steps live); fall
+        # back to the tab widget for layouts without one.
+        top_bar = getattr(window, "top_bar", None)
+        return top_bar if top_bar is not None else getattr(window, "tabs", None)
 
     def _resolve_pre_files(_w: QtWidgets.QMainWindow) -> Optional[QtWidgets.QWidget]:
         return getattr(window, "file_panel", None)
@@ -927,9 +935,9 @@ def _keyboard_cheatsheet_html() -> str:
             ("Ctrl+0", "Reset focused plot view"),
         ]),
     ]
-    parts = ["<style>td{padding:3px 14px 3px 0;} kbd{background:#1b2230;color:#e9f0fb;"
-            "border:1px solid #355080;border-radius:4px;padding:1px 6px;font-family:Consolas,monospace;}"
-            "h4{color:#2f8cff;margin-top:14px;margin-bottom:6px;}</style>"]
+    parts = ["<style>td{padding:3px 14px 3px 0;} kbd{background:#1d2333;color:#edf0f8;"
+            "border:1px solid #465073;border-radius:4px;padding:1px 6px;font-family:Consolas,monospace;}"
+            "h4{color:#916dff;margin-top:14px;margin-bottom:6px;}</style>"]
     for header, items in rows:
         if header is not None:
             parts.append(f"<h4>{header}</h4>")
@@ -950,22 +958,22 @@ def _keyboard_cheatsheet_html() -> str:
 _POST_SECTION_META: Dict[str, Tuple[str, str, str, str]] = {
     "setup":    ("S", "#4b9df8", "Setup",         "Load processed traces and behavior / events"),
     "sync":     ("Y", "#94e2d5", "Time synchronization", "Align camera / behavior time to photometry DIO"),
-    "psth":     ("P", "#7d4df2", "PSTH analysis", "Trial windows, baselines and metrics"),
-    "spatial":  ("X", "#5dd39e", "Spatial maps",  "Occupancy, activity and velocity heatmaps"),
-    "temporal": ("T", "#2d8cff", "Temporal Modeling", "Continuous GLM and trial-level FLMM"),
+    "psth":     ("P", "#7c5cff", "PSTH analysis", "Trial windows, baselines and metrics"),
+    "spatial":  ("X", "#43d9a3", "Spatial maps",  "Occupancy, activity and velocity heatmaps"),
+    "temporal": ("T", "#4da3ff", "Temporal Modeling", "Continuous GLM and trial-level FLMM"),
     "signal":   ("E", "#f5a97f", "Signal events", "Peak detection and amplitude / rate metrics"),
     "behavior": ("B", "#ee99a0", "Behavior",       "Behavior alignment and per-state analysis"),
     "export":   ("D", "#94e2d5", "Export",         "Export PSTH, peaks, behavior and project files"),
 }
 
 _PRE_SECTION_META: Dict[str, Tuple[str, str, str, str]] = {
-    "artifacts":      ("A", "#ee6471", "Artifacts",       "Detection thresholds and detected / manual artifact list"),
-    "filtering":      ("F", "#7d4df2", "Filtering",       "Low-pass + smoothing for the photometry trace"),
+    "artifacts":      ("A", "#f26d7e", "Artifacts",       "Detection thresholds and detected / manual artifact list"),
+    "filtering":      ("F", "#7c5cff", "Filtering",       "Low-pass + smoothing for the photometry trace"),
     "baseline":       ("B", "#4b9df8", "Baseline",        "Baseline estimation across the recording"),
-    "output":         ("O", "#5dd39e", "Output",          "Choose dFF / dF / z-score formula"),
+    "output":         ("O", "#43d9a3", "Output",          "Choose dFF / dF / z-score formula"),
     "qc":             ("Q", "#94e2d5", "Quality control", "Per-recording diagnostic checks"),
     "export":         ("D", "#f5a97f", "Export",          "Export processed traces"),
-    "config":         ("C", "#aab4c5", "Configuration",   "Save / load preprocessing parameter sets"),
+    "config":         ("C", "#a9b3c9", "Configuration",   "Save / load preprocessing parameter sets"),
 }
 
 
@@ -1228,6 +1236,7 @@ class TopAppBar(QtWidgets.QFrame):
 
     helpRequested = QtCore.Signal()
     preferencesRequested = QtCore.Signal()
+    stepClicked = QtCore.Signal(int)
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
@@ -1246,7 +1255,7 @@ class TopAppBar(QtWidgets.QFrame):
         self._app_name.setObjectName("pyberAppName")
         lay.addWidget(self._app_name)
 
-        # Workflow steps
+        # Workflow steps (clickable: they drive the main tab widget)
         self._steps_holder = QtWidgets.QFrame()
         sl = QtWidgets.QHBoxLayout(self._steps_holder)
         sl.setContentsMargins(12, 0, 12, 0)
@@ -1260,6 +1269,10 @@ class TopAppBar(QtWidgets.QFrame):
             lbl = QtWidgets.QLabel(name)
             lbl.setObjectName("pyberWorkflowStep")
             lbl.setProperty("active", "true" if i == 0 else "false")
+            lbl.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            lbl.mousePressEvent = (
+                lambda event, index=i: self.stepClicked.emit(index)
+            )
             self._step_labels.append(lbl)
             sl.addWidget(lbl)
         lay.addWidget(self._steps_holder)
@@ -1416,7 +1429,7 @@ def reset_focused_plot_view(window: QtWidgets.QWidget) -> None:
 def add_empty_state_hint(
     plot,  # type: ignore[no-untyped-def]  pg.PlotWidget
     text: str,
-    color: str = "#7d8aa1",
+    color: str = "#707b93",
 ) -> Optional[Any]:
     """
     Add a non-interactive TextItem at (0,0) on the plot with the given hint

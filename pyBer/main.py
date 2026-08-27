@@ -102,8 +102,40 @@ try:
 except Exception:
     _CRASH_LOG_FILE = None
 
+# Show the branded splash BEFORE the heavy scientific imports below. On a
+# slow machine those imports take tens of seconds; without this the user
+# stares at nothing. Only for direct launches (harnesses import main as a
+# module and manage their own QApplication).
+_STARTUP_SPLASH = None
+if __name__ == "__main__" and str(os.environ.get("PYBER_SMOKE_TEST", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+    try:
+        from splash_screen import show_early_splash as _show_early_splash
+
+        _STARTUP_SPLASH = _show_early_splash()
+    except Exception:
+        _STARTUP_SPLASH = None
+
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
+
+# pyqtgraph's ColorMapMenu (built eagerly by every HistogramLUT gradient
+# widget) imports matplotlib.pyplot just to list leftover colormap names,
+# which costs seconds of cold startup. Skip that probe unless matplotlib is
+# already loaded; the background warmup imports matplotlib shortly after
+# launch, so menus created later still get the full listing.
+try:
+    from pyqtgraph.widgets import ColorMapMenu as _pg_cmm
+
+    _pg_find_mpl_leftovers = _pg_cmm.find_mpl_leftovers
+
+    def _lazy_find_mpl_leftovers():
+        if "matplotlib" not in sys.modules:
+            return []
+        return _pg_find_mpl_leftovers()
+
+    _pg_cmm.find_mpl_leftovers = _lazy_find_mpl_leftovers
+except Exception:
+    pass
 from pyqtgraph.dockarea import DockArea, Dock
 import h5py
 
@@ -149,6 +181,7 @@ from onboarding import (
     TutorialOverlay,
     PreferencesDialog,
     PanelHeader,
+    TopAppBar,
     register_global_shortcuts,
     attach_dirty_title,
     install_close_confirmation,
@@ -159,6 +192,7 @@ from onboarding import (
 from styles import (
     apply_app_palette,
     app_qss,
+    install_native_titlebar,
     _make_icon,
     _paint_database,
     _paint_sliders,
@@ -343,10 +377,6 @@ def _pyber_icon_path() -> str:
     return _first_existing_asset("pyBer.ico")
 
 
-def _pyber_splash_path() -> str:
-    return _first_existing_asset("pyBer_logo_big.png")
-
-
 def _set_windows_app_user_model_id() -> None:
     """Give Windows a stable app identity so Qt's app icon is used on the taskbar."""
     if os.name != "nt":
@@ -503,11 +533,11 @@ def _rolling_corr(x: np.ndarray, y: np.ndarray, win: int) -> Tuple[np.ndarray, n
 
 # Tier table: (min_score_inclusive, label, color)
 _QC_TIERS: List[Tuple[float, str, str]] = [
-    (85.0, "EXCELLENT", "#5dd39e"),
-    (70.0, "GOOD",      "#9ce0a3"),
-    (55.0, "FAIR",      "#f5c542"),
-    (40.0, "MARGINAL",  "#f0915e"),
-    (0.0,  "POOR",      "#ee6471"),
+    (85.0, "EXCELLENT", "#43d9a3"),
+    (70.0, "GOOD",      "#7ee0b8"),
+    (55.0, "FAIR",      "#f6c453"),
+    (40.0, "MARGINAL",  "#f59060"),
+    (0.0,  "POOR",      "#f26d7e"),
 ]
 
 
@@ -891,17 +921,17 @@ _QC_PLAIN_PROBLEM = {
 # What the user should physically do with the file, per overall tier.
 # (chip label, chip colour, one-sentence instruction)
 _QC_ACTION_BY_TIER = {
-    "EXCELLENT": ("KEEP", "#5dd39e",
+    "EXCELLENT": ("KEEP", "#43d9a3",
                   "Keep this recording as it is. Every check passed."),
-    "GOOD": ("KEEP", "#5dd39e",
+    "GOOD": ("KEEP", "#43d9a3",
              "Keep this recording. Anything below is optional polish."),
-    "FAIR": ("USE WITH CARE", "#f5c542",
+    "FAIR": ("USE WITH CARE", "#f6c453",
              "Usable, but clean it up before pooling it with the rest of the dataset, "
              "and say in the methods what you did."),
-    "MARGINAL": ("REPAIR FIRST", "#f0915e",
+    "MARGINAL": ("REPAIR FIRST", "#f59060",
                  "Do not analyse this file as it stands. Apply the fixes below and run "
                  "the check again; if the verdict does not improve, leave the file out."),
-    "POOR": ("EXCLUDE", "#ee6471",
+    "POOR": ("EXCLUDE", "#f26d7e",
              "Leave this recording out of the analysis. Too many core checks failed for "
              "the result to mean anything."),
 }
@@ -918,7 +948,7 @@ class QcVerdict:
     why: str = ""                                  # friendly "why this verdict"
     counts: str = ""                               # dim one-liner with the tallies
     action_kind: str = "KEEP"                      # KEEP / USE WITH CARE / ...
-    action_color: str = "#5dd39e"
+    action_color: str = "#43d9a3"
     headline: str = ""                             # what to do with the file
     actions: List[str] = field(default_factory=list)     # concrete fixes
     segments: List[Dict[str, object]] = field(default_factory=list)  # spans to cut
@@ -968,11 +998,11 @@ def _qc_build_recommendations(
     # If most of the session has to be cut, or almost nothing survives, the file
     # is not salvageable no matter how good the surviving part looks.
     if cut_fraction >= 0.35:
-        kind, color = "EXCLUDE", "#ee6471"
+        kind, color = "EXCLUDE", "#f26d7e"
         headline = (f"Leave this recording out: about {cut_fraction * 100:.0f}% of the session "
                     f"has to be cut, so what is left is no longer a fair sample of it.")
     elif np.isfinite(kept_s) and kept_s < 60.0 and np.isfinite(duration_s) and duration_s > 60.0:
-        kind, color = "EXCLUDE", "#ee6471"
+        kind, color = "EXCLUDE", "#f26d7e"
         headline = (f"Leave this recording out: only about {max(kept_s, 0.0):.0f} s survive the "
                     f"cuts below, which is too short to analyse.")
 
@@ -1444,17 +1474,17 @@ def _evaluate_qc(qc: Dict[str, object]) -> QcVerdict:
 
 
 _QC_TIER_BADGE_COLORS = {
-    "PASS": "#5dd39e",
-    "WARN": "#f5c542",
-    "FAIL": "#ee6471",
-    "": "#6f7a8e",
+    "PASS": "#43d9a3",
+    "WARN": "#f6c453",
+    "FAIL": "#f26d7e",
+    "": "#707b93",
 }
 
 
 # Colour of the recommendation panel. Green reads as "here is what to do",
 # independently of how bad the recording turned out to be; the severity itself
 # is carried by the KEEP / USE WITH CARE / REPAIR FIRST / EXCLUDE chip inside.
-_QC_REC_GREEN = "#5dd39e"
+_QC_REC_GREEN = "#43d9a3"
 
 
 def _qc_tint(color: str, alpha_pct: int) -> str:
@@ -1483,9 +1513,9 @@ class QualityVerdictCard(QtWidgets.QFrame):
         tier_color = verdict.color
         self.setObjectName("qcVerdictCard")
         self.setStyleSheet(
-            "QFrame#qcVerdictCard { background: #1a1d26; border: 1px solid #2c3240;"
+            "QFrame#qcVerdictCard { background: #161a26; border: 1px solid #232a3d;"
             " border-radius: 12px; }"
-            "QFrame#qcVerdictCard QLabel { background: transparent; color: #e9ecf3; }"
+            "QFrame#qcVerdictCard QLabel { background: transparent; color: #edf0f8; }"
         )
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(16, 14, 16, 14)
@@ -1516,7 +1546,7 @@ class QualityVerdictCard(QtWidgets.QFrame):
         col.addWidget(verdict_lbl)
         sub = QtWidgets.QLabel("Overall quality")
         sub.setStyleSheet(
-            "color: #aab4c5; font-size: 8.8pt; letter-spacing: 0.5px; text-transform: uppercase;"
+            "color: #a9b3c9; font-size: 8.8pt; letter-spacing: 0.5px; text-transform: uppercase;"
         )
         col.addWidget(sub)
         head_lay.addLayout(col, 1)
@@ -1541,11 +1571,11 @@ class QualityVerdictCard(QtWidgets.QFrame):
         note_lay.addWidget(note_title)
         note_why = QtWidgets.QLabel(verdict.why)
         note_why.setWordWrap(True)
-        note_why.setStyleSheet("color: #eef1f7; font-size: 9.0pt;")
+        note_why.setStyleSheet("color: #edf0f8; font-size: 9.0pt;")
         note_lay.addWidget(note_why)
         note_counts = QtWidgets.QLabel(verdict.counts)
         note_counts.setWordWrap(True)
-        note_counts.setStyleSheet("color: #98a3b6; font-size: 8.1pt;")
+        note_counts.setStyleSheet("color: #8f99b3; font-size: 8.1pt;")
         note_lay.addWidget(note_counts)
         outer.addWidget(note)
 
@@ -1554,7 +1584,7 @@ class QualityVerdictCard(QtWidgets.QFrame):
         if rows:
             crit_header = QtWidgets.QLabel("The checks, one by one")
             crit_header.setStyleSheet(
-                "color: #aab4c5; font-size: 8.7pt; letter-spacing: 0.5px;"
+                "color: #a9b3c9; font-size: 8.7pt; letter-spacing: 0.5px;"
                 " text-transform: uppercase; padding-top: 2px;"
             )
             outer.addWidget(crit_header)
@@ -1566,7 +1596,7 @@ class QualityVerdictCard(QtWidgets.QFrame):
             if last_was_critical is True and not is_critical:
                 sep_label = QtWidgets.QLabel("Advisory (does not set the grade)")
                 sep_label.setStyleSheet(
-                    "color: #6f7a8e; font-size: 8.0pt; letter-spacing: 0.4px;"
+                    "color: #707b93; font-size: 8.0pt; letter-spacing: 0.4px;"
                     " text-transform: uppercase; padding-top: 6px;"
                 )
                 outer.addWidget(sep_label)
@@ -1583,16 +1613,16 @@ class QualityVerdictCard(QtWidgets.QFrame):
             head_row.setSpacing(6)
 
             crit_chip_html = (
-                "  <span style='color:#aab4c5; font-size:7.5pt;'>critical</span>"
+                "  <span style='color:#a9b3c9; font-size:7.5pt;'>critical</span>"
                 if is_critical else
-                "  <span style='color:#6f7a8e; font-size:7.5pt;'>advisory</span>"
+                "  <span style='color:#707b93; font-size:7.5pt;'>advisory</span>"
             )
             name_lbl = QtWidgets.QLabel(f"{name}{crit_chip_html}")
             name_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
-            name_lbl.setStyleSheet("color: #e9ecf3; font-size: 9.2pt; font-weight: 700;")
+            name_lbl.setStyleSheet("color: #edf0f8; font-size: 9.2pt; font-weight: 700;")
             head_row.addWidget(name_lbl, 1)
 
-            tier_color_chip = _QC_TIER_BADGE_COLORS.get(tier or "", "#6f7a8e")
+            tier_color_chip = _QC_TIER_BADGE_COLORS.get(tier or "", "#707b93")
             tier_chip = QtWidgets.QLabel(tier or "-")
             tier_chip.setStyleSheet(
                 f"color: {tier_color_chip}; background: {_qc_tint(tier_color_chip, 13)};"
@@ -1609,14 +1639,14 @@ class QualityVerdictCard(QtWidgets.QFrame):
             bar.setTextVisible(False)
             bar.setFixedHeight(5)
             bar.setStyleSheet(
-                "QProgressBar { border: 0; background: #2c3240; border-radius: 2px; margin: 0; }"
+                "QProgressBar { border: 0; background: #232a3d; border-radius: 2px; margin: 0; }"
                 f"QProgressBar::chunk {{ background: {tier_color_chip}; border-radius: 2px; }}"
             )
             mlay.addWidget(bar)
 
             why_lbl = QtWidgets.QLabel(why)
             why_lbl.setWordWrap(True)
-            why_lbl.setStyleSheet("color: #aab4c5; font-size: 8.4pt;")
+            why_lbl.setStyleSheet("color: #a9b3c9; font-size: 8.4pt;")
             mlay.addWidget(why_lbl)
             outer.addWidget(metric_row)
 
@@ -1665,11 +1695,11 @@ class QcRecommendationCard(QtWidgets.QFrame):
 
         headline = QtWidgets.QLabel(verdict.headline)
         headline.setWordWrap(True)
-        headline.setStyleSheet("color: #eef1f7; font-size: 9.2pt; font-weight: 600;")
+        headline.setStyleSheet("color: #edf0f8; font-size: 9.2pt; font-weight: 600;")
         lay.addWidget(headline)
 
         for text in verdict.actions:
-            lay.addWidget(self._bullet_row("•", text, "#cfd7e5", lead_width=12))
+            lay.addWidget(self._bullet_row("•", text, "#ccd4e4", lead_width=12))
 
         # Concrete spans to cut, with the exact seconds to type into
         # Advanced Options -> Cut out regions.
@@ -1682,7 +1712,7 @@ class QcRecommendationCard(QtWidgets.QFrame):
 
             sub = QtWidgets.QLabel("Parts of the recording to cut")
             sub.setStyleSheet(
-                "color: #aab4c5; font-size: 8.3pt; letter-spacing: 0.5px;"
+                "color: #a9b3c9; font-size: 8.3pt; letter-spacing: 0.5px;"
                 " text-transform: uppercase; padding-top: 4px;"
             )
             lay.addWidget(sub)
@@ -1692,7 +1722,7 @@ class QcRecommendationCard(QtWidgets.QFrame):
                 lay.addWidget(self._bullet_row(
                     span,
                     f"{seg['label']} - {seg['detail']}",
-                    "#cfd7e5",
+                    "#ccd4e4",
                     lead_width=92,
                     lead_color=_QC_REC_GREEN,
                     lead_bold=True,
@@ -1702,7 +1732,7 @@ class QcRecommendationCard(QtWidgets.QFrame):
             if hidden > 0:
                 more = QtWidgets.QLabel(f"... and {hidden} shorter span(s) not listed.")
                 more.setWordWrap(True)
-                more.setStyleSheet("color: #8d97a9; font-size: 8.1pt;")
+                more.setStyleSheet("color: #8f99b3; font-size: 8.1pt;")
                 lay.addWidget(more)
 
         lay.addStretch(1)
@@ -1714,7 +1744,7 @@ class QcRecommendationCard(QtWidgets.QFrame):
         color: str,
         *,
         lead_width: int = 12,
-        lead_color: str = "#8d97a9",
+        lead_color: str = "#8f99b3",
         lead_bold: bool = False,
     ) -> QtWidgets.QWidget:
         """One hanging-indent line: fixed-width lead (bullet or time span) + text."""
@@ -1754,13 +1784,24 @@ class QcDialog(QtWidgets.QDialog):
         self.plot_corr = pg.PlotWidget(title="Motion/reference coupling (dF/F)")
         self.plot_zdist = pg.PlotWidget(title="Corrected output distribution (z-score, secondary)")
         self.plot_roll = pg.PlotWidget(title="Rolling motion coupling (dF/F r)")
+        from styles import PLOT_THEME
+        plot_theme = PLOT_THEME["dark"]  # QC cards are dark in both app themes
         for w in (self.plot_z, self.plot_noise, self.plot_corr, self.plot_zdist, self.plot_roll):
-            w.showGrid(x=True, y=True, alpha=0.25)
+            w.setBackground(plot_theme["bg"])
+            w.showGrid(x=True, y=True, alpha=plot_theme["grid_alpha"])
             w.showAxis("top", False)
             w.showAxis("right", False)
+            try:
+                item = w.getPlotItem()
+                if item.titleLabel is not None:
+                    item.titleLabel.setText(item.titleLabel.text, color=plot_theme["title"])
+            except Exception:
+                pass
             for axis_name in ("left", "bottom"):
                 axis = w.getAxis(axis_name)
                 try:
+                    axis.setPen(pg.mkPen(plot_theme["axis"]))
+                    axis.setTextPen(pg.mkPen(plot_theme["text"]))
                     axis.enableAutoSIPrefix(False)
                 except Exception:
                     pass
@@ -2356,6 +2397,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_panel_config_json_into_settings()
 
         self._build_ui()
+        # _build_ui styled everything for dark; _apply_app_theme uses this to
+        # skip a full (multi-second) restyle when the saved theme is also dark.
+        self._app_theme_applied = "dark"
         self._restore_settings()
         self._panel_layout_persistence_ready = True
         self._reset_pre_history_snapshot()
@@ -2382,8 +2426,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_ui(self) -> None:
         self.setStyleSheet(app_qss(self._app_theme_mode))
 
+        # Branded app bar above the workspace: mark + name, clickable workflow
+        # steps (they replace the plain tab strip), project chip, help.
         self.tabs = QtWidgets.QTabWidget()
-        self.setCentralWidget(self.tabs)
+        self.tabs.tabBar().hide()
+        self.top_bar = TopAppBar()
+        self.top_bar.stepClicked.connect(self.tabs.setCurrentIndex)
+        self.tabs.currentChanged.connect(self.top_bar.set_active_step)
+        self.top_bar.helpRequested.connect(lambda: self._show_tutorial_again(automatic=False))
+        self.top_bar.preferencesRequested.connect(self._open_preferences)
+        central = QtWidgets.QWidget()
+        central_layout = QtWidgets.QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.top_bar)
+        central_layout.addWidget(self.tabs, 1)
+        self.setCentralWidget(central)
         self._status_bar = QtWidgets.QStatusBar(self)
         self.setStatusBar(self._status_bar)
         self.btn_app_theme = QtWidgets.QPushButton("Theme")
@@ -2617,10 +2675,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_workflow_load.setText("File")
         self.btn_workflow_qc.setText("Run QC")
         self.btn_workflow_export.setText("Run Export")
+
+        def _toolbar_separator() -> QtWidgets.QFrame:
+            sep = QtWidgets.QFrame()
+            sep.setObjectName("toolbarSeparator")
+            return sep
+
+        # Grouped: file source | analysis actions | view configuration.
         transport_layout.addWidget(self.btn_workflow_load)
+        transport_layout.addWidget(_toolbar_separator())
         transport_layout.addWidget(self.btn_workflow_qc)
         transport_layout.addWidget(self.btn_workflow_export)
-        transport_layout.addSpacing(8)
+        transport_layout.addWidget(_toolbar_separator())
         transport_layout.addWidget(self.btn_plot_style)
         transport_layout.addWidget(self.btn_sensor)
         transport_layout.addStretch(1)
@@ -2824,9 +2890,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_dirty_title = attach_dirty_title(
             self, "Pyber - Fiber Photometry", _is_dirty,
         )
+
+        def _refresh_top_bar_chip() -> None:
+            try:
+                path = str(getattr(self, "_current_path", "") or "")
+                name = os.path.basename(path) if path else "No recording loaded"
+                self.top_bar.set_project_name(name, dirty=_is_dirty())
+            except Exception:
+                pass
+
+        _refresh_top_bar_chip()
         self._dirty_poll = QtCore.QTimer(self)
         self._dirty_poll.setInterval(800)
         self._dirty_poll.timeout.connect(self._refresh_dirty_title)
+        self._dirty_poll.timeout.connect(_refresh_top_bar_chip)
         self._dirty_poll.start()
 
         install_close_confirmation(
@@ -3039,8 +3116,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     btn.clicked.connect(lambda _checked=False, section_dock=dock: self._hide_pre_dockarea_dock(section_dock))
                     btn.setProperty("_pyber_hide_wired", True)
                 light = str(getattr(self, "_app_theme_mode", "dark")).lower() == "light"
-                fg = "#4a5568" if light else "#f3f5f8"
-                fg_hover = "#172033" if light else "#ffffff"
+                fg = "#506078" if light else "#f7f9fd"
+                fg_hover = "#1b2434" if light else "#ffffff"
                 btn.setStyleSheet(
                     "QToolButton {"
                     " background: transparent;"
@@ -6868,9 +6945,19 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+        # Re-theming repolishes the whole widget tree (seconds on slow
+        # machines); when the requested mode is already active, only the
+        # cheap menu-state updates above are needed.
+        if mode == getattr(self, "_app_theme_applied", None):
+            if persist:
+                self._save_settings()
+            return
+        self._app_theme_applied = mode
+
         try:
             apply_app_palette(QtWidgets.QApplication.instance(), mode)
             self.setStyleSheet(app_qss(mode))
+            install_native_titlebar(QtWidgets.QApplication.instance(), mode)
         except Exception:
             pass
         self._refresh_pre_rail_icons()
@@ -6893,7 +6980,7 @@ class MainWindow(QtWidgets.QMainWindow):
             from styles import _make_icon
         except Exception:
             return
-        icon_color = "#334155" if self._app_theme_mode == "light" else "#cdd6f4"
+        icon_color = "#3b4763" if self._app_theme_mode == "light" else "#c7d0e6"
         painters = getattr(self, "_pre_rail_icon_painters", {}) or {}
         for key, painter in painters.items():
             btn = getattr(self, "_section_buttons", {}).get(key)
@@ -8983,26 +9070,57 @@ def _install_global_excepthook() -> None:
     sys.excepthook = _hook
 
 
+def _build_branded_splash() -> Optional[QtGui.QPixmap]:
+    """Delegates to splash_screen so the same artwork serves both the early
+    pre-import splash and this late fallback path."""
+    try:
+        from splash_screen import build_branded_splash
+
+        return build_branded_splash()
+    except Exception:
+        return None
+
+
+def _start_background_warmup() -> None:
+    """Import heavy optional dependencies after the UI is idle.
+
+    sklearn, pybaselines, pandas and matplotlib are no longer imported at
+    startup; warming them on a daemon thread means the first Lasso fit,
+    baseline estimation, EthoVision load or colormap menu doesn't stall.
+    """
+    import threading
+
+    def _worker() -> None:
+        for name in ("pybaselines", "sklearn.linear_model", "pandas", "matplotlib"):
+            try:
+                __import__(name)
+            except Exception:
+                pass
+
+    threading.Thread(target=_worker, name="pyber-warmup", daemon=True).start()
+
+
 def main() -> None:
     pg.setConfigOptions(antialias=False)
     smoke_test = str(os.environ.get("PYBER_SMOKE_TEST", "")).strip().lower() in {"1", "true", "yes", "on"}
     _set_windows_app_user_model_id()
-    app = QtWidgets.QApplication([])
+    # The early-splash path (module top) may already own the QApplication.
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     _install_global_excepthook()
     apply_app_palette(app, "dark")
+    install_native_titlebar(app, "dark")
     spinbox_scrubber = install_spinbox_scrubbers(app)
     _set_qt_application_icon(app)
-    splash = None
-    if not smoke_test:
+    splash = _STARTUP_SPLASH
+    if splash is None and not smoke_test:
         try:
-            icon_path = _pyber_splash_path()
-            if os.path.isfile(icon_path):
-                pix = QtGui.QPixmap(icon_path)
-                if not pix.isNull():
-                    splash = QtWidgets.QSplashScreen(pix, QtCore.Qt.WindowType.WindowStaysOnTopHint)
-                    _set_qt_window_icon(splash)
-                    splash.show()
-                    app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+            pix = _build_branded_splash()
+            if pix is not None and not pix.isNull():
+                splash = QtWidgets.QSplashScreen(pix, QtCore.Qt.WindowType.WindowStaysOnTopHint)
+                splash.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+                _set_qt_window_icon(splash)
+                splash.show()
+                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
         except Exception:
             splash = None
     w = MainWindow()
@@ -9044,6 +9162,7 @@ def main() -> None:
     _force_windows_taskbar_icon(w)
     if splash is not None:
         splash.finish(w)
+    QtCore.QTimer.singleShot(1500, _start_background_warmup)
     app.exec()
 
 

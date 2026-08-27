@@ -51,7 +51,9 @@ def attach_right_axis(plot_widget: pg.PlotWidget) -> pg.ViewBox:
 
 def optimize_plot_widget(pw: pg.PlotWidget) -> None:
     pi = pw.getPlotItem()
-    pi.setDownsampling(mode="peak")
+    # auto=True is required: passing only mode= configures the downsampler
+    # without ever switching it on, so full-resolution paths get rendered.
+    pi.setDownsampling(auto=True, mode="peak")
     pi.setClipToView(True)
     pi.setMenuEnabled(False)
     pw.setAntialiasing(False)
@@ -652,7 +654,7 @@ class PlotDashboard(QtWidgets.QFrame):
         self.plot_raw.addItem(self.region_selector)
 
         self.log_label = QtWidgets.QLabel("")
-        self.log_label.setStyleSheet("color: #AAB4C4; font-size: 8.5pt; padding: 2px 6px;")
+        self.log_label.setStyleSheet("color: #a9b3c9; font-size: 8.5pt; padding: 2px 6px;")
         self.log_label.setFixedHeight(18)
         layout.addWidget(self.log_label)
 

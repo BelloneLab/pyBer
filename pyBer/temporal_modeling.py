@@ -1102,124 +1102,145 @@ class TrialFLMM:
 
 _TEMPORAL_QSS = """
 TemporalModelingWidget {
-    background: #111821;
-    color: #d7e0ee;
+    background: #161a26;
+    color: #edf0f8;
 }
 QFrame#temporalHeader {
-    background: #101b2b;
-    border: 1px solid #263a52;
-    border-radius: 8px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1f2e, stop:1 #12151f);
+    border: 1px solid #232a3d;
+    border-radius: 10px;
 }
 QFrame#temporalNav {
-    background: #0f1a28;
-    border: 1px solid #263a52;
-    border-radius: 8px;
+    background: #10131c;
+    border: 1px solid #232a3d;
+    border-radius: 10px;
 }
 QFrame#temporalControls {
-    background: #111d2c;
-    border: 1px solid #263a52;
-    border-radius: 8px;
+    background: #161a26;
+    border: 1px solid #232a3d;
+    border-radius: 10px;
 }
 QFrame#temporalWorkspace {
-    background: #111821;
-    border: 1px solid #263a52;
-    border-radius: 8px;
+    background: #161a26;
+    border: 1px solid #232a3d;
+    border-radius: 10px;
 }
 QFrame#temporalScopeBar {
-    background: #101b2b;
-    border: 1px solid #263a52;
-    border-radius: 8px;
+    background: #10131c;
+    border: 1px solid #232a3d;
+    border-radius: 10px;
 }
 QLabel {
-    color: #d7e0ee;
+    color: #edf0f8;
 }
 QLabel[class="muted"] {
-    color: #9bacc3;
+    color: #a9b3c9;
 }
 QLabel[class="title"] {
-    color: #eef4ff;
+    color: #f7f9fd;
+    font-family: "Segoe UI Variable Display", "Segoe UI Semibold", "Segoe UI", sans-serif;
     font-size: 15pt;
     font-weight: 800;
 }
 QGroupBox {
-    color: #d7e0ee;
+    color: #edf0f8;
     font-weight: 700;
-    border: 1px solid #29405c;
-    border-radius: 7px;
+    border: 1px solid #232a3d;
+    border-radius: 10px;
     margin-top: 10px;
     padding: 14px 10px 10px 10px;
-    background: #142033;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1c2132, stop:1 #191e2c);
 }
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
     left: 10px;
     padding: 0 6px;
-    color: #dce8f8;
+    color: #8f99b3;
+    font-size: 8.2pt;
+    font-weight: 800;
+    letter-spacing: 1.1px;
+    text-transform: uppercase;
 }
 QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {
-    color: #e9f0fb;
-    background: #0f1724;
-    border: 1px solid #314963;
-    border-radius: 6px;
+    color: #edf0f8;
+    background: #141824;
+    border: 1px solid #333c56;
+    border-radius: 7px;
     padding: 5px 8px;
     min-height: 24px;
+    selection-background-color: #7c5cff;
+    selection-color: #ffffff;
+}
+QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus {
+    border: 1px solid #7c5cff;
 }
 QComboBox::drop-down {
     border: 0;
     width: 24px;
 }
 QProgressBar {
-    color: #e9f0fb;
-    background: #0f1724;
-    border: 1px solid #314963;
-    border-radius: 6px;
+    color: #edf0f8;
+    background: #141824;
+    border: 1px solid #232a3d;
+    border-radius: 7px;
     min-height: 18px;
     text-align: center;
 }
 QProgressBar::chunk {
-    background: #2d8cff;
-    border-radius: 5px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7c5cff, stop:1 #9d7bff);
+    border-radius: 6px;
 }
 QListWidget, QTextEdit {
-    color: #e6edf8;
-    background: #0d1420;
-    border: 1px solid #314963;
-    border-radius: 6px;
-    selection-background-color: #2d78c4;
+    color: #edf0f8;
+    background: #141824;
+    border: 1px solid #232a3d;
+    border-radius: 8px;
+    selection-background-color: #372f66;
+    selection-color: #ffffff;
 }
 QPushButton {
-    color: #eef4ff;
-    background: #17263a;
-    border: 1px solid #34506c;
-    border-radius: 7px;
+    color: #edf0f8;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #262c46, stop:1 #222840);
+    border: 1px solid #333c56;
+    border-radius: 8px;
     padding: 6px 12px;
     font-weight: 700;
 }
 QPushButton:hover {
-    background: #203450;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2d3450, stop:1 #293049);
+    border: 1px solid #465073;
 }
 QPushButton[class="primary"] {
-    background: #2d8cff;
-    border: 1px solid #4ba0ff;
+    color: #ffffff;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #8a63ff, stop:1 #6f4df2);
+    border: 1px solid #8f74ff;
+}
+QPushButton[class="primary"]:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #9a77ff, stop:1 #7d5cff);
+    border: 1px solid #a68cff;
 }
 QToolButton {
-    color: #cdd8e8;
-    background: #101b2b;
-    border: 1px solid #29405c;
-    border-radius: 8px;
+    color: #ccd4e4;
+    background: #1d2333;
+    border: 1px solid #232a3d;
+    border-radius: 9px;
     padding: 9px 8px;
     font-weight: 700;
 }
+QToolButton:hover {
+    background: #293049;
+    color: #ffffff;
+}
 QToolButton:checked {
     color: #ffffff;
-    background: #1f6db1;
-    border: 1px solid #35a4e8;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #43397e, stop:1 #372f66);
+    border: 1px solid #7c5cff;
 }
 QToolButton#paramHelpButton {
-    color: #9bd8ff;
-    background: #101b2b;
-    border: 1px solid #38597a;
+    color: #a9b3c9;
+    background: #1d2333;
+    border: 1px solid #333c56;
     border-radius: 9px;
     padding: 0;
     min-width: 18px;
@@ -1230,139 +1251,144 @@ QToolButton#paramHelpButton {
 }
 QToolButton#paramHelpButton:hover {
     color: #ffffff;
-    background: #1f6db1;
-    border: 1px solid #35a4e8;
+    background: #293049;
+    border: 1px solid #7c5cff;
 }
 QTabWidget::pane {
-    border: 1px solid #263a52;
-    border-radius: 6px;
+    border: 1px solid #232a3d;
+    border-radius: 8px;
     top: -1px;
 }
 QTabBar::tab {
-    color: #b9c8dc;
-    background: #152237;
-    border: 1px solid #263a52;
+    color: #a9b3c9;
+    background: #1d2333;
+    border: 1px solid #232a3d;
     padding: 7px 14px;
-    border-top-left-radius: 6px;
-    border-top-right-radius: 6px;
+    border-top-left-radius: 7px;
+    border-top-right-radius: 7px;
+}
+QTabBar::tab:hover:!selected {
+    color: #ffffff;
+    background: #293049;
 }
 QTabBar::tab:selected {
     color: #ffffff;
-    background: #1f6db1;
-    border-color: #35a4e8;
+    background: #372f66;
+    border-color: #7c5cff;
 }
 """
 _SECTION_QSS = _TEMPORAL_QSS
 
 _TEMPORAL_QSS_LIGHT = _TEMPORAL_QSS + """
 TemporalModelingWidget {
-    background: #f4f6fb;
-    color: #1f2a37;
+    background: #f2f4f9;
+    color: #1b2434;
 }
 QFrame#temporalHeader {
-    background: #eef4ff;
-    border: 1px solid #bfd7ff;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffffff, stop:1 #eef1f7);
+    border: 1px solid #d9dfec;
 }
 QFrame#temporalNav,
 QFrame#temporalControls,
 QFrame#temporalWorkspace,
 QFrame#temporalScopeBar {
     background: #ffffff;
-    border: 1px solid #d6dde9;
+    border: 1px solid #d9dfec;
 }
 QLabel {
-    color: #1f2a37;
+    color: #1b2434;
 }
 QLabel[class="muted"] {
-    color: #4c5a6f;
+    color: #506078;
 }
 QLabel[class="title"] {
-    color: #172033;
+    color: #141b28;
 }
 QGroupBox {
-    color: #1f2a37;
-    border: 1px solid #d6dde9;
+    color: #1b2434;
+    border: 1px solid #dde3ee;
     background: #ffffff;
 }
 QGroupBox::title {
-    background: #f4f6fb;
-    color: #334155;
+    background: #eef1f7;
+    color: #5d6a82;
 }
 QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {
-    color: #1f2a37;
+    color: #1b2434;
     background: #ffffff;
-    border: 1px solid #c2ccda;
-    selection-background-color: #2563eb;
+    border: 1px solid #c3ccdd;
+    selection-background-color: #6d4de0;
     selection-color: #ffffff;
 }
 QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus {
-    border: 1px solid #2563eb;
+    border: 1px solid #6d4de0;
 }
 QComboBox QAbstractItemView {
     background: #ffffff;
-    color: #1f2a37;
-    border: 1px solid #c2ccda;
-    selection-background-color: #2563eb;
-    selection-color: #ffffff;
+    color: #1b2434;
+    border: 1px solid #c3ccdd;
+    selection-background-color: #e2dbf8;
+    selection-color: #2a1f5e;
 }
 QProgressBar {
-    color: #1f2a37;
+    color: #1b2434;
     background: #ffffff;
-    border: 1px solid #c2ccda;
+    border: 1px solid #c3ccdd;
 }
 QProgressBar::chunk {
-    background: #2563eb;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6d4de0, stop:1 #8d70f2);
 }
 QListWidget, QTextEdit {
-    color: #1f2a37;
+    color: #1b2434;
     background: #ffffff;
-    border: 1px solid #c2ccda;
-    selection-background-color: #2563eb;
-    selection-color: #ffffff;
+    border: 1px solid #dde3ee;
+    selection-background-color: #e2dbf8;
+    selection-color: #2a1f5e;
 }
 QListWidget::item:hover {
-    background: #dbeafe;
-    color: #172033;
+    background: #eff2f9;
+    color: #1b2434;
 }
 QListWidget::item:selected {
-    background: #2563eb;
-    color: #ffffff;
+    background: #e2dbf8;
+    color: #2a1f5e;
 }
 QPushButton {
-    color: #1f2a37;
+    color: #1b2434;
     background: #ffffff;
-    border: 1px solid #c2ccda;
+    border: 1px solid #c3ccdd;
 }
 QPushButton:hover {
-    background: #eff6ff;
-    border: 1px solid #93c5fd;
+    background: #f3f1fc;
+    border: 1px solid #c4b4f0;
 }
 QPushButton[class="primary"] {
     color: #ffffff;
-    background: #2563eb;
-    border: 1px solid #1d4ed8;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #7a5ae8, stop:1 #5f41d6);
+    border: 1px solid #8a6cee;
 }
 QPushButton[class="primary"]:hover {
-    background: #1d4ed8;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #8d70f2, stop:1 #6d4de0);
 }
 QToolButton {
-    color: #334155;
+    color: #3c4a60;
     background: #ffffff;
-    border: 1px solid #c2ccda;
+    border: 1px solid #c3ccdd;
 }
 QToolButton:hover {
-    background: #dbeafe;
-    border: 1px solid #93c5fd;
+    background: #f3f1fc;
+    border: 1px solid #c4b4f0;
+    color: #1b2434;
 }
 QToolButton:checked {
     color: #ffffff;
-    background: #2563eb;
-    border: 1px solid #1d4ed8;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #7a5ae8, stop:1 #5f41d6);
+    border: 1px solid #8a6cee;
 }
 QToolButton#paramHelpButton {
-    color: #1d4ed8;
-    background: #eef6ff;
-    border: 1px solid #93c5fd;
+    color: #5f41d6;
+    background: #f1edfd;
+    border: 1px solid #c4b4f0;
     border-radius: 9px;
     padding: 0;
     min-width: 18px;
@@ -1373,35 +1399,35 @@ QToolButton#paramHelpButton {
 }
 QToolButton#paramHelpButton:hover {
     color: #ffffff;
-    background: #2563eb;
-    border: 1px solid #1d4ed8;
+    background: #6d4de0;
+    border: 1px solid #5f41d6;
 }
 QTabWidget::pane {
-    border: 1px solid #d6dde9;
+    border: 1px solid #d9dfec;
     background: #ffffff;
 }
 QTabBar::tab {
-    color: #4a5568;
-    background: #eef2f8;
-    border: 1px solid #d6dde9;
+    color: #506078;
+    background: #eef1f7;
+    border: 1px solid #d9dfec;
 }
 QTabBar::tab:hover:!selected {
-    color: #172033;
-    background: #dbeafe;
-    border-color: #93c5fd;
+    color: #1b2434;
+    background: #f3f1fc;
+    border-color: #c4b4f0;
 }
 QTabBar::tab:selected {
     color: #ffffff;
-    background: #2563eb;
-    border-color: #1d4ed8;
+    background: #6d4de0;
+    border-color: #5f41d6;
 }
 QCheckBox::indicator {
-    border: 1px solid #c2ccda;
+    border: 1px solid #c3ccdd;
     background: #ffffff;
 }
 QCheckBox::indicator:checked {
-    background: #2563eb;
-    border: 1px solid #1d4ed8;
+    background: #6d4de0;
+    border: 1px solid #5f41d6;
 }
 """
 
@@ -1683,7 +1709,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         self.txt_summary = QtWidgets.QTextEdit()
         self.txt_summary.setReadOnly(True)
         self.txt_summary.setMaximumHeight(140)
-        self.txt_summary.setStyleSheet("background: #1b2029; border: 1px solid #3a4050; border-radius: 4px;")
+        self.txt_summary.setStyleSheet("background: #141824; border: 1px solid #333c56; border-radius: 4px;")
         rl.addWidget(self.txt_summary)
         root.addWidget(self.grp_results)
 
@@ -1728,7 +1754,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         badge.setFixedSize(34, 34)
         badge.setStyleSheet(
-            "background: #2d8cff; color: white; border-radius: 17px; "
+            "background: #7c5cff; color: white; border-radius: 17px; "
             "font-weight: 800; font-size: 14pt;"
         )
         h.addWidget(badge)
@@ -2589,13 +2615,15 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
     def _style_plot(self, plot: pg.PlotWidget, min_height: int = 360) -> None:
         plot.setMinimumHeight(int(min_height))
+        from styles import PLOT_THEME
         light = self._app_theme_mode == "light"
-        bg = "#fbfcfe" if light else "#05080d"
-        axis_color = "#334155" if light else "#516179"
-        text_color = "#1f2a37" if light else "#c5d2e3"
-        title_color = "#172033" if light else "#d7e0ee"
+        theme = PLOT_THEME["light" if light else "dark"]
+        bg = tuple(theme["bg"])
+        axis_color = tuple(theme["axis"])
+        text_color = tuple(theme["text"])
+        title_color = theme["title"]
         plot.setBackground(bg)
-        plot.showGrid(x=True, y=True, alpha=0.26 if light else 0.22)
+        plot.showGrid(x=True, y=True, alpha=theme["grid_alpha"])
         pi = plot.getPlotItem()
         if getattr(pi, "legend", None) is None:
             plot.addLegend(offset=(12, 12))
@@ -5180,7 +5208,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
     @staticmethod
     def _html_p_text(value: float) -> str:
         if not np.isfinite(value):
-            return "<span style='color:#6f7a8e;'>n/a</span>"
+            return "<span style='color:#707b93;'>n/a</span>"
         if value < 0.0001:
             return "<b>&lt; 1e-4</b>"
         return f"{value:.3g}"
@@ -5188,8 +5216,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
     @staticmethod
     def _html_q_text(value: float, significant: bool) -> str:
         if not np.isfinite(value):
-            return "<span style='color:#6f7a8e;'>n/a</span>"
-        color = "#5dd39e" if significant else "#cfd8e6"
+            return "<span style='color:#707b93;'>n/a</span>"
+        color = "#43d9a3" if significant else "#ccd4e4"
         weight = "bold" if significant else "normal"
         return f"<span style='color:{color}; font-weight:{weight};'>{value:.3g}</span>"
 
@@ -5230,24 +5258,24 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         # ---- Verdict card -------------------------------------------------
         tested_rows = [r for r in importance_rows if r.get("significance_status") == "ok"]
         sig_rows = [r for r in tested_rows if r.get("significant", False)]
-        verdict_color = "#5dd39e" if sig_rows else "#aab4c5"
-        verdict_bg = "#1c2e22" if sig_rows else "#1f242e"
-        verdict_border = "#2f7a4a" if sig_rows else "#3a4050"
+        verdict_color = "#43d9a3" if sig_rows else "#a9b3c9"
+        verdict_bg = "#142a24" if sig_rows else "#1a1f2e"
+        verdict_border = "#2a6b51" if sig_rows else "#333c56"
         if tested_rows:
             verdict_main = (
                 f"<b style='font-size:13pt; color:{verdict_color};'>"
                 f"{len(sig_rows)}/{len(tested_rows)}</b>"
-                f" <span style='color:#cfd8e6;'>predictors significant after FDR (q &lt; 0.05)</span>"
+                f" <span style='color:#ccd4e4;'>predictors significant after FDR (q &lt; 0.05)</span>"
             )
         else:
-            verdict_main = "<b style='color:#aab4c5;'>Significance untested</b> "\
-                           "<span style='color:#aab4c5;'>(no coefficient CIs available)</span>"
+            verdict_main = "<b style='color:#a9b3c9;'>Significance untested</b> "\
+                           "<span style='color:#a9b3c9;'>(no coefficient CIs available)</span>"
         verdict_html = (
             f"<table width='100%' cellpadding='0' cellspacing='0'><tr><td "
             f"style='background:{verdict_bg}; border:1px solid {verdict_border};"
             f" padding:10px 14px;'>"
             f"<div>{verdict_main}</div>"
-            f"<div style='color:#aab4c5; font-size:8.6pt; margin-top:4px;'>"
+            f"<div style='color:#a9b3c9; font-size:8.6pt; margin-top:4px;'>"
             f"Method: conservative z-test on coefficient CI widths &middot; "
             f"Bonferroni across time bins &middot; Benjamini-Hochberg FDR across predictors."
             f"</div>"
@@ -5274,26 +5302,26 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         if np.isfinite(aic_val):
             meta_bits.append(f"AIC = {aic_val:.5g}")
         meta_html = (
-            f"<div style='color:#aab4c5; font-size:8.7pt; padding:6px 0 2px 0;'>"
+            f"<div style='color:#a9b3c9; font-size:8.7pt; padding:6px 0 2px 0;'>"
             f"{' &middot; '.join(meta_bits)}"
             f"</div>"
-            f"<div style='color:#cfd8e6; font-size:8.8pt; padding:0 0 6px 0;'>"
-            f"<span style='color:#6f7a8e;'>formula:</span> {esc(readable_formula)}"
+            f"<div style='color:#ccd4e4; font-size:8.8pt; padding:0 0 6px 0;'>"
+            f"<span style='color:#707b93;'>formula:</span> {esc(readable_formula)}"
             f"</div>"
         )
         warning_bits: List[str] = []
         if use_fixed_fallback or fallback_grouping:
-            warning_bits.append(self._html_badge("SINGLE-ANIMAL MODE", "#f5c542", "#2e2918"))
+            warning_bits.append(self._html_badge("SINGLE-ANIMAL MODE", "#f6c453", "#2b2517"))
             warning_bits.append(
-                "<span style='color:#f5c542;'>Functional regression fitted at the trial level "
+                "<span style='color:#f6c453;'>Functional regression fitted at the trial level "
                 "(no between-subject random effects). Coefficients describe within-recording "
                 "associations; do not generalize to population-level inference without a "
                 "multi-animal cohort.</span>"
             )
         if stats.get("variance_unavailable"):
-            warning_bits.append(self._html_badge("NO CI", "#f5c542", "#2e2918"))
+            warning_bits.append(self._html_badge("NO CI", "#f6c453", "#2b2517"))
             warning_bits.append(
-                "<span style='color:#f5c542;'>Variance inference unavailable for this fit; "
+                "<span style='color:#f6c453;'>Variance inference unavailable for this fit; "
                 "significance cannot be assessed.</span>"
             )
         if warning_bits:
@@ -5326,11 +5354,11 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 is_sig_perm = bool(row.get("significant_perm", False))
                 status = str(row.get("significance_status", "not tested") or "not tested")
                 if is_sig:
-                    badge = self._html_badge("SIG", "#5dd39e", "#1c2e22")
+                    badge = self._html_badge("SIG", "#43d9a3", "#142a24")
                 elif status != "ok":
-                    badge = self._html_badge("UNTESTED", "#aab4c5", "#1f242e")
+                    badge = self._html_badge("UNTESTED", "#a9b3c9", "#1a1f2e")
                 else:
-                    badge = self._html_badge("n.s.", "#aab4c5", "#1f242e")
+                    badge = self._html_badge("n.s.", "#a9b3c9", "#1a1f2e")
                 frac = float(row.get("significant_fraction", 0.0) or 0.0)
                 frac_text = f"{frac * 100:.1f}%" if frac else "0.0%"
 
@@ -5343,45 +5371,45 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                         p_perm_html = (
                             f"<b>&le; {1.0/max(n_perm + 1, 1):.3g}</b>"
                             if n_perm > 0 else
-                            "<span style='color:#6f7a8e;'>n/a</span>"
+                            "<span style='color:#707b93;'>n/a</span>"
                         )
                     else:
                         p_perm_html = self._html_p_text(p_perm_val)
                     q_perm_html = self._html_q_text(q_perm_val, is_sig_perm)
-                    perm_badge = (self._html_badge("SIG", "#5dd39e", "#1c2e22")
+                    perm_badge = (self._html_badge("SIG", "#43d9a3", "#142a24")
                                   if is_sig_perm else
-                                  self._html_badge("n.s.", "#aab4c5", "#1f242e"))
+                                  self._html_badge("n.s.", "#a9b3c9", "#1a1f2e"))
                     perm_cells = (
-                        f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240;"
+                        f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d;"
                         f" font-family:Consolas,monospace;'>{p_perm_html}</td>"
-                        f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240;"
+                        f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d;"
                         f" font-family:Consolas,monospace;'>{q_perm_html}</td>"
-                        f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240;'>{perm_badge}</td>"
+                        f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d;'>{perm_badge}</td>"
                     )
                 else:
                     perm_cells = ""
 
                 rows_html.append(
                     "<tr>"
-                    f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240;"
-                    f" color:{'#5dd39e' if (is_sig or is_sig_perm) else '#e9ecf3'};'>"
+                    f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d;"
+                    f" color:{'#43d9a3' if (is_sig or is_sig_perm) else '#edf0f8'};'>"
                     f"{'<b>' if (is_sig or is_sig_perm) else ''}{label}"
                     f"{'</b>' if (is_sig or is_sig_perm) else ''}"
                     f"</td>"
-                    f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240;"
+                    f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d;"
                     f" font-family:Consolas,monospace;'>{self._html_p_text(p_val)}</td>"
-                    f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240;"
+                    f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d;"
                     f" font-family:Consolas,monospace;'>{self._html_q_text(q_val, is_sig)}</td>"
-                    f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240;"
-                    f" color:#cfd8e6;'>{frac_text}</td>"
-                    f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240;'>{badge}</td>"
+                    f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d;"
+                    f" color:#ccd4e4;'>{frac_text}</td>"
+                    f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d;'>{badge}</td>"
                     + perm_cells
                     + "</tr>"
                 )
-            header_style = ("padding:6px 8px; background:#1f242e; color:#aab4c5;"
+            header_style = ("padding:6px 8px; background:#1a1f2e; color:#a9b3c9;"
                             " text-align:left; font-weight:700; font-size:8.5pt;"
                             " letter-spacing:0.4px; text-transform:uppercase;"
-                            " border-bottom:1px solid #2c3240;")
+                            " border-bottom:1px solid #232a3d;")
             perm_hdr = (
                 f"<th style='{header_style}'>p (perm)</th>"
                 f"<th style='{header_style}'>q (perm FDR)</th>"
@@ -5396,11 +5424,11 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 "the CI assumption of the conservative z-test."
             ) if has_perm else ""
             sig_html = (
-                "<h3 style='color:#aab4c5; font-size:9pt; font-weight:600;"
+                "<h3 style='color:#a9b3c9; font-size:9pt; font-weight:600;"
                 " letter-spacing:0.4px; text-transform:uppercase; margin:14px 0 6px 0;'>"
                 "Variable significance (CI-based and permutation)</h3>"
                 "<table width='100%' cellpadding='0' cellspacing='0' "
-                "style='border:1px solid #2c3240; border-radius:6px;'>"
+                "style='border:1px solid #232a3d; border-radius:6px;'>"
                 f"<tr>"
                 f"<th style='{header_style}'>Predictor</th>"
                 f"<th style='{header_style}'>p (raw)</th>"
@@ -5411,7 +5439,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 f"</tr>"
                 + "".join(rows_html)
                 + "</table>"
-                "<div style='color:#6f7a8e; font-size:8.4pt; margin:4px 0 0 0;'>"
+                "<div style='color:#707b93; font-size:8.4pt; margin:4px 0 0 0;'>"
                 "<b>p (raw) / q (FDR):</b> CI-based z-test on coefficient widths, "
                 "Bonferroni across time bins, Benjamini-Hochberg FDR across predictors."
                 f"{footer_extra}"
@@ -5442,42 +5470,42 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 label = self._html_escape(self._flmm_readable_label(name, term_labels))
                 if not np.isfinite(mean_abs) and not np.isfinite(peak_abs):
                     rows_html.append(
-                        f"<tr><td style='padding:4px 8px; border-bottom:1px solid #2c3240;'>{label}</td>"
-                        f"<td colspan='3' style='padding:4px 8px; border-bottom:1px solid #2c3240;"
-                        f" color:#aab4c5;'>not estimable</td></tr>"
+                        f"<tr><td style='padding:4px 8px; border-bottom:1px solid #232a3d;'>{label}</td>"
+                        f"<td colspan='3' style='padding:4px 8px; border-bottom:1px solid #232a3d;"
+                        f" color:#a9b3c9;'>not estimable</td></tr>"
                     )
                     continue
                 rows_html.append(
                     "<tr>"
-                    f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240; color:#e9ecf3;'>{label}</td>"
-                    f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240;"
-                    f" font-family:Consolas,monospace; color:#cfd8e6;'>"
+                    f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d; color:#edf0f8;'>{label}</td>"
+                    f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d;"
+                    f" font-family:Consolas,monospace; color:#ccd4e4;'>"
                     f"{self._fmt_stat(mean_coef, 4)}</td>"
-                    f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240;"
-                    f" font-family:Consolas,monospace; color:#cfd8e6;'>"
+                    f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d;"
+                    f" font-family:Consolas,monospace; color:#ccd4e4;'>"
                     f"{self._fmt_stat(mean_abs, 4)}</td>"
-                    f"<td style='padding:4px 8px; border-bottom:1px solid #2c3240;"
-                    f" font-family:Consolas,monospace; color:#cfd8e6;'>"
+                    f"<td style='padding:4px 8px; border-bottom:1px solid #232a3d;"
+                    f" font-family:Consolas,monospace; color:#ccd4e4;'>"
                     f"{self._fmt_stat(peak_abs, 4)}</td>"
                     "</tr>"
                 )
-            header_style = ("padding:6px 8px; background:#1f242e; color:#aab4c5;"
+            header_style = ("padding:6px 8px; background:#1a1f2e; color:#a9b3c9;"
                             " text-align:left; font-weight:700; font-size:8.5pt;"
                             " letter-spacing:0.4px; text-transform:uppercase;"
-                            " border-bottom:1px solid #2c3240;")
+                            " border-bottom:1px solid #232a3d;")
             extra_rows = ""
             if len(ordered_names) > 12:
                 extra_rows = (
                     f"<tr><td colspan='4' style='padding:4px 8px;"
-                    f" color:#6f7a8e; font-style:italic;'>"
+                    f" color:#707b93; font-style:italic;'>"
                     f"... {len(ordered_names) - 12} more coefficient curve(s)</td></tr>"
                 )
             coeff_html = (
-                "<h3 style='color:#aab4c5; font-size:9pt; font-weight:600;"
+                "<h3 style='color:#a9b3c9; font-size:9pt; font-weight:600;"
                 " letter-spacing:0.4px; text-transform:uppercase; margin:14px 0 6px 0;'>"
                 "Coefficient magnitudes</h3>"
                 "<table width='100%' cellpadding='0' cellspacing='0' "
-                "style='border:1px solid #2c3240; border-radius:6px;'>"
+                "style='border:1px solid #232a3d; border-radius:6px;'>"
                 f"<tr>"
                 f"<th style='{header_style}'>Predictor</th>"
                 f"<th style='{header_style}'>Mean coef</th>"
@@ -5491,10 +5519,10 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         # ---- Interpretation line -----------------------------------------
         interp_html = (
-            "<h3 style='color:#aab4c5; font-size:9pt; font-weight:600;"
+            "<h3 style='color:#a9b3c9; font-size:9pt; font-weight:600;"
             " letter-spacing:0.4px; text-transform:uppercase; margin:14px 0 6px 0;'>"
             "How to read this</h3>"
-            "<div style='color:#cfd8e6; font-size:9pt;'>"
+            "<div style='color:#ccd4e4; font-size:9pt;'>"
             "Each coefficient curve is the expected change in the aligned response "
             "for a +1 SD increase in that predictor. Positive coefficients mean higher "
             "predictor values are associated with a higher response at that time; "
@@ -5507,33 +5535,33 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         if missing_terms:
             readable_missing = [self._html_escape(term_labels.get(t, t)) for t in missing_terms]
             notes_bits.append(
-                f"<div style='color:#cfd8e6; font-size:8.6pt; padding:3px 0;'>"
-                f"<b style='color:#aab4c5;'>Auto formula used:</b> {', '.join(readable_missing)}"
+                f"<div style='color:#ccd4e4; font-size:8.6pt; padding:3px 0;'>"
+                f"<b style='color:#a9b3c9;'>Auto formula used:</b> {', '.join(readable_missing)}"
                 f"</div>"
             )
         if dropped_terms:
             notes_bits.append(
-                f"<div style='color:#cfd8e6; font-size:8.6pt; padding:3px 0;'>"
-                f"<b style='color:#aab4c5;'>Dropped covariates:</b> "
+                f"<div style='color:#ccd4e4; font-size:8.6pt; padding:3px 0;'>"
+                f"<b style='color:#a9b3c9;'>Dropped covariates:</b> "
                 f"{self._html_escape(', '.join(dropped_terms))}"
                 f"</div>"
             )
         for note in stats.get("fit_notes", []) or []:
             notes_bits.append(
-                f"<div style='color:#cfd8e6; font-size:8.6pt; padding:3px 0;'>"
-                f"<b style='color:#aab4c5;'>Fit note:</b> {self._html_escape(note)}"
+                f"<div style='color:#ccd4e4; font-size:8.6pt; padding:3px 0;'>"
+                f"<b style='color:#a9b3c9;'>Fit note:</b> {self._html_escape(note)}"
                 f"</div>"
             )
         if importance_mode == "loo" and num_boots > 0:
             notes_bits.append(
-                f"<div style='color:#6f7a8e; font-size:8.4pt; padding:3px 0;'>"
+                f"<div style='color:#707b93; font-size:8.4pt; padding:3px 0;'>"
                 f"Leave-one-out comparison uses analytic fits; bootstrap CIs are not repeated."
                 f"</div>"
             )
         notes_html = ""
         if notes_bits:
             notes_html = (
-                "<h3 style='color:#aab4c5; font-size:9pt; font-weight:600;"
+                "<h3 style='color:#a9b3c9; font-size:9pt; font-weight:600;"
                 " letter-spacing:0.4px; text-transform:uppercase; margin:14px 0 6px 0;'>"
                 "Notes</h3>"
                 + "".join(notes_bits)
@@ -5541,11 +5569,11 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         # ---- Assemble ----------------------------------------------------
         title_html = (
-            "<div style='color:#e9ecf3; font-size:11pt; font-weight:700;"
+            "<div style='color:#edf0f8; font-size:11pt; font-weight:700;"
             " padding-bottom:4px;'>FLMM / functional model summary</div>"
         )
         return (
-            "<div style='font-family:\"Segoe UI\", sans-serif; color:#e9ecf3;"
+            "<div style='font-family:\"Segoe UI\", sans-serif; color:#edf0f8;"
             " line-height:1.4;'>"
             + title_html
             + verdict_html
@@ -5588,37 +5616,37 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         r2_val = float(result.r2) if np.isfinite(result.r2) else float("nan")
         cv_r2 = float(stats.get("cv_r2", float("nan")))
 
-        verdict_color = "#5dd39e" if sig_rows else "#aab4c5"
-        verdict_bg = "#1c2e22" if sig_rows else "#1f242e"
-        verdict_border = "#2f7a4a" if sig_rows else "#3a4050"
+        verdict_color = "#43d9a3" if sig_rows else "#a9b3c9"
+        verdict_bg = "#142a24" if sig_rows else "#1a1f2e"
+        verdict_border = "#2a6b51" if sig_rows else "#333c56"
         r2_text = f"{r2_val:.3f}" if np.isfinite(r2_val) else "n/a"
         cv_text = (
-            f"<span style='color:#cfd8e6;'> &middot; out-of-sample (block-CV) "
-            f"R<sup>2</sup> = <b style='color:#e9ecf3;'>{cv_r2:.3f}</b></span>"
+            f"<span style='color:#ccd4e4;'> &middot; out-of-sample (block-CV) "
+            f"R<sup>2</sup> = <b style='color:#edf0f8;'>{cv_r2:.3f}</b></span>"
             if np.isfinite(cv_r2) else ""
         )
         if tested_rows:
             sig_phrase = (
                 f"<b style='font-size:13pt; color:{verdict_color};'>"
                 f"{len(sig_rows)}/{len(tested_rows)}</b>"
-                f" <span style='color:#cfd8e6;'>predictors significant "
+                f" <span style='color:#ccd4e4;'>predictors significant "
                 f"(BH-FDR q &lt; 0.05)</span>"
             )
         else:
             sig_phrase = (
-                "<span style='color:#aab4c5;'>"
+                "<span style='color:#a9b3c9;'>"
                 "Significance untested (no shift-bootstrap)</span>"
             )
         verdict_html = (
             f"<table width='100%' cellpadding='0' cellspacing='0'><tr><td "
             f"style='background:{verdict_bg}; border:1px solid {verdict_border};"
             f" padding:10px 14px;'>"
-            f"<div style='font-size:11pt; color:#e9ecf3;'>"
+            f"<div style='font-size:11pt; color:#edf0f8;'>"
             f"In-sample R<sup>2</sup> = "
-            f"<b style='color:#e9ecf3;'>{r2_text}</b>{cv_text}"
+            f"<b style='color:#edf0f8;'>{r2_text}</b>{cv_text}"
             f"</div>"
             f"<div style='margin-top:4px;'>{sig_phrase}</div>"
-            f"<div style='color:#aab4c5; font-size:8.6pt; margin-top:4px;'>"
+            f"<div style='color:#a9b3c9; font-size:8.6pt; margin-top:4px;'>"
             f"Method: leave-one-predictor-out &Delta;R<sup>2</sup> with "
             f"circular-shift bootstrap null distribution &middot; "
             f"Benjamini-Hochberg FDR across predictors."
@@ -5646,20 +5674,20 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 f"shift-bootstrap N={int(n_boot)}, jobs={int(n_jobs)}"
             )
         meta_html = (
-            f"<div style='color:#aab4c5; font-size:8.7pt; padding:6px 0 2px 0;'>"
+            f"<div style='color:#a9b3c9; font-size:8.7pt; padding:6px 0 2px 0;'>"
             f"{' &middot; '.join(meta_bits)}"
             f"</div>"
         )
         if record_preview:
             meta_html += (
-                f"<div style='color:#cfd8e6; font-size:8.8pt; padding:0 0 6px 0;'>"
-                f"<span style='color:#6f7a8e;'>recordings:</span> {record_preview}"
+                f"<div style='color:#ccd4e4; font-size:8.8pt; padding:0 0 6px 0;'>"
+                f"<span style='color:#707b93;'>recordings:</span> {record_preview}"
                 f"</div>"
             )
         if used_labels:
             meta_html += (
-                f"<div style='color:#cfd8e6; font-size:8.8pt; padding:0 0 6px 0;'>"
-                f"<span style='color:#6f7a8e;'>predictors:</span> "
+                f"<div style='color:#ccd4e4; font-size:8.8pt; padding:0 0 6px 0;'>"
+                f"<span style='color:#707b93;'>predictors:</span> "
                 f"{esc(', '.join(used_labels))}"
                 f"</div>"
             )
@@ -5671,9 +5699,9 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 "no refit was needed.</span>"
             )
         if n_boot == 0 and tested_rows == []:
-            warning_bits.append(self._html_badge("NO BOOT", "#f5c542", "#2e2918"))
+            warning_bits.append(self._html_badge("NO BOOT", "#f6c453", "#2b2517"))
             warning_bits.append(
-                "<span style='color:#f5c542;'>Shift-bootstrap is off; "
+                "<span style='color:#f6c453;'>Shift-bootstrap is off; "
                 "predictor significance cannot be assessed.</span>"
             )
         if warning_bits:
@@ -5682,12 +5710,12 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             )
 
         header_style = (
-            "padding:6px 8px; background:#1f242e; color:#aab4c5;"
+            "padding:6px 8px; background:#1a1f2e; color:#a9b3c9;"
             " text-align:left; font-weight:700; font-size:8.5pt;"
             " letter-spacing:0.4px; text-transform:uppercase;"
-            " border-bottom:1px solid #2c3240;"
+            " border-bottom:1px solid #232a3d;"
         )
-        cell_style = "padding:4px 8px; border-bottom:1px solid #2c3240;"
+        cell_style = "padding:4px 8px; border-bottom:1px solid #232a3d;"
         mono_style = cell_style + " font-family:Consolas,monospace;"
 
         # ---- Fit statistics table ----------------------------------------
@@ -5704,8 +5732,8 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         for label, value, digits in fit_stats_rows:
             fit_rows_html.append(
                 f"<tr>"
-                f"<td style='{cell_style} color:#e9ecf3;'>{label}</td>"
-                f"<td style='{mono_style} color:#cfd8e6;'>"
+                f"<td style='{cell_style} color:#edf0f8;'>{label}</td>"
+                f"<td style='{mono_style} color:#ccd4e4;'>"
                 f"{self._fmt_stat(value, digits)}</td>"
                 f"</tr>"
             )
@@ -5714,17 +5742,17 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         cv_extra = f" ({esc(cv_note)})" if cv_note else ""
         fit_rows_html.append(
             f"<tr>"
-            f"<td style='{cell_style} color:#e9ecf3;'>Block-CV folds</td>"
-            f"<td style='{mono_style} color:#cfd8e6;'>"
+            f"<td style='{cell_style} color:#edf0f8;'>Block-CV folds</td>"
+            f"<td style='{mono_style} color:#ccd4e4;'>"
             f"{cv_folds}{cv_extra}</td>"
             f"</tr>"
         )
         fit_html = (
-            "<h3 style='color:#aab4c5; font-size:9pt; font-weight:600;"
+            "<h3 style='color:#a9b3c9; font-size:9pt; font-weight:600;"
             " letter-spacing:0.4px; text-transform:uppercase; margin:14px 0 6px 0;'>"
             "Fit statistics</h3>"
             "<table width='100%' cellpadding='0' cellspacing='0' "
-            "style='border:1px solid #2c3240; border-radius:6px;'>"
+            "style='border:1px solid #232a3d; border-radius:6px;'>"
             f"<tr>"
             f"<th style='{header_style}'>Metric</th>"
             f"<th style='{header_style}'>Value</th>"
@@ -5736,20 +5764,20 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         # ---- Diagnostics table ------------------------------------------
         diag_rows_html: List[str] = []
         condition = float(stats.get("condition_number", float("nan")))
-        cond_color = "#e9ecf3" if (np.isfinite(condition) and condition < 30) else (
-            "#f5c542" if (np.isfinite(condition) and condition < 100) else "#f5755a"
+        cond_color = "#edf0f8" if (np.isfinite(condition) and condition < 30) else (
+            "#f6c453" if (np.isfinite(condition) and condition < 100) else "#f5755a"
         )
         cond_badge = ""
         if np.isfinite(condition):
             if condition < 30:
-                cond_badge = self._html_badge("OK", "#5dd39e", "#1c2e22")
+                cond_badge = self._html_badge("OK", "#43d9a3", "#142a24")
             elif condition < 100:
-                cond_badge = self._html_badge("WATCH", "#f5c542", "#2e2918")
+                cond_badge = self._html_badge("WATCH", "#f6c453", "#2b2517")
             else:
                 cond_badge = self._html_badge("UNSTABLE", "#f5755a", "#2e1c18")
         diag_rows_html.append(
             f"<tr>"
-            f"<td style='{cell_style} color:#e9ecf3;'>Design condition number</td>"
+            f"<td style='{cell_style} color:#edf0f8;'>Design condition number</td>"
             f"<td style='{mono_style} color:{cond_color};'>"
             f"{self._fmt_stat(condition, 3)}</td>"
             f"<td style='{cell_style}'>{cond_badge}</td>"
@@ -5763,34 +5791,34 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 r_val = float(item.get("r", float("nan")))
                 diag_rows_html.append(
                     f"<tr>"
-                    f"<td style='{cell_style} color:#e9ecf3;'>"
+                    f"<td style='{cell_style} color:#edf0f8;'>"
                     f"{lbl_a} &harr; {lbl_b}</td>"
-                    f"<td style='{mono_style} color:#f5c542;'>"
+                    f"<td style='{mono_style} color:#f6c453;'>"
                     f"r = {self._fmt_stat(r_val, 3)}</td>"
                     f"<td style='{cell_style}'>"
-                    f"{self._html_badge('|r| &ge; 0.8', '#f5c542', '#2e2918')}</td>"
+                    f"{self._html_badge('|r| &ge; 0.8', '#f6c453', '#2b2517')}</td>"
                     f"</tr>"
                 )
             if len(high_corr) > 5:
                 diag_rows_html.append(
-                    f"<tr><td colspan='3' style='{cell_style} color:#6f7a8e;"
+                    f"<tr><td colspan='3' style='{cell_style} color:#707b93;"
                     f" font-style:italic;'>... {len(high_corr) - 5} more "
                     f"correlated pair(s)</td></tr>"
                 )
         else:
             diag_rows_html.append(
                 f"<tr>"
-                f"<td colspan='3' style='{cell_style} color:#cfd8e6;'>"
+                f"<td colspan='3' style='{cell_style} color:#ccd4e4;'>"
                 f"No predictor pairs with |r| &ge; 0.8."
                 f"</td>"
                 f"</tr>"
             )
         diag_html = (
-            "<h3 style='color:#aab4c5; font-size:9pt; font-weight:600;"
+            "<h3 style='color:#a9b3c9; font-size:9pt; font-weight:600;"
             " letter-spacing:0.4px; text-transform:uppercase; margin:14px 0 6px 0;'>"
             "Diagnostics</h3>"
             "<table width='100%' cellpadding='0' cellspacing='0' "
-            "style='border:1px solid #2c3240; border-radius:6px;'>"
+            "style='border:1px solid #232a3d; border-radius:6px;'>"
             f"<tr>"
             f"<th style='{header_style}'>Check</th>"
             f"<th style='{header_style}'>Value</th>"
@@ -5828,7 +5856,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                     p_html = (
                         f"<b>&le; {1.0/max(int(n_boot) + 1, 1):.3g}</b>"
                         if n_boot > 0 else
-                        "<span style='color:#6f7a8e;'>n/a</span>"
+                        "<span style='color:#707b93;'>n/a</span>"
                     )
                 else:
                     p_html = self._html_p_text(p_val)
@@ -5836,23 +5864,23 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 if status != "ok" and "failed" in status:
                     badge = self._html_badge("FAILED", "#f5755a", "#2e1c18")
                 elif is_sig:
-                    badge = self._html_badge("SIG", "#5dd39e", "#1c2e22")
+                    badge = self._html_badge("SIG", "#43d9a3", "#142a24")
                 elif not np.isfinite(p_val):
-                    badge = self._html_badge("UNTESTED", "#aab4c5", "#1f242e")
+                    badge = self._html_badge("UNTESTED", "#a9b3c9", "#1a1f2e")
                 else:
-                    badge = self._html_badge("n.s.", "#aab4c5", "#1f242e")
-                name_color = "#5dd39e" if is_sig else "#e9ecf3"
+                    badge = self._html_badge("n.s.", "#a9b3c9", "#1a1f2e")
+                name_color = "#43d9a3" if is_sig else "#edf0f8"
                 bold_open = "<b>" if is_sig else ""
                 bold_close = "</b>" if is_sig else ""
                 rows_html.append(
                     "<tr>"
                     f"<td style='{cell_style} color:{name_color};'>"
                     f"{bold_open}{label}{bold_close}</td>"
-                    f"<td style='{mono_style} color:#cfd8e6;'>"
+                    f"<td style='{mono_style} color:#ccd4e4;'>"
                     f"{self._fmt_stat(delta_r2, 4)}</td>"
-                    f"<td style='{mono_style} color:#cfd8e6;'>"
+                    f"<td style='{mono_style} color:#ccd4e4;'>"
                     f"{self._fmt_stat(delta_mse, 4)}</td>"
-                    f"<td style='{mono_style} color:#cfd8e6;'>"
+                    f"<td style='{mono_style} color:#ccd4e4;'>"
                     f"{self._fmt_stat(reduced_r2, 4)}</td>"
                     f"<td style='{mono_style}'>{p_html}</td>"
                     f"<td style='{mono_style}'>{q_html}</td>"
@@ -5867,15 +5895,15 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             if warnings:
                 warn_lines = "<br>".join(esc(w) for w in warnings)
                 warn_html = (
-                    f"<div style='color:#f5c542; font-size:8.5pt; margin:6px 0 0 0;'>"
+                    f"<div style='color:#f6c453; font-size:8.5pt; margin:6px 0 0 0;'>"
                     f"<b>Bootstrap warnings:</b> {warn_lines}</div>"
                 )
             contrib_html = (
-                "<h3 style='color:#aab4c5; font-size:9pt; font-weight:600;"
+                "<h3 style='color:#a9b3c9; font-size:9pt; font-weight:600;"
                 " letter-spacing:0.4px; text-transform:uppercase; margin:14px 0 6px 0;'>"
                 "Variable contribution (leave-one-predictor-out)</h3>"
                 "<table width='100%' cellpadding='0' cellspacing='0' "
-                "style='border:1px solid #2c3240; border-radius:6px;'>"
+                "style='border:1px solid #232a3d; border-radius:6px;'>"
                 f"<tr>"
                 f"<th style='{header_style}'>Predictor</th>"
                 f"<th style='{header_style}'>&Delta;R<sup>2</sup></th>"
@@ -5887,7 +5915,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 f"</tr>"
                 + "".join(rows_html)
                 + "</table>"
-                "<div style='color:#6f7a8e; font-size:8.4pt; margin:4px 0 0 0;'>"
+                "<div style='color:#707b93; font-size:8.4pt; margin:4px 0 0 0;'>"
                 "<b>&Delta;R<sup>2</sup>:</b> drop in fit when a predictor is "
                 "removed. <b>p (raw):</b> circular-shift bootstrap "
                 "(predictor's contribution under a time-shifted null). "
@@ -5898,10 +5926,10 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         # ---- Interpretation ---------------------------------------------
         interp_html = (
-            "<h3 style='color:#aab4c5; font-size:9pt; font-weight:600;"
+            "<h3 style='color:#a9b3c9; font-size:9pt; font-weight:600;"
             " letter-spacing:0.4px; text-transform:uppercase; margin:14px 0 6px 0;'>"
             "How to read this</h3>"
-            "<div style='color:#cfd8e6; font-size:9pt;'>"
+            "<div style='color:#ccd4e4; font-size:9pt;'>"
             "Each kernel shows the expected change in the signal locked to a "
             "predictor (event or behavior trace). &Delta;R<sup>2</sup> is the "
             "drop in fit when that predictor is left out &mdash; how much the "
@@ -5916,15 +5944,15 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         notes_bits: List[str] = []
         if dropped_predictors:
             notes_bits.append(
-                f"<div style='color:#cfd8e6; font-size:8.6pt; padding:3px 0;'>"
-                f"<b style='color:#aab4c5;'>Dropped predictors:</b> "
+                f"<div style='color:#ccd4e4; font-size:8.6pt; padding:3px 0;'>"
+                f"<b style='color:#a9b3c9;'>Dropped predictors:</b> "
                 f"{esc(', '.join(str(v) for v in dropped_predictors))}"
                 f"</div>"
             )
         if dropped_records:
             notes_bits.append(
-                f"<div style='color:#cfd8e6; font-size:8.6pt; padding:3px 0;'>"
-                f"<b style='color:#aab4c5;'>Dropped recordings:</b> "
+                f"<div style='color:#ccd4e4; font-size:8.6pt; padding:3px 0;'>"
+                f"<b style='color:#a9b3c9;'>Dropped recordings:</b> "
                 f"{esc(', '.join(str(v) for v in dropped_records))}"
                 f"</div>"
             )
@@ -5934,7 +5962,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         ]
         if failed:
             notes_bits.append(
-                f"<div style='color:#cfd8e6; font-size:8.6pt; padding:3px 0;'>"
+                f"<div style='color:#ccd4e4; font-size:8.6pt; padding:3px 0;'>"
                 f"<b style='color:#f5755a;'>{len(failed)} reduced fit(s) "
                 f"failed;</b> see log for details."
                 f"</div>"
@@ -5942,18 +5970,18 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         notes_html = ""
         if notes_bits:
             notes_html = (
-                "<h3 style='color:#aab4c5; font-size:9pt; font-weight:600;"
+                "<h3 style='color:#a9b3c9; font-size:9pt; font-weight:600;"
                 " letter-spacing:0.4px; text-transform:uppercase; margin:14px 0 6px 0;'>"
                 "Notes</h3>"
                 + "".join(notes_bits)
             )
 
         title_html = (
-            "<div style='color:#e9ecf3; font-size:11pt; font-weight:700;"
+            "<div style='color:#edf0f8; font-size:11pt; font-weight:700;"
             " padding-bottom:4px;'>Continuous GLM summary</div>"
         )
         return (
-            "<div style='font-family:\"Segoe UI\", sans-serif; color:#e9ecf3;"
+            "<div style='font-family:\"Segoe UI\", sans-serif; color:#edf0f8;"
             " line-height:1.4;'>"
             + title_html
             + verdict_html
@@ -6958,13 +6986,13 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         sig = np.asarray([bool(r.get("significant", False)) for r in rows], bool)
         fig, ax = plt.subplots(figsize=(3.5, max(1.5, 0.18 * len(rows) + 0.6)))
         y = np.arange(len(rows))
-        colors = ["#5dd39e" if s else "#a0aec0" for s in sig]
+        colors = ["#43d9a3" if s else "#a0aec0" for s in sig]
         ax.barh(y, vals, color=colors, edgecolor="0.2", linewidth=0.3)
         for i, row in enumerate(rows):
             q = float(row.get("q_value", float("nan")))
             if np.isfinite(q) and row.get("significant"):
                 ax.text(float(vals[i]) + max(vals.max(), 1e-9) * 0.02, i,
-                        f"q={q:.2g}", va="center", fontsize=5.5, color="#1c2e22")
+                        f"q={q:.2g}", va="center", fontsize=5.5, color="#142a24")
         ax.set_yticks(y)
         ax.set_yticklabels([self._compact_feature_label(n, 30) for n in names])
         ax.axvline(0, color="0.6", lw=0.5)
@@ -8034,7 +8062,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         brushes = []
         for row, val in zip(usable, vals):
             if row.get("significant", False):
-                brushes.append(pg.mkBrush("#f5c542"))
+                brushes.append(pg.mkBrush("#f6c453"))
             else:
                 brushes.append(pg.mkBrush("#4b9df8" if val >= 0 else "#ee99a0"))
         bar = pg.BarGraphItem(x0=np.zeros_like(vals), x1=vals, y=y_pos, height=0.62, brushes=brushes)
@@ -8054,7 +8082,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 else:
                     op = "<=" if row.get("p_value_upper_bound", False) else "="
                     label_text = f"p{op}{p_value:.3g}"
-                p_txt = pg.TextItem(label_text, color="#f5c542", anchor=(0.0, 0.5))
+                p_txt = pg.TextItem(label_text, color="#f6c453", anchor=(0.0, 0.5))
                 pw.addItem(p_txt)
                 p_txt.setPos(float(val) + label_offset, float(pos))
         pw.getAxis("left").setTicks([labels])

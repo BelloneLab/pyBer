@@ -6,7 +6,27 @@ from pathlib import Path
 from typing import Dict, Optional, List
 
 import numpy as np
-import pandas as pd
+
+
+class _LazyPandas:
+    """Deferred pandas import.
+
+    pandas costs seconds of cold startup on slow machines and is only needed
+    once an EthoVision workbook is actually opened. Attribute access triggers
+    the real import exactly once.
+    """
+
+    _module = None
+
+    def __getattr__(self, name):
+        module = _LazyPandas._module
+        if module is None:
+            import pandas
+            module = _LazyPandas._module = pandas
+        return getattr(module, name)
+
+
+pd = _LazyPandas()
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent
@@ -247,9 +267,12 @@ class PlotPanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
-        pg.setConfigOptions(antialias=True)
-
+        # Antialias only this panel's view: setting the global pyqtgraph
+        # config here would silently slow down every other plot in the app.
         self.plot = pg.PlotWidget()
+        self.plot.setAntialiasing(True)
+        self.plot.getPlotItem().setDownsampling(auto=True, mode="peak")
+        self.plot.getPlotItem().setClipToView(True)
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.addLegend(offset=(10, 10))
 
