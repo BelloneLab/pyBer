@@ -87,6 +87,12 @@ ARTIFACT_DETECTION_MODES = [
     "Global MAD (raw)",
 ]
 
+# Score (in units of the detection threshold) above which a flagged region is
+# "strong": unambiguous on its own. Real hardware/motion hits measured on user
+# recordings score 30-330x threshold; heavy-tailed channel noise tops out
+# near 3.5x, so 6.0 splits the two populations with margin on both sides.
+SMART_STRONG_SCORE = 6.0
+
 BAND_LIMITED_INVERTED_ISO_MODE = "dFF (motion corrected with band-limited inverted isobestic)"
 
 # Output modes
@@ -2453,6 +2459,11 @@ def detect_artifacts_smart(
 
     The 465 channel is protected against ordinary slow positive transients unless
     the evidence is abrupt, very large, or also appears in the reference channel.
+
+    Borderline detections (score below SMART_STRONG_SCORE) survive only when
+    the recording also contains at least one strong interior artifact; on a
+    recording with no strong evidence they are treated as heavy-tailed channel
+    noise and suppressed (the summary reports how many).
     """
     t = np.asarray(time, float)
     sig = np.asarray(signal_465, float)
@@ -2587,6 +2598,52 @@ def detect_artifacts_smart(
             sig_core = sig_core & core
             ref_core = ref_core & core
 
+    # ------------------------------------------------------------------
+    # Session-corroboration gate. Borderline hits (score just past the
+    # threshold) are indistinguishable, event by event, from the tail of a
+    # heavy-tailed noise process: on a clean-but-spiky recording they occur
+    # many times per minute and are false alarms, while the same scores on a
+    # motion-laden session are genuine. What separates the two situations is
+    # the SESSION: real artifact-contaminated recordings carry unambiguous
+    # strong events (measured 30-330x threshold), heavy-tailed noise does not
+    # (tops out near 3.5x). So borderline regions are kept only when the
+    # recording also contains strong interior evidence; NaN gaps and strong
+    # regions themselves always survive. Record edges (~2 s) are excluded as
+    # corroborators because LED/detector settling produces large scores on
+    # perfectly good sessions.
+    # ------------------------------------------------------------------
+    suppressed_weak = 0
+    if np.any(core):
+        corroborator = core & (score >= SMART_STRONG_SCORE)
+        corr_edge_n = _window_samples_from_seconds(fs_val, 2.0, minimum=1)
+        if corroborator.size > 2 * corr_edge_n:
+            corroborator[:corr_edge_n] = False
+            corroborator[-corr_edge_n:] = False
+        # A corroborating artifact must be SUSTAINED: real strong hits hold
+        # score >= SMART_STRONG_SCORE over many consecutive samples (measured
+        # 5-23 at 60 Hz), while a lone heavy-tail fluke spans 1-2. Without
+        # this, one freak sample would unleash every borderline coincidence
+        # in the recording.
+        corr_min_run = max(3, _window_samples_from_seconds(fs_val, 0.03, minimum=1))
+        corroborator = _mask_runs_at_least(corroborator, corr_min_run)
+        if not bool(np.any(corroborator)):
+            nonfinite_any = np.asarray(sig_feat["nonfinite"], bool) | np.asarray(
+                ref_feat["nonfinite"], bool
+            )
+            keep = np.zeros_like(core)
+            core_idx = np.flatnonzero(core)
+            run_splits = np.flatnonzero(np.diff(core_idx) > 1) + 1
+            for run in np.split(core_idx, run_splits):
+                if run.size == 0:
+                    continue
+                if np.any(nonfinite_any[run]) or float(np.max(score[run])) >= SMART_STRONG_SCORE:
+                    keep[run] = True
+                else:
+                    suppressed_weak += 1
+            core = keep
+            sig_core = sig_core & core
+            ref_core = ref_core & core
+
     # Extend regions over slow recovery shoulders so repairs anchor on
     # settled signal rather than on a half-recovered tail. The sanity check
     # reverts the extension if it would swallow too much of the record.
@@ -2614,6 +2671,8 @@ def detect_artifacts_smart(
         f"smart artifacts: n={len(regions)}, "
         f"core={float(np.mean(core)) * 100.0:.2f}%, padded={float(np.mean(padded)) * 100.0:.2f}%"
     )
+    if suppressed_weak:
+        summary += f", {suppressed_weak} weak candidate(s) suppressed (no strong corroborating artifact)"
     return ArtifactDetectionResult(
         mask=np.asarray(padded, bool),
         core_mask=np.asarray(core, bool),

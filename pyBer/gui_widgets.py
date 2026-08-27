@@ -628,23 +628,23 @@ class PlotDashboard(QtWidgets.QFrame):
         layout.addWidget(self.plot_proc, stretch=2)
         layout.addWidget(self.plot_out, stretch=1)
 
-        self.raw_465_curve = self.plot_raw.plot(pen=pg.mkPen((70, 220, 120), width=1.6))
-        self.raw_405_curve = self.plot_raw.plot(pen=pg.mkPen((160, 120, 255), width=1.4, style=QtCore.Qt.PenStyle.DashLine))
+        self.raw_465_curve = self.plot_raw.plot(pen=pg.mkPen((70, 220, 120), width=1.0))
+        self.raw_405_curve = self.plot_raw.plot(pen=pg.mkPen((160, 120, 255), width=1.0, style=QtCore.Qt.PenStyle.DashLine))
 
-        self.proc_465_curve = self.plot_proc.plot(pen=pg.mkPen((70, 220, 120), width=1.2))
-        self.proc_405_curve = self.plot_proc.plot(pen=pg.mkPen((160, 120, 255), width=1.2, style=QtCore.Qt.PenStyle.DashLine))
+        self.proc_465_curve = self.plot_proc.plot(pen=pg.mkPen((70, 220, 120), width=1.0))
+        self.proc_405_curve = self.plot_proc.plot(pen=pg.mkPen((160, 120, 255), width=1.0, style=QtCore.Qt.PenStyle.DashLine))
         self.base_465_curve = self.plot_proc.plot(pen=pg.mkPen((190, 190, 190), width=1.0, style=QtCore.Qt.PenStyle.DotLine))
         self.base_405_curve = self.plot_proc.plot(pen=pg.mkPen((190, 190, 190), width=1.0, style=QtCore.Qt.PenStyle.DotLine))
 
-        self.out_curve = self.plot_out.plot(pen=pg.mkPen((80, 170, 255), width=1.4))
+        self.out_curve = self.plot_out.plot(pen=pg.mkPen((80, 170, 255), width=1.0))
 
         self.raw_vb_right = attach_right_axis(self.plot_raw)
         self.proc_vb_right = attach_right_axis(self.plot_proc)
         self.out_vb_right = attach_right_axis(self.plot_out)
 
-        self.digital_raw = pg.PlotCurveItem(pen=pg.mkPen((220, 180, 80), width=1.1))
-        self.digital_proc = pg.PlotCurveItem(pen=pg.mkPen((220, 180, 80), width=1.1))
-        self.digital_out = pg.PlotCurveItem(pen=pg.mkPen((220, 180, 80), width=1.1))
+        self.digital_raw = pg.PlotCurveItem(pen=pg.mkPen((220, 180, 80), width=1.0))
+        self.digital_proc = pg.PlotCurveItem(pen=pg.mkPen((220, 180, 80), width=1.0))
+        self.digital_out = pg.PlotCurveItem(pen=pg.mkPen((220, 180, 80), width=1.0))
         self.raw_vb_right.addItem(self.digital_raw)
         self.proc_vb_right.addItem(self.digital_proc)
         self.out_vb_right.addItem(self.digital_out)

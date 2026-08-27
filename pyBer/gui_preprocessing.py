@@ -3471,15 +3471,15 @@ class PlotDashboard(QtWidgets.QWidget):
         # Empty-state hints removed by design - keep plots visually clean.
         self._preproc_empty_hints = []
 
-        # Raw traces share the same primary y-axis. The 465 signal gets a
-        # phosphor-style glow: a wide, translucent shadow pen under a crisp
-        # antialiased core, so the physiology reads like a scope trace.
+        # Raw traces share the same primary y-axis. Pens stay at width 1.0:
+        # Qt's fast antialiased stroker only covers thin cosmetic pens, and a
+        # wide translucent shadow pen costs ~70x more per frame (the v0.46
+        # "glow" made panning a slideshow). Emphasis comes from color/alpha.
         self.curve_465 = self.plot_raw.plot(
-            pen=pg.mkPen((80, 250, 160), width=1.3),
-            shadowPen=pg.mkPen((80, 250, 160, 55), width=4.5),
+            pen=pg.mkPen((80, 250, 160), width=1.0),
             antialias=True,
         )
-        self.curve_405 = self.plot_raw.plot(pen=pg.mkPen((160, 120, 255, 128), width=1.2))
+        self.curve_405 = self.plot_raw.plot(pen=pg.mkPen((160, 120, 255, 128), width=1.0))
 
         pen_env = pg.mkPen((240, 200, 90), width=1.0, style=QtCore.Qt.PenStyle.DashLine)
         self.curve_thr_hi = self.plot_raw.plot(pen=pen_env)
@@ -3489,8 +3489,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.curve_ref_thr_lo = self.plot_raw.plot(pen=pen_ref_env)
 
         self.curve_f465 = self.plot_proc.plot(
-            pen=pg.mkPen((80, 250, 160), width=1.1),
-            shadowPen=pg.mkPen((80, 250, 160, 50), width=4.0),
+            pen=pg.mkPen((80, 250, 160), width=1.0),
             antialias=True,
         )
         self.curve_f405 = self.plot_proc.plot(pen=pg.mkPen((160, 120, 255), width=1.0))
@@ -3509,11 +3508,10 @@ class PlotDashboard(QtWidgets.QWidget):
             pen=pg.mkPen((160, 160, 160, 100), width=1.0, style=QtCore.Qt.PenStyle.DashLine)
         )
 
-        # Output dF/F: glowing core plus a soft area fill down to zero, so
+        # Output dF/F: crisp core plus a soft area fill down to zero, so
         # transients read as bright events rising from the baseline.
         self.curve_out = self.plot_out.plot(
-            pen=pg.mkPen((90, 190, 255), width=1.2),
-            shadowPen=pg.mkPen((90, 190, 255, 55), width=4.5),
+            pen=pg.mkPen((90, 190, 255), width=1.0),
             fillLevel=0.0,
             fillBrush=pg.mkBrush(90, 190, 255, 26),
             antialias=True,
@@ -3525,7 +3523,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self.selector = PreprocessingSelector(values=(0, 1), brush=(80, 120, 200, 60))
         self.plot_raw.addItem(self.selector)
 
-        self._dio_pen = pg.mkPen((230, 180, 80), width=1.2)
+        self._dio_pen = pg.mkPen((230, 180, 80), width=1.0)
         self.vb_dio_raw, self.curve_dio_raw = self._add_dio_axis(self.plot_raw, "A/D")
         self.vb_dio_proc, self.curve_dio_proc = self._add_dio_axis(self.plot_proc, "A/D")
         self.vb_dio_out, self.curve_dio_out = self._add_dio_axis(self.plot_out, "A/D")

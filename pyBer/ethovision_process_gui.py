@@ -330,7 +330,7 @@ class PlotPanel(QWidget):
                 x_plot, y_plot = x, y
 
             col = self._palette[color_i % len(self._palette)]
-            pen = pg.mkPen(color=col, width=1.2)
+            pen = pg.mkPen(color=col, width=1.0)
             self.plot.plot(x_plot, y_plot, pen=pen, name=yc)
             color_i += 1
             any_plotted = True

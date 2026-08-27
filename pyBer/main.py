@@ -118,6 +118,14 @@ if __name__ == "__main__" and str(os.environ.get("PYBER_SMOKE_TEST", "")).strip(
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
+# Antialiasing is safe app-wide ONLY because every long-trace pen stays at
+# width <= 1.0: Qt's raster engine has a fast AA stroker for thin cosmetic
+# pens (~4 ms/frame on a 72k-point downsampled trace) but falls into a
+# stroke-to-fill path for anything wider (~300 ms/frame). Keep data-curve
+# pens at width 1.0; use color/alpha for emphasis, never width. Set at import
+# so harnesses that build MainWindow without calling main() get it too.
+pg.setConfigOptions(antialias=True)
+
 # pyqtgraph's ColorMapMenu (built eagerly by every HistogramLUT gradient
 # widget) imports matplotlib.pyplot just to list leftover colormap names,
 # which costs seconds of cold startup. Skip that probe unless matplotlib is
@@ -1840,7 +1848,7 @@ class QcDialog(QtWidgets.QDialog):
                 name="fitted-ref corrected",
             )
         self.plot_z.plot(
-            t, dff_env, pen=pg.mkPen((120, 245, 210), width=1.5),
+            t, dff_env, pen=pg.mkPen((120, 245, 210), width=1.0),
             name="corrected envelope" if has_reference else "slow envelope",
         )
         self.plot_z.setLabel("left", "dF/F (%)")
@@ -1911,7 +1919,7 @@ class QcDialog(QtWidgets.QDialog):
                 self.plot_corr.plot(z_ref[idx], z_sig[idx], pen=None, symbol="o", symbolSize=3, symbolBrush=(120, 180, 220, 70))
                 a, b = np.polyfit(z_ref[m], z_sig[m], 1)
                 xs = np.linspace(np.nanmin(z_ref[m]), np.nanmax(z_ref[m]), 200)
-                self.plot_corr.plot(xs, a * xs + b, pen=pg.mkPen((220, 120, 120), width=1.2))
+                self.plot_corr.plot(xs, a * xs + b, pen=pg.mkPen((220, 120, 120), width=1.0))
                 r = float(qc.get("r", np.nan))
                 r2 = r * r if np.isfinite(r) else np.nan
                 if np.isfinite(r):
@@ -9101,7 +9109,6 @@ def _start_background_warmup() -> None:
 
 
 def main() -> None:
-    pg.setConfigOptions(antialias=False)
     smoke_test = str(os.environ.get("PYBER_SMOKE_TEST", "")).strip().lower() in {"1", "true", "yes", "on"}
     _set_windows_app_user_model_id()
     # The early-splash path (module top) may already own the QApplication.

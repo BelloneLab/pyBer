@@ -960,7 +960,7 @@ class ContinuousAlignDialog(QtWidgets.QDialog):
         self.plot.plot(time, values, pen=pg.mkPen((100, 190, 255), width=1))
         if mask.size == values.size and np.any(mask):
             masked = np.where(mask, values, np.nan)
-            self.plot.plot(time, masked, pen=pg.mkPen((255, 180, 70), width=2))
+            self.plot.plot(time, masked, pen=pg.mkPen((255, 180, 70), width=1.0))
         event_count = int(on.size if self.combo_align.currentText().endswith("onset") else off.size)
         sample_count = int(np.sum(mask)) if mask.size else 0
         self.lbl_status.setText(
@@ -3921,7 +3921,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # Empty-state hints removed by design - keep plots visually clean.
         self._postproc_empty_hints: List[Any] = []
 
-        self.curve_trace = self.plot_trace.plot(pen=pg.mkPen(self._style["trace"], width=1.1))
+        self.curve_trace = self.plot_trace.plot(pen=pg.mkPen(self._style["trace"], width=1.0))
         self.curve_behavior = self.plot_trace.plot(pen=pg.mkPen(self._style["behavior"], width=1.0))
         self.curve_behavior.setVisible(False)
         self.curve_peak_markers = self.plot_trace.plot(
@@ -3995,7 +3995,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spatial_lut_activity.setImageItem(self.img_spatial_activity)
         self.spatial_lut_velocity.setImageItem(self.img_spatial_velocity)
 
-        self.curve_avg = self.plot_avg.plot(pen=pg.mkPen(self._style["avg"], width=1.3))
+        self.curve_avg = self.plot_avg.plot(pen=pg.mkPen(self._style["avg"], width=1.0))
         self.curve_sem_hi = self.plot_avg.plot(pen=pg.mkPen((152, 201, 143), width=1.0))
         self.curve_sem_lo = self.plot_avg.plot(pen=pg.mkPen((152, 201, 143), width=1.0))
         self.sem_band = pg.FillBetweenItem(
@@ -8317,7 +8317,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             pw.plot(
                 t_arr[::stride],
                 y_arr[::stride],
-                pen=pg.mkPen(color, width=1.2),
+                pen=pg.mkPen(color, width=1.0),
                 name=label,
             )
             return int(t_arr.size)
@@ -11169,8 +11169,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_sync_signal.setLabel("bottom", "Time (s)")
         if getattr(self.plot_sync_signal.getPlotItem(), "legend", None) is None:
             self.plot_sync_signal.addLegend(offset=(10, 10))
-        self.plot_sync_signal.plot(time, raw, pen=pg.mkPen((127, 209, 230), width=1.1), name="Raw signal")
-        self.plot_sync_signal.plot(time, binary_scaled, pen=pg.mkPen((163, 190, 140), width=1.1), name="Binary (scaled)")
+        self.plot_sync_signal.plot(time, raw, pen=pg.mkPen((127, 209, 230), width=1.0), name="Raw signal")
+        self.plot_sync_signal.plot(time, binary_scaled, pen=pg.mkPen((163, 190, 140), width=1.0), name="Binary (scaled)")
         self.plot_sync_signal.plot(
             [float(time[0]), float(time[-1])],
             [float(threshold), float(threshold)],
@@ -11482,10 +11482,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                                     symbolPen=pg.mkPen((90, 190, 255), width=1.0))
         if fib.size and fit.size:
             order = np.argsort(fib)
-            self.plot_sync_map.plot(fib[order], fit[order], pen=pg.mkPen((255, 190, 90), width=1.5))
+            self.plot_sync_map.plot(fib[order], fit[order], pen=pg.mkPen((255, 190, 90), width=1.0))
         if resid.size:
             x = np.arange(1, resid.size + 1, dtype=float)
-            self.plot_sync_residual.plot(x, resid * 1000.0, pen=pg.mkPen((245, 210, 80), width=1.2),
+            self.plot_sync_residual.plot(x, resid * 1000.0, pen=pg.mkPen((245, 210, 80), width=1.0),
                                          symbol="o", symbolSize=5,
                                          symbolBrush=pg.mkBrush(245, 210, 80, 180))
             self.plot_sync_residual.addLine(y=0.0, pen=pg.mkPen((180, 190, 210), style=QtCore.Qt.PenStyle.DashLine))
@@ -14085,11 +14085,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _apply_plot_style(self) -> None:
         trace_color = self._style_color_tuple("trace", (90, 190, 255))
         avg_color = self._style_color_tuple("avg", (90, 190, 255))
-        self.curve_trace.setPen(pg.mkPen(trace_color, width=1.1))
-        self.curve_trace.setShadowPen(pg.mkPen((*trace_color[:3], 50), width=4.0))
+        # No shadow pens: a wide translucent shadow forces Qt's slow
+        # stroke-to-fill path (~70x per-frame cost on long traces).
+        self.curve_trace.setPen(pg.mkPen(trace_color, width=1.0))
+        self.curve_trace.setShadowPen(None)
         self.curve_behavior.setPen(pg.mkPen(self._style_color_tuple("behavior", (220, 180, 80)), width=1.0))
-        self.curve_avg.setPen(pg.mkPen(avg_color, width=1.3))
-        self.curve_avg.setShadowPen(pg.mkPen((*avg_color[:3], 60), width=4.5))
+        self.curve_avg.setPen(pg.mkPen(avg_color, width=1.0))
+        self.curve_avg.setShadowPen(None)
         sem_edge = self._style_color_tuple("sem_edge", (152, 201, 143))
         sem_fill = self._style_color_tuple("sem_fill", (188, 230, 178, 96))
         self.curve_sem_hi.setPen(pg.mkPen(sem_edge, width=1.0))

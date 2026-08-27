@@ -131,7 +131,12 @@ def _interior_regions(regions, lo=2.0, hi=118.0):
 
 class SharedDipTierTests(unittest.TestCase):
     """The looser shared tier flags concurrent dips that neither channel
-    could report on its own, and only concurrent NEGATIVE ones."""
+    could report on its own, and only concurrent NEGATIVE ones.
+
+    Borderline shared dips are corroboration-gated: they count only when the
+    recording also carries at least one strong interior artifact. On real
+    clean-but-spiky recordings, isolated moderate co-dips are noise
+    coincidences (user ground truth, 2026-08-27)."""
 
     SIG_DEPTH = 0.22   # ~4.4 noise sigma: below the k=8 single-channel gates
     REF_DEPTH = 0.12   # ~6 noise sigma, still below the 405's own core bar
@@ -140,27 +145,49 @@ class SharedDipTierTests(unittest.TestCase):
     def _dip(self, t, center):
         return np.exp(-0.5 * ((t - center) / self.DIP_SIGMA) ** 2)
 
-    def test_concurrent_moderate_dips_are_flagged(self):
+    def _strong_hit(self, t, signal, reference, center=30.0):
+        """A gross bilateral artifact (>> SMART_STRONG_SCORE) as corroborator."""
+        hit = np.exp(-0.5 * ((t - center) / 0.05) ** 2)
+        return signal - 3.0 * hit, reference - 1.0 * hit
+
+    def test_concurrent_moderate_dips_are_flagged_when_corroborated(self):
+        t, signal, reference = _quiet_pair()
+        dip = self._dip(t, 60.0)
+        signal, reference = self._strong_hit(t, signal - self.SIG_DEPTH * dip,
+                                             reference - self.REF_DEPTH * dip)
+        res = _detect(t, signal, reference)
+        covering = [(a, b) for a, b in res.regions if a <= 60.0 <= b]
+        self.assertEqual(len(covering), 1, msg=f"regions={res.regions}")
+
+    def test_isolated_moderate_dip_is_suppressed(self):
+        # No strong artifact anywhere in the record: the moderate co-dip is
+        # indistinguishable from heavy-tailed noise coincidence and must not
+        # be flagged.
         t, signal, reference = _quiet_pair()
         dip = self._dip(t, 60.0)
         res = _detect(t, signal - self.SIG_DEPTH * dip,
                       reference - self.REF_DEPTH * dip)
         covering = [(a, b) for a, b in res.regions if a <= 60.0 <= b]
-        self.assertEqual(len(covering), 1, msg=f"regions={res.regions}")
+        self.assertEqual(len(covering), 0, msg=f"regions={res.regions}")
+        self.assertIn("suppressed", res.summary)
 
     def test_same_dip_in_one_channel_stays_clean(self):
         t, signal, reference = _quiet_pair()
-        res = _detect(t, signal - self.SIG_DEPTH * self._dip(t, 60.0), reference)
+        sig_only = signal - self.SIG_DEPTH * self._dip(t, 60.0)
+        sig_only, reference = self._strong_hit(t, sig_only, reference)
+        res = _detect(t, sig_only, reference)
         covering = [(a, b) for a, b in res.regions if a <= 60.0 <= b]
         self.assertEqual(len(covering), 0, msg=f"regions={res.regions}")
 
     def test_concurrent_moderate_bumps_stay_clean(self):
         # Positive-going concurrence is NOT artifact-certain (bleed-through,
-        # hemodynamics), so the loose tier must not fire on bumps.
+        # hemodynamics), so the loose tier must not fire on bumps, even in a
+        # recording corroborated by a strong artifact elsewhere.
         t, signal, reference = _quiet_pair()
         bump = self._dip(t, 60.0)
-        res = _detect(t, signal + self.SIG_DEPTH * bump,
-                      reference + self.REF_DEPTH * bump)
+        signal, reference = self._strong_hit(t, signal + self.SIG_DEPTH * bump,
+                                             reference + self.REF_DEPTH * bump)
+        res = _detect(t, signal, reference)
         covering = [(a, b) for a, b in res.regions if a <= 60.0 <= b]
         self.assertEqual(len(covering), 0, msg=f"regions={res.regions}")
 
@@ -171,6 +198,31 @@ class SharedDipTierTests(unittest.TestCase):
             interior = _interior_regions(res.regions)
             self.assertEqual(len(interior), 0,
                              msg=f"seed={seed} regions={res.regions}")
+
+
+class SessionCorroborationTests(unittest.TestCase):
+    """Heavy-tailed channel noise crosses fixed z thresholds many times per
+    minute; without a strong interior artifact those crossings are false
+    alarms and the whole recording must come back clean."""
+
+    def _heavy_tailed_pair(self, duration_s=300.0, fs=100.0, seed=10):
+        t = np.arange(0.0, duration_s, 1.0 / fs)
+        rng = np.random.default_rng(seed)
+        signal = 250.0 + 0.05 * rng.standard_t(3, t.size)
+        reference = 80.0 + 0.02 * rng.standard_t(3, t.size)
+        return t, signal, reference
+
+    def test_heavy_tailed_noise_yields_no_regions(self):
+        t, signal, reference = self._heavy_tailed_pair()
+        res = _detect(t, signal, reference)
+        self.assertEqual(res.regions, [], msg=f"regions={res.regions}")
+
+    def test_strong_hit_in_heavy_tailed_noise_is_still_caught(self):
+        t, signal, reference = self._heavy_tailed_pair()
+        hit = np.exp(-0.5 * ((t - 150.0) / 0.05) ** 2)
+        res = _detect(t, signal - 3.0 * hit, reference - 1.0 * hit)
+        covering = [(a, b) for a, b in res.regions if a <= 150.0 <= b]
+        self.assertEqual(len(covering), 1, msg=f"regions={res.regions}")
 
 
 class TailExtensionTests(unittest.TestCase):

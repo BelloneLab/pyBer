@@ -3537,7 +3537,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                         pg.PlotDataItem(result.kernel_tvec, hi_arr),
                         brush=qcol,
                     ))
-            plot.plot(result.kernel_tvec, kernel, pen=pg.mkPen(color, width=2.0), name=self._predictor_label(name))
+            plot.plot(result.kernel_tvec, kernel, pen=pg.mkPen(color, width=1.0), name=self._predictor_label(name))
         plot.setTitle(self._kernel_title(name))
         plot.setLabel("bottom", "Time", units="s")
         plot.setLabel("left", self._kernel_y_label(name))
@@ -3595,7 +3595,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                         pg.PlotDataItem(result.kernel_tvec, hi_arr),
                         brush=qcol,
                     ))
-            pw.plot(result.kernel_tvec, kernel, pen=pg.mkPen(color, width=2), name=self._predictor_label(name))
+            pw.plot(result.kernel_tvec, kernel, pen=pg.mkPen(color, width=1.0), name=self._predictor_label(name))
         if not names:
             txt = pg.TextItem("No kernels selected.", color="#c5d2e3")
             pw.addItem(txt)
@@ -7542,7 +7542,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
             lo = mean - sem
             hi = mean + sem
             self.plot_group_kernels.plot(
-                ref_t, mean, pen=pg.mkPen(color, width=2),
+                ref_t, mean, pen=pg.mkPen(color, width=1.0),
                 name=f"{self._predictor_label(key)} (n={arr.shape[0]})",
             )
             fill = pg.FillBetweenItem(
@@ -7726,14 +7726,14 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         except Exception:
             pass
         x = np.asarray(result.time, float) if result.time is not None else np.arange(result.y_actual.size)
-        pw.plot(x, result.y_actual, pen=pg.mkPen("#4b9df8", width=1.2), name="actual")
-        pw.plot(x, result.y_pred, pen=pg.mkPen("#f5a97f", width=1.4), name="predicted")
+        pw.plot(x, result.y_actual, pen=pg.mkPen("#4b9df8", width=1.0), name="actual")
+        pw.plot(x, result.y_pred, pen=pg.mkPen("#f5a97f", width=1.0), name="predicted")
         pw.setLabel("bottom", "Time", units="s")
         pw.setLabel("left", "Signal")
 
         rw = self.plot_residuals
         rw.clear()
-        rw.plot(x, result.residuals, pen=pg.mkPen("#ee99a0", width=1.1), name="residual")
+        rw.plot(x, result.residuals, pen=pg.mkPen("#ee99a0", width=1.0), name="residual")
         rw.addLine(y=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
         rw.setLabel("bottom", "Time", units="s")
         rw.setLabel("left", "Residual")
@@ -7817,12 +7817,12 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         raw_color = "#94e2d5"
 
         if show_signal:
-            pw.plot(x, signal, pen=pg.mkPen(signal_color, width=1.25), name="signal")
+            pw.plot(x, signal, pen=pg.mkPen(signal_color, width=1.0), name="signal")
         if show_pred and predicted is not None:
             pw.plot(x, predicted, pen=pg.mkPen(predicted_color, width=1.0, style=QtCore.Qt.PenStyle.DashLine), name="predicted")
         if show_contrib:
             feat_curve = pg.PlotDataItem(
-                x, contribution, pen=pg.mkPen(feature_color, width=1.8),
+                x, contribution, pen=pg.mkPen(feature_color, width=1.0),
                 name=self._predictor_label(key),
             )
             vb.addItem(feat_curve)
@@ -8013,7 +8013,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                     brush=fill_col,
                 )
                 pw.addItem(fill)
-                pw.plot(tvec, mean, pen=pg.mkPen("#8bd5ca", width=3), name="mean")
+                pw.plot(tvec, mean, pen=pg.mkPen("#8bd5ca", width=1.0), name="mean")
 
         pw.addLine(x=0, pen=pg.mkPen("#5a6274", width=1, style=QtCore.Qt.PenStyle.DashLine))
         pw.setLabel("bottom", "Time", units="s")
@@ -8665,7 +8665,7 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
         # Pointwise CI dashed lines.
         if name in result.ci_lower and name in result.ci_upper:
-            dash_pen = pg.mkPen(color, width=1.2 if big else 1,
+            dash_pen = pg.mkPen(color, width=1.0,
                                 style=QtCore.Qt.PenStyle.DashLine)
             pw.plot(tvec, result.ci_lower[name], pen=dash_pen)
             pw.plot(tvec, result.ci_upper[name], pen=dash_pen)
