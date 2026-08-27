@@ -24,6 +24,16 @@ a = Analysis(
         "libmmd.dll", "libifcoremd.dll", "libifportmd.dll", "libiomp5md.dll",
         "libimalloc.dll", "svml_dispmd.dll", "libpng16.dll", "freetype.dll",
         "liblzma.dll", "libbz2.dll", "ffi-8.dll", "libexpat.dll", "sqlite3.dll",
+        "libcrypto-3-x64.dll", "libssl-3-x64.dll",
+        # Native runtimes used by scipy and analysis_core.QtCore. Conda stores
+        # these outside site-packages, so dependency discovery cannot find them
+        # unless the spec seeds them explicitly.
+        "libblas.dll", "libcblas.dll", "liblapack.dll",
+        "libgcc_s_seh-1.dll", "libgomp-1.dll", "libquadmath-0.dll", "vcomp140.dll",
+        "pyside6.cp311-win_amd64.dll", "shiboken6.cp311-win_amd64.dll",
+        "Qt6Core.dll", "Qt6Network.dll",
+        "jpeg8.dll", "lcms2.dll", "openjp2.dll", "qhull_r.dll", "tiff.dll",
+        "libwebp.dll", "libwebpdemux.dll", "libwebpmux.dll",
         "mkl_rt.2.dll",
         "mkl_core.2.dll", "mkl_intel_thread.2.dll", "mkl_sequential.2.dll",
         "mkl_def.2.dll", "mkl_avx2.2.dll", "mkl_avx512.2.dll", "mkl_mc3.2.dll",

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.45"><img src="https://img.shields.io/badge/release-v0.45-7c4dff" alt="v0.45 release"></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.46"><img src="https://img.shields.io/badge/release-v0.46-7c4dff" alt="v0.46 release"></a>
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-41cd52?logo=qt&logoColor=white" alt="PySide6 and pyqtgraph">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white" alt="Windows">
@@ -18,9 +18,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.45/pyBer-windows.exe"><strong>Download the Windows GUI</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.46/pyBer-windows.exe"><strong>Download the Windows GUI</strong></a>
   &nbsp;|&nbsp;
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.45/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.46/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
   &nbsp;|&nbsp;
   <a href="docs/index.md"><strong>Read the full guide</strong></a>
 </p>
@@ -178,22 +178,17 @@ The flagged table collects processing failures, excessive artifact load, poor fi
 | Processed data | Self-describing CSV with `.pyber.json` sidecar and HDF5 with embedded metadata. |
 | Reports | Preprocessing PNG, strict QC report images, batch summaries, flagged-recording tables, analysis CSVs, model tables, and publication figure exports. |
 
-Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.45 executables target Windows; source execution on other platforms is not part of the tested release path.
+Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.46 executables target Windows; source execution on other platforms is not part of the tested release path.
 
-## What changed in v0.45
+## What changed in v0.46
 
-- Added legacy Doric key discovery alongside the modern Doric HDF5 layout.
-- Added recursive raw-file discovery across multiple nested folder levels.
-- Added a standalone GUI executable and a headless CLI executable.
-- Added single-file, multi-file, and folder batch preprocessing.
-- Added sensor-aware, recording-aware recommendations with per-section explanations.
-- Added CLI parameter files and repeatable field-level overrides.
-- Added paired processed CSV/HDF5 output, preprocessing report figures, JSON provenance, batch summaries, and `flagged_recordings.csv`.
-- Hardened export naming and schema consistency so separate channels do not overwrite one another.
-- Improved DIO/AOUT discovery and aliases across Doric variants.
-- Fixed the compiled-app artifact overlay crash caused by an unavailable pyqtgraph path class.
-- Made each newly opened file become the active preview reliably.
-- Revised QC to measure SNR after fitted-reference correction, reject recordings dominated by shared 405/465 fluctuations, and stop treating mild baseline adaptation as a long bleach-in cut.
+- Fixed compiled loading paths for supported Doric, CSV, and processed HDF5 inputs.
+- Recalibrated QC around the fitted-reference corrected output, including corrected SNR and signal-retention checks that reject shared 405/465 contamination.
+- Improved artifact repair with robust median anchors, short-gap merging, and higher-fidelity resampling across repaired spans.
+- Fixed the Cut-mode plotting crash triggered by large artifact sets whose label windows contain only NaN samples.
+- Refined artifact selection, linked plot navigation, and manual-region history behavior.
+- Added a branded startup splash and refreshed the application theme, controls, recommendation cards, plots, and modeling workspace.
+- Regenerated the documentation screenshots from the current application and expanded regression coverage for loading, QC, artifact repair, and overlays.
 
 ## Install from source
 

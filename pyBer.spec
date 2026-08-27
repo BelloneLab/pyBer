@@ -45,6 +45,38 @@ a = Analysis(
         'ffi-8.dll',
         'libexpat.dll',
         'sqlite3.dll',
+        'libcrypto-3-x64.dll',
+        'libssl-3-x64.dll',
+        # Conda keeps BLAS/LAPACK and Qt beside the interpreter rather than
+        # inside their Python packages. PyInstaller sees the extension modules
+        # but cannot resolve these native dependencies unless they are seeded
+        # explicitly. Without them, the one-file app only works on machines
+        # that already have the build environment on PATH.
+        'libblas.dll',
+        'libcblas.dll',
+        'liblapack.dll',
+        'libgcc_s_seh-1.dll',
+        'libgomp-1.dll',
+        'libquadmath-0.dll',
+        'vcomp140.dll',
+        'pyside6.cp311-win_amd64.dll',
+        'shiboken6.cp311-win_amd64.dll',
+        'Qt6Core.dll',
+        'Qt6Network.dll',
+        'Qt6Gui.dll',
+        'Qt6Widgets.dll',
+        'Qt6Svg.dll',
+        'Qt6OpenGL.dll',
+        'Qt6OpenGLWidgets.dll',
+        'Qt6Test.dll',
+        'jpeg8.dll',
+        'lcms2.dll',
+        'openjp2.dll',
+        'qhull_r.dll',
+        'tiff.dll',
+        'libwebp.dll',
+        'libwebpdemux.dll',
+        'libwebpmux.dll',
         # conda-forge's libblas/liblapack shims resolve MKL symbols by the
         # versioned name at runtime, so dependency scanners do not see it.
         'mkl_rt.2.dll',
@@ -63,6 +95,7 @@ a = Analysis(
     ]),
     datas=[('assets/pyBer_logo_big.png', 'assets'), ('assets/pyBer.ico', 'assets')],
     hiddenimports=[
+        'PySide6.QtOpenGL',
         'rpy2.rinterface',
         'rpy2.rinterface_lib',
         'rpy2.robjects',
