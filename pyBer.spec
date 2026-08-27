@@ -110,19 +110,20 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# One-DIR build, no UPX. The previous one-FILE build re-extracted the whole
+# ~800 MB bundle (Qt, MKL, scipy) to a temp dir on EVERY launch and UPX added
+# a decompress pass on top: 36-60 s from double-click to window. The folder
+# build loads DLLs in place: a few seconds. Distribute by zipping dist/pyBer.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='pyBer',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -130,4 +131,13 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['assets/pyBer.ico'],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='pyBer',
 )

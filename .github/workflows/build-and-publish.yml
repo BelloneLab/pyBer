@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: v0.46
+  RELEASE_VERSION: v0.47
 
 jobs:
   build-windows:
@@ -93,15 +93,21 @@ jobs:
       - name: Smoke test built EXE
         run: |
           export PYBER_SMOKE_TEST=1
-          ./dist/pyBer.exe
+          ./dist/pyBer/pyBer.exe
           ./dist/pyBer-cli.exe --version
+
+      - name: Package GUI folder
+        # The GUI is a one-dir build (one-file re-extracted the whole bundle
+        # on every launch); ship the folder as a zip.
+        run: |
+          pwsh -Command "Compress-Archive -Path dist/pyBer -DestinationPath dist/pyBer-windows.zip"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: pyber-windows-exe
           path: |
-            dist/pyBer.exe
+            dist/pyBer-windows.zip
             dist/pyBer-cli.exe
           if-no-files-found: error
 
@@ -126,20 +132,22 @@ jobs:
       - name: Normalize Release Asset Name
         run: |
           set -euo pipefail
-          gui_path="$(find ./publish -type f -name 'pyBer.exe' | head -n 1 || true)"
+          gui_path="$(find ./publish -type f -name 'pyBer-windows.zip' | head -n 1 || true)"
           cli_path="$(find ./publish -type f -name 'pyBer-cli.exe' | head -n 1 || true)"
           if [[ -z "$gui_path" || -z "$cli_path" ]]; then
-            echo "Expected GUI and CLI executables were not found"
+            echo "Expected GUI zip and CLI executable were not found"
             find ./publish -maxdepth 4 -type f -print || true
             exit 1
           fi
-          cp "$gui_path" ./publish/pyBer-windows.exe
+          if [[ "$gui_path" != "./publish/pyBer-windows.zip" ]]; then
+            cp "$gui_path" ./publish/pyBer-windows.zip
+          fi
           cp "$cli_path" ./publish/pyBer-cli-windows.exe
 
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "./publish/pyBer-windows.exe,./publish/pyBer-cli-windows.exe"
+          artifacts: "./publish/pyBer-windows.zip,./publish/pyBer-cli-windows.exe"
           token: ${{ secrets.GITHUB_TOKEN }}
           generateReleaseNotes: true
           allowUpdates: true
