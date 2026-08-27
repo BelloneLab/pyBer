@@ -8118,7 +8118,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.artifact_panel.set_regions(manual_regs)
 
         # Update plots (decimated signals)
-        self.plots.update_plots(processed, preserve_view=preserve_view)
+        self.plots.update_plots(
+            processed,
+            preserve_view=preserve_view,
+            artifact_overlay_entries=self.artifact_panel.active_overlay_entries(),
+        )
         if not preserve_view:
             # Auto-range on each update so file/time-window changes do not require manual reset.
             self._auto_range_for_processed(processed)

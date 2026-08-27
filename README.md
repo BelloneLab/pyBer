@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.47"><img src="https://img.shields.io/badge/release-v0.47-7c4dff" alt="v0.47 release"></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.48"><img src="https://img.shields.io/badge/release-v0.48-7c4dff" alt="v0.48 release"></a>
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-41cd52?logo=qt&logoColor=white" alt="PySide6 and pyqtgraph">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white" alt="Windows">
@@ -18,9 +18,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.47/pyBer-windows.zip"><strong>Download the Windows GUI (zip)</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.48/pyBer-windows.zip"><strong>Download the Windows GUI (zip)</strong></a>
   &nbsp;|&nbsp;
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.47/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.48/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
   &nbsp;|&nbsp;
   <a href="docs/index.md"><strong>Read the full guide</strong></a>
 </p>
@@ -178,7 +178,16 @@ The flagged table collects processing failures, excessive artifact load, poor fi
 | Processed data | Self-describing CSV with `.pyber.json` sidecar and HDF5 with embedded metadata. |
 | Reports | Preprocessing PNG, strict QC report images, batch summaries, flagged-recording tables, analysis CSVs, model tables, and publication figure exports. |
 
-Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.47 builds target Windows; source execution on other platforms is not part of the tested release path.
+Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.48 builds target Windows; source execution on other platforms is not part of the tested release path.
+
+## What changed in v0.48
+
+- Smart artifact detection now recognizes repeated downward events shared by the 465 and 405 channels. Repeated bilateral dips corroborate one another without globally lowering the threshold, while isolated moderate dips and independent heavy-tailed noise remain suppressed.
+- Auto-detected artifact IDs are stable across enable and disable operations. Disabling artifact 45 removes only overlay 45, artifact 46 remains 46, and re-enabling 45 restores its original label and interval.
+- Manual artifact overlays use `M1`, `M2`, and subsequent IDs so they cannot collide with automatic artifact numbers.
+- Artifact checkbox updates preserve the exact preview zoom and time position across the raw, filtered, and output plots.
+- Long processing summaries no longer inflate the output plot geometry or destabilize linked x-axis navigation. The complete summary remains available from the plot-title tooltip.
+- Added recording-grounded and GUI regression coverage for repeated downward artifacts, stable overlay identity, and linked-range preservation.
 
 ## What changed in v0.47
 

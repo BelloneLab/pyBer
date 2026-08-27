@@ -2460,10 +2460,11 @@ def detect_artifacts_smart(
     The 465 channel is protected against ordinary slow positive transients unless
     the evidence is abrupt, very large, or also appears in the reference channel.
 
-    Borderline detections (score below SMART_STRONG_SCORE) survive only when
-    the recording also contains at least one strong interior artifact; on a
-    recording with no strong evidence they are treated as heavy-tailed channel
-    noise and suppressed (the summary reports how many).
+    Borderline detections (score below SMART_STRONG_SCORE) survive when the
+    recording contains either one strong interior artifact or repeated shared
+    negative events in 465 and 405. The repeated-event route is deliberately
+    selective: it retains only bilateral candidates, so isolated moderate dips
+    and independent heavy-tailed channel noise remain suppressed.
     """
     t = np.asarray(time, float)
     sig = np.asarray(signal_465, float)
@@ -2508,6 +2509,8 @@ def detect_artifacts_smart(
         channel_label="465",
         protect_positive_transients=True,
     )
+    shared_dip = np.zeros(n, dtype=bool)
+    repeated_shared_dips = False
     if has_reference:
         ref_feat = _smart_channel_artifact_features(
             t,
@@ -2582,6 +2585,27 @@ def detect_artifacts_smart(
         if dip_edge_n > 0 and shared_dip.size > 2 * dip_edge_n:
             shared_dip[:dip_edge_n] = False
             shared_dip[-dip_edge_n:] = False
+
+        # Two or more sustained bilateral dips corroborate one another even
+        # when no single event reaches SMART_STRONG_SCORE. This captures the
+        # repeated downward hardware/motion hits seen in real Doric sessions
+        # without reopening the gate for isolated moderate dips or independent
+        # heavy-tailed noise. Ignore at least the first/last two seconds, and
+        # one quarter of long adaptive windows, because rolling robust
+        # statistics are boundary-biased.
+        dip_corroborator = np.asarray(shared_dip, bool).copy()
+        dip_context_s = float(window_s)
+        if not np.isfinite(dip_context_s) or dip_context_s <= 0:
+            dip_context_s = 5.0
+        dip_corr_edge_s = max(2.0, min(10.0, 0.25 * dip_context_s))
+        dip_corr_edge_n = _window_samples_from_seconds(fs_val, dip_corr_edge_s, minimum=1)
+        if dip_corroborator.size > 2 * dip_corr_edge_n:
+            dip_corroborator[:dip_corr_edge_n] = False
+            dip_corroborator[-dip_corr_edge_n:] = False
+        dip_min_run = max(3, _window_samples_from_seconds(fs_val, 0.03, minimum=1))
+        dip_corroborator = _mask_runs_at_least(dip_corroborator, dip_min_run)
+        dip_corroborator = _close_mask_gaps(t, dip_corroborator, max_gap_s=0.20)
+        repeated_shared_dips = len(regions_from_mask(t, dip_corroborator)) >= 2
         shared = shared | shared_dip
     sig_core = np.asarray(sig_feat["core"], bool) | shared
     ref_core = np.asarray(ref_feat["core"], bool) | shared
@@ -2600,17 +2624,13 @@ def detect_artifacts_smart(
 
     # ------------------------------------------------------------------
     # Session-corroboration gate. Borderline hits (score just past the
-    # threshold) are indistinguishable, event by event, from the tail of a
-    # heavy-tailed noise process: on a clean-but-spiky recording they occur
-    # many times per minute and are false alarms, while the same scores on a
-    # motion-laden session are genuine. What separates the two situations is
-    # the SESSION: real artifact-contaminated recordings carry unambiguous
-    # strong events (measured 30-330x threshold), heavy-tailed noise does not
-    # (tops out near 3.5x). So borderline regions are kept only when the
-    # recording also contains strong interior evidence; NaN gaps and strong
-    # regions themselves always survive. Record edges (~2 s) are excluded as
-    # corroborators because LED/detector settling produces large scores on
-    # perfectly good sessions.
+    # threshold) can be indistinguishable from the tail of a heavy-tailed noise
+    # process. A session therefore needs either one unambiguous strong event or
+    # repeated sustained negative events shared by 465 and 405. Strong events
+    # corroborate all candidates, while repeated shared dips corroborate only
+    # bilateral candidates. NaN gaps and strong regions themselves always
+    # survive. Record edges (~2 s) are excluded as corroborators because
+    # LED/detector settling produces large scores on clean sessions.
     # ------------------------------------------------------------------
     suppressed_weak = 0
     if np.any(core):
@@ -2636,7 +2656,12 @@ def detect_artifacts_smart(
             for run in np.split(core_idx, run_splits):
                 if run.size == 0:
                     continue
-                if np.any(nonfinite_any[run]) or float(np.max(score[run])) >= SMART_STRONG_SCORE:
+                shared_session_hit = bool(repeated_shared_dips and np.any(shared[run]))
+                if (
+                    np.any(nonfinite_any[run])
+                    or float(np.max(score[run])) >= SMART_STRONG_SCORE
+                    or shared_session_hit
+                ):
                     keep[run] = True
                 else:
                     suppressed_weak += 1
@@ -2672,7 +2697,9 @@ def detect_artifacts_smart(
         f"core={float(np.mean(core)) * 100.0:.2f}%, padded={float(np.mean(padded)) * 100.0:.2f}%"
     )
     if suppressed_weak:
-        summary += f", {suppressed_weak} weak candidate(s) suppressed (no strong corroborating artifact)"
+        summary += f", {suppressed_weak} weak candidate(s) suppressed (insufficient corroboration)"
+    if repeated_shared_dips:
+        summary += ", repeated shared dips corroborated"
     return ArtifactDetectionResult(
         mask=np.asarray(padded, bool),
         core_mask=np.asarray(core, bool),

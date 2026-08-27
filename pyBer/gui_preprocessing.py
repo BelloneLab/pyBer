@@ -933,12 +933,32 @@ class ArtifactPanel(QtWidgets.QDialog):
         regs.sort(key=lambda x: x[0])
         return regs
 
+    def active_overlay_entries(self) -> List[Tuple[str, float, float]]:
+        """Return enabled regions with IDs that match the artifact tables.
+
+        Auto IDs belong to the complete detector result, not to the filtered
+        list of enabled regions. Disabling auto artifact 45 therefore removes
+        label 45 without renaming artifact 46. Manual IDs use an ``M`` prefix
+        so they remain unambiguous when auto and manual intervals are mixed on
+        the same raw-signal plot.
+        """
+        entries: List[Tuple[str, float, float]] = []
+        for artifact_id, (keep, (a, b)) in enumerate(
+            zip(self._auto_checked, self._auto_regions), start=1
+        ):
+            if keep:
+                entries.append((str(artifact_id), float(a), float(b)))
+        for artifact_id, (a, b) in enumerate(self._regions, start=1):
+            entries.append((f"M{artifact_id}", float(a), float(b)))
+        entries.sort(key=lambda entry: (entry[1], entry[2], entry[0]))
+        return entries
+
     def _rebuild_table(self) -> None:
         self.table.setRowCount(0)
         for idx, (a, b) in enumerate(self._regions, start=1):
             r = self.table.rowCount()
             self.table.insertRow(r)
-            id_item = QtWidgets.QTableWidgetItem(str(idx))
+            id_item = QtWidgets.QTableWidgetItem(f"M{idx}")
             id_item.setFlags(id_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             id_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(r, 0, id_item)
@@ -3395,6 +3415,7 @@ class PlotDashboard(QtWidgets.QWidget):
         self._last_overlay_time: Optional[np.ndarray] = None
         self._last_overlay_signal: Optional[np.ndarray] = None
         self._last_overlay_regions: List[Tuple[float, float]] = []
+        self._last_overlay_labels: List[str] = []
         self._artifact_pen_default = pg.mkPen((240, 130, 90), width=1.0)
         self._artifact_brush_default = pg.mkBrush(240, 130, 90, 40)
         self._artifact_pen_selected = pg.mkPen((255, 220, 120), width=2.0)
@@ -3467,6 +3488,13 @@ class PlotDashboard(QtWidgets.QWidget):
         self.plot_out = pg.PlotWidget(title="Output")
         for w in (self.plot_raw, self.plot_proc, self.plot_out):
             _optimize_plot(w)
+        # LabelItem reports the full unwrapped title width as its minimum
+        # layout width. The detailed output context can be several thousand
+        # pixels wide, which silently makes the output ViewBox much wider than
+        # the raw/proc ViewBoxes and destabilizes linked x ranges. Cap only the
+        # on-canvas title width; show_output() keeps the complete text as a
+        # tooltip for inspection.
+        self.plot_out.getPlotItem().titleLabel.setMaximumWidth(720.0)
 
         # Empty-state hints removed by design - keep plots visually clean.
         self._preproc_empty_hints = []
@@ -3749,9 +3777,15 @@ class PlotDashboard(QtWidgets.QWidget):
         self._last_xrange = (float(x0), float(x1))
         self._sync_guard = True
         try:
+            # raw is the master x view. proc and out are linked to it by
+            # _link_stacked_x_axes(), so writing the same range into all three
+            # views is not merely redundant: pyqtgraph translates each child
+            # write back through the link using its current scene geometry.
+            # During an asynchronous preview refresh those geometries can be
+            # one layout pass apart, causing the repeated child writes to zoom
+            # and shift the master range. Set the master exactly once and let
+            # the native links propagate it to both children.
             self.plot_raw.setXRange(x0, x1, padding=0)
-            self.plot_proc.setXRange(x0, x1, padding=0)
-            self.plot_out.setXRange(x0, x1, padding=0)
         finally:
             self._sync_guard = False
 
@@ -3959,14 +3993,24 @@ class PlotDashboard(QtWidgets.QWidget):
         t: np.ndarray,
         raw_sig: np.ndarray,
         regions: Optional[List[Tuple[float, float]]],
+        labels: Optional[List[str]] = None,
     ) -> None:
+        region_list = [(float(a), float(b)) for a, b in (regions or [])]
+        if labels is None:
+            label_list = [str(idx) for idx in range(1, len(region_list) + 1)]
+        else:
+            label_list = [str(label) for label in labels[:len(region_list)]]
+            label_list.extend(
+                str(idx) for idx in range(len(label_list) + 1, len(region_list) + 1)
+            )
         self._last_overlay_time = None if t is None else np.asarray(t, float)
         self._last_overlay_signal = None if raw_sig is None else np.asarray(raw_sig, float)
-        self._last_overlay_regions = list(regions or [])
+        self._last_overlay_regions = region_list
+        self._last_overlay_labels = label_list
         self._clear_artifact_overlays()
         if not self._artifact_overlay_visible:
             return
-        if t is None or raw_sig is None or not regions:
+        if t is None or raw_sig is None or not region_list:
             return
         tt = np.asarray(t, float)
         yy = np.asarray(raw_sig, float)
@@ -3974,10 +4018,10 @@ class PlotDashboard(QtWidgets.QWidget):
         # Optimization: use one Qt path item for many regions to avoid scene
         # graph bloat. ``pyqtgraph.PathItem`` is not a public/version-stable API
         # and is absent from pyqtgraph 0.14, including the packaged application.
-        if len(regions) > 25:
+        if len(region_list) > 25:
             y0, y1 = -1e12, 1e12  # Large range for vertical bars
             path = QtGui.QPainterPath()
-            for a, b in regions:
+            for a, b in region_list:
                 path.addRect(QtCore.QRectF(float(a), y0, float(b - a), y1 - y0))
 
             path_item = QtWidgets.QGraphicsPathItem(path)
@@ -3988,19 +4032,19 @@ class PlotDashboard(QtWidgets.QWidget):
             # range. It is decorative and must not contaminate plot autoranging.
             self.plot_raw.addItem(path_item, ignoreBounds=True)
             self._artifact_regions.append(path_item)
-            self._artifact_region_bounds.extend(regions)
+            self._artifact_region_bounds.extend(region_list)
 
             # Limit labels to first 100 to avoid lag
-            for idx, (a, b) in enumerate(regions[:100], start=1):
+            for label_text, (a, b) in zip(label_list[:100], region_list[:100]):
                 y_pos = self._artifact_label_y(tt, yy, float(a), float(b))
 
-                label = pg.TextItem(str(idx), color=(240, 240, 240), anchor=(0.5, 0.5))
+                label = pg.TextItem(label_text, color=(240, 240, 240), anchor=(0.5, 0.5))
                 label.setPos(float((a + b) * 0.5), y_pos)
                 label.setZValue(9)
                 self.plot_raw.addItem(label, ignoreBounds=True)
                 self._artifact_labels.append(label)
         else:
-            for idx, (a, b) in enumerate(regions, start=1):
+            for label_text, (a, b) in zip(label_list, region_list):
                 region = pg.LinearRegionItem(
                     values=(float(a), float(b)),
                     movable=False,
@@ -4014,7 +4058,7 @@ class PlotDashboard(QtWidgets.QWidget):
 
                 y_pos = self._artifact_label_y(tt, yy, float(a), float(b))
 
-                label = pg.TextItem(str(idx), color=(240, 240, 240), anchor=(0.5, 0.5))
+                label = pg.TextItem(label_text, color=(240, 240, 240), anchor=(0.5, 0.5))
                 label.setPos(float((a + b) * 0.5), y_pos)
                 label.setZValue(9)
                 self.plot_raw.addItem(label, ignoreBounds=True)
@@ -4030,6 +4074,7 @@ class PlotDashboard(QtWidgets.QWidget):
                 self._last_overlay_time,
                 self._last_overlay_signal,
                 self._last_overlay_regions,
+                self._last_overlay_labels,
             )
 
     def artifact_overlay_visible(self) -> bool:
@@ -4302,6 +4347,7 @@ class PlotDashboard(QtWidgets.QWidget):
         context = _first_not_none(kwargs, "output_context", "label_context", default="")
         title = f"Output: {label}" if not context else f"Output: {label} | {context}"
         self.plot_out.setTitle(title)
+        self.plot_out.getPlotItem().titleLabel.setToolTip(title)
 
         dio = _first_not_none(kwargs, "dio", "digital", "dio_y")
         dio_name = _first_not_none(kwargs, "dio_name", "digital_name", "trigger_name", default="") or ""
@@ -4309,7 +4355,12 @@ class PlotDashboard(QtWidgets.QWidget):
 
     # -------------------- Modern API (kept) --------------------
 
-    def update_plots(self, processed: ProcessedTrial, preserve_view: bool = False) -> None:
+    def update_plots(
+        self,
+        processed: ProcessedTrial,
+        preserve_view: bool = False,
+        artifact_overlay_entries: Optional[List[Tuple[str, float, float]]] = None,
+    ) -> None:
         t = np.asarray(processed.time, float)
         raw_t = getattr(processed, "raw_display_time", None)
         raw_signal = getattr(processed, "raw_display_signal", None)
@@ -4363,7 +4414,13 @@ class PlotDashboard(QtWidgets.QWidget):
             dio=processed.dio, dio_name=processed.dio_name,
             preserve_view=preserve_view,
         )
-        self._update_artifact_overlays(raw_t, raw_signal, processed.artifact_regions_sec)
+        if artifact_overlay_entries is None:
+            overlay_regions = list(processed.artifact_regions_sec or [])
+            overlay_labels = None
+        else:
+            overlay_labels = [str(label) for label, _a, _b in artifact_overlay_entries]
+            overlay_regions = [(float(a), float(b)) for _label, a, b in artifact_overlay_entries]
+        self._update_artifact_overlays(raw_t, raw_signal, overlay_regions, overlay_labels)
         self._update_prominence_overlay(processed)
         if kept_xrange is not None:
             self.set_xrange_all(*kept_xrange)

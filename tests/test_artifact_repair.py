@@ -159,6 +159,18 @@ class SharedDipTierTests(unittest.TestCase):
         covering = [(a, b) for a, b in res.regions if a <= 60.0 <= b]
         self.assertEqual(len(covering), 1, msg=f"regions={res.regions}")
 
+    def test_repeated_moderate_shared_dips_corroborate_each_other(self):
+        t, signal, reference = _quiet_pair()
+        for center in (45.0, 75.0):
+            dip = self._dip(t, center)
+            signal = signal - self.SIG_DEPTH * dip
+            reference = reference - self.REF_DEPTH * dip
+        res = _detect(t, signal, reference)
+        for center in (45.0, 75.0):
+            covering = [(a, b) for a, b in res.regions if a <= center <= b]
+            self.assertEqual(len(covering), 1, msg=f"center={center} regions={res.regions}")
+        self.assertIn("repeated shared dips corroborated", res.summary)
+
     def test_isolated_moderate_dip_is_suppressed(self):
         # No strong artifact anywhere in the record: the moderate co-dip is
         # indistinguishable from heavy-tailed noise coincidence and must not
