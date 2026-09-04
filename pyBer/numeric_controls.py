@@ -3,6 +3,21 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from shiboken6 import isValid
+
+
+def _is_alive(obj: object) -> bool:
+    """Return whether a PySide wrapper still owns a live C++ object.
+
+    Qt can deliver a final queued event while tearing down a dialog. During
+    that narrow window ``isinstance`` still succeeds for a Python wrapper, but
+    any Qt method call, including ``parent()``, raises ``RuntimeError`` because
+    the underlying C++ widget has already gone away.
+    """
+    try:
+        return isinstance(obj, QtCore.QObject) and bool(isValid(obj))
+    except (RuntimeError, TypeError):
+        return False
 
 
 def _event_global_pos(event: QtCore.QEvent) -> QtCore.QPoint:
@@ -45,6 +60,8 @@ class SpinBoxScrubber(QtCore.QObject):
         self._override_cursor = False
 
     def scan(self, root: QtCore.QObject) -> None:
+        if not _is_alive(root):
+            return
         if isinstance(root, QtWidgets.QAbstractSpinBox):
             self._configure_spinbox(root)
         if isinstance(root, QtWidgets.QWidget):
@@ -52,6 +69,15 @@ class SpinBoxScrubber(QtCore.QObject):
                 self._configure_spinbox(spin)
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        # A dialog's spin-box editor can be destroyed before its last queued
+        # event reaches this application-wide filter. Never dereference such a
+        # stale PySide wrapper. This is particularly visible when QColorDialog
+        # closes from the postprocessing Plot Styling dialog.
+        if not _is_alive(obj):
+            self._clear_deleted_press_target()
+            return False
+
+        self._clear_deleted_press_target()
         etype = event.type()
         if etype == QtCore.QEvent.Type.Show:
             self._configure_object_tree(obj)
@@ -117,6 +143,8 @@ class SpinBoxScrubber(QtCore.QObject):
         return False
 
     def _configure_object_tree(self, obj: QtCore.QObject) -> None:
+        if not _is_alive(obj):
+            return
         spin = self._spinbox_for_object(obj)
         if spin is not None:
             self._configure_spinbox(spin)
@@ -126,6 +154,8 @@ class SpinBoxScrubber(QtCore.QObject):
                 self._configure_spinbox(child)
 
     def _configure_spinbox(self, spin: QtWidgets.QAbstractSpinBox) -> None:
+        if not _is_alive(spin):
+            return
         if bool(spin.property(self._CONFIGURED_PROP)):
             return
         spin.setProperty(self._CONFIGURED_PROP, True)
@@ -148,14 +178,25 @@ class SpinBoxScrubber(QtCore.QObject):
             spin.setToolTip(f"{tip}\n{scrub_tip}" if tip else scrub_tip)
 
     def _spinbox_for_object(self, obj: QtCore.QObject) -> Optional[QtWidgets.QAbstractSpinBox]:
+        if not _is_alive(obj):
+            return None
         if isinstance(obj, QtWidgets.QAbstractSpinBox):
             return obj
-        parent = obj.parent() if isinstance(obj, QtCore.QObject) else None
-        while parent is not None:
+        parent = obj.parent()
+        while _is_alive(parent):
             if isinstance(parent, QtWidgets.QAbstractSpinBox):
                 return parent
             parent = parent.parent()
         return None
+
+    def _clear_deleted_press_target(self) -> None:
+        """Release drag state if its spin box vanished with a closed dialog."""
+        if self._press_spin is None or _is_alive(self._press_spin):
+            return
+        self._press_spin = None
+        self._last_steps = 0
+        self._dragging = False
+        self._restore_override_cursor()
 
     def _steps_from_drag(self, dx: int, event: QtCore.QEvent) -> int:
         pixels_per_step = 12.0
