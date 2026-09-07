@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: v0.48
+  RELEASE_VERSION: v0.49
 
 jobs:
   build-windows:
@@ -84,6 +84,9 @@ jobs:
           print("h5py:", h5py.__version__)
           print("sklearn:", sklearn.__version__)
           PY
+
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -q
 
       - name: Build with PyInstaller
         run: |

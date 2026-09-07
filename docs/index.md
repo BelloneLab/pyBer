@@ -588,7 +588,7 @@ python -m PyInstaller --noconfirm --clean pyBer.spec
 The app is written to:
 
 ```text
-dist\pyBer.exe
+dist\pyBer\pyBer.exe
 ```
 
 When building with FLMM support, make sure `fastFMM` is installed before running
