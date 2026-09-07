@@ -3428,14 +3428,17 @@ class PlotDashboard(QtWidgets.QWidget):
 
         top = QtWidgets.QHBoxLayout()
         self.lbl_title = QtWidgets.QLabel("No file loaded")
-        self.lbl_title.setStyleSheet("font-weight: 900; font-size: 12pt;")
+        self.lbl_title.setStyleSheet("font-weight: 600; font-size: 12pt;")
         self.lbl_status = QtWidgets.QLabel("Channel: - | A/D: None | Fs: - -> - Hz | Mode: -")
         self.lbl_status.setProperty("class", "hint")
         self.lbl_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         top.addWidget(self.lbl_title)
         top.addStretch(1)
         top.addWidget(self.lbl_status)
-        v.addLayout(top)
+        self._plot_header = QtWidgets.QWidget()
+        self._plot_header.setLayout(top)
+        top.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(self._plot_header)
 
         tools = QtWidgets.QHBoxLayout()
         self.btn_add_region = QtWidgets.QPushButton("Add from selector")
@@ -3480,12 +3483,19 @@ class PlotDashboard(QtWidgets.QWidget):
         tools.addWidget(self.btn_box_select)
         tools.addWidget(self.btn_thresholds)
         tools.addStretch(1)
-        v.addLayout(tools)
+        self._plot_tools = QtWidgets.QWidget()
+        self._plot_tools.setLayout(tools)
+        tools.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(self._plot_tools)
 
         self._raw_vb = ArtifactSelectViewBox()
         self.plot_raw = pg.PlotWidget(viewBox=self._raw_vb, title="raw signal")
         self.plot_proc = pg.PlotWidget(title="Filtered + baselines")
         self.plot_out = pg.PlotWidget(title="Output")
+        self._plot_data_available = {
+            plot: False for plot in (self.plot_raw, self.plot_proc, self.plot_out)
+        }
+        self._history_available = (False, False)
         for w in (self.plot_raw, self.plot_proc, self.plot_out):
             _optimize_plot(w)
         # LabelItem reports the full unwrapped title width as its minimum
@@ -3567,7 +3577,16 @@ class PlotDashboard(QtWidgets.QWidget):
         self.plot_splitter.addWidget(self.plot_out)
         self.plot_splitter.setSizes([320, 260, 260])
 
-        v.addWidget(self.plot_splitter, stretch=1)
+        from plot_empty_state import PlotEmptyState
+
+        self.plot_workspace = QtWidgets.QStackedWidget()
+        self.plot_empty_state = PlotEmptyState(
+            title="Load a recording to begin",
+            hint="Your traces will appear here.",
+        )
+        self.plot_workspace.addWidget(self.plot_empty_state)
+        self.plot_workspace.addWidget(self.plot_splitter)
+        v.addWidget(self.plot_workspace, stretch=1)
         v.addWidget(self.lbl_log)
 
         self.btn_add_region.clicked.connect(self.manualRegionFromSelectorRequested.emit)
@@ -3592,10 +3611,78 @@ class PlotDashboard(QtWidgets.QWidget):
         self._toggle_box_select(False)
         self.set_history_available(False, False)
         self.set_plot_appearance(self._plot_background_mode, self._plot_grid_visible)
+        self.clear_plots()
+
+    @staticmethod
+    def _has_trace_data(time, values) -> bool:
+        """Require a finite time/value pair before exposing a plot canvas."""
+        if time is None or values is None:
+            return False
+        x, y = np.asarray(time, float), np.asarray(values, float)
+        if x.ndim != 1 or y.ndim != 1:
+            return False
+        n = min(x.size, y.size)
+        return bool(n and np.any(np.isfinite(x[:n]) & np.isfinite(y[:n])))
+
+    def _set_plot_data_available(self, plot: pg.PlotWidget, available: bool) -> None:
+        """Keep the workspace surface but hide all chart furniture when empty.
+
+        Hiding the complete PlotItem also hides its axes, grid, titles and
+        selectors without discarding styling or disturbing splitter sizes.
+        Digital overlays live outside that item and are gated separately.
+        """
+        available = bool(available)
+        previous = self._plot_data_available.get(plot, False)
+        self._plot_data_available[plot] = available
+        plot.getPlotItem().setVisible(available)
+        has_data = any(self._plot_data_available.values())
+        self._plot_header.setVisible(has_data)
+        self._plot_tools.setVisible(self._plot_data_available.get(self.plot_raw, False))
+        self.plot_workspace.setCurrentWidget(
+            self.plot_splitter if any(self._plot_data_available.values()) else self.plot_empty_state
+        )
+        if plot is self.plot_raw:
+            if available != previous or not available:
+                self.selector.setVisible(available)
+            for button in (
+                self.btn_add_region, self.btn_clear_regions,
+                self.btn_box_select, self.btn_thresholds,
+            ):
+                button.setEnabled(available)
+            self.set_history_available(*self._history_available)
+        for candidate, overlay, curve in (
+            (self.plot_raw, self.vb_dio_raw, self.curve_dio_raw),
+            (self.plot_proc, self.vb_dio_proc, self.curve_dio_proc),
+            (self.plot_out, self.vb_dio_out, self.curve_dio_out),
+        ):
+            if candidate is plot:
+                visible = available and self._dio_overlay_visible
+                overlay.setVisible(visible)
+                curve.setVisible(visible)
+
+    def clear_plots(self) -> None:
+        """Return every panel to a genuinely blank, non-interactive state."""
+        for plot in (self.plot_raw, self.plot_proc, self.plot_out):
+            for curve in plot.listDataItems():
+                curve.setData([], [])
+            self._set_plot_data_available(plot, False)
+        self._clear_artifact_overlays()
+        self._clear_prominence_overlay()
+        self._last_overlay_time = None
+        self._last_overlay_signal = None
+        self._last_overlay_regions = []
+        self._last_overlay_labels = []
+        self._last_xrange = None
+        self._set_dio(np.asarray([]), None, "")
+        self.btn_box_select.setChecked(False)
+        self._raw_vb.clear_selection()
+        self.set_history_available(False, False)
 
     def set_history_available(self, can_undo: bool, can_redo: bool) -> None:
-        self.btn_undo.setEnabled(bool(can_undo))
-        self.btn_redo.setEnabled(bool(can_redo))
+        self._history_available = (bool(can_undo), bool(can_redo))
+        available = self._plot_data_available.get(self.plot_raw, False)
+        self.btn_undo.setEnabled(bool(can_undo) and available)
+        self.btn_redo.setEnabled(bool(can_redo) and available)
 
     def _normalize_plot_background_mode(self, value: object) -> str:
         mode = str(value or "").strip().lower()
@@ -3681,6 +3768,7 @@ class PlotDashboard(QtWidgets.QWidget):
             (self.plot_proc, self.vb_dio_proc, self.curve_dio_proc),
             (self.plot_out, self.vb_dio_out, self.curve_dio_out),
         ):
+            panel_visible = self._dio_overlay_visible and self._plot_data_available.get(plot, False)
             pi = plot.getPlotItem()
             axis = pi.getAxis("right")
             if axis is not None:
@@ -3693,11 +3781,11 @@ class PlotDashboard(QtWidgets.QWidget):
             except Exception:
                 pass
             try:
-                vb.setVisible(self._dio_overlay_visible)
+                vb.setVisible(panel_visible)
             except Exception:
                 pass
             try:
-                curve.setVisible(self._dio_overlay_visible)
+                curve.setVisible(panel_visible)
             except Exception:
                 pass
         self._align_plot_axis_layouts()
@@ -4161,15 +4249,7 @@ class PlotDashboard(QtWidgets.QWidget):
             r = _first_not_none(kwargs, "raw405", "reference_405", "raw_reference", "ref", "reference")
 
         if t is None or s is None or r is None:
-            # fail silently but clear plot (prevents hard crashes)
-            self.curve_465.setData([], [])
-            self.curve_405.setData([], [])
-            self.curve_thr_hi.setData([], [])
-            self.curve_thr_lo.setData([], [])
-            self.curve_ref_thr_hi.setData([], [])
-            self.curve_ref_thr_lo.setData([], [])
-            self._sync_artifact_threshold_curves_visibility()
-            self._set_dio(np.asarray([]), None, "")
+            self.clear_plots()
             return
 
         t = np.asarray(t, float)
@@ -4177,6 +4257,10 @@ class PlotDashboard(QtWidgets.QWidget):
         r = np.asarray(r, float)
         n = min(t.size, s.size, r.size)
         t, s, r = t[:n], s[:n], r[:n]
+        if not self._has_trace_data(t, s):
+            self.clear_plots()
+            return
+        self._set_plot_data_available(self.plot_raw, True)
 
         self.curve_465.setData(t, s, connect="finite", skipFiniteCheck=True)
         ref_scale, ref_offset = self._reference_to_signal_params(s, r)
@@ -4270,6 +4354,7 @@ class PlotDashboard(QtWidgets.QWidget):
             t = _first_not_none(kwargs, "time", "t", "Time")
 
         if t is None:
+            self._set_plot_data_available(self.plot_proc, False)
             self.curve_f465.setData([], [])
             self.curve_f405.setData([], [])
             self.curve_b465.setData([], [])
@@ -4298,6 +4383,10 @@ class PlotDashboard(QtWidgets.QWidget):
         _set_curve(self.curve_f405, ref_f)
         _set_curve(self.curve_b465, baseline_sig)
         _set_curve(self.curve_b405, baseline_ref)
+        self._set_plot_data_available(
+            self.plot_proc,
+            any(self._has_trace_data(t, values) for values in (sig_f, ref_f)),
+        )
 
         dio = _first_not_none(kwargs, "dio", "digital", "dio_y")
         dio_name = _first_not_none(kwargs, "dio_name", "digital_name", "trigger_name", default="") or ""
@@ -4328,6 +4417,7 @@ class PlotDashboard(QtWidgets.QWidget):
             y = _first_not_none(kwargs, "output", "y", "dff", "zscore")
 
         if t is None or y is None:
+            self._set_plot_data_available(self.plot_out, False)
             self.curve_out.setData([], [])
             self._set_dio(np.asarray([]), None, "")
             return
@@ -4336,6 +4426,7 @@ class PlotDashboard(QtWidgets.QWidget):
         y = np.asarray(y, float)
         n = min(t.size, y.size)
         t, y = t[:n], y[:n]
+        self._set_plot_data_available(self.plot_out, self._has_trace_data(t, y))
 
         label = _first_not_none(kwargs, "label", "output_label", default="Output")
 
@@ -4361,6 +4452,9 @@ class PlotDashboard(QtWidgets.QWidget):
         preserve_view: bool = False,
         artifact_overlay_entries: Optional[List[Tuple[str, float, float]]] = None,
     ) -> None:
+        if processed is None:
+            self.clear_plots()
+            return
         t = np.asarray(processed.time, float)
         raw_t = getattr(processed, "raw_display_time", None)
         raw_signal = getattr(processed, "raw_display_signal", None)

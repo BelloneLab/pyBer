@@ -886,6 +886,27 @@ QFrame#pyberPanelHeader {
     padding: 0;
 }
 
+QFrame#plotEmptyWorkspace {
+    background: #141824;
+    border: 1px solid #232a3d;
+    border-radius: 12px;
+}
+QLabel#plotEmptyTitle {
+    background: transparent;
+    border: 0;
+    color: #a9b3c9;
+    font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif;
+    font-size: 12pt;
+    font-weight: 500;
+}
+QLabel#plotEmptyHint {
+    background: transparent;
+    border: 0;
+    color: #707b93;
+    font-size: 9pt;
+    font-weight: 400;
+}
+
 QFrame#pyberPanelHeader QLabel {
     background: transparent;
 }

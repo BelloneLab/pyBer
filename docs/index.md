@@ -99,6 +99,12 @@ python .\pyBer\main.py
 Both workflow rails use matching vector line icons: white on the dark theme,
 with contrasting ink on light surfaces and white on selected buttons. Panel
 headings use compact titles and descriptions without circular letter badges.
+Before loading data, both plot workspaces show one quiet canvas with a small
+loading prompt. Axes, color scales, selection tools, and uncomputed results stay
+hidden. A loaded raw trace can appear before processing completes; clearing the
+last file restores the empty canvas without retaining old plots. Run
+`conda run -n pyBer python scripts/validate_empty_workspaces.py` to check real-data
+empty/load/clear transitions and save screenshots under `_test/empty_workspaces`.
 The original pyBer application icon is installed before the splash and reused
 by detached windows at the display's native resolution. Restart pyBer after
 updating to apply these changes; an older packaged executable must be rebuilt.

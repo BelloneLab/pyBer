@@ -7155,6 +7155,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_channel = None
                 self._current_trigger = None
                 self.plots.set_title("No file loaded")
+                self.plots.clear_plots()
                 self._refresh_preprocessing_recommendation()
                 self._post_get_current_dio_list()
                 self._update_plot_status()
@@ -7162,6 +7163,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # preview shows first selected
         path = sel[0]
+        if path != self._current_path:
+            self.plots.clear_plots()
         self._current_path = path
 
         doric = self._loaded_files.get(path)

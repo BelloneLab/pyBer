@@ -30,6 +30,7 @@ from analysis_core import (
 )
 from ethovision_process_gui import clean_sheet
 from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, create_plot_card, style_plot
+from plot_empty_state import PlotEmptyState, set_plot_has_data
 from postprocessing_core import (
     compute_psth_matrix, extract_complete_events, group_close_events,
     mean_sem, normalize_events, window_metrics, paired_summary,
@@ -3798,7 +3799,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_plot_file.setWordWrap(True)
         header_row.addWidget(self.lbl_plot_file)
         header_row.addStretch(1)
-        rv.addLayout(header_row)
+        self._plot_file_context = QtWidgets.QWidget()
+        self._plot_file_context.setLayout(header_row)
+        header_row.setContentsMargins(0, 0, 0, 0)
+        rv.addWidget(self._plot_file_context)
 
         # Keep analysis provenance visible beside the plots, even when drawers
         # are closed. Wrapped text also works on smaller laptop displays.
@@ -3826,7 +3830,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_individual_file.setToolTip("Select file for individual view (each row = trial)")
         visual_bar.addWidget(self.combo_individual_file, stretch=1)
         visual_bar.addStretch(1)
-        rv.addLayout(visual_bar)
+        self._plot_scope_controls = QtWidgets.QWidget()
+        self._plot_scope_controls.setLayout(visual_bar)
+        rv.addWidget(self._plot_scope_controls)
 
         view_row = QtWidgets.QHBoxLayout()
         view_row.addWidget(QtWidgets.QLabel("View layout"))
@@ -3850,7 +3856,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_fit_psth.setToolTip("Restore the full time window and fit the trace and average vertically.")
         view_row.addWidget(self.btn_fit_psth)
         view_row.addStretch(1)
-        rv.addLayout(view_row)
+        self._plot_view_controls = QtWidgets.QWidget()
+        self._plot_view_controls.setLayout(view_row)
+        view_row.setContentsMargins(0, 0, 0, 0)
+        rv.addWidget(self._plot_view_controls)
 
         self.plot_trace = pg.PlotWidget(title="Trace preview")
         self.plot_heat = pg.PlotWidget(title="Heatmap")
@@ -4191,7 +4200,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._results_scroll.setWidgetResizable(True)
         self._results_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self._results_scroll.setWidget(self._results_splitter)
-        rv.addWidget(self._results_scroll, stretch=1)
+        self._empty_results = PlotEmptyState(
+            "Load processed data to begin", "Your traces and analysis results will appear here.",
+        )
+        self._results_stack = QtWidgets.QStackedWidget()
+        self._results_stack.addWidget(self._empty_results)
+        self._results_stack.addWidget(self._results_scroll)
+        rv.addWidget(self._results_stack, stretch=1)
+        for widget in (*self._plot_card_by_widget, self.plot_spatial_occupancy,
+                       self.plot_spatial_activity, self.plot_spatial_velocity):
+            set_plot_has_data(widget, False)
+        self.heat_colorbar_widget.hide()
+        for scale in (self.heat_lut, self.spatial_lut_occupancy,
+                      self.spatial_lut_activity, self.spatial_lut_velocity):
+            scale.hide()
         if self._use_pg_dockarea_layout:
             workspace = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
             workspace.setChildrenCollapsible(False)
@@ -4394,8 +4416,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_view_layout.currentIndexChanged.connect(self._queue_view_settings_save)
         self.combo_heat_scale.currentIndexChanged.connect(self._refresh_psth_contrast)
         self.combo_plot_preset.currentTextChanged.connect(self._set_plot_preset)
-        self.btn_edit_scale.toggled.connect(self.heat_lut.setVisible)
-        self.btn_edit_scale.toggled.connect(lambda checked: self.heat_colorbar_widget.setVisible(not checked))
+        self.btn_edit_scale.toggled.connect(self._refresh_heatmap_scale_visibility)
         self.btn_fit_psth.clicked.connect(self._fit_psth_plots)
         self.cb_peak_overlay.toggled.connect(self._refresh_signal_overlay)
         self.combo_signal_source.currentIndexChanged.connect(self._refresh_signal_file_combo)
@@ -5686,6 +5707,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
     @QtCore.Slot(list)
     def receive_current_processed(self, processed_list: List[ProcessedTrial]) -> None:
         self._processed = processed_list or []
+        if not self._processed:
+            self._clear_psth_cache()
+            self._clear_psth_visuals()
+            self._clear_cached_analysis_outputs()
         if not self._autosave_restoring:
             self._project_dirty = True
         self._update_file_lists()
@@ -9028,6 +9053,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         spatial_ready = has_processed and has_behavior
         for w in (
             self.btn_compute,
+            self.btn_action_compute,
             self.btn_update,
             self.btn_export,
             self.btn_export_img,
@@ -9141,6 +9167,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not hasattr(self, "lbl_status"):
             return
         n_files = len(self._processed)
+        if hasattr(self, "_results_stack"):
+            self._results_stack.setCurrentWidget(self._results_scroll if n_files else self._empty_results)
+        self.lbl_status.setVisible(n_files > 0)
+        for controls in (self._plot_file_context, self._plot_scope_controls, self._plot_view_controls):
+            controls.setVisible(n_files > 0)
+        self._refresh_heatmap_scale_visibility()
         src_mode = "Group" if self.tab_sources.currentIndex() == 1 else "Single"
         if self._processed:
             proc0 = self._processed[0]
@@ -9234,6 +9266,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if self._last_mat is not None and self._last_tvec is not None:
             self._render_heatmap(self._last_mat, self._last_tvec, self._last_display_labels)
         self._queue_view_settings_save()
+
+    def _refresh_heatmap_scale_visibility(self, *_args: object) -> None:
+        """Never expose a default numeric scale before a valid heatmap exists."""
+        ready = bool(self.plot_heat.property("hasPlotData"))
+        self.btn_edit_scale.setEnabled(ready)
+        self.combo_heat_scale.setEnabled(ready)
+        detailed = self.btn_edit_scale.isChecked()
+        self.heat_lut.setVisible(ready and detailed)
+        self.heat_colorbar_widget.setVisible(ready and not detailed)
 
     def _set_plot_preset(self, name: str) -> None:
         """Apply a coordinated plot palette and keep custom styling available."""
@@ -10244,6 +10285,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         title: str,
     ) -> None:
         plot_widget.setTitle(title)
+        ready = heat is not None and heat.size > 0 and extent is not None and bool(np.any(np.isfinite(heat)))
+        set_plot_has_data(plot_widget, ready)
+        for image_name, lut_name in (("img_spatial_occupancy", "spatial_lut_occupancy"),
+                                     ("img_spatial_activity", "spatial_lut_activity"),
+                                     ("img_spatial_velocity", "spatial_lut_velocity")):
+            if image_item is getattr(self, image_name, None):
+                getattr(self, lut_name).setVisible(ready)
         plot_widget.setLabel("bottom", x_label or "X")
         plot_widget.setLabel("left", y_label or "Y")
         invert_y = bool(self.cb_spatial_invert_y.isChecked()) if hasattr(self, "cb_spatial_invert_y") else False
@@ -10251,7 +10299,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if vb is not None:
             vb.invertY(invert_y)
 
-        if heat is None or heat.size == 0 or extent is None:
+        if not ready:
             image_item.setImage(np.zeros((1, 1)), autoLevels=True)
             image_item.setRect(QtCore.QRectF(0.0, 0.0, 1.0, 1.0))
             plot_widget.setXRange(0.0, 1.0, padding=0.0)
@@ -12043,6 +12091,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._event_regions.append(reg)
 
     def _clear_trace_preview(self) -> None:
+        set_plot_has_data(self.plot_trace, False)
         self.curve_trace.setData([], [])
         self.curve_behavior.setData([], [])
         self.curve_peak_markers.setData([], [])
@@ -12140,6 +12189,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         break
         t = self._proc_time(proc)
         y = proc.output if proc.output is not None else np.full_like(t, np.nan)
+
+        ready = t.size == np.asarray(y).size and bool(np.any(np.isfinite(t) & np.isfinite(y)))
+        set_plot_has_data(self.plot_trace, ready)
+        if not ready:
+            self._clear_trace_preview()
+            return
 
         self.curve_trace.setData(t, y, connect="finite", skipFiniteCheck=True)
         self._update_behavior_overlay(proc)
@@ -12930,6 +12985,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _render_signal_event_plots(self) -> None:
         for pw in (self.plot_peak_amp, self.plot_peak_ibi, self.plot_peak_rate):
             pw.clear()
+            set_plot_has_data(pw, False)
         if not self.last_signal_events:
             return
         peak_times = np.asarray(self.last_signal_events.get("peak_times_sec", np.array([], float)), float)
@@ -12947,6 +13003,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             vals = vals[np.isfinite(vals)]
             if vals.size == 0:
                 return
+            set_plot_has_data(plot, True)
             bins = min(40, max(8, int(np.sqrt(vals.size))))
             hist, edges = np.histogram(vals, bins=bins)
             bars = pg.BarGraphItem(x=edges[:-1], height=hist, width=np.diff(edges), brush=color)
@@ -12960,6 +13017,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         t0 = float(np.nanmin(peak_times))
         t1 = float(np.nanmax(peak_times))
         if t1 > t0:
+            set_plot_has_data(self.plot_peak_rate, True)
             edges = np.arange(t0, t1 + bin_sec, bin_sec)
             hist, edges = np.histogram(peak_times, bins=edges)
             rate = hist / (bin_sec / 60.0)
@@ -13230,6 +13288,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _render_behavior_analysis_outputs(self) -> None:
         self.tbl_behavior_metrics.setRowCount(0)
+        for plot in (self.plot_behavior_raster, self.plot_behavior_rate,
+                     self.plot_behavior_duration, self.plot_behavior_starts):
+            plot.clear()
+            set_plot_has_data(plot, False)
         if not self.last_behavior_analysis:
             return
         per_file_metrics = self.last_behavior_analysis.get("per_file_metrics", []) or []
@@ -13301,10 +13363,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         dur_arr = dur_arr[np.isfinite(dur_arr)]
 
         if starts_arr.size:
+            set_plot_has_data(self.plot_behavior_raster, True)
+            set_plot_has_data(self.plot_behavior_starts, True)
             bin_sec = max(0.5, float(self.spin_behavior_bin.value()))
             t0 = float(np.nanmin(starts_arr))
             t1 = float(np.nanmax(starts_arr))
             if t1 > t0:
+                set_plot_has_data(self.plot_behavior_rate, True)
                 edges = np.arange(t0, t1 + bin_sec, bin_sec)
                 hist, edges = np.histogram(starts_arr, bins=edges)
                 rate = hist / (bin_sec / 60.0)
@@ -13317,6 +13382,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_behavior_starts.addItem(bars)
 
         if dur_arr.size:
+            set_plot_has_data(self.plot_behavior_duration, True)
             bins = min(40, max(8, int(np.sqrt(dur_arr.size))))
             hist, edges = np.histogram(dur_arr, bins=bins)
             bars = pg.BarGraphItem(x=edges[:-1], height=hist, width=np.diff(edges), brush=(220, 150, 110))
@@ -13685,7 +13751,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return ticks
 
     def _render_heatmap(self, mat: np.ndarray, tvec: np.ndarray, labels: Optional[List[str]] = None) -> None:
-        if mat.size == 0:
+        ready = bool(mat.size and tvec.size and np.any(np.isfinite(mat)))
+        set_plot_has_data(self.plot_heat, ready)
+        self._refresh_heatmap_scale_visibility()
+        if not ready:
             self._suppress_heatmap_level_store = True
             try:
                 self.img.setImage(np.zeros((1, 1)), autoLevels=False)
@@ -13802,22 +13871,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _render_duration_hist(self, durations: np.ndarray) -> None:
         self.plot_dur.clear()
+        set_plot_has_data(self.plot_dur, False)
         if durations is None or durations.size == 0:
-            txt = pg.TextItem("No durations", color=(170, 180, 196))
-            txt.setPos(0, 0)
-            self.plot_dur.addItem(txt)
-            self.plot_dur.setXRange(0, 1, padding=0)
-            self.plot_dur.setYRange(0, 1, padding=0)
             return
         d = np.asarray(durations, float)
         d = d[np.isfinite(d)]
         if d.size == 0:
-            txt = pg.TextItem("No durations", color=(170, 180, 196))
-            txt.setPos(0, 0)
-            self.plot_dur.addItem(txt)
-            self.plot_dur.setXRange(0, 1, padding=0)
-            self.plot_dur.setYRange(0, 1, padding=0)
             return
+        set_plot_has_data(self.plot_dur, True)
         bins = min(20, max(5, int(np.sqrt(d.size))))
         hist, edges = np.histogram(d, bins=bins)
         bg = pg.BarGraphItem(x=edges[:-1], height=hist, width=np.diff(edges), brush=pg.mkBrush(90, 143, 214))
@@ -13828,7 +13889,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_dur.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
 
     def _render_avg(self, mat: np.ndarray, tvec: np.ndarray) -> None:
-        if mat.size == 0:
+        ready = bool(mat.size and tvec.size and np.any(np.isfinite(mat)))
+        set_plot_has_data(self.plot_avg, ready)
+        if not ready:
             self.curve_avg.setData([], [])
             self.curve_sem_hi.setData([], [])
             self.curve_sem_lo.setData([], [])
@@ -13884,6 +13947,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
 
     def _render_metrics(self, mat: np.ndarray, tvec: np.ndarray) -> None:
+        set_plot_has_data(self.plot_metrics, False)
         if mat.size == 0 or not self.cb_metrics.isChecked():
             self.metrics_bar_pre.setOpts(height=[0])
             self.metrics_bar_post.setOpts(height=[0])
@@ -13926,6 +13990,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         post_vals_all = window_metrics(mat, tvec, post0, post1, reduction)
         pre_vals_finite = pre_vals_all[np.isfinite(pre_vals_all)]
         post_vals_finite = post_vals_all[np.isfinite(post_vals_all)]
+        set_plot_has_data(self.plot_metrics, bool(pre_vals_finite.size or post_vals_finite.size))
         pre_mean, pre_sem, pre_n = self._finite_mean_sem(pre_vals_finite)
         post_mean, post_sem, post_n = self._finite_mean_sem(post_vals_finite)
         self.metrics_bar_pre.setOpts(height=[pre_mean])
@@ -14085,6 +14150,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         }
 
     def _render_global_metrics(self) -> None:
+        set_plot_has_data(self.plot_global, False)
         if not self.cb_global_metrics.isChecked():
             self._last_global_metrics = None
             self.lbl_global_metrics.setText("Global metrics: -")
@@ -14144,6 +14210,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
 
         avg_amp, sem_amp, n_amp = self._finite_mean_sem(amp_vals)
+        set_plot_has_data(self.plot_global, True)
         avg_freq, sem_freq, n_freq = self._finite_mean_sem(freq_vals)
         total_peaks = float(np.nansum(peaks)) if peaks else 0.0
         avg_thr = float(np.nanmean(thrs)) if thrs else 0.0
@@ -14678,6 +14745,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_behavior_summary.setText("Group metrics: -")
         for pw in (self.plot_peak_amp, self.plot_peak_ibi, self.plot_peak_rate):
             pw.clear()
+            set_plot_has_data(pw, False)
         for pw in (
             self.plot_behavior_raster,
             self.plot_behavior_rate,
@@ -14685,6 +14753,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_behavior_starts,
         ):
             pw.clear()
+            set_plot_has_data(pw, False)
         self._refresh_signal_overlay()
 
     def _restore_cached_analysis_outputs(self, payload: Dict[str, object]) -> None:
