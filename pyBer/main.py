@@ -2902,6 +2902,11 @@ class MainWindow(QtWidgets.QMainWindow):
         def _refresh_top_bar_chip() -> None:
             try:
                 path = str(getattr(self, "_current_path", "") or "")
+                if self.tabs.currentWidget() is self.post_tab and self.post_tab._processed:
+                    selected = self.post_tab.combo_individual_file.currentText().strip()
+                    sources = self.post_tab._processed
+                    active = next((p for p in sources if self.post_tab._file_id_for_proc(p) == selected), sources[0])
+                    path = str(active.path or "")
                 name = os.path.basename(path) if path else "No recording loaded"
                 self.top_bar.set_project_name(name, dirty=_is_dirty())
             except Exception:

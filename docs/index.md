@@ -247,6 +247,79 @@ Export filenames include the active alignment edge, for example
 `mouse_01_social_contact_offset_heatmap.csv`, so onset and offset analyses can
 be saved in the same folder without overwriting one another.
 
+### Plot workspace
+
+Choose **Midnight**, **Paper**, or **Sand** from the plot Theme selector. These
+presets coordinate the trace, mean, uncertainty ribbon, axes, and plot cards.
+The application theme and plot theme are independent. Plot style still offers
+individual color overrides.
+
+Drag the horizontal dividers to resize the trace, heatmap, and average rows.
+The View layout menu provides focused views. **Fit plots** restores useful
+bounds after zooming. Event labels become more detailed as you zoom in;
+offset-aligned shading ends at the alignment marker.
+
+**Contrast** offers full range, robust 2nd-98th percentiles, or a range symmetric
+about zero. These settings change appearance only. **Edit scale** reveals the
+detailed histogram and manual limits; manual limits take priority over presets.
+
+The summary above the plots identifies the alignment, valid rows, exclusions,
+and analysis window. Window, baseline, filter, and normalization edits recompute
+after a short pause. Empty or failed computations clear the previous results.
+
+### Numerical and export conventions
+
+- **Baseline z-score** subtracts the event baseline mean and divides by its SD.
+  A flat baseline or fewer than five finite baseline samples makes a trial
+  unavailable. **Subtract baseline** preserves source units, and **Original
+  processed units** performs no additional normalization.
+- Missing samples and gaps longer than three median source sample intervals
+  stay missing. No constant values are extrapolated beyond recording coverage.
+  Smoothing operates separately within observed segments.
+- Mean and sample SEM use the finite contributing rows at each time point.
+  SEM is unavailable with fewer than two rows. Average CSV/HDF5 exports include
+  the contributing count `n` alongside the mean and SEM.
+- AUC uses trapezoidal integration with exact window endpoints. Incomplete
+  coverage produces an unavailable AUC, not zero or a stretched estimate.
+- Pre/post comparisons use a two-sided exact paired sign test. It tests the
+  direction of differences, not their magnitude, and does not require
+  normality. It still assumes independent paired units. Trial-level results
+  within a recording are exploratory; pooled trials across animals have no
+  inferential p-value. Use animal averages for group inference, with one
+  independent animal per recording. Publication p-values are unadjusted across
+  behaviors, so multiple comparisons require a separate analysis plan.
+- Binary and threshold-derived bouts require observed start and end crossings.
+  Boundary-truncated or missing-data-interrupted bouts are excluded. Duration
+  filters exclude events with unknown duration when a duration bound is set.
+
+Individual exports use the selected recording and its event times. Group
+filenames identify animal averages or trial rows. Repeated result exports use
+`_run_2`, `_run_3`, and subsequent suffixes to preserve earlier bundles. A JSON
+manifest records settings, scope, excluded recordings, output files, and status.
+HDF5-only exports include event, duration, and metric outputs. Metric exports
+include uncertainty, counts, the test method, and its assumptions. Publication
+figures are saved as PNG, PDF, and SVG.
+
+Recording basenames must be unique within a combined analysis. Duplicate names
+are rejected rather than silently merging their caches. These numerical fixes
+can change results relative to older versions, particularly at gaps and edges.
+
+### Reproducible validation
+
+Run the real-recording checks from an IDE using `scripts/validate_postprocessing.py`,
+or from the terminal:
+
+```powershell
+conda run -n pyBer python scripts/validate_postprocessing.py --data-dir D:\Apps\pyBer\_test\_data --label after
+```
+
+The validator reads the inputs, compares CSV and HDF5 loaders, exercises the GUI,
+and writes CSV checks, screenshots, and PNG/PDF/SVG comparison figures under
+`_test/postprocessing_validation`. Input hashes are checked before and after.
+If the requested folder is absent, it explicitly reports use of the known
+sibling folder `D:\Apps\pyBer_test_data`. Generated validation output is ignored
+by git. Use `--label before` before changing code to preserve a comparison run.
+
 ### Alignment sources
 
 pyBer can align to:

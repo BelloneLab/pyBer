@@ -29,6 +29,11 @@ from analysis_core import (
     load_processed_h5,
 )
 from ethovision_process_gui import clean_sheet
+from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, create_plot_card, style_plot
+from postprocessing_core import (
+    compute_psth_matrix, extract_complete_events, group_close_events,
+    mean_sem, normalize_events, window_metrics, paired_summary,
+)
 from time_sync import (
     SyncResult,
     align_sync_traces,
@@ -456,37 +461,11 @@ def _extract_events_with_durations(
 
 
 def _extract_onsets_offsets(
-    time: np.ndarray,
-    dio: np.ndarray,
-    threshold: float = 0.5,
+    time: np.ndarray, dio: np.ndarray, threshold: float = 0.5,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    t = np.asarray(time, float)
-    x = np.asarray(dio, float)
-    if t.size < 2 or x.size != t.size:
-        return np.array([], float), np.array([], float), np.array([], float)
-    b = x > threshold
-    rising = np.where((~b[:-1]) & (b[1:]))[0] + 1
-    falling = np.where((b[:-1]) & (~b[1:]))[0] + 1
-    if rising.size == 0 or falling.size == 0:
-        return np.array([], float), np.array([], float), np.array([], float)
+    """Use observed, complete bouts for both binary and continuous sources."""
+    return extract_complete_events(time, dio, threshold)
 
-    on = []
-    off = []
-    dur = []
-    fi = 0
-    for ri in rising:
-        while fi < falling.size and falling[fi] <= ri:
-            fi += 1
-        if fi >= falling.size:
-            break
-        t0 = float(t[ri])
-        t1 = float(t[falling[fi]])
-        if t1 > t0:
-            on.append(t0)
-            off.append(t1)
-            dur.append(t1 - t0)
-        fi += 1
-    return np.asarray(on, float), np.asarray(off, float), np.asarray(dur, float)
 
 def _detect_time_column(df, fallback_to_first: bool = False) -> Optional[str]:
     for c in df.columns:
@@ -771,18 +750,7 @@ def _continuous_threshold_events(
     mask = np.zeros(n, dtype=bool)
     if np.any(finite):
         mask[finite] = _continuous_rule_mask(values[finite], variable_name, rule_text)
-    prev_high = np.r_[False, mask[:-1]]
-    next_high = np.r_[mask[1:], False]
-    on_idx = np.where(mask & ~prev_high)[0]
-    off_idx = np.where(mask & ~next_high)[0]
-    on = time[on_idx]
-    off = time[off_idx]
-    m = min(on.size, off.size)
-    dur = off[:m] - on[:m] if m else np.array([], float)
-    if on.size != off.size:
-        dur = np.full(on.shape, np.nan, dtype=float)
-    else:
-        dur = np.maximum(dur, 0.0)
+    on, off, dur = extract_complete_events(time, np.where(finite, mask.astype(float), np.nan))
     return on, off, dur, mask
 
 
@@ -1587,51 +1555,14 @@ def _compute_psth_matrix(
     baseline_win: Tuple[float, float],
     resample_hz: float,
     smooth_sigma_s: float = 0.0,
+    normalization: str = "zscore",
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Returns:
-      tvec (relative time), mat (n_events x n_samples) with NaNs if missing
-    """
-    t = np.asarray(t, float)
-    y = np.asarray(y, float)
-    ev = np.asarray(event_times, float)
-    ev = ev[np.isfinite(ev)]
-    if ev.size == 0:
-        return np.array([], float), np.zeros((0, 0), float)
+    """Delegate event-aligned numerics to the tested, GUI-independent core."""
+    return compute_psth_matrix(
+        t, y, event_times, window, baseline_win, resample_hz,
+        smooth_sigma_s=smooth_sigma_s, normalization=normalization,
+    )
 
-    dt = 1.0 / float(resample_hz)
-    tvec = np.arange(window[0], window[1] + 0.5 * dt, dt)
-
-    mat = np.full((ev.size, tvec.size), np.nan, float)
-
-    for i, et in enumerate(ev):
-        # baseline
-        bmask = (t >= et + baseline_win[0]) & (t <= et + baseline_win[1])
-        base = y[bmask]
-        if base.size < 5 or not np.any(np.isfinite(base)):
-            continue
-        bmean = np.nanmean(base)
-        bstd = np.nanstd(base)
-        if not np.isfinite(bstd) or bstd <= 1e-12:
-            bstd = 1.0
-
-        # extract window and interpolate onto tvec
-        wmask = (t >= et + window[0]) & (t <= et + window[1])
-        tw = t[wmask] - et
-        yw = y[wmask]
-        good = np.isfinite(tw) & np.isfinite(yw)
-        if np.sum(good) < 5:
-            continue
-        # sparse interpolation
-        mat[i, :] = np.interp(tvec, tw[good], (yw[good] - bmean) / bstd)
-
-    if smooth_sigma_s and smooth_sigma_s > 0:
-        # simple gaussian smoothing along time axis
-        from scipy.ndimage import gaussian_filter1d
-        sigma = smooth_sigma_s * resample_hz
-        mat = gaussian_filter1d(mat, sigma=sigma, axis=1, mode="nearest")
-
-    return tvec, mat
 
 
 class PostProcessingPanel(QtWidgets.QWidget):
@@ -1674,6 +1605,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._sync_extract_errors: List[str] = []
         self._continuous_align_rules: Dict[str, Dict[str, object]] = {}
         self._last_mat: Optional[np.ndarray] = None
+        self._psth_computing = False
+        self._psth_pending = False
+        self._psth_timer = QtCore.QTimer(self)
+        self._psth_timer.setSingleShot(True)
+        self._psth_timer.setInterval(200)
+        self._psth_timer.timeout.connect(self._compute_psth)
         self._last_tvec: Optional[np.ndarray] = None
         self._last_events: Optional[np.ndarray] = None
         self._last_durations: Optional[np.ndarray] = None
@@ -1684,6 +1621,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._last_spatial_velocity_map: Optional[np.ndarray] = None
         self._last_spatial_extent: Optional[Tuple[float, float, float, float]] = None
         self._last_event_rows: List[Dict[str, object]] = []
+        self._per_file_event_rows: Dict[str, List[Dict[str, object]]] = {}
         self._last_display_labels: List[str] = []
         self._last_psth_display_level: str = "trials"
         self._psth_excluded_files: Dict[str, Dict[str, object]] = {}
@@ -1728,6 +1666,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "heatmap_max": None,
             "heatmap_levels_manual": False,
         }
+        self._style.update(copy.deepcopy(POSTPROCESSING_PRESETS["Midnight"]["style"]))
+        self._style["postprocessing_preset"] = "Midnight"
         self._section_popups: Dict[str, QtWidgets.QDockWidget] = {}
         self._section_scroll_hosts: Dict[str, QtWidgets.QScrollArea] = {}
         self._section_buttons: Dict[str, QtWidgets.QPushButton] = {}
@@ -2002,6 +1942,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_b1 = QtWidgets.QDoubleSpinBox(); self.spin_b1.setRange(-60, 0); self.spin_b1.setValue(0.0); self.spin_b1.setDecimals(2)
         self.spin_resample = QtWidgets.QDoubleSpinBox(); self.spin_resample.setRange(1, 1000); self.spin_resample.setValue(50); self.spin_resample.setDecimals(1)
         self.spin_smooth = QtWidgets.QDoubleSpinBox(); self.spin_smooth.setRange(0, 5); self.spin_smooth.setValue(0.0); self.spin_smooth.setDecimals(2)
+        self.combo_psth_normalization = QtWidgets.QComboBox()
+        self.combo_psth_normalization.addItem("Baseline z-score", "zscore")
+        self.combo_psth_normalization.addItem("Subtract baseline", "subtract")
+        self.combo_psth_normalization.addItem("Original processed units", "none")
+        self.combo_psth_normalization.setToolTip("Z-score divides by baseline SD. Flat or insufficient baselines are unavailable. Subtract keeps the source units; original leaves the processed signal unchanged.")
 
         self.cb_filter_events = QtWidgets.QCheckBox("Enable event filters")
         self.cb_filter_events.setChecked(True)
@@ -2035,7 +1980,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_hide_metrics.setText("Hide")
         self.btn_hide_metrics.setCheckable(True)
         self.combo_metric = QtWidgets.QComboBox()
-        self.combo_metric.addItems(["AUC", "Mean z"])
+        self.combo_metric.addItems(["AUC", "Mean signal"])
         _compact_combo(self.combo_metric, min_chars=6)
         self.spin_metric_pre0 = QtWidgets.QDoubleSpinBox(); self.spin_metric_pre0.setRange(-120, 0); self.spin_metric_pre0.setValue(-1.0); self.spin_metric_pre0.setDecimals(2)
         self.spin_metric_pre1 = QtWidgets.QDoubleSpinBox(); self.spin_metric_pre1.setRange(-120, 0); self.spin_metric_pre1.setValue(0.0); self.spin_metric_pre1.setDecimals(2)
@@ -2117,6 +2062,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fw.addRow("Baseline (s)", base_widget)
         fw.addRow("Resample (Hz)", self.spin_resample)
         fw.addRow("Smooth sigma (s)", self.spin_smooth)
+        fw.addRow("Normalization", self.combo_psth_normalization)
 
         # =======================================================
         # Section 2 - Event filters
@@ -3849,9 +3795,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
         header_font = self.lbl_plot_file.font()
         header_font.setBold(True)
         self.lbl_plot_file.setFont(header_font)
+        self.lbl_plot_file.setWordWrap(True)
         header_row.addWidget(self.lbl_plot_file)
         header_row.addStretch(1)
         rv.addLayout(header_row)
+
+        # Keep analysis provenance visible beside the plots, even when drawers
+        # are closed. Wrapped text also works on smaller laptop displays.
+        self.lbl_status = QtWidgets.QLabel("Load a processed recording and select events to begin.")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.setProperty("class", "hint")
+        self.lbl_status.setContentsMargins(10, 8, 10, 8)
+        self.lbl_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        rv.addWidget(self.lbl_status)
 
         # --- Visual mode tabs: Individual / Group ---
         visual_bar = QtWidgets.QHBoxLayout()
@@ -3878,6 +3834,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_view_layout.addItems(["Standard", "Heatmap focus", "Trace focus", "Metrics focus", "All"])
         _compact_combo(self.combo_view_layout, min_chars=9)
         view_row.addWidget(self.combo_view_layout)
+        self.combo_plot_preset = QtWidgets.QComboBox()
+        self.combo_plot_preset.addItems(list(POSTPROCESSING_PRESETS))
+        self.combo_plot_preset.setToolTip("Coordinated colors and typography. Fine-tune individual colors in Plot style.")
+        _compact_combo(self.combo_plot_preset, min_chars=6)
+        view_row.addWidget(QtWidgets.QLabel("Theme"))
+        view_row.addWidget(self.combo_plot_preset)
+        self.combo_heat_scale = QtWidgets.QComboBox()
+        self.combo_heat_scale.addItems(["Full range", "Robust (2-98%)", "Symmetric about zero"])
+        self.combo_heat_scale.setToolTip("Display contrast only. Exported numeric values are unchanged. Manual Plot Styling limits take priority.")
+        _compact_combo(self.combo_heat_scale, min_chars=8)
+        view_row.addWidget(QtWidgets.QLabel("Contrast"))
+        view_row.addWidget(self.combo_heat_scale)
+        self.btn_fit_psth = QtWidgets.QPushButton("Fit plots")
+        self.btn_fit_psth.setToolTip("Restore the full time window and fit the trace and average vertically.")
+        view_row.addWidget(self.btn_fit_psth)
         view_row.addStretch(1)
         rv.addLayout(view_row)
 
@@ -3952,6 +3923,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.heat_lut.setMinimumWidth(110)
         self.heat_lut.setMaximumWidth(150)
         self.heat_lut.setImageItem(self.img)
+        self.heat_colorbar_widget = pg.GraphicsLayoutWidget()
+        self.heat_colorbar_widget.setFixedWidth(78)
+        self.heat_colorbar = pg.ColorBarItem(values=(0, 1), colorMap=pg.colormap.get("viridis"), width=14, interactive=False)
+        self.heat_colorbar_widget.addItem(self.heat_colorbar)
+        self.heat_lut.hide()
+        self.btn_edit_scale = QtWidgets.QPushButton("Edit scale")
+        self.btn_edit_scale.setCheckable(True)
+        self.btn_edit_scale.setToolTip("Show the detailed histogram and draggable contrast limits.")
+        view_row.addWidget(self.btn_edit_scale)
         self.plot_heat.setLabel("bottom", "Time (s)")
         self.plot_heat.setLabel("left", "Trials / Recordings")
         self.plot_dur.setLabel("bottom", "Duration (s)")
@@ -4098,6 +4078,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         heat_row.setContentsMargins(0, 0, 0, 0)
         heat_row.setSpacing(8)
         heat_row.addWidget(self.plot_heat, stretch=4)
+        heat_row.addWidget(self.heat_colorbar_widget, stretch=0)
         heat_row.addWidget(self.heat_lut, stretch=0)
         heat_row.addWidget(self.plot_dur, stretch=1)
 
@@ -4177,11 +4158,40 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.row_heat.setMinimumHeight(180)
         self.row_avg.setMinimumHeight(140)
 
-        rv.addWidget(self.plot_trace, stretch=1)
-        rv.addWidget(self.row_heat, stretch=2)
-        rv.addWidget(self.row_avg, stretch=1)
-        rv.addWidget(self.row_signal, stretch=1)
-        rv.addWidget(self.row_behavior, stretch=1)
+        # Each interactive plot sits on a restrained card. Keep the existing
+        # plot objects so export, zoom and scientific rendering share one view.
+        self._postprocessing_plot_cards = []
+        self._plot_card_by_widget = {}
+        for row in (self.row_heat, self.row_avg, self.row_signal, self.row_behavior):
+            layout = row.layout()
+            for index in range(layout.count()):
+                widget = layout.itemAt(index).widget()
+                if isinstance(widget, pg.PlotWidget):
+                    placeholder = QtWidgets.QWidget()
+                    layout.replaceWidget(widget, placeholder)
+                    card = create_plot_card(widget, "")
+                    card.title_label.hide()
+                    layout.replaceWidget(placeholder, card)
+                    placeholder.hide()
+                    placeholder.deleteLater()
+                    self._postprocessing_plot_cards.append(card)
+                    self._plot_card_by_widget[widget] = card
+        self.trace_card = create_plot_card(self.plot_trace, "")
+        self.trace_card.title_label.hide()
+        self._postprocessing_plot_cards.append(self.trace_card)
+        self._plot_card_by_widget[self.plot_trace] = self.trace_card
+        self._results_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self._results_splitter.setChildrenCollapsible(False)
+        self._results_splitter.setHandleWidth(6)
+        for index, widget in enumerate((self.trace_card, self.row_heat, self.row_avg, self.row_signal, self.row_behavior)):
+            self._results_splitter.addWidget(widget)
+            self._results_splitter.setStretchFactor(index, 1 if index == 0 else 2)
+        self._results_splitter.setSizes([170, 300, 250, 180, 180])
+        self._results_scroll = QtWidgets.QScrollArea()
+        self._results_scroll.setWidgetResizable(True)
+        self._results_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self._results_scroll.setWidget(self._results_splitter)
+        rv.addWidget(self._results_scroll, stretch=1)
         if self._use_pg_dockarea_layout:
             workspace = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
             workspace.setChildrenCollapsible(False)
@@ -4382,6 +4392,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_hide_metrics.toggled.connect(self._toggle_metrics_panel)
         self.combo_view_layout.currentIndexChanged.connect(self._apply_view_layout)
         self.combo_view_layout.currentIndexChanged.connect(self._queue_view_settings_save)
+        self.combo_heat_scale.currentIndexChanged.connect(self._refresh_psth_contrast)
+        self.combo_plot_preset.currentTextChanged.connect(self._set_plot_preset)
+        self.btn_edit_scale.toggled.connect(self.heat_lut.setVisible)
+        self.btn_edit_scale.toggled.connect(lambda checked: self.heat_colorbar_widget.setVisible(not checked))
+        self.btn_fit_psth.clicked.connect(self._fit_psth_plots)
         self.cb_peak_overlay.toggled.connect(self._refresh_signal_overlay)
         self.combo_signal_source.currentIndexChanged.connect(self._refresh_signal_file_combo)
         self.combo_signal_scope.currentIndexChanged.connect(self._refresh_signal_file_combo)
@@ -4411,7 +4426,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_behavior_align.currentIndexChanged.connect(self._update_align_ui)
         self.btn_continuous_align.clicked.connect(self._open_continuous_align_dialog)
         self.combo_align.currentIndexChanged.connect(self._refresh_behavior_list)
-        self.combo_align.currentIndexChanged.connect(self._compute_psth)
+        self.combo_align.currentIndexChanged.connect(self._schedule_psth)
         for w in (
             self.combo_dio,
             self.combo_dio_polarity,
@@ -4421,9 +4436,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.combo_behavior_from,
             self.combo_behavior_to,
         ):
-            w.currentIndexChanged.connect(self._compute_psth)
-        self.spin_transition_gap.valueChanged.connect(self._compute_psth)
+            w.currentIndexChanged.connect(self._schedule_psth)
+        self.spin_transition_gap.valueChanged.connect(self._schedule_psth)
+        self.combo_psth_normalization.currentIndexChanged.connect(self._schedule_psth)
         for w in (
+            self.spin_pre,
+            self.spin_post,
+            self.spin_b0,
+            self.spin_b1,
+            self.spin_resample,
+            self.spin_smooth,
             self.spin_event_start,
             self.spin_event_end,
             self.spin_group_window,
@@ -4437,13 +4459,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_global_start,
             self.spin_global_end,
         ):
-            w.valueChanged.connect(self._compute_psth)
-        self.combo_metric.currentIndexChanged.connect(self._compute_psth)
+            w.valueChanged.connect(self._schedule_psth)
+        self.combo_metric.currentIndexChanged.connect(self._schedule_psth)
         self.cb_exclude_low_event_animals.toggled.connect(self._update_psth_inclusion_controls)
-        self.cb_exclude_low_event_animals.toggled.connect(self._compute_psth)
-        self.cb_group_keep_trials.toggled.connect(self._compute_psth)
-        self.cb_global_amp.stateChanged.connect(self._compute_psth)
-        self.cb_global_freq.stateChanged.connect(self._compute_psth)
+        self.cb_exclude_low_event_animals.toggled.connect(self._schedule_psth)
+        self.cb_group_keep_trials.toggled.connect(self._schedule_psth)
+        self.cb_filter_events.toggled.connect(self._schedule_psth)
+        self.cb_metrics.toggled.connect(self._schedule_psth)
+        self.tab_sources.currentChanged.connect(self._schedule_psth)
+        self.cb_global_amp.stateChanged.connect(self._schedule_psth)
+        self.cb_global_freq.stateChanged.connect(self._schedule_psth)
         for w in (self.spin_metric_pre0, self.spin_metric_pre1, self.spin_metric_post0, self.spin_metric_post1):
             w.valueChanged.connect(self._update_metric_regions)
         for w in (self.combo_spatial_x, self.combo_spatial_y, self.combo_spatial_weight):
@@ -4556,7 +4581,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 temporal.set_app_theme_mode(self._app_theme_mode)
             except Exception:
                 pass
-        self._style["plot_bg"] = self._theme_plot_background()
+        if "postprocessing_preset" not in self._style:
+            self._style["plot_bg"] = self._theme_plot_background()
         try:
             self._apply_plot_style()
         except Exception:
@@ -8741,6 +8767,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.row_avg.setVisible(show_avg)
         self.row_signal.setVisible(show_signal)
         self.row_behavior.setVisible(show_behavior)
+        for plot, card in getattr(self, "_plot_card_by_widget", {}).items():
+            card.setVisible(not plot.isHidden())
+        if hasattr(self, "_results_splitter"):
+            # All panels must keep a legible plotting area. Extra rows scroll
+            # vertically instead of compressing titles and axes into one another.
+            minima = ((self.trace_card, 160), (self.row_heat, 220),
+                      (self.row_avg, 210), (self.row_signal, 220), (self.row_behavior, 360))
+            visible = [(widget, height) for widget, height in minima if not widget.isHidden()]
+            for widget, height in minima:
+                widget.setMinimumHeight(height)
+            self._results_splitter.setMinimumHeight(sum(height for _, height in visible) + 6 * max(0, len(visible) - 1))
 
     def _refresh_signal_file_combo(self) -> None:
         if not hasattr(self, "combo_signal_file"):
@@ -8933,6 +8970,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return stacked, tvec_ref[:min_cols], labels[: stacked.shape[0]]
 
     def _rerender_visual_from_cache(self) -> None:
+        self._last_mat = None
+        self._last_tvec = None
         visual_mode = self.tab_visual_mode.currentIndex()
         if visual_mode == 1:
             # Group view
@@ -8940,8 +8979,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 mat = self._group_trial_mat
                 tvec = self._group_trial_tvec
                 labels = list(self._group_trial_labels)
-                if mat is None or tvec is None:
-                    mat, tvec, labels = self._stack_psth_trial_rows()
                 if mat is not None and tvec is not None:
                     self._last_psth_display_level = "trials"
                     self._last_display_labels = labels
@@ -8978,7 +9015,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self.lbl_plot_file.setText(f"File: {sel_id}")
                 self.plot_avg.setTitle("Average across trials +/- SEM")
         # Always refresh the trace preview to match the selected file
+        if self._last_mat is None:
+            self._clear_psth_result_view()
         self._update_trace_preview()
+        self._update_status_strip()
+        self._refresh_psth_duration_view()
         self._sync_temporal_modeling_context()
 
     def _update_data_availability(self) -> None:
@@ -9103,6 +9144,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         src_mode = "Group" if self.tab_sources.currentIndex() == 1 else "Single"
         if self._processed:
             proc0 = self._processed[0]
+            if self.tab_visual_mode.currentIndex() == 0:
+                selected = self.combo_individual_file.currentText().strip()
+                proc0 = next((p for p in self._processed if self._file_id_for_proc(p) == selected), proc0)
             file_txt = os.path.basename(proc0.path) if proc0.path else "import"
             self.lbl_plot_file.setText(f"File: {file_txt}")
             fs_actual = float(proc0.fs_actual) if np.isfinite(proc0.fs_actual) else np.nan
@@ -9126,7 +9170,87 @@ class PostProcessingPanel(QtWidgets.QWidget):
         status_msg = (
             f"Source: {src_mode} ({n_files}) | Output: {output_label} | Align: {align_src} [{align_detail}] {align_mode} | Events: {ev_count} | Window: {win_txt} | Resample: {rs_txt} | Fs: {fs_txt}"
         )
-        self.statusUpdate.emit(status_msg, 30000)
+        ready = self._last_mat is not None and np.any(np.isfinite(self._last_mat))
+        pending = bool(getattr(self, "_psth_pending", False))
+        state = "Updating" if pending else ("Ready" if ready else "No valid PSTH")
+        rows = int(self._last_mat.shape[0]) if ready else 0
+        level = getattr(self, "_last_psth_display_level", "trials")
+        excluded = len(self._psth_excluded_files)
+        self.lbl_status.setText(
+            f"{state}  |  {align_detail} / {align_mode.replace('Align to ', '')}  |  "
+            f"{rows} {level}  |  -{self.spin_pre.value():g} to +{self.spin_post.value():g} s"
+            + (f"  |  {excluded} file(s) excluded" if excluded else "")
+            + ("\nAdjust the event selection, baseline, or inclusion threshold." if not ready and not pending else "")
+        )
+        self.lbl_status.setToolTip(status_msg)
+        for name in ("btn_export", "btn_action_export"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(ready and not pending)
+        if self.tab_visual_mode.currentIndex() == 1:
+            self.lbl_plot_file.setText(f"Group view: {rows} {level} from {n_files} recording(s)")
+
+    def _schedule_psth(self, *_args: object) -> None:
+        """Debounce edits so a changed control cannot silently label old results."""
+        if self._is_restoring_settings or self._psth_computing:
+            return
+        self._psth_pending = True
+        self._psth_timer.start()
+        self._update_status_strip()
+
+    def _psth_normalization(self) -> str:
+        """Return the persisted normalization code, including legacy projects."""
+        combo = getattr(self, "combo_psth_normalization", None)
+        return str(combo.currentData() or "zscore") if combo is not None else "zscore"
+
+    def _psth_units(self) -> str:
+        """Label plotted values according to their actual normalization."""
+        if self._psth_normalization() == "zscore":
+            return "Baseline z-score"
+        proc = self._processed[0] if self._processed else None
+        if proc is not None and self.tab_visual_mode.currentIndex() == 0:
+            selected = self.combo_individual_file.currentText().strip()
+            proc = next((p for p in self._processed if self._file_id_for_proc(p) == selected), proc)
+        label = (proc.output_label or "Processed units") if proc is not None else "Processed units"
+        return f"{label} (baseline subtracted)" if self._psth_normalization() == "subtract" else label
+
+    def _refresh_psth_duration_view(self) -> None:
+        """Keep the duration histogram on the same recording scope as exports."""
+        durations = self._last_durations
+        if self.tab_visual_mode.currentIndex() == 0:
+            selected = self.combo_individual_file.currentText().strip()
+            rows = getattr(self, "_per_file_event_rows", {}).get(selected, [])
+            durations = np.asarray([row.get("duration_sec", np.nan) for row in rows], float)
+        self._render_duration_hist(np.asarray(durations, float) if durations is not None else np.array([], float))
+
+    def _ensure_current_psth(self) -> bool:
+        """Flush pending edits before any output uses current control labels."""
+        if getattr(self, "_psth_pending", False):
+            self._compute_psth()
+        return self._last_mat is not None and self._last_tvec is not None
+
+    def _refresh_psth_contrast(self, *_args: object) -> None:
+        """Change display contrast without recomputing or changing samples."""
+        if self._last_mat is not None and self._last_tvec is not None:
+            self._render_heatmap(self._last_mat, self._last_tvec, self._last_display_labels)
+        self._queue_view_settings_save()
+
+    def _set_plot_preset(self, name: str) -> None:
+        """Apply a coordinated plot palette and keep custom styling available."""
+        if name not in POSTPROCESSING_PRESETS:
+            return
+        apply_plot_preset(self, name)
+        self._refresh_psth_contrast()
+
+    def _fit_psth_plots(self) -> None:
+        """Restore useful plot bounds after zooming or panning."""
+        self.plot_trace.autoRange()
+        self.plot_avg.autoRange()
+        if self._last_tvec is not None and self._last_tvec.size:
+            lo, hi = float(self._last_tvec[0]), float(self._last_tvec[-1])
+            self.plot_avg.setXRange(lo, hi, padding=0)
+            self.plot_heat.setXRange(lo, hi, padding=0)
+            self.plot_heat.setYRange(0, self._last_mat.shape[0], padding=0)
 
     def _update_event_filter_enabled(self) -> None:
         enabled = self.cb_filter_events.isChecked()
@@ -9594,7 +9718,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     combo_idx = self.combo_individual_file.findText(file_id)
                     if combo_idx >= 0:
                         self.combo_individual_file.setCurrentIndex(combo_idx)
-            self._rerender_visual_from_cache()
+            self._compute_psth()
             self._update_trace_preview()
             self._save_settings()
         finally:
@@ -11682,14 +11806,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 on = np.asarray(event_info, float)
                 off = on.copy()
                 dur = np.full(on.shape, np.nan, dtype=float)
-            on = on[np.isfinite(on)]
-            off = off[np.isfinite(off)]
-            on = np.sort(np.unique(on))
-            off = np.sort(np.unique(off)) if off.size else on.copy()
-            if dur.size != on.size:
-                m = min(on.size, off.size)
-                dur = off[:m] - on[:m] if m else np.array([], float)
-            return on, off, np.asarray(dur, float)
+            return normalize_events(on, off, dur)
 
         behaviors = info.get("behaviors") or {}
         if behavior_name not in behaviors:
@@ -11738,6 +11855,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             sig = (np.asarray(x, float) > 0.5).astype(float)
             if polarity.startswith("Event low"):
                 sig = 1.0 - sig
+            sig = np.where(np.isfinite(x), sig, np.nan)
             on, off, dur = _extract_onsets_offsets(t, sig, threshold=0.5)
             on = self._map_photometry_times_for_proc(proc, on)
             off = self._map_photometry_times_for_proc(proc, off)
@@ -11752,7 +11870,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not info:
             return np.array([], float), np.array([], float)
         behaviors = info.get("behaviors") or {}
-        if not behaviors:
+        if not behaviors and not info.get("event_behaviors"):
             return np.array([], float), np.array([], float)
 
         align_mode = self.combo_behavior_align.currentText()
@@ -11777,6 +11895,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if 0 <= on_b[bi] - a_off <= gap:
                     times.append(on_b[bi])
                     durs.append(dur_b[bi] if bi < dur_b.size else np.nan)
+                    bi += 1
             return np.asarray(times, float), np.asarray(durs, float)
 
         beh = self.combo_behavior_name.currentText().strip()
@@ -11790,49 +11909,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return on, dur
 
     def _group_close_events(
-        self,
-        times: np.ndarray,
-        durations: np.ndarray,
-        window_s: float,
+        self, times: np.ndarray, durations: np.ndarray, window_s: float,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        t = np.asarray(times, float)
-        d = np.asarray(durations, float)
-        if t.size < 2 or window_s <= 0:
-            return t, d
+        """Merge event bouts using the selected onset or offset convention."""
+        combo = self.combo_dio_align if _is_doric_channel_align(self.combo_align.currentText()) else self.combo_behavior_align
+        edge = "offset" if combo.currentText().endswith("offset") else "onset"
+        return group_close_events(times, durations, window_s, alignment=edge)
 
-        grouped_t: List[float] = []
-        grouped_d: List[float] = []
-
-        start = float(t[0])
-        prev = float(t[0])
-        d0 = float(d[0]) if d.size else np.nan
-        cluster_end = (start + max(0.0, d0)) if np.isfinite(d0) else np.nan
-
-        for i in range(1, t.size):
-            ti = float(t[i])
-            di = float(d[i]) if i < d.size else np.nan
-            if (ti - prev) <= window_s:
-                if np.isfinite(di):
-                    end_i = ti + max(0.0, di)
-                    cluster_end = end_i if not np.isfinite(cluster_end) else max(cluster_end, end_i)
-                prev = ti
-                continue
-
-            grouped_t.append(start)
-            grouped_d.append(max(0.0, cluster_end - start) if np.isfinite(cluster_end) else np.nan)
-            start = ti
-            prev = ti
-            cluster_end = (ti + max(0.0, di)) if np.isfinite(di) else np.nan
-
-        grouped_t.append(start)
-        grouped_d.append(max(0.0, cluster_end - start) if np.isfinite(cluster_end) else np.nan)
-        return np.asarray(grouped_t, float), np.asarray(grouped_d, float)
 
     def _filter_events(self, times: np.ndarray, durations: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        if not self.cb_filter_events.isChecked():
-            return np.asarray(times, float), np.asarray(durations, float)
-        times = np.asarray(times, float)
-        durations = np.asarray(durations, float) if durations is not None else np.array([], float)
+        """Keep event tuples valid even when optional selection filters are off."""
+        times = np.asarray(times, float).reshape(-1)
+        durations = np.asarray(durations, float).reshape(-1) if durations is not None else np.array([], float)
         if durations.size != times.size:
             durations = np.full_like(times, np.nan, dtype=float)
         if times.size == 0:
@@ -11842,10 +11930,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not np.any(finite):
             return np.array([], float), np.array([], float)
         times = times[finite]
-        durations = durations[finite]
-        order = np.argsort(times)
+        durations = durations[finite].copy()
+        durations[~np.isfinite(durations) | (durations < 0)] = np.nan
+        order = np.argsort(times, kind="stable")
         times = times[order]
         durations = durations[order]
+        if not self.cb_filter_events.isChecked():
+            return times, durations
 
         group_window_s = max(0.0, float(self.spin_group_window.value()))
         times, durations = self._group_close_events(times, durations, group_window_s)
@@ -11864,8 +11955,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         min_dur = float(self.spin_dur_min.value())
         max_dur = float(self.spin_dur_max.value())
-        if np.any(np.isfinite(durations)) and (min_dur > 0 or max_dur > 0):
-            mask = np.ones_like(durations, dtype=bool)
+        if min_dur > 0 or max_dur > 0:
+            # Unknown durations cannot satisfy an explicitly requested bound.
+            mask = np.isfinite(durations)
             if min_dur > 0:
                 mask &= durations >= min_dur
             if max_dur > 0:
@@ -11896,39 +11988,59 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._event_regions = []
 
     def _render_visible_event_annotations(self, *_args: object) -> None:
+        """Draw correctly aligned bouts and readable labels at the current zoom."""
         self._clear_event_annotations()
-        ev = np.asarray(getattr(self, "_trace_preview_events", np.array([], float)), float)
-        if ev.size == 0:
+        ev = np.asarray(getattr(self, "_trace_preview_events", np.array([], float)), float).reshape(-1)
+        if ev.size == 0 or not np.any(np.isfinite(ev)):
             return
-        dur = np.asarray(getattr(self, "_trace_preview_durations", np.array([], float)), float)
+        dur = np.asarray(getattr(self, "_trace_preview_durations", np.array([], float)), float).reshape(-1)
         if dur.size != ev.size:
             dur = np.full(ev.shape, np.nan, dtype=float)
         min_y, max_y = getattr(self, "_trace_preview_y_bounds", (-1.0, 1.0))
+        view = self.plot_trace.getViewBox()
         try:
-            x0, x1 = self.plot_trace.getViewBox().viewRange()[0]
+            x0, x1 = view.viewRange()[0]
         except Exception:
             x0, x1 = float(np.nanmin(ev)), float(np.nanmax(ev))
         if x1 < x0:
             x0, x1 = x1, x0
+        # Distances are measured in screen pixels so zooming progressively
+        # reveals labels. Every event remains represented by the marker curve.
+        pixel_width = max(1.0, float(view.width()))
+        seconds_per_pixel = max(np.finfo(float).eps, (x1 - x0) / pixel_width)
+        minimum_label_pixels = 36.0
+        last_label_pixel = -np.inf
+        last_label_width = minimum_label_pixels
+        combo = self.combo_dio_align if _is_doric_channel_align(self.combo_align.currentText()) else self.combo_behavior_align
+        offset_aligned = combo.currentText().endswith("offset")
         finite_ev = np.isfinite(ev)
-        finite_dur = np.isfinite(dur)
-        overlaps = finite_ev & (ev <= x1) & (
-            (ev >= x0) | (finite_dur & ((ev + np.maximum(dur, 0.0)) >= x0))
-        )
+        positive_durations = np.where(np.isfinite(dur) & (dur > 0), dur, 0.0)
+        starts = ev - positive_durations if offset_aligned else ev
+        stops = ev if offset_aligned else ev + positive_durations
+        overlaps = finite_ev & (starts <= x1) & (stops >= x0)
         visible_idx = np.where(overlaps)[0]
+        visible_idx = visible_idx[np.argsort(ev[visible_idx], kind="stable")]
         for idx in visible_idx:
             et = float(ev[idx])
-            label = pg.TextItem(str(int(idx) + 1), color=(200, 200, 200))
-            label.setPos(et, float(max_y))
-            self.plot_trace.addItem(label)
-            self._event_labels.append(label)
-            if idx < dur.size and np.isfinite(dur[idx]):
-                t1 = et + max(0.0, float(dur[idx]))
-                if t1 > et:
-                    reg = pg.LinearRegionItem(values=(et, t1), brush=(200, 200, 200, 40), movable=False)
-                    reg.setZValue(1)
-                    self.plot_trace.addItem(reg)
-                    self._event_regions.append(reg)
+            pixel = (et - x0) / seconds_per_pixel
+            label_text = str(int(idx) + 1)
+            label_width = max(minimum_label_pixels, 7.0 * len(label_text) + 8.0)
+            spacing = max(minimum_label_pixels, 0.5 * (last_label_width + label_width))
+            if x0 <= et <= x1 and pixel - last_label_pixel >= spacing:
+                label = pg.TextItem(label_text, color=(97, 171, 188), anchor=(0.5, 0.0))
+                label.setPos(et, float(max_y))
+                label.setZValue(10)
+                self.plot_trace.addItem(label)
+                self._event_labels.append(label)
+                last_label_pixel, last_label_width = pixel, label_width
+            if positive_durations[idx] > 0:
+                reg = pg.LinearRegionItem(
+                    values=(float(starts[idx]), float(stops[idx])),
+                    brush=(70, 174, 197, 22), pen=pg.mkPen(None), movable=False,
+                )
+                reg.setZValue(-1)
+                self.plot_trace.addItem(reg)
+                self._event_regions.append(reg)
 
     def _clear_trace_preview(self) -> None:
         self.curve_trace.setData([], [])
@@ -11955,9 +12067,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _clear_psth_cache(self) -> None:
         self._last_mat = None
         self._last_tvec = None
+        self._last_metrics = None
+        self._last_durations = np.array([], float)
         self._last_global_metrics = None
         self._last_events = np.array([], float)
         self._last_event_rows = []
+        self._per_file_event_rows = {}
         self._per_file_mats = {}
         self._per_file_labels = {}
         self._group_mat = None
@@ -11970,6 +12085,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._last_display_labels = []
         self._last_psth_display_level = "trials"
         self._psth_excluded_files = {}
+
+    def _clear_psth_result_view(self) -> None:
+        """Blank invalid results while retaining per-file choices for inspection."""
+        self._last_mat = None
+        self._last_tvec = None
+        self._last_metrics = None
+        self._last_display_labels = []
+        empty = np.empty((0, 0), dtype=float)
+        self._render_heatmap(empty, np.array([], float), labels=[])
+        self._render_avg(empty, np.array([], float))
+        self._render_metrics(empty, np.array([], float))
+        self._render_duration_hist(np.array([], float))
 
     def _clear_psth_visuals(self) -> None:
         self._clear_trace_preview()
@@ -13249,6 +13376,27 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     w.writerow([float(starts[i]), float(ends[i]), float(durs[i]), file_id, behavior_name])
 
     def _compute_psth(self) -> None:
+        """Replace cached results atomically, including failed/empty analyses."""
+        if getattr(self, "_psth_computing", False):
+            return
+        self._psth_computing = True
+        self._psth_pending = False
+        timer = getattr(self, "_psth_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._clear_psth_cache()
+        try:
+            self._compute_psth_impl()
+        except Exception as exc:
+            _LOG.exception("PSTH computation failed")
+            self.statusUpdate.emit(f"Postprocessing error: {exc}", 5000)
+        finally:
+            self._psth_computing = False
+            if self._last_mat is None:
+                self._clear_psth_result_view()
+            self._update_status_strip()
+
+    def _compute_psth_impl(self) -> None:
         self._queue_settings_save()
         if not self._processed:
             self.statusUpdate.emit("No processed data loaded.", 5000)
@@ -13274,6 +13422,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         try:
             group_mode = self.tab_sources.currentIndex() == 1
             mats: List[np.ndarray] = []
+            identifiers = [os.path.splitext(os.path.basename(p.path))[0] if p.path else "import" for p in self._processed]
+            if len(set(identifiers)) != len(identifiers):
+                raise ValueError("Recording names must be unique. Rename same-named processed files before combining them.")
+            if group_mode and self._psth_normalization() != "zscore":
+                units = {str(getattr(p, "output_label", "")) for p in self._processed}
+                if len(units) > 1:
+                    raise ValueError("Group recordings use different output units. Select baseline z-score or load matching outputs.")
             animal_rows: List[np.ndarray] = []
             animal_labels: List[str] = []
             per_file_mats: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
@@ -13311,12 +13466,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     dur_row = np.full(ev.shape, np.nan, dtype=float)
                 else:
                     dur_row = np.asarray(dur, float)
-                tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, ev, window, baseline, res_hz, smooth_sigma_s=smooth)
+                tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, ev, window, baseline, res_hz, smooth_sigma_s=smooth,
+                                               normalization=self._psth_normalization())
+                # Invalid baselines produce missing rows, which must not count
+                # toward the minimum number of usable events per animal.
+                valid_rows = np.any(np.isfinite(mat), axis=1) if mat.ndim == 2 else np.array([], bool)
+                mat, ev, dur_row = mat[valid_rows], ev[valid_rows], dur_row[valid_rows]
+                dur = dur_row
+                if exclude_low_events and mat.shape[0] < min_events:
+                    excluded_files[file_id] = {"event_count": int(mat.shape[0]), "min_events": min_events}
                 if mat.size == 0:
                     continue
                 # Keep all per-file matrices so Individual view can inspect excluded animals.
                 per_file_mats[file_id] = (tvec.copy(), mat.copy())
                 per_file_labels[file_id] = [f"Trial {j + 1}" for j in range(mat.shape[0])]
+                self._per_file_event_rows[file_id] = [
+                    {"file_id": file_id, "event_time_sec": float(et), "duration_sec": float(duration)}
+                    for et, duration in zip(ev, dur_row)
+                ]
                 if file_id not in file_ids_order:
                     file_ids_order.append(file_id)
                 if exclude_low_events and mat.shape[0] < min_events:
@@ -13341,7 +13508,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if file_id not in group_file_ids_order:
                     group_file_ids_order.append(file_id)
                 # Build group (animal-level) row
-                row = np.nanmean(mat, axis=0)
+                row = mean_sem(mat)[0]
                 if np.any(np.isfinite(row)):
                     animal_rows.append(row)
                     animal_labels.append(file_id)
@@ -13454,6 +13621,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._last_events = np.asarray(all_events, float) if all_events else np.array([], float)
             self._last_durations = dur_all
             self._last_event_rows = event_rows
+            self._refresh_psth_duration_view()
             excluded_suffix = ""
             if excluded_files:
                 excluded_suffix = f" Excluded {len(excluded_files)} animal/file(s) below {min_events} event(s)."
@@ -13474,6 +13642,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._save_settings()
             self._sync_temporal_modeling_context()
         except Exception as e:
+            self._clear_psth_cache()
+            self._clear_psth_result_view()
+            _LOG.exception("PSTH computation failed")
             self.statusUpdate.emit(f"Postprocessing error: {e}", 5000)
             self._update_status_strip()
 
@@ -13546,12 +13717,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.img.setLookupTable(lut)
             if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
                 self.heat_lut.item.gradient.setColorMap(cmap)
+            if hasattr(self, "heat_colorbar"):
+                self.heat_colorbar.setColorMap(cmap)
         except Exception:
             pass
         finite = img[np.isfinite(img)]
         if finite.size:
             lo = float(np.nanmin(finite))
             hi = float(np.nanmax(finite))
+            scale = self.combo_heat_scale.currentIndex()
+            if scale == 1:
+                lo, hi = np.percentile(finite, [2, 98]).tolist()
+            elif scale == 2:
+                limit = max(abs(lo), abs(hi))
+                lo, hi = -limit, limit
         else:
             lo, hi = 0.0, 1.0
         manual_levels = bool(self._style.get("heatmap_levels_manual", False))
@@ -13573,6 +13752,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         try:
             self.img.setImage(img, autoLevels=False)
             self.img.setLevels([lo, hi])
+            if hasattr(self, "heat_colorbar"):
+                self.heat_colorbar.setLevels((lo, hi))
             if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
                 try:
                     self.heat_lut.item.setLevels(lo, hi)
@@ -13587,8 +13768,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if x1 == x0:
             x1 = x0 + 1.0
         n_rows = img.shape[1]
-        self.img.setRect(QtCore.QRectF(x0, 0, x1 - x0, n_rows))
-        self.plot_heat.setXRange(x0, x1, padding=0)
+        # Pixel centers, rather than pixel edges, represent the sample times.
+        half_step = float(tvec[1] - tvec[0]) / 2 if tvec.size > 1 else 0.5
+        self.img.setRect(QtCore.QRectF(x0 - half_step, 0, x1 - x0 + 2 * half_step, n_rows))
+        self.plot_heat.setXRange(x0 - half_step, x1 + half_step, padding=0)
         self.plot_heat.setYRange(0, float(n_rows), padding=0)
         self.heat_zero_line.setPos(0.0)
         self.heat_zero_line.setVisible(bool(x0 <= 0.0 <= x1))
@@ -13651,8 +13834,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.curve_sem_lo.setData([], [])
             return
 
-        avg = np.nanmean(mat, axis=0)
-        sem = np.nanstd(mat, axis=0) / np.sqrt(max(1, np.sum(np.any(np.isfinite(mat), axis=1))))
+        avg, sem, counts = mean_sem(mat)
+        self.plot_avg.setLabel("left", self._psth_units())
+        self.plot_avg.setLabel("bottom", "Time from alignment (s)")
+        self.plot_avg.setToolTip(f"Contributing rows per bin: {int(counts.min())} to {int(counts.max())}. SEM uses sample SD; unavailable with fewer than two rows.")
 
         self.curve_avg.setData(tvec, avg, connect="finite", skipFiniteCheck=True)
         self.curve_sem_hi.setData(tvec, avg + sem, connect="finite", skipFiniteCheck=True)
@@ -13670,10 +13855,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         vals = vals[np.isfinite(vals)]
         n = int(vals.size)
         if n == 0:
-            return 0.0, 0.0, 0
+            return np.nan, np.nan, 0
         mean = float(np.nanmean(vals))
         if n < 2:
-            return mean, 0.0, n
+            return mean, np.nan, n
         sem = float(np.nanstd(vals, ddof=1) / np.sqrt(float(n)))
         if not np.isfinite(sem):
             sem = 0.0
@@ -13736,20 +13921,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._last_metrics = None
             return
 
-        def _metric_vals(win: np.ndarray, duration: float) -> np.ndarray:
-            if win.size == 0:
-                return np.array([], float)
-            w = np.asarray(win, float)
-            valid = np.isfinite(w)
-            counts = np.sum(valid, axis=1)
-            sums = np.nansum(w, axis=1)
-            vals = np.divide(sums, counts, out=np.full(w.shape[0], np.nan, dtype=float), where=counts > 0)
-            if metric.startswith("AUC"):
-                vals = vals * float(abs(duration))
-            return np.asarray(vals, float)
-
-        pre_vals_all = _metric_vals(pre, pre1 - pre0)
-        post_vals_all = _metric_vals(post, post1 - post0)
+        reduction = "auc" if metric.startswith("AUC") else "mean"
+        pre_vals_all = window_metrics(mat, tvec, pre0, pre1, reduction)
+        post_vals_all = window_metrics(mat, tvec, post0, post1, reduction)
         pre_vals_finite = pre_vals_all[np.isfinite(pre_vals_all)]
         post_vals_finite = post_vals_all[np.isfinite(post_vals_all)]
         pre_mean, pre_sem, pre_n = self._finite_mean_sem(pre_vals_finite)
@@ -13766,19 +13940,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if pre_pair.size and post_pair.size:
             pre_pair = pre_pair[:n_pair]
             post_pair = post_pair[:n_pair]
-            if n_pair >= 2:
-                diffs = post_pair - pre_pair
-                diffs = diffs[np.isfinite(diffs)]
-                if diffs.size >= 2:
-                    if float(np.nanstd(diffs, ddof=1)) == 0.0:
-                        p_value = 1.0 if float(np.nanmean(diffs)) == 0.0 else 0.0
-                    else:
-                        try:
-                            from scipy import stats
-                            result = stats.ttest_rel(pre_pair, post_pair, nan_policy="omit")
-                            p_value = float(result.pvalue)
-                        except Exception:
-                            p_value = np.nan
+            # Group trial rows share animals and cannot be treated as
+            # independent replicates. Infer only on the animal-level view.
+            summary = paired_summary(
+                pre_pair, post_pair,
+                independent_units=(not group_mode or self._last_psth_display_level == "animals"),
+            )
+            p_value = summary["paired_p"]
             # Build segmented polyline: (0, pre_i) -> (1, post_i), NaN separator.
             x_line = np.empty(n_pair * 3, dtype=float)
             y_line = np.empty(n_pair * 3, dtype=float)
@@ -13837,11 +14005,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             ymax = ymin + 1.0
         self.plot_metrics.setYRange(ymin, ymax, padding=0.2)
         span = float(ymax - ymin) if np.isfinite(ymax - ymin) and ymax != ymin else 1.0
+        self.plot_metrics.setYRange(ymin, ymax + 0.35 * span, padding=0.08)
         if n_pair >= 2:
             if np.isfinite(p_value):
-                p_label = "paired p < 1e-4" if p_value < 1e-4 else f"paired p = {p_value:.4g}"
+                p_label = "sign-test p < 1e-4" if p_value < 1e-4 else f"sign-test p = {p_value:.4g}"
             else:
-                p_label = "paired p = n/a"
+                p_label = "Descriptive only"
             self.metrics_p_text.setText(p_label)
             self.metrics_p_text.setPos(0.5, ymax + 0.14 * span)
             self.metrics_p_text.setVisible(True)
@@ -13858,6 +14027,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "paired_p": float(p_value) if np.isfinite(p_value) else np.nan,
             "metric": metric,
         }
+        self._last_metrics.update(paired_summary(
+            pre_pair, post_pair,
+            independent_units=(not group_mode or self._last_psth_display_level == "animals"),
+        ))
+        self.plot_metrics.setToolTip(str(self._last_metrics["assumption_note"]))
 
     def _compute_global_metrics_for_trace(
         self,
@@ -14060,8 +14234,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         post0 = float(self.spin_metric_post0.value())
         post1 = float(self.spin_metric_post1.value())
 
-        self._pre_region = pg.LinearRegionItem(values=(pre0, pre1), brush=(90, 143, 214, 60), movable=False)
-        self._post_region = pg.LinearRegionItem(values=(post0, post1), brush=(214, 122, 90, 60), movable=False)
+        self._pre_region = pg.LinearRegionItem(values=(pre0, pre1), brush=(90, 143, 214, 20), pen=pg.mkPen(None), movable=False)
+        self._post_region = pg.LinearRegionItem(values=(post0, post1), brush=(214, 122, 90, 20), pen=pg.mkPen(None), movable=False)
+        self._pre_region.setZValue(-5)
+        self._post_region.setZValue(-5)
         self.plot_avg.addItem(self._pre_region)
         self.plot_avg.addItem(self._post_region)
 
@@ -14090,12 +14266,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.curve_trace.setPen(pg.mkPen(trace_color, width=1.0))
         self.curve_trace.setShadowPen(None)
         self.curve_behavior.setPen(pg.mkPen(self._style_color_tuple("behavior", (220, 180, 80)), width=1.0))
-        self.curve_avg.setPen(pg.mkPen(avg_color, width=1.0))
+        self.curve_avg.setPen(pg.mkPen(avg_color, width=2.0))
         self.curve_avg.setShadowPen(None)
         sem_edge = self._style_color_tuple("sem_edge", (152, 201, 143))
         sem_fill = self._style_color_tuple("sem_fill", (188, 230, 178, 96))
-        self.curve_sem_hi.setPen(pg.mkPen(sem_edge, width=1.0))
-        self.curve_sem_lo.setPen(pg.mkPen(sem_edge, width=1.0))
+        self.curve_sem_hi.setPen(pg.mkPen(None))
+        self.curve_sem_lo.setPen(pg.mkPen(None))
         if hasattr(self, "sem_band"):
             self.sem_band.setBrush(pg.mkBrush(*sem_fill))
         bg = self._style_color_tuple("plot_bg", (12, 15, 22))
@@ -14164,6 +14340,34 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self.heat_lut.item.gradient.setColorMap(cmap)
         except Exception:
             pass
+
+        preset = self._style.get("postprocessing_preset", "Midnight")
+        palette = copy.deepcopy(POSTPROCESSING_PRESETS.get(preset, POSTPROCESSING_PRESETS["Midnight"]))
+        # Respect custom plot backgrounds and grid settings within a preset.
+        palette["surface"] = QtGui.QColor(*bg[:3]).name()
+        palette["style"]["grid_alpha"] = grid_alpha
+        for name, widget in vars(self).items():
+            if name.startswith("plot_") and isinstance(widget, pg.PlotWidget):
+                style_plot(widget, palette)
+                widget.showGrid(x=False, y=grid_enabled and widget is not self.plot_heat, alpha=grid_alpha)
+        for card in getattr(self, "_postprocessing_plot_cards", []):
+            card.set_preset(palette)
+        if hasattr(self, "heat_colorbar_widget"):
+            self.heat_colorbar_widget.setBackground(palette["surface"])
+            self.heat_colorbar.axis.setTextPen(pg.mkPen(palette["muted"]))
+            self.heat_colorbar.axis.setPen(pg.mkPen(palette["axis"]))
+        accent = QtGui.QColor(palette["accent"])
+        self.metrics_bar_pre.setOpts(width=0.32, brush=pg.mkBrush(accent))
+        self.metrics_bar_post.setOpts(width=0.32, brush=pg.mkBrush(223, 161, 111, 175))
+        self.metrics_pairs_curve.setPen(pg.mkPen(accent.red(), accent.green(), accent.blue(), 65))
+        self.metrics_p_text.setColor(palette["text"])
+        self.metrics_p_text.setFont(QtGui.QFont("Segoe UI", 9))
+        for error_bar in (self.metrics_err_pre, self.metrics_err_post, self.global_err_amp, self.global_err_freq):
+            error_bar.setData(pen=pg.mkPen(palette["text"], width=1.2))
+        self.lbl_status.setStyleSheet(
+            f"background: {palette['accent_soft']}; color: {palette['text']}; "
+            "border-radius: 8px; font-size: 12px;"
+        )
 
     def _on_heatmap_levels_changed(self) -> None:
         if self._is_restoring_settings or self._suppress_heatmap_level_store:
@@ -15545,6 +15749,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 "heatmap_min": None,
                 "heatmap_max": None,
                 "heatmap_levels_manual": False,
+                **copy.deepcopy(POSTPROCESSING_PRESETS["Midnight"]["style"]),
+                "postprocessing_preset": "Midnight",
             },
         }
 
@@ -15559,7 +15765,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._is_restoring_settings = previous_restoring
             self._history_restoring = previous_history_restoring
         self._record_history_change()
-        self._rerender_visual_from_cache()
+        self._compute_psth()
         self._compute_spatial_heatmap()
         self._save_settings()
         self.statusUpdate.emit("Reset postprocessing parameters to defaults.", 3000)
@@ -15627,6 +15833,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "baseline_end": float(self.spin_b1.value()),
             "resample": float(self.spin_resample.value()),
             "smooth": float(self.spin_smooth.value()),
+            "psth_normalization": self.combo_psth_normalization.currentText(),
             "filter_enabled": self.cb_filter_events.isChecked(),
             "event_start": int(self.spin_event_start.value()),
             "event_end": int(self.spin_event_end.value()),
@@ -15648,6 +15855,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "global_amp": self.cb_global_amp.isChecked(),
             "global_freq": self.cb_global_freq.isChecked(),
             "view_layout": self.combo_view_layout.currentText(),
+            "heatmap_contrast": self.combo_heat_scale.currentText(),
             "visual_mode": int(self.tab_visual_mode.currentIndex()),
             "individual_file": self.combo_individual_file.currentText().strip(),
             "signal_source": self.combo_signal_source.currentText(),
@@ -15778,7 +15986,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.cb_group_keep_trials.setChecked(bool(data["psth_group_keep_trials"]))
         self._update_psth_inclusion_controls()
         self.cb_metrics.setChecked(bool(data.get("metrics_enabled", True)))
-        _set_combo(self.combo_metric, data.get("metric"))
+        _set_combo(self.combo_metric, "Mean signal" if data.get("metric") == "Mean z" else data.get("metric"))
         if "metric_pre0" in data:
             self.spin_metric_pre0.setValue(float(data["metric_pre0"]))
         if "metric_pre1" in data:
@@ -15797,6 +16005,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if "global_freq" in data:
             self.cb_global_freq.setChecked(bool(data["global_freq"]))
         _set_combo(self.combo_view_layout, data.get("view_layout"))
+        _set_combo(self.combo_psth_normalization, data.get("psth_normalization", "Baseline z-score"))
+        _set_combo(self.combo_heat_scale, data.get("heatmap_contrast", "Full range"))
         if "visual_mode" in data:
             try:
                 idx = int(data.get("visual_mode") or 0)
@@ -15881,6 +16091,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         style = data.get("style")
         if isinstance(style, dict):
             self._style.update(style)
+            if "postprocessing_preset" not in style:
+                self._style.update(copy.deepcopy(POSTPROCESSING_PRESETS["Midnight"]["style"]))
+            self.combo_plot_preset.blockSignals(True)
+            self.combo_plot_preset.setCurrentText(self._style.get("postprocessing_preset", "Midnight"))
+            self.combo_plot_preset.blockSignals(False)
             self._apply_plot_style()
         self._apply_behavior_time_settings()
         self._update_event_filter_enabled()
@@ -15976,9 +16191,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         prefix = "postprocess"
         if self._processed:
             prefix = os.path.splitext(os.path.basename(self._processed[0].path))[0]
+        visual_mode = getattr(self, "tab_visual_mode", None)
+        picker = getattr(self, "combo_individual_file", None)
+        if visual_mode is not None and visual_mode.currentIndex() == 0 and picker is not None:
+            prefix = picker.currentText().strip() or prefix
         align_suffix = self._alignment_export_suffix()
         if align_suffix:
             prefix = f"{prefix}_{align_suffix}"
+        if visual_mode is not None and visual_mode.currentIndex() == 1:
+            prefix = f"{prefix}_{getattr(self, '_last_psth_display_level', 'animals')}"
         return self._group_export_prefix(prefix)
 
     def _alignment_export_suffix(self) -> str:
@@ -16080,6 +16301,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             ("baseline_end_s", data.get("baseline_end", 0.0)),
             ("resample_hz", data.get("resample", 0.0)),
             ("gaussian_smooth_sigma_s", data.get("smooth", 0.0)),
+            ("normalization", data.get("psth_normalization", "Baseline z-score")),
             ("event_filters_enabled", data.get("filter_enabled", False)),
             ("event_index_start", data.get("event_start", 0)),
             ("event_index_end", data.get("event_end", 0)),
@@ -16234,7 +16456,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return (ok_png and ok_pdf), (png_path if ok_png else None), (pdf_path if ok_pdf else None)
 
     def _export_results(self) -> None:
-        if self._last_mat is None or self._last_tvec is None:
+        if not self._ensure_current_psth():
             return
         is_group = (
             self.tab_visual_mode.currentIndex() == 1
@@ -16251,6 +16473,32 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         self._remember_export_dir(out_dir)
         prefix = self._default_export_prefix()
+        # Reserve a distinct bundle name so repeated analyses remain comparable.
+        existing_names = set(os.listdir(out_dir))
+        original_prefix = prefix
+        run_number = 2
+        while any(name.startswith(f"{prefix}_") for name in existing_names):
+            prefix = f"{original_prefix}_run_{run_number}"
+            run_number += 1
+
+        selected_file = self.combo_individual_file.currentText().strip()
+        individual_scope = self.tab_visual_mode.currentIndex() == 0
+        export_event_rows = list(self._last_event_rows or [])
+        if individual_scope:
+            per_file_rows = getattr(self, "_per_file_event_rows", {})
+            if selected_file in per_file_rows:
+                export_event_rows = list(per_file_rows[selected_file])
+            else:
+                export_event_rows = [row for row in export_event_rows
+                                     if str(row.get("file_id", "")) == selected_file]
+        export_events = np.asarray([row.get("event_time_sec", np.nan)
+                                    for row in export_event_rows], float)
+        export_durations = np.asarray([row.get("duration_sec", np.nan)
+                                       for row in export_event_rows], float)
+        if not export_event_rows and not individual_scope:
+            export_events = np.asarray(self._last_events, float)
+            export_durations = np.asarray(self._last_durations, float)
+
         do_csv = bool(choices.get("csv", True))
         do_h5 = bool(choices.get("h5", False))
         do_png = bool(choices.get("png", True))
@@ -16282,155 +16530,219 @@ class PostProcessingPanel(QtWidgets.QWidget):
             progress_done += 1
             self.exportProgress.emit(progress_done, progress_total, label)
 
-        self.exportProgress.emit(0, progress_total, "Exporting postprocessing data...")
+        def _require_output_files(base: str, extensions: List[str]) -> None:
+            """Catch image writers that report failure without raising."""
+            for extension in extensions:
+                target = f"{base}.{extension}"
+                if not os.path.isfile(target) or os.path.getsize(target) == 0:
+                    raise OSError(f"Requested output was not written: {os.path.basename(target)}")
 
-        # Determine row labels for heatmap columns
-        display_labels = list(getattr(self, "_last_display_labels", []) or [])
-        if display_labels and len(display_labels) == int(self._last_mat.shape[0]):
-            row_labels = display_labels
-        elif is_group and self._group_labels:
-            row_labels = self._group_labels
-        else:
-            row_labels = [f"trial_{i + 1}" for i in range(self._last_mat.shape[0])]
+        def _write_manifest(status: str, error: str = "") -> None:
+            """Record scope and settings alongside the files in this bundle."""
+            manifest_name = f"{prefix}_manifest.json"
+            output_names = sorted(name for name in os.listdir(out_dir)
+                                  if name.startswith(f"{prefix}_") and name != manifest_name)
+            manifest = {
+                "schema_version": 1,
+                "status": status,
+                "prefix": prefix,
+                "scope": "individual" if individual_scope else "group",
+                "selected_file": selected_file if individual_scope else None,
+                "display_level": str(getattr(self, "_last_psth_display_level", "trials")),
+                "source_files": [str(proc.path or "") for proc in self._processed],
+                "event_count": int(export_events.size),
+                "matrix_shape": list(np.asarray(self._last_mat).shape),
+                "excluded_files": getattr(self, "_psth_excluded_files", {}),
+                "settings": self._collect_settings(),
+                "choices": choices,
+                "outputs": output_names,
+                "error": error or None,
+            }
+            with open(os.path.join(out_dir, manifest_name), "w", encoding="utf-8") as stream:
+                json.dump(manifest, stream, ensure_ascii=False, indent=2,
+                          default=lambda value: value.item() if isinstance(value, np.generic) else str(value))
 
-        if choices.get("heatmap"):
-            _start_export_step("Exporting heatmap matrix...")
-            heat_base = os.path.join(out_dir, f"{prefix}_heatmap")
-            mat = np.asarray(self._last_mat, float)
-            if mat.ndim == 1:
-                mat = mat[np.newaxis, :]
-            time = np.asarray(self._last_tvec, float)
-            n_time = min(time.size, mat.shape[1])
-            time = time[:n_time]
-            mat = mat[:, :n_time]
-            arr = np.column_stack([time, mat.T])
-            header_cols = ["time"] + list(row_labels[:mat.shape[0]])
-            if do_csv:
-                np.savetxt(f"{heat_base}.csv", arr, delimiter=",",
-                           header=",".join(header_cols), comments="")
-            if do_h5:
-                with h5py.File(f"{heat_base}.h5", "w") as hf:
-                    hf.create_dataset("time", data=time)
-                    hf.create_dataset("matrix", data=mat)
-                    hf.attrs["row_labels"] = row_labels[:mat.shape[0]]
-            self._write_export_parameter_file(heat_base, self._collect_psth_parameter_sections(include_heatmap=True))
-            _finish_export_step("Exported heatmap matrix")
+        try:
+            self.exportProgress.emit(0, progress_total, "Exporting postprocessing data...")
 
-        if choices.get("heatmap_aligned"):
-            _start_export_step("Exporting aligned heatmaps...")
-            # Export all per-file heatmaps stacked with file_id column
-            aligned_base = os.path.join(out_dir, f"{prefix}_heatmap_aligned")
-            if self._per_file_mats and do_csv:
-                import csv as csv_mod
-                with open(f"{aligned_base}.csv", "w", newline="") as f:
-                    w = csv_mod.writer(f)
-                    first_id = next(iter(self._per_file_mats))
-                    tvec_ref = self._per_file_mats[first_id][0]
-                    w.writerow(["file_id", "trial"] + [f"{t:.4f}" for t in tvec_ref])
-                    for fid, (tvec_f, mat_f) in self._per_file_mats.items():
-                        for j in range(mat_f.shape[0]):
-                            row_data = [fid, f"trial_{j + 1}"] + [f"{v:.6f}" for v in mat_f[j, :min(tvec_ref.size, mat_f.shape[1])]]
-                            w.writerow(row_data)
-            if self._per_file_mats and do_h5:
-                with h5py.File(f"{aligned_base}.h5", "w") as hf:
-                    for fid, (tvec_f, mat_f) in self._per_file_mats.items():
-                        grp = hf.create_group(fid)
-                        grp.create_dataset("time", data=tvec_f)
-                        grp.create_dataset("matrix", data=mat_f)
-            _finish_export_step("Exported aligned heatmaps")
+            # Determine row labels for heatmap columns
+            display_labels = list(getattr(self, "_last_display_labels", []) or [])
+            if display_labels and len(display_labels) == int(self._last_mat.shape[0]):
+                row_labels = display_labels
+            elif is_group and self._group_labels:
+                row_labels = self._group_labels
+            else:
+                row_labels = [f"trial_{i + 1}" for i in range(self._last_mat.shape[0])]
 
-        if choices.get("avg"):
-            _start_export_step("Exporting average PSTH...")
-            avg_base = os.path.join(out_dir, f"{prefix}_avg_psth")
-            avg = np.nanmean(self._last_mat, axis=0)
-            n_valid = max(1, np.sum(np.any(np.isfinite(self._last_mat), axis=1)))
-            sem = np.nanstd(self._last_mat, axis=0) / np.sqrt(n_valid)
-            arr = np.vstack([self._last_tvec, avg, sem]).T
-            if do_csv:
-                np.savetxt(f"{avg_base}.csv", arr, delimiter=",",
-                           header="time,average_psth,sem", comments="")
-            if do_h5:
-                with h5py.File(f"{avg_base}.h5", "w") as hf:
-                    hf.create_dataset("time", data=self._last_tvec)
-                    hf.create_dataset("average", data=avg)
-                    hf.create_dataset("sem", data=sem)
-            self._write_export_parameter_file(avg_base, self._collect_psth_parameter_sections(include_heatmap=False))
-            _finish_export_step("Exported average PSTH")
-
-        if choices.get("events"):
-            _start_export_step("Exporting event times...")
-            event_base = os.path.join(out_dir, f"{prefix}_events")
-            if self._last_event_rows:
-                import csv
+            if choices.get("heatmap"):
+                _start_export_step("Exporting heatmap matrix...")
+                heat_base = os.path.join(out_dir, f"{prefix}_heatmap")
+                mat = np.asarray(self._last_mat, float)
+                if mat.ndim == 1:
+                    mat = mat[np.newaxis, :]
+                time = np.asarray(self._last_tvec, float)
+                n_time = min(time.size, mat.shape[1])
+                time = time[:n_time]
+                mat = mat[:, :n_time]
+                arr = np.column_stack([time, mat.T])
+                header_cols = ["time"] + list(row_labels[:mat.shape[0]])
                 if do_csv:
-                    with open(f"{event_base}.csv", "w", newline="") as f:
+                    np.savetxt(f"{heat_base}.csv", arr, delimiter=",",
+                               header=",".join(header_cols), comments="")
+                if do_h5:
+                    with h5py.File(f"{heat_base}.h5", "w") as hf:
+                        hf.create_dataset("time", data=time)
+                        hf.create_dataset("matrix", data=mat)
+                        hf.attrs["row_labels"] = row_labels[:mat.shape[0]]
+                self._write_export_parameter_file(heat_base, self._collect_psth_parameter_sections(include_heatmap=True))
+                _finish_export_step("Exported heatmap matrix")
+
+            if choices.get("heatmap_aligned"):
+                _start_export_step("Exporting aligned heatmaps...")
+                # Export all per-file heatmaps stacked with file_id column
+                aligned_base = os.path.join(out_dir, f"{prefix}_heatmap_aligned")
+                if self._per_file_mats and do_csv:
+                    import csv as csv_mod
+                    with open(f"{aligned_base}.csv", "w", newline="") as f:
+                        w = csv_mod.writer(f)
+                        first_id = next(iter(self._per_file_mats))
+                        tvec_ref = self._per_file_mats[first_id][0]
+                        w.writerow(["file_id", "trial"] + [f"{t:.4f}" for t in tvec_ref])
+                        for fid, (tvec_f, mat_f) in self._per_file_mats.items():
+                            for j in range(mat_f.shape[0]):
+                                row_data = [fid, f"trial_{j + 1}"] + [f"{v:.6f}" for v in mat_f[j, :min(tvec_ref.size, mat_f.shape[1])]]
+                                w.writerow(row_data)
+                if self._per_file_mats and do_h5:
+                    with h5py.File(f"{aligned_base}.h5", "w") as hf:
+                        for fid, (tvec_f, mat_f) in self._per_file_mats.items():
+                            grp = hf.create_group(fid)
+                            grp.create_dataset("time", data=tvec_f)
+                            grp.create_dataset("matrix", data=mat_f)
+                _finish_export_step("Exported aligned heatmaps")
+
+            if choices.get("avg"):
+                _start_export_step("Exporting average PSTH...")
+                avg_base = os.path.join(out_dir, f"{prefix}_avg_psth")
+                avg, sem, counts = mean_sem(self._last_mat)
+                arr = np.vstack([self._last_tvec, avg, sem, counts]).T
+                if do_csv:
+                    np.savetxt(f"{avg_base}.csv", arr, delimiter=",",
+                               header="time,average_psth,sem,n", comments="")
+                if do_h5:
+                    with h5py.File(f"{avg_base}.h5", "w") as hf:
+                        hf.create_dataset("time", data=self._last_tvec)
+                        hf.create_dataset("average", data=avg)
+                        hf.create_dataset("sem", data=sem)
+                        hf.create_dataset("n", data=counts)
+                self._write_export_parameter_file(avg_base, self._collect_psth_parameter_sections(include_heatmap=False))
+                _finish_export_step("Exported average PSTH")
+
+            if choices.get("events"):
+                _start_export_step("Exporting event times...")
+                event_base = os.path.join(out_dir, f"{prefix}_events")
+                if do_csv:
+                    import csv
+                    with open(f"{event_base}.csv", "w", newline="", encoding="utf-8") as stream:
+                        writer = csv.writer(stream)
+                        writer.writerow(["file_id", "event_time_sec", "duration_sec"])
+                        for index, event_time in enumerate(export_events):
+                            row = export_event_rows[index] if index < len(export_event_rows) else {}
+                            duration = export_durations[index] if index < export_durations.size else np.nan
+                            writer.writerow([row.get("file_id", ""), event_time, duration])
+                if do_h5:
+                    with h5py.File(f"{event_base}.h5", "w") as hf:
+                        hf.create_dataset("event_time_sec", data=export_events)
+                        hf.create_dataset("duration_sec", data=export_durations)
+                        file_ids = [str(row.get("file_id", "")) for row in export_event_rows]
+                        if not file_ids:
+                            file_ids = [""] * int(export_events.size)
+                        hf.create_dataset("file_id", data=file_ids, dtype=h5py.string_dtype("utf-8"))
+                _finish_export_step("Exported event times")
+
+            if choices.get("durations"):
+                _start_export_step("Exporting event durations...")
+                dur_base = os.path.join(out_dir, f"{prefix}_durations")
+                if do_csv:
+                    np.savetxt(f"{dur_base}.csv", export_durations, delimiter=",",
+                               header="duration_sec", comments="")
+                if do_h5:
+                    with h5py.File(f"{dur_base}.h5", "w") as hf:
+                        hf.create_dataset("duration_sec", data=export_durations)
+                _finish_export_step("Exported event durations")
+
+            if choices.get("metrics") and (self._last_metrics or self._last_global_metrics):
+                _start_export_step("Exporting metrics table...")
+                import csv
+                met_base = os.path.join(out_dir, f"{prefix}_metrics")
+                if do_csv:
+                    with open(f"{met_base}.csv", "w", newline="") as f:
                         w = csv.writer(f)
-                        w.writerow(["file_id", "event_time_sec", "duration_sec"])
-                        for row in self._last_event_rows:
-                            w.writerow([row.get("file_id", ""), row.get("event_time_sec", np.nan), row.get("duration_sec", np.nan)])
-            elif self._last_events is not None and do_csv:
-                np.savetxt(f"{event_base}.csv", self._last_events, delimiter=",")
-            _finish_export_step("Exported event times")
-
-        if choices.get("durations") and self._last_durations is not None:
-            _start_export_step("Exporting event durations...")
-            dur_base = os.path.join(out_dir, f"{prefix}_durations")
-            if do_csv:
-                np.savetxt(f"{dur_base}.csv", self._last_durations, delimiter=",")
-            _finish_export_step("Exported event durations")
-
-        if choices.get("metrics") and (self._last_metrics or self._last_global_metrics):
-            _start_export_step("Exporting metrics table...")
-            import csv
-            met_base = os.path.join(out_dir, f"{prefix}_metrics")
-            if do_csv:
-                with open(f"{met_base}.csv", "w", newline="") as f:
-                    w = csv.writer(f)
-                    if self._last_metrics:
-                        w.writerow(["metric", "pre", "post"])
-                        w.writerow([self._last_metrics.get("metric", ""), self._last_metrics.get("pre", ""), self._last_metrics.get("post", "")])
-                    if self._last_global_metrics:
                         if self._last_metrics:
-                            w.writerow([])
-                        w.writerow(["global_amp", "global_freq_hz", "global_start_s", "global_end_s", "global_peaks", "global_threshold", "global_duration_s"])
-                        w.writerow([
-                            self._last_global_metrics.get("amp", ""),
-                            self._last_global_metrics.get("freq", ""),
-                            self._last_global_metrics.get("start", ""),
-                            self._last_global_metrics.get("end", ""),
-                            self._last_global_metrics.get("peaks", ""),
-                            self._last_global_metrics.get("thr", ""),
-                            self._last_global_metrics.get("duration", ""),
-                        ])
-            _finish_export_step("Exported metrics table")
+                            w.writerow(list(self._last_metrics))
+                            w.writerow(list(self._last_metrics.values()))
+                        if self._last_global_metrics:
+                            if self._last_metrics:
+                                w.writerow([])
+                            w.writerow(["global_amp", "global_freq_hz", "global_start_s", "global_end_s", "global_peaks", "global_threshold", "global_duration_s"])
+                            w.writerow([
+                                self._last_global_metrics.get("amp", ""),
+                                self._last_global_metrics.get("freq", ""),
+                                self._last_global_metrics.get("start", ""),
+                                self._last_global_metrics.get("end", ""),
+                                self._last_global_metrics.get("peaks", ""),
+                                self._last_global_metrics.get("thr", ""),
+                                self._last_global_metrics.get("duration", ""),
+                            ])
+                if do_h5:
+                    with h5py.File(f"{met_base}.h5", "w") as hf:
+                        for key, value in (self._last_metrics or {}).items():
+                            hf.create_dataset(key, data=value)
+                        global_group = hf.create_group("global_metrics")
+                        for key, value in (self._last_global_metrics or {}).items():
+                            global_group.create_dataset(key, data=value)
+                _finish_export_step("Exported metrics table")
 
-        # --- Plot exports ---
-        if choices.get("plot_heatmap") and hasattr(self, "row_heat"):
-            _start_export_step("Exporting heatmap plot...")
-            base = os.path.join(out_dir, f"{prefix}_plot_heatmap")
-            self._export_widget_selective(self.row_heat, base, do_png, do_pdf)
-            _finish_export_step("Exported heatmap plot")
-        if choices.get("plot_avg") and hasattr(self, "row_avg"):
-            _start_export_step("Exporting average plot...")
-            base = os.path.join(out_dir, f"{prefix}_plot_avg")
-            self._export_widget_selective(self.row_avg, base, do_png, do_pdf)
-            _finish_export_step("Exported average plot")
-        if choices.get("plot_trace") and hasattr(self, "plot_trace"):
-            _start_export_step("Exporting trace plot...")
-            base = os.path.join(out_dir, f"{prefix}_plot_trace")
-            self._export_widget_selective(self.plot_trace, base, do_png, do_pdf)
-            _finish_export_step("Exported trace plot")
+            # --- Plot exports ---
+            if choices.get("plot_heatmap") and hasattr(self, "row_heat"):
+                _start_export_step("Exporting heatmap plot...")
+                base = os.path.join(out_dir, f"{prefix}_plot_heatmap")
+                self._export_widget_selective(self.row_heat, base, do_png, do_pdf)
+                _require_output_files(base, [ext for enabled, ext in ((do_png, "png"), (do_pdf, "pdf")) if enabled])
+                _finish_export_step("Exported heatmap plot")
+            if choices.get("plot_avg") and hasattr(self, "row_avg"):
+                _start_export_step("Exporting average plot...")
+                base = os.path.join(out_dir, f"{prefix}_plot_avg")
+                self._export_widget_selective(self.row_avg, base, do_png, do_pdf)
+                _require_output_files(base, [ext for enabled, ext in ((do_png, "png"), (do_pdf, "pdf")) if enabled])
+                _finish_export_step("Exported average plot")
+            if choices.get("plot_trace") and hasattr(self, "plot_trace"):
+                _start_export_step("Exporting trace plot...")
+                base = os.path.join(out_dir, f"{prefix}_plot_trace")
+                self._export_widget_selective(self.plot_trace, base, do_png, do_pdf)
+                _require_output_files(base, [ext for enabled, ext in ((do_png, "png"), (do_pdf, "pdf")) if enabled])
+                _finish_export_step("Exported trace plot")
 
-        # --- Publication figure ---
-        if choices.get("pub_figure"):
-            _start_export_step("Exporting publication figure...")
-            pub_content = str(choices.get("pub_content", "Heatmap + Avg PSTH + Metrics"))
-            self._export_publication_figure(out_dir, prefix, pub_content)
-            _finish_export_step("Exported publication figure")
+            # --- Publication figure ---
+            if choices.get("pub_figure"):
+                _start_export_step("Exporting publication figure...")
+                pub_content = str(choices.get("pub_content", "Heatmap + Avg PSTH + Metrics"))
+                self._export_publication_figure(out_dir, prefix, pub_content)
+                _require_output_files(os.path.join(out_dir, f"{prefix}_publication_figure"), ["png", "pdf"])
+                _finish_export_step("Exported publication figure")
 
-        if progress_done < progress_total:
-            self.exportProgress.emit(progress_total, progress_total, "Export complete")
-        self.statusUpdate.emit(f"Export complete \u2192 {out_dir}", 5000)
+            _write_manifest("complete")
+        except Exception as exc:
+            _LOG.exception("Postprocessing export failed")
+            try:
+                _write_manifest("failed", str(exc))
+            except Exception:
+                _LOG.debug("Could not record failed export manifest", exc_info=True)
+            self.exportProgress.emit(progress_done, progress_total, "Export failed")
+            self.statusUpdate.emit(f"Export failed: {exc}. Partial files remain in {out_dir}", 10000)
+            return
+
+        self.exportProgress.emit(progress_total, progress_total, "Export complete")
+        self.statusUpdate.emit(f"Export complete: {prefix} in {out_dir}", 5000)
 
     def _export_widget_selective(self, widget: QtWidgets.QWidget, base_path: str,
                                   do_png: bool, do_pdf: bool) -> None:
@@ -16463,7 +16775,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         smooth = float(self.spin_smooth.value())
         window = (-pre, post)
         baseline = (b0, b1)
-        is_group = self.tab_visual_mode.currentIndex() == 1 and len(self._processed) > 1
+        is_group = self.tab_visual_mode.currentIndex() == 1 and self.tab_sources.currentIndex() == 1
         keep_trial_rows = bool(is_group and self._psth_group_trial_view_enabled())
         min_events = self._psth_min_events_per_animal()
         exclude_low_events = bool(is_group and self._psth_exclude_low_event_animals_enabled())
@@ -16472,7 +16784,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         all_mats: List[np.ndarray] = []
         all_labels: List[str] = []
         tvec = None
+        selected = self.combo_individual_file.currentText().strip()
         for proc in self._processed:
+            if not is_group and selected and self._file_id_for_proc(proc) != selected:
+                continue
             info = self._match_behavior_source(proc)
             if not info:
                 continue
@@ -16488,12 +16803,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
             file_id = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
             if exclude_low_events and events.size < min_events:
                 continue
-            tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, events, window, baseline, res_hz, smooth_sigma_s=smooth)
+            tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, events, window, baseline, res_hz, smooth_sigma_s=smooth,
+                                           normalization=self._psth_normalization())
+            mat = mat[np.any(np.isfinite(mat), axis=1)]
+            if exclude_low_events and mat.shape[0] < min_events:
+                continue
             if mat.size == 0:
                 continue
             all_mats.append(mat)
             all_labels.extend([f"{file_id} | Trial {i + 1}" for i in range(mat.shape[0])])
-            row = np.nanmean(mat, axis=0)
+            row = mean_sem(mat)[0]
             if np.any(np.isfinite(row)):
                 animal_rows.append(row)
                 animal_labels.append(file_id)
@@ -16599,9 +16918,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     ax.set_yticks([]); ax.set_xticks([])
                 continue
 
-            avg = np.nanmean(mat, axis=0)
-            n_valid = max(1, np.sum(np.any(np.isfinite(mat), axis=1)))
-            sem = np.nanstd(mat, axis=0) / np.sqrt(n_valid)
+            avg, sem, _counts = mean_sem(mat)
 
             # --- Row title (behavior name) spanning all columns ---
             # Place as a left-aligned text annotation on the first panel
@@ -16613,7 +16930,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if not first_ax_placed:
                     ax_heat.set_title(beh_name, fontweight="bold", fontsize=10, loc="left", pad=8)
                     first_ax_placed = True
-                extent = [float(tvec[0]), float(tvec[-1]), 0, mat.shape[0]]
+                half_step = float(tvec[1] - tvec[0]) / 2 if tvec.size > 1 else 0.5
+                extent = [float(tvec[0]) - half_step, float(tvec[-1]) + half_step, 0, mat.shape[0]]
                 im = ax_heat.imshow(mat, aspect="auto", origin="lower", extent=extent,
                                      cmap=cmap_name, interpolation="nearest")
                 ax_heat.axvline(0, color="white", linewidth=0.7, linestyle="--", alpha=0.8)
@@ -16658,7 +16976,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     ax_avg.set_xlabel("Time (s)")
                 else:
                     ax_avg.set_xticklabels([])
-                ax_avg.set_ylabel("z-score")
+                ax_avg.set_ylabel(self._psth_units())
                 ax_avg.spines["top"].set_visible(False)
                 ax_avg.spines["right"].set_visible(False)
                 col += 1
@@ -16670,19 +16988,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     ax_met.set_title(beh_name, fontweight="bold", fontsize=10, loc="left", pad=8)
                     first_ax_placed = True
                 elif row_i == 0:
-                    ax_met.set_title(f"{metric_name} (paired t-test)", fontweight="bold")
+                    ax_met.set_title(f"{metric_name} (paired sign test)", fontweight="bold")
                 pre_mask = (tvec >= pre0) & (tvec <= pre1)
                 post_mask = (tvec >= post0) & (tvec <= post1)
                 if np.any(pre_mask) and np.any(post_mask):
                     pre_vals = mat[:, pre_mask]
                     post_vals = mat[:, post_mask]
-                    if metric_name == "AUC":
-                        dt = float(tvec[1] - tvec[0]) if tvec.size > 1 else 1.0
-                        per_row_pre = np.nansum(pre_vals, axis=1) * dt
-                        per_row_post = np.nansum(post_vals, axis=1) * dt
-                    else:
-                        per_row_pre = np.nanmean(pre_vals, axis=1)
-                        per_row_post = np.nanmean(post_vals, axis=1)
+                    reduction = "auc" if metric_name.startswith("AUC") else "mean"
+                    per_row_pre = window_metrics(mat, tvec, pre0, pre1, reduction)
+                    per_row_post = window_metrics(mat, tvec, post0, post1, reduction)
 
                     # Filter valid paired data
                     valid = np.isfinite(per_row_pre) & np.isfinite(per_row_post)
@@ -16690,10 +17004,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     post_v = per_row_post[valid]
                     n_pairs = int(pre_v.size)
 
-                    mean_pre = float(np.mean(pre_v)) if n_pairs else 0.0
-                    mean_post = float(np.mean(post_v)) if n_pairs else 0.0
-                    sem_pre = float(np.std(pre_v, ddof=1) / np.sqrt(n_pairs)) if n_pairs > 1 else 0.0
-                    sem_post = float(np.std(post_v, ddof=1) / np.sqrt(n_pairs)) if n_pairs > 1 else 0.0
+                    mean_pre, sem_pre, _pre_n = self._finite_mean_sem(per_row_pre)
+                    mean_post, sem_post, _post_n = self._finite_mean_sem(per_row_post)
 
                     colors = ["#5B8CD6", "#D67B5B"]
                     bars = ax_met.bar([0, 1], [mean_pre, mean_post], width=0.55,
@@ -16713,19 +17025,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         ax_met.scatter(1 + jitter_post, post_v, s=12, color="#B05B3B",
                                         edgecolors="white", linewidths=0.3, zorder=3, alpha=0.8)
 
-                    # Paired t-test
-                    p_val = np.nan
-                    if n_pairs >= 2:
-                        try:
-                            _, p_val = stats.ttest_rel(pre_v, post_v)
-                        except Exception:
-                            pass
-
-                    # Significance annotation
-                    y_max = max(mean_pre + sem_pre, mean_post + sem_post)
-                    if np.isfinite(pre_v).any() and np.isfinite(post_v).any():
-                        y_max = max(y_max, float(np.nanmax(np.concatenate([pre_v, post_v]))))
-                    bar_y = y_max * 1.08
+                    # Use the same test and replication unit as the GUI.
+                    independent = (self.tab_sources.currentIndex() != 1 or
+                                   (self.tab_visual_mode.currentIndex() == 1 and
+                                    not self._psth_group_trial_view_enabled()))
+                    test_result = paired_summary(pre_v, post_v, independent_units=independent)
+                    p_val = test_result["paired_p"]
                     if np.isfinite(p_val):
                         if p_val < 0.001:
                             sig_str = "***"
@@ -16735,10 +17040,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
                             sig_str = "*"
                         else:
                             sig_str = "n.s."
-                        ax_met.plot([0, 0, 1, 1], [bar_y, bar_y * 1.03, bar_y * 1.03, bar_y],
+                        lower, upper = ax_met.get_ylim()
+                        span = max(upper - lower, 1e-9)
+                        bar_y = upper + 0.06 * span
+                        ax_met.plot([0, 0, 1, 1], [bar_y, bar_y + 0.04 * span, bar_y + 0.04 * span, bar_y],
                                      color="#333", linewidth=0.8)
-                        ax_met.text(0.5, bar_y * 1.05, f"{sig_str}\np={p_val:.3g}",
+                        ax_met.text(0.5, bar_y + 0.06 * span, f"{sig_str}\np={p_val:.3g}",
                                      ha="center", va="bottom", fontsize=7, color="#333")
+                        ax_met.set_ylim(lower, upper + 0.36 * span)
                 else:
                     ax_met.text(0.5, 0.5, "N/A", ha="center", va="center",
                                 transform=ax_met.transAxes, fontsize=8, color="#999")
@@ -16753,6 +17062,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fig_base = os.path.join(out_dir, f"{prefix}_publication_figure")
         fig.savefig(f"{fig_base}.pdf", format="pdf", bbox_inches="tight", dpi=300)
         fig.savefig(f"{fig_base}.png", format="png", bbox_inches="tight", dpi=300)
+        fig.savefig(f"{fig_base}.svg", format="svg", bbox_inches="tight")
         plt.close(fig)
         self.statusUpdate.emit(f"Publication figure saved: {prefix}_publication_figure.pdf/.png", 5000)
 
@@ -16773,6 +17083,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return cleaned
 
     def _export_images(self) -> None:
+        self._ensure_current_psth()
         if not hasattr(self, "_right_panel"):
             return
         dlg = ExportImageDialog(self)
@@ -17498,7 +17809,7 @@ class ExportDialog(QtWidgets.QDialog):
         self.cb_pub_figure.setChecked(False)
         self.cb_pub_figure.setToolTip(
             "Export a publication-ready figure with one row per behavior:\n"
-            "heatmap | average PSTH | pre/post metrics with paired t-test p-value"
+            "heatmap | average PSTH | pre/post metrics with exact paired sign-test p-value"
         )
         pub_layout.addWidget(self.cb_pub_figure)
         self.combo_pub_content = QtWidgets.QComboBox()
