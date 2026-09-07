@@ -15976,10 +15976,37 @@ class PostProcessingPanel(QtWidgets.QWidget):
         prefix = "postprocess"
         if self._processed:
             prefix = os.path.splitext(os.path.basename(self._processed[0].path))[0]
-        beh_suffix = self._behavior_suffix()
-        if beh_suffix:
-            prefix = f"{prefix}_{beh_suffix}"
+        align_suffix = self._alignment_export_suffix()
+        if align_suffix:
+            prefix = f"{prefix}_{align_suffix}"
         return self._group_export_prefix(prefix)
+
+    def _alignment_export_suffix(self) -> str:
+        """Return a filesystem-safe label for the active PSTH alignment.
+
+        The edge is deliberately part of the shared export prefix. Otherwise,
+        exporting the same source once around onset and once around offset
+        writes both analyses to identical paths.
+        """
+        align_source = self.combo_align.currentText()
+        if _is_doric_channel_align(align_source):
+            channel = self.combo_dio.currentText().strip()
+            cleaned = re.sub(r"\s+", "_", channel)
+            cleaned = re.sub(r"[^A-Za-z0-9_\-]+", "", cleaned)
+            edge = "offset" if self.combo_dio_align.currentText().endswith("offset") else "onset"
+            return f"{cleaned}_{edge}" if cleaned else edge
+
+        behavior = self._behavior_suffix()
+        align_mode = self.combo_behavior_align.currentText()
+        if align_mode.startswith("Transition"):
+            return behavior
+
+        edge = "offset" if align_mode.endswith("offset") else "onset"
+        # Automatically generated continuous-event names already carry their
+        # edge. Avoid awkward names such as ``speed_offset_offset``.
+        if behavior.lower().endswith(f"_{edge}"):
+            return behavior
+        return f"{behavior}_{edge}" if behavior else edge
 
     def _format_export_param_value(self, value: object) -> str:
         if isinstance(value, bool):

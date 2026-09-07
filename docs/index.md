@@ -242,6 +242,11 @@ Use Postprocessing when you want to align processed traces to events or behavior
 5. Inspect the trace preview, heatmap, average PSTH, duration plot, and metrics.
 6. Export matrices, event times, metrics, and figures.
 
+Export filenames include the active alignment edge, for example
+`mouse_01_social_contact_onset_heatmap.csv` and
+`mouse_01_social_contact_offset_heatmap.csv`, so onset and offset analyses can
+be saved in the same folder without overwriting one another.
+
 ### Alignment sources
 
 pyBer can align to:
