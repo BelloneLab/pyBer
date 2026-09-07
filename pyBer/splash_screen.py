@@ -134,18 +134,9 @@ def build_branded_splash() -> Optional[QtGui.QPixmap]:
 
 
 def _set_windows_app_user_model_id_early() -> None:
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        func = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
-        func.argtypes = [wintypes.LPCWSTR]
-        func.restype = ctypes.HRESULT
-        func("BelloneLab.pyBer.FiberPhotometry")
-    except Exception:
-        pass
+    """Share the identity used by normal and IDE launches."""
+    from app_icon import set_windows_app_id
+    set_windows_app_id()
 
 
 def show_early_splash() -> Optional[QtWidgets.QSplashScreen]:
@@ -157,14 +148,16 @@ def show_early_splash() -> Optional[QtWidgets.QSplashScreen]:
     try:
         _set_windows_app_user_model_id_early()
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
+        # Windows may cache the first window's application icon. Install the
+        # application default before creating even the startup splash.
+        from app_icon import install_application_icon
+        install_application_icon(app)
         pix = build_branded_splash()
         if pix is None or pix.isNull():
             return None
         splash = QtWidgets.QSplashScreen(pix, QtCore.Qt.WindowType.WindowStaysOnTopHint)
         splash.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        icon_path = _first_existing_asset("pyBer.ico")
-        if os.path.isfile(icon_path):
-            splash.setWindowIcon(QtGui.QIcon(icon_path))
+        splash.setWindowIcon(app.windowIcon())
         splash.show()
         app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
         return splash

@@ -3,236 +3,13 @@ from __future__ import annotations
 
 import os
 
-# ---------------------------------------------------------------------------
-# Modern flat icons painted programmatically — used by the side-rail buttons
-# in main.py and gui_postprocessing.py. No external assets needed.
-# ---------------------------------------------------------------------------
-
-def _make_icon(painter_fn, size: int = 40, color: str = "#c7d0e6"):
-    from PySide6 import QtCore, QtGui
-    pix = QtGui.QPixmap(size, size)
-    pix.fill(QtCore.Qt.GlobalColor.transparent)
-    p = QtGui.QPainter(pix)
-    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-    painter_fn(p, QtCore.QRect(6, 6, size - 12, size - 12), QtGui.QColor(color))
-    p.end()
-    return QtGui.QIcon(pix)
-
-
-def _pen(c, w=2.0):
-    from PySide6 import QtCore, QtGui
-    return QtGui.QPen(c, w, QtCore.Qt.PenStyle.SolidLine,
-                      QtCore.Qt.PenCapStyle.RoundCap,
-                      QtCore.Qt.PenJoinStyle.RoundJoin)
-
-
-def _paint_database(p, r, c):
-    from PySide6 import QtCore
-    p.setPen(_pen(c, 1.9)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    cx = r.center().x(); ry = max(2, r.height() // 8)
-    p.drawEllipse(QtCore.QPoint(cx, r.top() + ry), r.width() // 2 - 1, ry)
-    p.drawLine(r.left() + 1, r.top() + ry, r.left() + 1, r.bottom() - ry)
-    p.drawLine(r.right() - 1, r.top() + ry, r.right() - 1, r.bottom() - ry)
-    p.drawArc(QtCore.QRect(r.left() + 1, r.bottom() - 2 * ry, r.width() - 2, 2 * ry),
-              200 * 16, 140 * 16)
-    p.drawArc(QtCore.QRect(r.left() + 1, r.center().y() - ry, r.width() - 2, 2 * ry),
-              200 * 16, 140 * 16)
-
-
-def _paint_list(p, r, c):
-    p.setPen(_pen(c, 2.0))
-    for i in range(3):
-        y = r.top() + 3 + i * (r.height() // 3)
-        p.drawLine(r.left() + 5, y, r.left() + 5, y)
-        p.drawLine(r.left() + 9, y, r.right() - 1, y)
-
-
-def _paint_sliders(p, r, c):
-    from PySide6 import QtCore, QtGui
-    p.setPen(_pen(c, 2.0)); p.setBrush(QtGui.QColor(c))
-    rows = [(0.25, 0.4), (0.55, 0.65), (0.8, 0.3)]
-    for frac_y, knob_x in rows:
-        y = r.top() + int(r.height() * frac_y)
-        p.drawLine(r.left() + 1, y, r.right() - 1, y)
-        kx = r.left() + int(r.width() * knob_x)
-        p.drawEllipse(QtCore.QPoint(kx, y), 2, 2)
-
-
-def _paint_filter(p, r, c):
-    from PySide6 import QtCore, QtGui
-    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    pts = [QtCore.QPoint(r.left() + 1, r.top() + 2),
-           QtCore.QPoint(r.right() - 1, r.top() + 2),
-           QtCore.QPoint(r.center().x() + r.width() // 5, r.center().y()),
-           QtCore.QPoint(r.center().x() + r.width() // 5, r.bottom() - 2),
-           QtCore.QPoint(r.center().x() - r.width() // 5, r.bottom() - 2),
-           QtCore.QPoint(r.center().x() - r.width() // 5, r.center().y())]
-    p.drawPolygon(QtGui.QPolygon(pts))
-
-
-def _paint_wave(p, r, c):
-    from PySide6 import QtCore, QtGui
-    import math
-    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    path = QtGui.QPainterPath()
-    cy = r.center().y()
-    path.moveTo(r.left(), cy)
-    w = r.width()
-    for i in range(w + 1):
-        x = r.left() + i
-        y = cy - math.sin(i / w * 2 * math.pi * 1.4) * (r.height() / 2 - 2)
-        path.lineTo(x, y)
-    p.drawPath(path)
-
-
-def _paint_chart(p, r, c):
-    from PySide6 import QtGui
-    p.setPen(_pen(c, 1.6)); p.setBrush(QtGui.QColor(c))
-    bar_w = max(3, r.width() // 5)
-    gap = max(2, (r.width() - bar_w * 3) // 4)
-    heights = [0.5, 0.85, 0.65]
-    x = r.left() + gap
-    for h in heights:
-        bh = int(r.height() * h)
-        p.drawRect(x, r.bottom() - bh, bar_w, bh)
-        x += bar_w + gap
-
-
-def _paint_badge(p, r, c):
-    from PySide6 import QtCore
-    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    cx, cy = r.center().x(), r.center().y()
-    rad = min(r.width(), r.height()) // 2 - 1
-    p.drawEllipse(QtCore.QPoint(cx, cy), rad, rad)
-    p.drawLine(cx - rad // 2, cy, cx - 2, cy + rad // 2)
-    p.drawLine(cx - 2, cy + rad // 2, cx + rad // 2, cy - rad // 3)
-
-
-def _paint_export(p, r, c):
-    from PySide6 import QtCore
-    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    cx = r.center().x()
-    p.drawLine(cx, r.top() + 1, cx, r.bottom() - r.height() // 3)
-    p.drawLine(cx, r.bottom() - r.height() // 3,
-               cx - r.width() // 4, r.bottom() - r.height() // 3 - r.width() // 4)
-    p.drawLine(cx, r.bottom() - r.height() // 3,
-               cx + r.width() // 4, r.bottom() - r.height() // 3 - r.width() // 4)
-    p.drawLine(r.left() + 1, r.bottom() - 1, r.right() - 1, r.bottom() - 1)
-
-
-def _paint_gear(p, r, c):
-    from PySide6 import QtCore
-    import math
-    p.setPen(_pen(c, 1.8)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    cx, cy = r.center().x(), r.center().y()
-    rad = min(r.width(), r.height()) // 2 - 2
-    p.drawEllipse(QtCore.QPoint(cx, cy), rad - 2, rad - 2)
-    p.drawEllipse(QtCore.QPoint(cx, cy), max(1, rad // 3), max(1, rad // 3))
-    for k in range(8):
-        a = k * math.pi / 4
-        x1 = cx + (rad - 1) * math.cos(a); y1 = cy + (rad - 1) * math.sin(a)
-        x2 = cx + (rad + 2) * math.cos(a); y2 = cy + (rad + 2) * math.sin(a)
-        p.drawLine(int(x1), int(y1), int(x2), int(y2))
-
-
-def _paint_grid(p, r, c):
-    from PySide6 import QtCore
-    p.setPen(_pen(c, 1.6)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    p.drawRect(r)
-    p.drawLine(r.left(), r.center().y(), r.right(), r.center().y())
-    p.drawLine(r.center().x(), r.top(), r.center().x(), r.bottom())
-
-
-def _paint_target(p, r, c):
-    from PySide6 import QtCore
-    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    cx, cy = r.center().x(), r.center().y()
-    rad = min(r.width(), r.height()) // 2 - 1
-    p.drawEllipse(QtCore.QPoint(cx, cy), rad, rad)
-    p.drawEllipse(QtCore.QPoint(cx, cy), rad // 2, rad // 2)
-    p.drawLine(cx - rad - 2, cy, cx - 2, cy)
-    p.drawLine(cx + 2, cy, cx + rad + 2, cy)
-    p.drawLine(cx, cy - rad - 2, cx, cy - 2)
-    p.drawLine(cx, cy + 2, cx, cy + rad + 2)
-
-
-def _paint_sync(p, r, c):
-    """Sync icon — two aligned waves with a center timing marker."""
-    from PySide6 import QtCore, QtGui
-    import math
-    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-
-    cx = r.center().x()
-    top_mid = r.top() + int(r.height() * 0.34)
-    bottom_mid = r.top() + int(r.height() * 0.68)
-    amplitude = max(2, int(r.height() * 0.12))
-    width = max(1, r.width())
-
-    def _wave_path(mid_y: int) -> QtGui.QPainterPath:
-        path = QtGui.QPainterPath()
-        path.moveTo(r.left(), mid_y)
-        for i in range(width + 1):
-            x = r.left() + i
-            y = mid_y - math.sin(i / width * 2.0 * math.pi) * amplitude
-            path.lineTo(x, y)
-        return path
-
-    p.setPen(_pen(c, 1.9))
-    p.drawPath(_wave_path(top_mid))
-    p.drawPath(_wave_path(bottom_mid))
-
-    p.setPen(_pen(QtGui.QColor(c).lighter(140), 2.1))
-    p.drawLine(cx, r.top() + 1, cx, r.bottom() - 1)
-
-
-def _paint_pulse(p, r, c):
-    from PySide6 import QtCore
-    p.setPen(_pen(c, 2.0)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    cy = r.center().y()
-    x0 = r.left()
-    p.drawLine(x0, cy, x0 + r.width() // 4, cy)
-    p.drawLine(x0 + r.width() // 4, cy, x0 + r.width() // 4, r.top() + 1)
-    p.drawLine(x0 + r.width() // 4, r.top() + 1, x0 + r.width() // 2, r.top() + 1)
-    p.drawLine(x0 + r.width() // 2, r.top() + 1, x0 + r.width() // 2, r.bottom() - 1)
-    p.drawLine(x0 + r.width() // 2, r.bottom() - 1, x0 + 3 * r.width() // 4, r.bottom() - 1)
-    p.drawLine(x0 + 3 * r.width() // 4, r.bottom() - 1, x0 + 3 * r.width() // 4, cy)
-    p.drawLine(x0 + 3 * r.width() // 4, cy, r.right(), cy)
-
-
-def _paint_paw(p, r, c):
-    from PySide6 import QtCore, QtGui
-    p.setPen(_pen(c, 1.4)); p.setBrush(QtGui.QColor(c))
-    cx, cy = r.center().x(), r.center().y()
-    rw = r.width(); rh = r.height()
-    # Pad
-    p.drawEllipse(QtCore.QPoint(cx, cy + rh // 6), rw // 3, rh // 4)
-    # Toes
-    for dx in (-rw // 3, -rw // 9, rw // 9, rw // 3):
-        p.drawEllipse(QtCore.QPoint(cx + dx, cy - rh // 4), max(2, rw // 10), max(2, rh // 8))
-
-
-def _paint_temporal(p, r, c):
-    """Temporal modeling icon — sine wave over a grid with a regression line."""
-    from PySide6 import QtCore, QtGui
-    import math
-    p.setPen(_pen(c, 1.6)); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    # Horizontal axis
-    cy = r.top() + int(r.height() * 0.6)
-    p.drawLine(r.left(), cy, r.right(), cy)
-    # Sine-like curve
-    path = QtGui.QPainterPath()
-    path.moveTo(r.left(), cy)
-    w = r.width()
-    for i in range(w + 1):
-        x = r.left() + i
-        y = cy - math.sin(i / w * 2.5 * math.pi) * (r.height() * 0.35)
-        path.lineTo(x, y)
-    p.setPen(_pen(c, 2.0))
-    p.drawPath(path)
-    # Regression trend line (dashed)
-    p.setPen(_pen(QtGui.QColor(c).lighter(140), 1.4))
-    p.drawLine(r.left() + 2, cy + int(r.height() * 0.15),
-               r.right() - 2, cy - int(r.height() * 0.25))
+# Tool drawings are code-native vectors shared by both workflow rails.
+from tool_icons import (
+    _make_icon, _paint_database, _paint_list, _paint_sliders, _paint_artifacts,
+    _paint_filter, _paint_wave, _paint_chart, _paint_output, _paint_badge,
+    _paint_export, _paint_gear, _paint_grid, _paint_target, _paint_sync,
+    _paint_pulse, _paint_paw, _paint_temporal,
+)
 
 
 # ===========================================================================
@@ -1116,9 +893,9 @@ QFrame#pyberPanelHeader QLabel {
 QLabel#pyberPanelHeaderTitle {
     color: #f7f9fd;
     font-family: "Segoe UI Variable Display", "Segoe UI Semibold", "Segoe UI", sans-serif;
-    font-size: 13pt;
-    font-weight: 800;
-    letter-spacing: 0.2px;
+    font-size: 12pt;
+    font-weight: 600;
+    letter-spacing: 0px;
 }
 
 QLabel#pyberPanelHeaderSubtitle {
@@ -1234,16 +1011,6 @@ QLabel#pyberAppName {
     font-weight: 800;
     letter-spacing: 0.4px;
     padding: 0 6px;
-}
-
-QLabel#pyberAppMark {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #8a63ff, stop:1 #6146e0);
-    color: #ffffff;
-    border-radius: 9px;
-    font-size: 11pt;
-    font-weight: 800;
-    padding: 0;
-    qproperty-alignment: AlignCenter;
 }
 
 QLabel#pyberWorkflowStep {
@@ -1997,13 +1764,23 @@ def _colorref(hex_color: str) -> int:
 def apply_native_titlebar(widget, theme_mode: object) -> None:
     if os.name != "nt" or widget is None:
         return
+    from PySide6 import QtGui
+    if QtGui.QGuiApplication.platformName() != "windows":
+        return
     try:
         import ctypes
+        from ctypes import wintypes
 
         hwnd = int(widget.winId())
         if not hwnd:
             return
         dwm = ctypes.windll.dwmapi
+        # HWND is pointer-sized on 64-bit Windows. Explicit signatures also
+        # prevent offscreen/test handles from reaching the native API above.
+        dwm.DwmSetWindowAttribute.argtypes = [
+            wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+        ]
+        dwm.DwmSetWindowAttribute.restype = ctypes.HRESULT
 
         mode = str(theme_mode or "").strip().lower()
         light = mode in {"light", "white", "l", "w"}
@@ -2057,6 +1834,9 @@ class _TitlebarThemer:
 def install_native_titlebar(app, theme_mode: object) -> None:
     """Install (or retarget) the title bar themer and restyle open windows."""
     if app is None or os.name != "nt":
+        return
+    from PySide6 import QtGui
+    if QtGui.QGuiApplication.platformName() != "windows":
         return
     try:
         mode = str(theme_mode or "").strip().lower()

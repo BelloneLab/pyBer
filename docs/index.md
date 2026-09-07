@@ -94,6 +94,19 @@ conda activate pyBer
 python .\pyBer\main.py
 ```
 
+### Tool icons and window branding
+
+Both workflow rails use matching vector line icons: white on the dark theme,
+with contrasting ink on light surfaces and white on selected buttons. Panel
+headings use compact titles and descriptions without circular letter badges.
+The original pyBer application icon is installed before the splash and reused
+by detached windows at the display's native resolution. Restart pyBer after
+updating to apply these changes; an older packaged executable must be rebuilt.
+
+For a reproducible before/after icon sheet and dark/light panel screenshots, run
+`conda run -n pyBer python scripts/validate_icon_design.py`. This writes only to
+`_test/icon_design` and isolates application preferences during validation.
+
 ## 3. Preprocessing Workflow
 
 Use Preprocessing when you want to clean and export photometry traces.

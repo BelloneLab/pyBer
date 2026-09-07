@@ -1110,6 +1110,12 @@ QFrame#temporalHeader {
     border: 1px solid #232a3d;
     border-radius: 10px;
 }
+QLabel#temporalHeaderTitle {
+    font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif;
+    font-size: 12pt;
+    font-weight: 600;
+    background: transparent;
+}
 QFrame#temporalNav {
     background: #10131c;
     border: 1px solid #232a3d;
@@ -1750,21 +1756,14 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         h.setContentsMargins(14, 10, 14, 10)
         h.setSpacing(10)
 
-        badge = QtWidgets.QLabel("T")
-        badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        badge.setFixedSize(34, 34)
-        badge.setStyleSheet(
-            "background: #7c5cff; color: white; border-radius: 17px; "
-            "font-weight: 800; font-size: 14pt;"
-        )
-        h.addWidget(badge)
-
         title_col = QtWidgets.QVBoxLayout()
         title_col.setContentsMargins(0, 0, 0, 0)
-        title_col.setSpacing(1)
+        title_col.setSpacing(3)
         title = QtWidgets.QLabel("Temporal Modeling")
-        title.setProperty("class", "title")
+        title.setObjectName("temporalHeaderTitle")
+        title.setWordWrap(True)
         subtitle = QtWidgets.QLabel("Continuous GLM and trial-level FLMM analysis")
+        subtitle.setWordWrap(True)
         subtitle.setProperty("class", "muted")
         title_col.addWidget(title)
         title_col.addWidget(subtitle)

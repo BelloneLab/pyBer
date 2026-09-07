@@ -204,6 +204,8 @@ from styles import (
     _make_icon,
     _paint_database,
     _paint_sliders,
+    _paint_artifacts,
+    _paint_output,
     _paint_filter,
     _paint_wave,
     _paint_chart,
@@ -378,77 +380,28 @@ def _first_existing_asset(filename: str) -> str:
 
 
 def _pyber_icon_path() -> str:
-    for filename in ("pyBer.ico", "pyBer_logo_big.png"):
-        path = _first_existing_asset(filename)
-        if os.path.isfile(path):
-            return path
-    return _first_existing_asset("pyBer.ico")
+    """Resolve the shared application asset used by Qt and the Windows shell."""
+    from app_icon import icon_path
+    return icon_path()
 
 
 def _set_windows_app_user_model_id() -> None:
     """Give Windows a stable app identity so Qt's app icon is used on the taskbar."""
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-        from ctypes import wintypes
-        app_id = "BelloneLab.pyBer.FiberPhotometry"
-        func = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
-        func.argtypes = [wintypes.LPCWSTR]
-        func.restype = ctypes.HRESULT
-        hr = func(app_id)
-        if hr != 0:
-            logging.warning("SetCurrentProcessExplicitAppUserModelID returned HRESULT 0x%08x", hr & 0xFFFFFFFF)
-        else:
-            logging.info("Windows AppUserModelID set to %s", app_id)
-    except Exception as exc:
-        logging.warning("Could not set Windows AppUserModelID: %s", exc)
+    from app_icon import set_windows_app_id
+    set_windows_app_id()
 
 
 def _build_pyber_icon() -> Optional["QtGui.QIcon"]:
-    """Build a QIcon backed by every embedded size of pyBer.ico.
-
-    On some Windows configurations Qt fails to render small taskbar icons
-    when only the multi-image .ico file is given to QIcon. Explicitly pulling
-    each pixmap out and re-adding it guarantees the 16/24/32/.../256 set is
-    available to Windows shell.
-    """
-    icon_path = _pyber_icon_path()
-    if not os.path.isfile(icon_path):
-        logging.warning("App icon not found at %s", icon_path)
-        return None
-    try:
-        from_file = QtGui.QIcon(icon_path)
-        if from_file.isNull():
-            logging.warning("QIcon failed to load %s", icon_path)
-            return None
-        icon = QtGui.QIcon()
-        sizes = from_file.availableSizes()
-        if not sizes:
-            sizes = [QtCore.QSize(s, s) for s in (16, 24, 32, 48, 64, 128, 256)]
-        for size in sizes:
-            pixmap = from_file.pixmap(size)
-            if not pixmap.isNull():
-                icon.addPixmap(pixmap)
-        if icon.isNull():
-            # Last-resort fallback: use whatever QIcon parsed from the file.
-            icon = from_file
-        logging.info("pyBer icon built from %s (sizes: %s)",
-                     icon_path, [s.width() for s in sizes])
-        return icon
-    except Exception as exc:
-        logging.warning("Failed to build pyBer icon: %s", exc)
-        return None
+    """Use the same multi-resolution icon as the early startup splash."""
+    from app_icon import build_icon
+    icon = build_icon()
+    return None if icon.isNull() else icon
 
 
 def _set_qt_application_icon(app: QtWidgets.QApplication) -> None:
-    icon = _build_pyber_icon()
-    if icon is None:
-        return
-    try:
-        app.setWindowIcon(icon)
-    except Exception as exc:
-        logging.warning("setWindowIcon (app) failed: %s", exc)
+    """Brand the application and all future top-level windows."""
+    from app_icon import install_application_icon
+    install_application_icon(app)
 
 
 def _set_qt_window_icon(window: QtWidgets.QWidget) -> None:
@@ -462,56 +415,9 @@ def _set_qt_window_icon(window: QtWidgets.QWidget) -> None:
 
 
 def _force_windows_taskbar_icon(window: QtWidgets.QWidget) -> None:
-    """Send WM_SETICON to the HWND so the Windows taskbar picks up the icon.
-
-    Required when running under python.exe in dev mode: Qt's setWindowIcon
-    updates the title bar but Windows often keeps the taskbar entry's icon
-    pointing at the python.exe resource. WM_SETICON tells the OS to use a
-    specific HICON for this window's taskbar entry and alt-tab thumbnail.
-    """
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-        from ctypes import wintypes
-        hwnd = int(window.winId())
-        if not hwnd:
-            return
-        ico_path = _pyber_icon_path()
-        if not os.path.isfile(ico_path):
-            return
-        IMAGE_ICON = 1
-        LR_LOADFROMFILE = 0x00000010
-        ICON_SMALL = 0
-        ICON_BIG = 1
-        WM_SETICON = 0x0080
-        LoadImageW = ctypes.windll.user32.LoadImageW
-        LoadImageW.argtypes = [
-            wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
-            ctypes.c_int, ctypes.c_int, wintypes.UINT,
-        ]
-        LoadImageW.restype = wintypes.HANDLE
-        SendMessageW = ctypes.windll.user32.SendMessageW
-        SendMessageW.argtypes = [
-            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
-        ]
-        SendMessageW.restype = wintypes.LPARAM
-        h_big = LoadImageW(
-            None, ico_path, IMAGE_ICON, 32, 32, LR_LOADFROMFILE,
-        )
-        h_small = LoadImageW(
-            None, ico_path, IMAGE_ICON, 16, 16, LR_LOADFROMFILE,
-        )
-        if h_big:
-            SendMessageW(hwnd, WM_SETICON, ICON_BIG, h_big)
-        if h_small:
-            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, h_small)
-        logging.info(
-            "WM_SETICON applied to HWND 0x%X (big=%s small=%s)",
-            hwnd, bool(h_big), bool(h_small),
-        )
-    except Exception as exc:
-        logging.warning("WM_SETICON path failed: %s", exc)
+    """Refresh native Windows icons without repeatedly leaking HICON handles."""
+    from app_icon import apply_native_window_icon
+    apply_native_window_icon(window)
 
 
 def _rolling_corr(x: np.ndarray, y: np.ndarray, win: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -2621,10 +2527,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # ----- Modern shell: vertical icon rail + thin transport bar ------
         # Configure section buttons as icon-only rail buttons.
         _rail_section_meta = {
-            "artifacts":      ("Artifacts",  "Detection thresholds and artifact list", _paint_sliders),
+            "artifacts":      ("Artifacts",  "Detection thresholds and artifact list", _paint_artifacts),
             "filtering":      ("Filtering",  "Low-pass and smoothing options",     _paint_filter),
             "baseline":       ("Baseline",   "Baseline estimation across recording", _paint_wave),
-            "output":         ("Output",     "Choose dFF / dF / z-score formula",  _paint_chart),
+            "output":         ("Output",     "Choose dFF / dF / z-score formula",  _paint_output),
             "qc":             ("QC",         "Per-recording diagnostic checks",    _paint_badge),
             "export":         ("Export",     "Export processed traces",             _paint_export),
             "config":         ("Config",     "Save / load preprocessing parameter sets", _paint_gear),
@@ -2728,7 +2634,7 @@ class MainWindow(QtWidgets.QMainWindow):
             _drawer_l = QtWidgets.QVBoxLayout(self._pre_drawer)
             _drawer_l.setContentsMargins(12, 10, 12, 10)
             _drawer_l.setSpacing(8)
-            # Rich panel header (badge + title + subtitle); set per active section.
+            # Compact title and description for the active section.
             self._pre_drawer_header = PanelHeader()
             _drawer_l.addWidget(self._pre_drawer_header)
             # Hidden compat label so legacy lookups don't crash.
@@ -3466,7 +3372,7 @@ class MainWindow(QtWidgets.QMainWindow):
         title_lbl = getattr(self, "_pre_drawer_title", None)
         if title_lbl is not None:
             title_lbl.setText(self._PRE_SECTION_TITLES.get(active_key or "", ""))
-        # Rich header (badge + title + subtitle).
+        # Update the shared title and description.
         header = getattr(self, "_pre_drawer_header", None)
         if header is not None:
             try:
@@ -6993,7 +6899,7 @@ class MainWindow(QtWidgets.QMainWindow):
             from styles import _make_icon
         except Exception:
             return
-        icon_color = "#3b4763" if self._app_theme_mode == "light" else "#c7d0e6"
+        icon_color = "#3b4763" if self._app_theme_mode == "light" else "#ffffff"
         painters = getattr(self, "_pre_rail_icon_painters", {}) or {}
         for key, painter in painters.items():
             btn = getattr(self, "_section_buttons", {}).get(key)

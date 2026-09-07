@@ -4211,7 +4211,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             _drw = QtWidgets.QVBoxLayout(self._post_drawer)
             _drw.setContentsMargins(12, 10, 12, 10)
             _drw.setSpacing(8)
-            # Rich panel header (badge + title + subtitle); set per active section.
+            # Compact title and description for the active section.
             self._post_drawer_header = _PyberPanelHeader()
             _drw.addWidget(self._post_drawer_header)
             # Hidden compat label so legacy lookups don't crash.
@@ -4560,7 +4560,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             from styles import _make_icon
         except Exception:
             return
-        icon_color = "#3b4763" if self._app_theme_mode == "light" else "#c7d0e6"
+        icon_color = "#3b4763" if self._app_theme_mode == "light" else "#ffffff"
         buttons = getattr(self, "_section_buttons", {}) or {}
         for key, painter in (getattr(self, "_post_rail_icon_painters", {}) or {}).items():
             btn = buttons.get(key)
@@ -5137,7 +5137,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         title_lbl = getattr(self, "_post_drawer_title", None)
         if title_lbl is not None:
             title_lbl.setText(self._POST_SECTION_TITLES.get(active_key or "", ""))
-        # Rich header (badge + title + subtitle).
+        # Update the shared title and description.
         header = getattr(self, "_post_drawer_header", None)
         if header is not None:
             try:

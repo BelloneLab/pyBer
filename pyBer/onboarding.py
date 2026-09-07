@@ -951,7 +951,7 @@ def _keyboard_cheatsheet_html() -> str:
 
 
 # ============================================================================
-# Panel header (per-section badge + title + subtitle)
+# Panel header (title + supporting description)
 # ============================================================================
 
 # (badge_letter, badge_color, title, subtitle)
@@ -980,8 +980,8 @@ _PRE_SECTION_META: Dict[str, Tuple[str, str, str, str]] = {
 class PanelHeader(QtWidgets.QFrame):
     """
     Reusable per-panel header. Shows:
-        [coloured badge with letter]  Title (large, bold)
-                                      Subtitle (muted, single line)
+        Title (compact, semibold)
+        Subtitle (muted, wrapping when needed)
     Use `set_section(key, meta_dict)` to swap the displayed section.
     """
 
@@ -989,23 +989,18 @@ class PanelHeader(QtWidgets.QFrame):
         super().__init__(parent)
         self.setObjectName("pyberPanelHeader")
         self.setStyleSheet("")
-        self.setMinimumHeight(54)
+        self.setMinimumHeight(48)
 
         lay = QtWidgets.QHBoxLayout(self)
         lay.setContentsMargins(0, 4, 0, 10)
-        lay.setSpacing(12)
-
-        self._badge = QtWidgets.QLabel("")
-        self._badge.setObjectName("pyberPanelBadge")
-        self._badge.setFixedSize(36, 36)
-        self._badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self._badge)
+        lay.setSpacing(0)
 
         col = QtWidgets.QVBoxLayout()
         col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(0)
+        col.setSpacing(3)
         self._title = QtWidgets.QLabel("")
         self._title.setObjectName("pyberPanelHeaderTitle")
+        self._title.setWordWrap(True)
         self._subtitle = QtWidgets.QLabel("")
         self._subtitle.setObjectName("pyberPanelHeaderSubtitle")
         self._subtitle.setWordWrap(True)
@@ -1014,19 +1009,12 @@ class PanelHeader(QtWidgets.QFrame):
         lay.addLayout(col, 1)
 
     def set_from_meta(self, meta: Optional[Tuple[str, str, str, str]]) -> None:
-        """meta = (badge_letter, badge_color, title, subtitle); falsy hides everything."""
+        """Show title and description; legacy letter/color metadata is ignored."""
         if not meta:
-            self._badge.setText("")
             self._title.setText("")
             self._subtitle.setText("")
-            self._badge.setStyleSheet("background: transparent;")
             return
-        letter, color, title, subtitle = meta
-        self._badge.setText(letter)
-        self._badge.setStyleSheet(
-            f"background: {color}; color: #ffffff; border-radius: 18px; "
-            f"font-weight: 800; font-size: 14pt;"
-        )
+        _letter, _color, title, subtitle = meta
         self._title.setText(title)
         self._subtitle.setText(subtitle)
 
@@ -1230,7 +1218,7 @@ class InlineStatus(QtWidgets.QFrame):
 class TopAppBar(QtWidgets.QFrame):
     """
     Persistent strip above the main tab widget. Shows:
-        [logo]  pyBer        Preprocessing > Postprocessing      [Project: name *]   [Help]
+        pyBer        Preprocessing > Postprocessing      [Project: name *]   [Help]
     The workflow step is highlighted based on the active main tab.
     """
 
@@ -1245,11 +1233,6 @@ class TopAppBar(QtWidgets.QFrame):
         lay = QtWidgets.QHBoxLayout(self)
         lay.setContentsMargins(16, 6, 16, 6)
         lay.setSpacing(12)
-
-        self._mark = QtWidgets.QLabel("p")
-        self._mark.setObjectName("pyberAppMark")
-        self._mark.setFixedSize(30, 30)
-        lay.addWidget(self._mark)
 
         self._app_name = QtWidgets.QLabel("pyBer")
         self._app_name.setObjectName("pyberAppName")
