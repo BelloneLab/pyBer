@@ -32,6 +32,7 @@ from ethovision_process_gui import clean_sheet
 from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, create_plot_card, style_plot
 from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
+from signal_events import preprocess_trace, estimate_noise, detect_peaks, observed_intervals, continuous_segments
 from postprocessing_core import (
     compute_psth_matrix, extract_complete_events, group_close_events,
     mean_sem, normalize_events, window_metrics, paired_summary,
@@ -2195,7 +2196,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_signal_source.addItems(["Use processed output trace (loaded file)", "Use PSTH input trace"])
         _compact_combo(self.combo_signal_source, min_chars=10)
         self.combo_signal_scope = QtWidgets.QComboBox()
-        self.combo_signal_scope.addItems(["Per file", "Pooled"])
+        self.combo_signal_scope.addItems(["Selected file", "All files"])
+        self.combo_signal_scope.setToolTip("All files estimates noise independently for each recording and retains per-file results.")
         _compact_combo(self.combo_signal_scope, min_chars=8)
         self.combo_signal_file = QtWidgets.QComboBox()
         _compact_combo(self.combo_signal_file, min_chars=8)
@@ -2204,13 +2206,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_peak_prominence = QtWidgets.QDoubleSpinBox()
         self.spin_peak_prominence.setRange(0.0, 1e6)
         self.spin_peak_prominence.setValue(0.5)
-        self.spin_peak_prominence.setDecimals(4)
+        self.spin_peak_prominence.setDecimals(8)
         self.cb_peak_auto_mad = QtWidgets.QCheckBox("Auto transient threshold (MAD noise)")
-        self.cb_peak_auto_mad.setChecked(False)
+        self.cb_peak_auto_mad.setChecked(True)
+        self.cb_peak_noise_gate = QtWidgets.QCheckBox()
+        self.cb_peak_noise_gate.setChecked(True)
+        self.cb_peak_noise_gate.setToolTip("Require peaks to exceed the local baseline by the noise multiplier × sigma, as well as passing prominence. Works with automatic or manual prominence.")
         self.cb_peak_auto_mad.setToolTip(
-            "Estimate trace noise as 1.4826 x MAD after baseline/smoothing and use "
-            "the multiplier below as the minimum peak prominence."
+            "Estimate robust noise around a rolling baseline in the chosen quiet interval. "
+            "The multiplier sets prominence independently for each file. Use 'Adjust from auto' "
+            "to copy the selected file's estimate into the editable manual threshold."
         )
+        self.btn_peak_use_auto = QtWidgets.QPushButton("Adjust from auto")
+        self.btn_peak_use_auto.setProperty("class", "compactSmall")
+        self.lbl_peak_threshold = QtWidgets.QLabel("Run detection to inspect the noise estimate.")
+        self.lbl_peak_threshold.setWordWrap(True)
+        self.lbl_peak_threshold.setProperty("class", "hint")
         self.spin_peak_mad_multiplier = QtWidgets.QDoubleSpinBox()
         self.spin_peak_mad_multiplier.setRange(0.5, 50.0)
         self.spin_peak_mad_multiplier.setValue(5.0)
@@ -2241,6 +2252,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_peak_auc_window.setRange(0.0, 30.0)
         self.spin_peak_auc_window.setValue(0.5)
         self.spin_peak_auc_window.setDecimals(3)
+        self.spin_peak_auc_window.setToolTip("AUC is reported only when the full +/- window is observed. Windows crossing cuts or recording edges are unavailable.")
         self.cb_peak_norm_prominence = QtWidgets.QCheckBox()
         self.cb_peak_norm_prominence.setChecked(False)
         self.cb_peak_norm_prominence.setToolTip(
@@ -2311,8 +2323,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_signal_baseline_status.setWordWrap(True)
         self.cb_peak_overlay = QtWidgets.QCheckBox("Show detected peaks on trace")
         self.cb_peak_overlay.setChecked(True)
-        self.cb_peak_noise_overlay = QtWidgets.QCheckBox("Show noise trace / MAD threshold overlay")
-        self.cb_peak_noise_overlay.setChecked(False)
+        self.cb_peak_noise_overlay = QtWidgets.QCheckBox("Show shaded noise band and threshold guides")
+        self.cb_peak_noise_overlay.setChecked(True)
         self.cb_peak_noise_overlay.setToolTip(
             "After peak detection, overlay the preprocessed detection trace, robust noise band, "
             "and effective prominence threshold used for the visible file."
@@ -2341,6 +2353,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             lbl.setMinimumWidth(SIG_LABEL_W)
             lbl.setMaximumWidth(SIG_LABEL_W)
             form.addRow(lbl, field)
+            field._signal_form_label = lbl
 
         # Source subsection.
         sub_sig_source = _PyberSubsection(
@@ -2349,7 +2362,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         fs_src = _sig_form()
         _sig_add(fs_src, "Signal source", self.combo_signal_source)
-        _sig_add(fs_src, "Group mode", self.combo_signal_scope)
+        _sig_add(fs_src, "Analyze", self.combo_signal_scope)
         _sig_add(fs_src, "File", self.combo_signal_file)
         sub_sig_source.add_layout(fs_src)
 
@@ -2367,13 +2380,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_peak_auto_mad.setText("")
         sub_sig_detect = _PyberSubsection(
             "Detection",
-            "Where to draw the peak threshold (manual prominence or MAD-noise auto).",
+            "Estimate a threshold per recording, then tune sensitivity or adjust the automatic value manually.",
         )
         fs_det = _sig_form()
         _sig_add(fs_det, "Method", self.combo_signal_method)
         _sig_add(fs_det, "Auto MAD threshold", self.cb_peak_auto_mad)
         _sig_add(fs_det, "MAD multiplier", self.spin_peak_mad_multiplier)
+        _sig_add(fs_det, "Noise height gate", self.cb_peak_noise_gate)
         _sig_add(fs_det, "Min prominence", self.spin_peak_prominence)
+        fs_det.addRow(self.btn_peak_use_auto)
+        fs_det.addRow(self.lbl_peak_threshold)
         _sig_add(fs_det, "Min height (0=off)", self.spin_peak_height)
         _sig_add(fs_det, "Min distance", self.spin_peak_distance)
         _sig_add(fs_det, "Smooth sigma", self.spin_peak_smooth)
@@ -2383,7 +2399,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_peak_baseline_window.setSuffix(" s")
         self.spin_peak_baseline_window.setMaximumWidth(150)
         sub_sig_baseline = _PyberSubsection(
-            "Baseline prominence",
+            "Noise and baseline",
             "Define the 'quiet' segment used as the normalization reference and "
             "(optionally) for the MAD noise floor.",
         )
@@ -2477,6 +2493,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.tbl_signal_metrics.horizontalHeader().setStretchLastSection(True)
         self.tbl_signal_metrics.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tbl_signal_metrics.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.tbl_signal_files = QtWidgets.QTableWidget(0, 6)
+        self.tbl_signal_files.setHorizontalHeaderLabels(["File", "Status", "Peaks", "Observed (s)", "Prominence", "Peaks/min"])
+        self.tbl_signal_files.verticalHeader().setVisible(False)
+        self.tbl_signal_files.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_signal_files.horizontalHeader().setStretchLastSection(True)
+        self.tbl_signal_files.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_signal_files.setMinimumHeight(130)
 
         # Plain frame holds the behavior subsections - no outer GroupBox chip,
         # the panel header already says "Behavior".
@@ -3578,6 +3601,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         signal_layout.addWidget(grp_signal)
         signal_layout.addWidget(self.signal_status)
         signal_layout.addWidget(self.tbl_signal_metrics, 1)
+        signal_layout.addWidget(self.tbl_signal_files)
         signal_layout.addWidget(self.signal_footer)
 
         self.section_behavior = QtWidgets.QWidget()
@@ -3838,7 +3862,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         view_row = QtWidgets.QHBoxLayout()
         view_row.addWidget(QtWidgets.QLabel("View layout"))
         self.combo_view_layout = QtWidgets.QComboBox()
-        self.combo_view_layout.addItems(["Standard", "Heatmap focus", "Trace focus", "Metrics focus", "All"])
+        self.combo_view_layout.addItems(["Standard", "Heatmap focus", "Trace focus", "Metrics focus", "Signal events", "All"])
         _compact_combo(self.combo_view_layout, min_chars=9)
         view_row.addWidget(self.combo_view_layout)
         self.combo_plot_preset = QtWidgets.QComboBox()
@@ -4392,6 +4416,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_compute.clicked.connect(self._compute_psth)
         self.btn_update.clicked.connect(self._compute_psth)
         self.btn_detect_peaks.clicked.connect(self._detect_signal_events)
+        self.btn_peak_use_auto.clicked.connect(self._use_auto_peak_settings)
         self.btn_export_peaks.clicked.connect(self._export_signal_events_csv)
         self.btn_compute_behavior.clicked.connect(self._compute_behavior_analysis)
         self.btn_export_behavior_metrics.clicked.connect(self._export_behavior_metrics_csv)
@@ -4423,7 +4448,23 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_signal_source.currentIndexChanged.connect(self._refresh_signal_file_combo)
         self.combo_signal_scope.currentIndexChanged.connect(self._refresh_signal_file_combo)
         self.combo_signal_file.currentIndexChanged.connect(self._on_signal_file_changed)
+        self.combo_signal_file.currentIndexChanged.connect(self._refresh_signal_baseline_status)
         self.cb_peak_auto_mad.toggled.connect(self._update_peak_auto_mad_enabled)
+        self.cb_peak_noise_gate.toggled.connect(self._update_signal_baseline_source_visibility)
+
+        for control in (self.spin_peak_prominence, self.spin_peak_mad_multiplier, self.spin_peak_height,
+                        self.spin_peak_distance, self.spin_peak_smooth, self.spin_peak_baseline_window,
+                        self.spin_peak_auc_window, self.spin_signal_baseline_start,
+                        self.spin_signal_baseline_end, self.spin_signal_baseline_pad):
+            control.valueChanged.connect(self._mark_signal_settings_changed)
+        for control in (self.cb_peak_auto_mad, self.cb_peak_noise_gate, self.cb_peak_norm_prominence):
+            control.toggled.connect(self._mark_signal_settings_changed)
+        for control in (self.combo_peak_baseline, self.combo_signal_baseline_source,
+                        self.combo_signal_baseline_behavior_file):
+            control.currentIndexChanged.connect(self._mark_signal_settings_changed)
+            control.currentIndexChanged.connect(self._queue_settings_save)
+        self.list_signal_baseline_exclude.itemChanged.connect(self._mark_signal_settings_changed)
+        self.list_signal_baseline_exclude.itemChanged.connect(self._queue_settings_save)
 
         # Baseline-prominence source plumbing.
         self.combo_signal_baseline_source.currentIndexChanged.connect(self._update_signal_baseline_source_visibility)
@@ -5707,6 +5748,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     @QtCore.Slot(list)
     def receive_current_processed(self, processed_list: List[ProcessedTrial]) -> None:
+        self.last_signal_events = None
+        self._signal_preview_proc = None
+        self._update_signal_metrics_table()
+        self._render_signal_event_plots()
         self._processed = processed_list or []
         if not self._processed:
             self._clear_psth_cache()
@@ -8787,6 +8832,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         elif layout == "All":
             show_signal = True
             show_behavior = True
+        elif layout == "Signal events":
+            show_heat = False
+            show_avg = False
+            show_signal = True
 
         self.plot_trace.setVisible(show_trace)
         self.row_heat.setVisible(show_heat)
@@ -8805,6 +8854,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 widget.setMinimumHeight(height)
             self._results_splitter.setMinimumHeight(sum(height for _, height in visible) + 6 * max(0, len(visible) - 1))
 
+    def _signal_file_id(self, proc: ProcessedTrial) -> str:
+        """Disambiguate repeated filenames/channels in signal batch results."""
+        stem = self._file_id_for_proc(proc)
+        matches = [item for item in self._processed if self._file_id_for_proc(item) == stem]
+        if len(matches) <= 1:
+            return stem
+        number = next((index + 1 for index, item in enumerate(matches) if item is proc), 1)
+        return f"{stem} [{getattr(proc, 'channel_id', '') or 'trace'} {number}]"
+
     def _refresh_signal_file_combo(self) -> None:
         if not hasattr(self, "combo_signal_file"):
             return
@@ -8812,7 +8870,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_signal_file.blockSignals(True)
         self.combo_signal_file.clear()
         for proc in self._processed:
-            stem = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
+            stem = self._signal_file_id(proc)
             self.combo_signal_file.addItem(stem)
         if prev:
             idx = self.combo_signal_file.findText(prev)
@@ -8821,7 +8879,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_signal_file.blockSignals(False)
         has_multi = self.combo_signal_file.count() > 1
         self.combo_signal_scope.setEnabled(has_multi)
-        self.combo_signal_file.setEnabled(self.combo_signal_scope.currentText() == "Per file")
+        self.combo_signal_file.setEnabled(bool(self._processed))
+        self.btn_detect_peaks.setText("Detect all files" if self.combo_signal_scope.currentText() == "All files" else "Detect peaks")
         self._refresh_signal_overlay()
 
     def _on_signal_file_changed(self, _index: int = 0) -> None:
@@ -8830,10 +8889,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if self.combo_signal_source.currentText().startswith("Use PSTH input trace"):
             self._refresh_signal_overlay()
             return
-        if self.combo_signal_scope.currentText() != "Per file":
-            self._refresh_signal_overlay()
-            return
 
+        index = self.combo_signal_file.currentIndex()
+        self._signal_preview_proc = self._processed[index] if 0 <= index < len(self._processed) else None
         file_id = self.combo_signal_file.currentText().strip()
         if not file_id:
             self._refresh_signal_overlay()
@@ -8849,23 +8907,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._refresh_signal_overlay()
 
     def _current_signal_overlay_file_id(self) -> str:
-        if self.combo_signal_source.currentText().startswith("Use PSTH input trace"):
-            return "psth_trace"
-        if self.combo_signal_scope.currentText() == "Per file":
-            file_id = self.combo_signal_file.currentText().strip()
-            if file_id:
-                return file_id
-        try:
-            if self.tab_visual_mode.currentIndex() == 0:
-                file_id = self.combo_individual_file.currentText().strip()
-                if file_id:
-                    return file_id
-        except Exception:
-            pass
-        if self._processed:
-            proc = self._processed[0]
-            return os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
-        return ""
+        """Overlays follow the actual plotted recording, not an unrelated selector."""
+        source = getattr(self, "_trace_preview_source", None)
+        if source is not None:
+            return self._signal_file_id(source[0])
+        return self._signal_file_id(self._processed[0]) if self._processed else ""
 
     def _refresh_individual_file_combo(self) -> None:
         if not hasattr(self, "combo_individual_file"):
@@ -8920,6 +8966,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             pass
 
     def _on_individual_file_changed(self, _index: int = 0) -> None:
+        self._signal_preview_proc = None
         if self.tab_visual_mode.currentIndex() == 0:
             self._rerender_visual_from_cache()
         # Push the new active file into the Temporal Modeling section so its
@@ -9068,6 +9115,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.combo_signal_file,
             self.combo_signal_method,
             self.cb_peak_auto_mad,
+            self.cb_peak_noise_gate,
             self.spin_peak_mad_multiplier,
             self.spin_peak_height,
             self.spin_peak_distance,
@@ -9215,6 +9263,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
             + (f"  |  {excluded} file(s) excluded" if excluded else "")
             + ("\nAdjust the event selection, baseline, or inclusion threshold." if not ready and not pending else "")
         )
+        if self.combo_view_layout.currentText() == "Signal events":
+            result = self.last_signal_events or {}
+            metrics = result.get("derived_metrics", {})
+            count = int(metrics.get("number_of_peaks", 0))
+            files = len(result.get("file_summaries", []))
+            duration = float(metrics.get("observed_duration_s", 0))
+            message = f"Signal events | {count} peaks | {files} file(s) | {duration:.1f} observed seconds"
+            if result.get("settings_changed"):
+                message += " | Settings changed: run detection to update"
+            elif result.get("cancelled"):
+                message += " | Batch cancelled; completed files retained"
+            self.lbl_status.setText(message)
+            status_msg = message
         self.lbl_status.setToolTip(status_msg)
         for name in ("btn_export", "btn_action_export"):
             button = getattr(self, name, None)
@@ -9283,6 +9344,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         apply_plot_preset(self, name)
         self._refresh_psth_contrast()
+        self._refresh_signal_overlay()
 
     def _fit_psth_plots(self) -> None:
         """Restore useful plot bounds after zooming or panning."""
@@ -9332,11 +9394,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._apply_view_layout()
         self._queue_settings_save()
 
+    def _mark_signal_settings_changed(self, *_args) -> None:
+        """Distinguish the last completed run from controls edited afterward."""
+        if getattr(self, "_signal_detection_running", False) or self._autosave_restoring or not self.last_signal_events:
+            return
+        self.last_signal_events["settings_changed"] = True
+        self.lbl_signal_msg.setText("Settings changed. Detect peaks to refresh the results; exports still describe the previous run.")
+        self._refresh_signal_overlay()
+        self._update_status_strip()
+
     def _update_peak_auto_mad_enabled(self, _checked: object = None, *, queue: bool = True) -> None:
         has_processed = bool(self._processed)
         auto_mad = bool(self.cb_peak_auto_mad.isChecked())
         self.spin_peak_prominence.setEnabled(has_processed and not auto_mad)
-        self.spin_peak_mad_multiplier.setEnabled(has_processed and auto_mad)
+        self.spin_peak_mad_multiplier.setEnabled(has_processed)
+        self.btn_peak_use_auto.setEnabled(has_processed)
+        self._update_signal_baseline_source_visibility()
         if queue:
             self._queue_settings_save()
 
@@ -9351,7 +9424,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         mode = self.combo_signal_baseline_source.currentData() or "window"
         is_window = (mode == "window")
         is_exclude = (mode == "exclude")
-        norm_on = bool(self.cb_peak_norm_prominence.isChecked())
+        norm_on = bool(self.cb_peak_norm_prominence.isChecked() or self.cb_peak_auto_mad.isChecked() or self.cb_peak_noise_gate.isChecked())
 
         # Window inputs
         for w, lbl_row_widget in self._signal_baseline_window_rows():
@@ -9376,6 +9449,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _form_row_label_widget(self, field: QtWidgets.QWidget) -> Optional[QtWidgets.QWidget]:
         """Locate the QLabel paired with `field` inside the enclosing QFormLayout."""
+        if hasattr(field, "_signal_form_label"):
+            return field._signal_form_label
         parent = field.parentWidget()
         if parent is None:
             return None
@@ -9475,25 +9550,25 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not self._processed:
             self.lbl_signal_baseline_status.setText("Load a recording first.")
             return
-        proc = self._processed[0]
-        t = np.asarray(getattr(proc, "time", np.array([], float)), float)
+        index = max(0, self.combo_signal_file.currentIndex())
+        proc = self._processed[min(index, len(self._processed) - 1)]
+        t = self._proc_time(proc)
         if t.size < 3:
             self.lbl_signal_baseline_status.setText("Active trace has no time vector.")
             return
-        finite = np.isfinite(t)
-        file_id = os.path.splitext(os.path.basename(getattr(proc, "path", "") or ""))[0] or "import"
+        values = np.asarray(proc.output, float)
+        finite = np.isfinite(t) & np.isfinite(values) if values.shape == t.shape else np.zeros(t.shape, bool)
+        file_id = self._signal_file_id(proc)
         try:
             mask, source, explanation = self._signal_baseline_mask(t, finite, file_id=file_id)
         except Exception as exc:
             self.lbl_signal_baseline_status.setText(f"Baseline preview error: {exc}")
             return
         n = int(np.sum(mask))
-        t_finite = t[mask]
-        if t_finite.size >= 2:
-            dur = float(np.nanmax(t_finite) - np.nanmin(t_finite))
-        else:
-            dur = 0.0
-        total_dur = float(np.nanmax(t[finite]) - np.nanmin(t[finite])) if np.sum(finite) >= 2 else 0.0
+        intervals = observed_intervals(t, np.where(mask, 0.0, np.nan))
+        dur = float(np.sum(intervals[:, 1] - intervals[:, 0]))
+        full_intervals = observed_intervals(t, np.where(finite, 0.0, np.nan))
+        total_dur = float(np.sum(full_intervals[:, 1] - full_intervals[:, 0]))
         pct = (dur / total_dur * 100.0) if total_dur > 0 else 0.0
         self.lbl_signal_baseline_status.setText(
             f"Baseline: {n} samples, {dur:.1f} s ({pct:.1f}% of trace) - {explanation}."
@@ -9874,6 +9949,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_peak_distance,
             self.spin_peak_smooth,
             self.spin_peak_baseline_window,
+            self.spin_signal_baseline_start,
+            self.spin_signal_baseline_end,
+            self.spin_signal_baseline_pad,
             self.spin_peak_rate_bin,
             self.spin_peak_auc_window,
             self.spin_behavior_bin,
@@ -9899,6 +9977,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.cb_global_amp,
             self.cb_global_freq,
             self.cb_peak_auto_mad,
+            self.cb_peak_noise_gate,
             self.cb_peak_norm_prominence,
             self.cb_peak_overlay,
             self.cb_peak_noise_overlay,
@@ -12189,6 +12268,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     if fid == sel_id:
                         proc = p
                         break
+        selected_signal = getattr(self, "_signal_preview_proc", None)
+        if selected_signal is not None and any(item is selected_signal for item in self._processed):
+            proc = selected_signal
         t = self._proc_time(proc)
         y = proc.output if proc.output is not None else np.full_like(t, np.nan)
 
@@ -12207,6 +12289,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         plot_t, plot_y = with_time_gap_breaks(t, y)
         self.curve_trace.setData(plot_t, plot_y, connect="finite", skipFiniteCheck=True)
+        self._trace_preview_source = source
         self._update_behavior_overlay(proc)
 
         # draw event lines if possible
@@ -12284,12 +12367,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not self._processed:
             return []
 
-        pooled = self.combo_signal_scope.currentText() == "Pooled"
+        pooled = self.combo_signal_scope.currentText() == "All files"
         if pooled:
             for proc in self._processed:
                 if proc.time is None or proc.output is None:
                     continue
-                file_id = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
+                file_id = self._signal_file_id(proc)
                 targets.append((file_id, np.asarray(self._proc_time(proc), float), np.asarray(proc.output, float)))
             return targets
 
@@ -12300,54 +12383,52 @@ class PostProcessingPanel(QtWidgets.QWidget):
         proc = self._processed[idx]
         if proc.time is None or proc.output is None:
             return []
-        file_id = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
+        file_id = self._signal_file_id(proc)
         targets.append((file_id, np.asarray(self._proc_time(proc), float), np.asarray(proc.output, float)))
         return targets
 
     def _preprocess_signal_for_peaks(self, t: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        t = np.asarray(t, float)
-        y = np.asarray(y, float)
-        m = np.isfinite(t) & np.isfinite(y)
-        t = t[m]
-        y = y[m]
-        if t.size < 3:
-            return np.array([], float), np.array([], float), np.array([], float)
+        """Prepare each continuous segment independently and keep original indices."""
+        return preprocess_trace(
+            t, y, baseline_mode=self.combo_peak_baseline.currentText(),
+            baseline_window_sec=float(self.spin_peak_baseline_window.value()),
+            smooth_sigma_sec=float(self.spin_peak_smooth.value()),
+        )
 
-        dt = float(np.nanmedian(np.diff(t))) if t.size > 2 else np.nan
-        if not np.isfinite(dt) or dt <= 0:
-            dt = 1.0
+    def _estimate_signal_noise(self, file_id: str, t: np.ndarray, y: np.ndarray) -> Dict[str, object]:
+        """Apply the chosen quiet interval to auto detection, not just normalization."""
+        finite = np.isfinite(t) & np.isfinite(y)
+        keep, source, explanation = self._signal_baseline_mask(t, finite, file_id=file_id)
+        if np.count_nonzero(keep) < 5:
+            keep = finite
+            source = "whole (fallback)"
+            explanation = "Quiet selection has fewer than five samples; using the whole recording."
+        stats = estimate_noise(t, y, baseline_window_sec=float(self.spin_peak_baseline_window.value()), baseline_mask=keep)
+        stats.update(baseline_mask_source=source, baseline_explanation=explanation)
+        return stats
 
-        baseline_mode = self.combo_peak_baseline.currentText()
-        baseline_window_sec = max(0.1, float(self.spin_peak_baseline_window.value()))
-        win = max(3, int(round(baseline_window_sec / dt)))
-        if win % 2 == 0:
-            win += 1
-
-        y_trace = y.copy()
-        y_proc = y.copy()
-        if baseline_mode.endswith("rolling median"):
-            try:
-                from scipy.ndimage import median_filter
-                y_proc = y - median_filter(y, size=win, mode="nearest")
-            except Exception:
-                pass
-        elif baseline_mode.endswith("rolling mean"):
-            try:
-                from scipy.ndimage import uniform_filter1d
-                y_proc = y - uniform_filter1d(y, size=win, mode="nearest")
-            except Exception:
-                pass
-
-        sigma_sec = max(0.0, float(self.spin_peak_smooth.value()))
-        if sigma_sec > 0:
-            try:
-                from scipy.ndimage import gaussian_filter1d
-                sigma_samp = sigma_sec / dt
-                y_proc = gaussian_filter1d(y_proc, sigma=sigma_samp, mode="nearest")
-            except Exception:
-                pass
-
-        return t, y_proc, y_trace
+    def _use_auto_peak_settings(self) -> None:
+        """Seed an editable absolute threshold from the currently selected file."""
+        targets = self._resolve_signal_detection_targets()
+        selected = self.combo_signal_file.currentText().strip()
+        target = next((item for item in targets if item[0] == selected), targets[0] if targets else None)
+        if target is None:
+            return
+        file_id, t_raw, y_raw = target
+        try:
+            t, y, _ = self._preprocess_signal_for_peaks(t_raw, y_raw)
+            sigma = float(self._estimate_signal_noise(file_id, t, y)["noise_sigma"])
+            value = float(self.spin_peak_mad_multiplier.value()) * sigma
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError("Noise estimate unavailable for this trace.")
+        except (ValueError, TypeError) as exc:
+            self.lbl_peak_threshold.setText(str(exc))
+            return
+        self.spin_peak_prominence.setDecimals(8)
+        self.spin_peak_prominence.setValue(value)
+        self.cb_peak_auto_mad.setChecked(False)
+        self.lbl_peak_threshold.setText(f"{file_id}: automatic prominence {value:.6g} copied. Adjust Min prominence, then Detect peaks. The manual value applies to every file in a batch.")
+        self._queue_settings_save()
 
     # ------------------------------------------------------------------
     # Baseline-prominence helpers
@@ -12388,7 +12469,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             n = int(np.sum(mask))
             if n < 3:
                 return finite.copy(), "whole", "window has too few samples; fell back to whole trace"
-            dur = float(abs_end - abs_start)
+            intervals = observed_intervals(t, np.where(mask, 0.0, np.nan))
+            dur = float(np.sum(intervals[:, 1] - intervals[:, 0]))
             return mask, "window", f"window [{start_s:g}, {end_s:g}] s -> {n} samples ({dur:.1f} s)"
 
         if source == "exclude":
@@ -12526,7 +12608,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 "baseline_explanation": explanation,
             }
 
-        centered_baseline = np.asarray(baseline, float) - baseline_median
+        centered_baseline = np.where(keep, y - baseline_median, np.nan)
         mad_stats = self._signal_mad_noise_stats(centered_baseline)
         mad_sigma = float(mad_stats.get("noise_sigma", np.nan))
         if not np.isfinite(mad_sigma) or mad_sigma <= 1e-12:
@@ -12534,8 +12616,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             full_mad_stats = self._signal_mad_noise_stats(full_centered)
             mad_sigma = float(full_mad_stats.get("noise_sigma", np.nan))
         try:
-            from scipy.signal import find_peaks
-            peaks, props = find_peaks(centered_baseline, prominence=max(0.0, float(min_prominence)))
+            result = detect_peaks(t, centered_baseline, prominence=max(0.0, float(min_prominence)), min_distance_sec=0, auc_half_window_sec=0)
+            peaks, props = result["indices"], {"prominences": result["prominences"]}
         except Exception:
             peaks = np.array([], int)
             props = {}
@@ -12549,7 +12631,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             scale = float(np.nanmean(np.sort(proms)[-top_count:]))
             scale_source = "baseline_peak_prominence"
 
-        duration = float(np.nanmax(t[keep]) - np.nanmin(t[keep])) if np.sum(keep) >= 2 else 0.0
+        intervals = observed_intervals(t, centered_baseline)
+        duration = float(np.sum(intervals[:, 1] - intervals[:, 0]))
         return {
             "scale": scale,
             "baseline_median": baseline_median,
@@ -12618,11 +12701,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
         self._signal_noise_items = []
+        self.trace_card.subtitle_label.hide()
         self.curve_peak_markers.setData([], [])
 
-        if not self.last_signal_events or not self._processed:
+        if not self.last_signal_events or not self._processed or self.last_signal_events.get("settings_changed", False):
             return
 
+        if self.last_signal_events.get("params", {}).get("signal_source", "").startswith("Use PSTH input trace"):
+            return
         current_file = self._current_signal_overlay_file_id()
         self._draw_signal_noise_overlay(current_file)
 
@@ -12643,73 +12729,102 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if times.size == 0:
             return
         self.curve_peak_markers.setData(times, heights, connect="finite", skipFiniteCheck=True)
-        for t0 in times[:600]:
-            ln = pg.InfiniteLine(
-                pos=float(t0),
-                angle=90,
-                pen=pg.mkPen((240, 120, 80), width=1.0, style=QtCore.Qt.PenStyle.DotLine),
-            )
-            self.plot_trace.addItem(ln)
-            self._signal_peak_lines.append(ln)
+        prominences = np.asarray(self.last_signal_events.get("peak_prominences", []), float)
+        if prominences.size == len(file_ids) and file_ids:
+            prominences = prominences[np.asarray([str(fid) == current_file for fid in file_ids], bool)]
+        if prominences.size == times.size:
+            x = np.column_stack((times, times, np.full(times.size, np.nan))).reshape(-1)
+            y = np.column_stack((heights - prominences, heights, np.full(times.size, np.nan))).reshape(-1)
+            stems = pg.PlotDataItem(x, y, connect="finite", pen=pg.mkPen((235, 166, 88, 145), width=0.8))
+            self.plot_trace.addItem(stems, ignoreBounds=True)
+            self._signal_peak_lines.append(stems)
 
     def _draw_signal_noise_overlay(self, current_file: str) -> None:
-        if not getattr(self, "cb_peak_noise_overlay", None) or not self.cb_peak_noise_overlay.isChecked():
+        """Shade empirical noise in trace units and never span a cut interval."""
+        if not self.cb_peak_noise_overlay.isChecked():
             return
         overlays = self.last_signal_events.get("noise_overlay_by_file", {}) if self.last_signal_events else {}
-        if not isinstance(overlays, dict) or not overlays:
-            return
-        overlay = overlays.get(str(current_file or ""))
-        if overlay is None and len(overlays) == 1:
-            overlay = next(iter(overlays.values()))
+        overlay = overlays.get(str(current_file or "")) if isinstance(overlays, dict) else None
         if not isinstance(overlay, dict):
             return
-
-        t = np.asarray(overlay.get("time", np.array([], float)), float)
-        y = np.asarray(overlay.get("detection_trace", np.array([], float)), float)
-        if t.size != y.size or t.size < 2:
+        t = np.asarray(overlay.get("time", []), float)
+        baseline = np.asarray(overlay.get("baseline_trace", []), float)
+        if t.shape != baseline.shape or t.size < 2:
             return
-
-        step = max(1, int(np.ceil(t.size / 5000)))
-        trace_item = pg.PlotDataItem(
-            t[::step],
-            y[::step],
-            pen=pg.mkPen((80, 220, 220, 150), width=1.0, style=QtCore.Qt.PenStyle.DashLine),
-            name="detection trace",
-        )
-        trace_item.setZValue(8)
-        self.plot_trace.addItem(trace_item)
-        self._signal_noise_items.append(trace_item)
-
-        center = float(overlay.get("center", np.nan))
         sigma = float(overlay.get("noise_sigma", np.nan))
-        used_prominence = float(overlay.get("used_prominence", np.nan))
-        for y0, color, width, style in (
-            (center, (80, 220, 220, 170), 1.0, QtCore.Qt.PenStyle.DotLine),
-            (center + sigma, (80, 220, 220, 110), 0.8, QtCore.Qt.PenStyle.DotLine),
-            (center - sigma, (80, 220, 220, 110), 0.8, QtCore.Qt.PenStyle.DotLine),
-            (center + used_prominence, (255, 210, 80, 190), 1.2, QtCore.Qt.PenStyle.DashLine),
-        ):
-            if not np.isfinite(y0):
+        prominence = float(overlay.get("used_prominence", np.nan))
+        height_trace = np.asarray(overlay.get("height_trace", []), float)
+        gate = bool(overlay.get("noise_gate", False))
+        dark = self.combo_plot_preset.currentText() == "Midnight"
+        cyan = (86, 196, 204) if dark else (26, 121, 136)
+        gold = (243, 190, 97) if dark else (158, 97, 20)
+        self.trace_card.subtitle_label.setText("Teal shade: noise +/-1 and +/-2 sigma   |   Dashed: prominence guide   |   Solid amber: height threshold")
+        self.trace_card.subtitle_label.show()
+        for number, segment in enumerate(continuous_segments(t, baseline)):
+            # Decimate only within continuous segments; preserve segment ends.
+            count = segment.stop - segment.start
+            indices = np.unique(np.r_[np.arange(segment.start, segment.stop, max(1, count // 2500)), segment.stop - 1])
+            x, center = t[indices], baseline[indices]
+            if x.size < 2:
                 continue
-            ln = pg.InfiniteLine(
-                pos=float(y0),
-                angle=0,
-                pen=pg.mkPen(color, width=width, style=style),
-                movable=False,
-            )
-            ln.setZValue(9)
-            self.plot_trace.addItem(ln)
-            self._signal_noise_items.append(ln)
+            def line(values, color, width=0.9, dashed=False):
+                item = pg.PlotDataItem(x, values, pen=pg.mkPen(color, width=width,
+                                      style=QtCore.Qt.PenStyle.DashLine if dashed else QtCore.Qt.PenStyle.SolidLine))
+                item.setZValue(3)
+                self.plot_trace.addItem(item, ignoreBounds=True)
+                self._signal_noise_items.append(item)
+                return item
+            center_item = line(center, (*cyan, 145), 0.8)
+            if np.isfinite(sigma) and sigma > 0:
+                # Two nested translucent bands give the noise envelope soft edges.
+                for multiple, alpha in ((2.0, 12), (1.0, 30)):
+                    lower = line(center - multiple * sigma, (*cyan, 35), 0.5)
+                    upper = line(center + multiple * sigma, (*cyan, 35), 0.5)
+                    band = pg.FillBetweenItem(lower, upper, brush=pg.mkBrush(*cyan, alpha))
+                    band.setZValue(-2)
+                    self.plot_trace.addItem(band, ignoreBounds=True)
+                    self._signal_noise_items.append(band)
+            guide = line(center + prominence, (*gold, 170), 1.0, True) if np.isfinite(prominence) else None
+            height_item = None
+            if height_trace.shape == t.shape and (gate or float(overlay.get("min_height", 0)) > 0):
+                height_item = line(height_trace[indices], (*gold, 230), 1.2)
+        self.lbl_peak_threshold.setText(
+            f"Noise sigma: {sigma:.4g}   |   Min prominence: {prominence:.4g}"
+        )
+        self.lbl_peak_threshold.setToolTip(
+            "Shading shows empirical noise, not a confidence interval. "
+            "The dashed prominence guide is relative to the baseline; actual prominence is measured from each peak's contour."
+        )
 
     def _detect_signal_events(self) -> None:
-        self.last_signal_events = None
+        """Analyze files independently; cancellation is checked between recordings."""
+        if getattr(self, "_signal_detection_running", False):
+            return
         targets = self._resolve_signal_detection_targets()
         if not targets:
-            self.statusUpdate.emit("No signal available for peak detection.", 5000)
-            self.tbl_signal_metrics.setRowCount(0)
-            self._refresh_signal_overlay()
+            self.lbl_signal_msg.setText("No signal available for peak detection.")
             return
+        self._signal_detection_running = True
+        progress = None
+        self._psth_timer.stop()
+        self._psth_pending = False
+        try:
+            if len(targets) > 1:
+                progress = QtWidgets.QProgressDialog("Preparing recordings...", "Cancel after current file", 0, len(targets), self)
+                progress.setWindowTitle("Signal events batch")
+                progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+                progress.setMinimumDuration(0)
+                progress.setAutoClose(False)
+                progress.setAutoReset(False)
+            self._run_signal_event_detection(targets, progress)
+        finally:
+            if progress is not None:
+                progress.close()
+                progress.deleteLater()
+            self._signal_detection_running = False
 
+    def _run_signal_event_detection(self, targets, progress=None) -> None:
+        """Collect complete per-file results, including empty and failed recordings."""
         all_times: List[float] = []
         all_idx: List[int] = []
         all_heights: List[float] = []
@@ -12730,64 +12845,84 @@ class PostProcessingPanel(QtWidgets.QWidget):
         auto_mad = bool(self.cb_peak_auto_mad.isChecked())
         mad_multiplier = float(self.spin_peak_mad_multiplier.value())
 
-        for file_id, t_raw, y_raw in targets:
-            t, y, y_trace = self._preprocess_signal_for_peaks(t_raw, y_raw)
-            if t.size < 5:
-                continue
-            dt = float(np.nanmedian(np.diff(t)))
-            if not np.isfinite(dt) or dt <= 0:
-                continue
-
-            manual_prominence = max(0.0, float(self.spin_peak_prominence.value()))
-            prominence = manual_prominence
-            mad_stats = self._signal_mad_noise_stats(y)
-            mad_sigma = float(mad_stats.get("noise_sigma", np.nan))
-            auto_prominence = np.nan
-            if auto_mad:
-                if np.isfinite(mad_sigma) and mad_sigma > 1e-12:
-                    auto_prominence = max(0.0, mad_multiplier * mad_sigma)
-                    prominence = auto_prominence
-                mad_threshold_by_file[str(file_id)] = {
-                    **mad_stats,
-                    "multiplier": mad_multiplier,
-                    "auto_prominence": auto_prominence,
-                    "fallback_manual_prominence": manual_prominence,
-                    "used_prominence": prominence,
-                }
-            noise_overlay_by_file[str(file_id)] = {
-                "time": t.copy(),
-                "detection_trace": y.copy(),
-                "center": float(mad_stats.get("center", np.nan)),
-                "mad": float(mad_stats.get("mad", np.nan)),
-                "noise_sigma": mad_sigma,
-                "auto_prominence": auto_prominence,
-                "manual_prominence": manual_prominence,
-                "used_prominence": prominence,
-            }
-            min_height = float(self.spin_peak_height.value())
-            min_distance_sec = max(0.0, float(self.spin_peak_distance.value()))
-            min_dist_samples = max(1, int(round(min_distance_sec / dt))) if min_distance_sec > 0 else None
-
-            kwargs: Dict[str, object] = {}
-            if prominence > 0:
-                kwargs["prominence"] = prominence
-            if min_height > 0:
-                kwargs["height"] = min_height
-            if min_dist_samples is not None:
-                kwargs["distance"] = min_dist_samples
-
+        file_summaries = []
+        all_ipi = []
+        observed_by_file = {}
+        cancelled = False
+        for file_number, (file_id, t_raw, y_raw) in enumerate(targets):
+            if progress is not None:
+                progress.setLabelText(f"{file_number + 1}/{len(targets)}: {file_id}")
+                progress.setValue(file_number)
+                QtWidgets.QApplication.processEvents()
+                if progress.wasCanceled():
+                    cancelled = True
+                    for pending_id, _, _ in targets[file_number:]:
+                        file_summaries.append(dict(file_id=pending_id, status="cancelled", number_of_peaks=0,
+                                                   observed_duration_s=0.0, noise_sigma=np.nan,
+                                                   used_prominence=np.nan, peak_frequency_per_min=np.nan))
+                    break
+            summary = dict(file_id=file_id, status="ok", number_of_peaks=0, observed_duration_s=0.0,
+                           noise_sigma=np.nan, used_prominence=np.nan, peak_frequency_per_min=np.nan)
+            file_summaries.append(summary)
             try:
-                from scipy.signal import find_peaks, peak_widths
-                peaks, props = find_peaks(y, **kwargs)
+                t, y, y_trace = self._preprocess_signal_for_peaks(t_raw, y_raw)
+                if np.count_nonzero(np.isfinite(t) & np.isfinite(y)) < 5:
+                    raise ValueError("Fewer than five finite samples.")
+                manual_prominence = max(0.0, float(self.spin_peak_prominence.value()))
+                mad_stats = self._estimate_signal_noise(str(file_id), t, y)
+                mad_sigma = float(mad_stats.get("noise_sigma", np.nan))
+                auto_prominence = mad_multiplier * mad_sigma if np.isfinite(mad_sigma) and mad_sigma > 0 else np.nan
+                prominence = auto_prominence if auto_mad and np.isfinite(auto_prominence) else manual_prominence
+                height = float(self.spin_peak_height.value())
+                noise_gate = bool(self.cb_peak_noise_gate.isChecked() and np.isfinite(auto_prominence))
+                if noise_gate:
+                    height = np.asarray(mad_stats["baseline"]) + auto_prominence
+                    if self.spin_peak_height.value() > 0:
+                        height = np.maximum(height, float(self.spin_peak_height.value()))
+                result = detect_peaks(
+                    t, y, prominence=prominence, min_height=height,
+                    min_distance_sec=float(self.spin_peak_distance.value()),
+                    auc_half_window_sec=float(self.spin_peak_auc_window.value()),
+                )
+                peaks = result["indices"]
+                duration = float(result["duration_s"])
+                summary.update(number_of_peaks=int(peaks.size), observed_duration_s=duration,
+                               noise_sigma=mad_sigma, used_prominence=prominence,
+                               peak_frequency_per_min=60.0 * peaks.size / duration if duration > 0 else np.nan,
+                               baseline_source=mad_stats["baseline_mask_source"],
+                               baseline_explanation=mad_stats["baseline_explanation"],
+                               status="ok" if peaks.size else "no peaks")
+                if auto_mad and not np.isfinite(auto_prominence):
+                    summary["status"] += "; manual fallback"
+                observed_by_file[str(file_id)] = observed_intervals(t, y)
+                all_ipi.extend(result["inter_peak_intervals_sec"].tolist())
+                scalar_stats = {key: value for key, value in mad_stats.items() if not isinstance(value, np.ndarray)}
+                mad_threshold_by_file[str(file_id)] = {
+                    **scalar_stats, "multiplier": mad_multiplier, "auto_prominence": auto_prominence,
+                    "fallback_manual_prominence": manual_prominence, "used_prominence": prominence,
+                }
+                # Baseline/noise are in detection units. Map them back to the
+                # displayed signal using the actual preprocessing offset.
+                unsmoothed = y
+                if self.spin_peak_smooth.value() > 0:
+                    _, unsmoothed, _ = preprocess_trace(t_raw, y_raw,
+                        baseline_mode=self.combo_peak_baseline.currentText(),
+                        baseline_window_sec=float(self.spin_peak_baseline_window.value()), smooth_sigma_sec=0)
+                offset = y_trace - unsmoothed
+                noise_overlay_by_file[str(file_id)] = {
+                    "time": t.copy(), "detection_trace": y.copy(),
+                    "baseline_trace": np.asarray(mad_stats["baseline"]) + offset,
+                    "noise_sigma": mad_sigma, "used_prominence": prominence,
+                    "min_height": float(self.spin_peak_height.value()),
+                    "height_trace": offset + height,
+                    "noise_gate": noise_gate,
+                }
             except Exception as exc:
-                self.statusUpdate.emit(f"Peak detection failed: {exc}", 5000)
-                self.tbl_signal_metrics.setRowCount(0)
-                self._refresh_signal_overlay()
-                return
-
+                summary.update(status="failed", error=str(exc))
+                continue
             if peaks.size == 0:
                 continue
-
+            props = {"prominences": result["prominences"]}
             p_signal_heights = np.asarray(y[peaks], float)
             p_trace_values = np.asarray(y_trace[peaks], float) if y_trace.size == y.size else p_signal_heights.copy()
             p_proms = np.asarray(props.get("prominences", np.full(peaks.size, np.nan)), float)
@@ -12796,7 +12931,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             p_norm_scales = np.full(peaks.size, np.nan, float)
 
             if normalize_amplitude:
-                norm_stats = self._signal_baseline_prominence_stats(t, y, prominence, file_id=str(file_id))
+                try:
+                    norm_stats = self._signal_baseline_prominence_stats(t, y, prominence, file_id=str(file_id))
+                except Exception as exc:
+                    norm_stats = {"scale": np.nan, "baseline_median": np.nan, "scale_source": "unavailable"}
+                    summary["status"] += "; normalization failed"
+                    summary["error"] = str(exc)
                 normalization_by_file[str(file_id)] = norm_stats
                 scale = float(norm_stats.get("scale", np.nan))
                 baseline_median = float(norm_stats.get("baseline_median", np.nan))
@@ -12806,25 +12946,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     p_norm_scales[:] = scale
                 else:
                     p_heights = np.full(peaks.size, np.nan, float)
-            try:
-                widths_samp = peak_widths(y, peaks, rel_height=0.5)[0]
-                widths_sec = np.asarray(widths_samp, float) * dt
-            except Exception:
-                widths_sec = np.full(peaks.size, np.nan, float)
-
-            auc_half_win = max(0.0, float(self.spin_peak_auc_window.value()))
-            auc_samp = int(round(auc_half_win / dt))
-            auc_vals: List[float] = []
-            for pk in peaks:
-                if auc_samp <= 0:
-                    auc_vals.append(np.nan)
-                    continue
-                i0 = max(0, int(pk - auc_samp))
-                i1 = min(y.size, int(pk + auc_samp + 1))
-                if i1 - i0 < 2:
-                    auc_vals.append(np.nan)
-                    continue
-                auc_vals.append(self._trapz_area(y[i0:i1], t[i0:i1]))
+            widths_sec = result["widths_sec"]
+            auc_vals = result["auc"]
 
             all_times.extend(t[peaks].tolist())
             all_idx.extend(peaks.tolist())
@@ -12840,11 +12963,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             all_auc.extend(np.asarray(auc_vals, float).tolist())
             all_file_ids.extend([file_id] * peaks.size)
 
-        if not all_times:
-            self.statusUpdate.emit("No peaks detected with current settings.", 5000)
-            self.tbl_signal_metrics.setRowCount(0)
-            self._refresh_signal_overlay()
-            return
+        if progress is not None and not cancelled:
+            progress.setValue(len(targets))
 
         peak_times = np.asarray(all_times, float)
         peak_idx = np.asarray(all_idx, int)
@@ -12874,16 +12994,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
         peak_auc = peak_auc[sort_idx]
         all_file_ids = [all_file_ids[i] for i in sort_idx]
 
-        ipi = np.diff(peak_times) if peak_times.size >= 2 else np.array([], float)
-        freq_per_min = float(peak_times.size) / max((float(np.nanmax(peak_times) - np.nanmin(peak_times)) / 60.0), 1e-12)
+        ipi = np.asarray(all_ipi, float)
+        observed_duration = sum(float(row["observed_duration_s"]) for row in file_summaries)
+        freq_per_min = 60.0 * peak_times.size / observed_duration if observed_duration > 0 else np.nan
+        def finite_mean(values):
+            values = np.asarray(values, float)
+            return float(np.mean(values[np.isfinite(values)])) if np.any(np.isfinite(values)) else np.nan
         metrics = {
             "number_of_peaks": float(peak_times.size),
-            "mean_amplitude": float(np.nanmean(peak_heights)),
-            "median_amplitude": float(np.nanmedian(peak_heights)),
-            "amplitude_std": float(np.nanstd(peak_heights)),
-            "mean_prominence": float(np.nanmean(peak_proms)),
+            "mean_amplitude": finite_mean(peak_heights),
+            "median_amplitude": float(np.nanmedian(peak_heights)) if np.any(np.isfinite(peak_heights)) else np.nan,
+            "amplitude_std": float(np.nanstd(peak_heights)) if np.any(np.isfinite(peak_heights)) else np.nan,
+            "mean_prominence": finite_mean(peak_proms),
             "mean_width_half_prom_s": float(np.nanmean(peak_widths_sec)) if peak_widths_sec.size else np.nan,
             "peak_frequency_per_min": freq_per_min,
+            "observed_duration_s": observed_duration,
             "mean_inter_peak_interval_s": float(np.nanmean(ipi)) if ipi.size else np.nan,
             "mean_auc": float(np.nanmean(peak_auc)) if np.any(np.isfinite(peak_auc)) else np.nan,
             "baseline_prominence_normalized": bool(normalize_amplitude),
@@ -12913,8 +13038,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if normalize_amplitude:
             metrics.update(
                 {
-                    "mean_raw_amplitude": float(np.nanmean(peak_signal_heights)),
-                    "median_raw_amplitude": float(np.nanmedian(peak_signal_heights)),
+                    "mean_raw_amplitude": finite_mean(peak_signal_heights),
+                    "median_raw_amplitude": float(np.nanmedian(peak_signal_heights)) if peak_signal_heights.size else np.nan,
                     "mean_normalized_prominence": (
                         float(np.nanmean(peak_norm_proms)) if np.any(np.isfinite(peak_norm_proms)) else np.nan
                     ),
@@ -12963,10 +13088,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "normalization_by_file": normalization_by_file,
             "mad_threshold_by_file": mad_threshold_by_file,
             "noise_overlay_by_file": noise_overlay_by_file,
+            "file_summaries": file_summaries,
+            "observed_intervals_by_file": observed_by_file,
+            "inter_peak_intervals_sec": ipi,
+            "cancelled": cancelled,
             "params": {
                 "method": self.combo_signal_method.currentText(),
                 "prominence": float(self.spin_peak_prominence.value()),
                 "auto_mad_threshold": bool(auto_mad),
+                "noise_height_gate": self.cb_peak_noise_gate.isChecked(),
                 "mad_multiplier": float(mad_multiplier),
                 "min_height": float(self.spin_peak_height.value()),
                 "min_distance_sec": float(self.spin_peak_distance.value()),
@@ -12979,7 +13109,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
             },
         }
 
-        msg = f"Detected {peak_times.size} peak(s)."
+        self.last_signal_events["params"].update({key: value for key, value in self._collect_settings().items() if key.startswith("signal_")})
+
+        msg = f"Detected {peak_times.size} peak(s) across {len(file_summaries)} file(s)."
+        if cancelled:
+            msg += " Batch cancelled; completed files retained."
+        failures = sum(row["status"] == "failed" for row in file_summaries)
+        if failures:
+            msg += f" {failures} file(s) failed; inspect the file report."
         if auto_mad:
             auto_vals = [
                 float(stats.get("auto_prominence", np.nan))
@@ -12995,9 +13132,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         elif normalize_amplitude and any(str(s.get("scale_source", "")) == "mad_noise_fallback" for s in normalization_by_file.values()):
             msg += " Normalization used MAD fallback for files without baseline peaks."
         self.statusUpdate.emit(msg, 5000)
+        self.lbl_signal_msg.setText(msg)
         self._refresh_signal_overlay()
         self._render_signal_event_plots()
         self._update_signal_metrics_table()
+        if self.combo_view_layout.currentText() == "Standard":
+            self.combo_view_layout.setCurrentText("Signal events")
         if not self._autosave_restoring:
             self._project_dirty = True
         self._save_settings()
@@ -13011,8 +13151,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         peak_times = np.asarray(self.last_signal_events.get("peak_times_sec", np.array([], float)), float)
         peak_heights = np.asarray(self.last_signal_events.get("peak_heights", np.array([], float)), float)
-        if peak_times.size == 0 or peak_heights.size == 0:
-            return
         metrics = self.last_signal_events.get("derived_metrics", {}) or {}
         if bool(metrics.get("baseline_prominence_normalized", False)):
             self.plot_peak_amp.setLabel("bottom", "Prominence-normalized amplitude")
@@ -13027,26 +13165,47 @@ class PostProcessingPanel(QtWidgets.QWidget):
             set_plot_has_data(plot, True)
             bins = min(40, max(8, int(np.sqrt(vals.size))))
             hist, edges = np.histogram(vals, bins=bins)
-            bars = pg.BarGraphItem(x=edges[:-1], height=hist, width=np.diff(edges), brush=color)
+            bars = pg.BarGraphItem(x=edges[:-1], height=hist, width=np.diff(edges) * 0.72, brush=color, pen=None)
             plot.addItem(bars)
 
         _bar_hist(self.plot_peak_amp, peak_heights, (240, 120, 80))
-        ipi = np.diff(np.sort(peak_times))
+        ipi = np.asarray(self.last_signal_events.get("inter_peak_intervals_sec", []), float)
         _bar_hist(self.plot_peak_ibi, ipi, (120, 180, 220))
 
-        bin_sec = max(0.5, float(self.spin_peak_rate_bin.value()))
-        t0 = float(np.nanmin(peak_times))
-        t1 = float(np.nanmax(peak_times))
-        if t1 > t0:
-            set_plot_has_data(self.plot_peak_rate, True)
-            edges = np.arange(t0, t1 + bin_sec, bin_sec)
-            hist, edges = np.histogram(peak_times, bins=edges)
-            rate = hist / (bin_sec / 60.0)
-            bars = pg.BarGraphItem(x=edges[:-1], height=rate, width=np.diff(edges), brush=(180, 180, 120))
-            self.plot_peak_rate.addItem(bars)
+        intervals = self.last_signal_events.get("observed_intervals_by_file", {})
+        arrays = [np.asarray(value, float).reshape(-1, 2) for value in intervals.values() if np.asarray(value).size]
+        if arrays:
+            observed = np.concatenate(arrays)
+            start, stop = float(observed[:, 0].min()), float(observed[:, 1].max())
+            if stop > start:
+                bin_sec = max(float(self.spin_peak_rate_bin.value()), (stop - start) / 5000)
+                edges = np.arange(start, stop, bin_sec)
+                edges = np.r_[edges, stop]
+                counts, _ = np.histogram(peak_times, bins=edges)
+                exposure = np.zeros(edges.size - 1)
+                for lo, hi in observed:
+                    exposure += np.maximum(0, np.minimum(edges[1:], hi) - np.maximum(edges[:-1], lo))
+                valid = exposure > 0
+                rate = 60.0 * counts[valid] / exposure[valid]
+                set_plot_has_data(self.plot_peak_rate, bool(np.any(valid)))
+                bars = pg.BarGraphItem(x=(edges[:-1][valid] + edges[1:][valid]) / 2,
+                                       height=rate, width=np.diff(edges)[valid] * 0.72,
+                                       brush=(128, 179, 161), pen=None)
+                self.plot_peak_rate.addItem(bars)
+                self.plot_peak_rate.setLabel("left", "Peaks / observed min")
 
     def _update_signal_metrics_table(self) -> None:
         self.tbl_signal_metrics.setRowCount(0)
+        self.tbl_signal_files.setRowCount(0)
+        for row in (self.last_signal_events or {}).get("file_summaries", []):
+            index = self.tbl_signal_files.rowCount()
+            self.tbl_signal_files.insertRow(index)
+            for column, key in enumerate(("file_id", "status", "number_of_peaks", "observed_duration_s", "used_prominence", "peak_frequency_per_min")):
+                value = row.get(key, "")
+                text = f"{value:.5g}" if isinstance(value, (int, float)) else str(value)
+                item = QtWidgets.QTableWidgetItem(text)
+                item.setToolTip(str(row.get("error") or row.get("baseline_explanation") or ""))
+                self.tbl_signal_files.setItem(index, column, item)
         if not self.last_signal_events:
             return
         metrics = self.last_signal_events.get("derived_metrics", {}) or {}
@@ -13132,11 +13291,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         peak_widths = np.asarray(self.last_signal_events.get("peak_widths_sec", np.array([], float)), float)
         peak_auc = np.asarray(self.last_signal_events.get("peak_auc", np.array([], float)), float)
         file_ids = self.last_signal_events.get("file_ids", [])
-        if peak_times.size == 0:
-            return
         prefix = "signal_events"
         if self._processed:
             prefix = os.path.splitext(os.path.basename(self._processed[0].path))[0]
+        if len(self.last_signal_events.get("file_summaries", [])) > 1:
+            prefix = "all_files_signal_events"
         out_path = os.path.join(out_dir, f"{prefix}_peaks.csv")
         import csv
         with open(out_path, "w", newline="") as f:
@@ -13175,6 +13334,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         fid,
                     ]
                 )
+
+        summaries = self.last_signal_events.get("file_summaries", [])
+        fields = ["file_id", "status", "number_of_peaks", "observed_duration_s", "noise_sigma",
+                  "used_prominence", "peak_frequency_per_min", "baseline_source", "baseline_explanation", "error"]
+        with open(os.path.join(out_dir, f"{prefix}_peaks_summary.csv"), "w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(summaries)
+        with open(os.path.join(out_dir, f"{prefix}_peaks_parameters.json"), "w", encoding="utf-8") as stream:
+            json.dump(self.last_signal_events.get("params", {}), stream, indent=2)
+        self.lbl_signal_msg.setText(f"Saved peak rows, file summary and detection settings to {out_dir}.")
 
     def _compute_behavior_analysis(self) -> None:
         self.last_behavior_analysis = None
@@ -13481,6 +13651,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._psth_computing = False
             if self._last_mat is None:
                 self._clear_psth_result_view()
+            if self._last_mat is not None and self.combo_view_layout.currentText() == "Signal events":
+                self.combo_view_layout.setCurrentText("Standard")
             self._update_status_strip()
 
     def _compute_psth_impl(self) -> None:
@@ -14653,6 +14825,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
             dict(self.last_signal_events.get("mad_threshold_by_file", {}) or {}),
         )
 
+        self._write_h5_json_any(group, "file_summaries_json", self.last_signal_events.get("file_summaries", []))
+        self._write_h5_numeric(group, "inter_peak_intervals_sec", np.asarray(self.last_signal_events.get("inter_peak_intervals_sec", []), float))
+        self._write_h5_json_any(group, "observed_intervals_json", {key: np.asarray(value).tolist() for key, value in self.last_signal_events.get("observed_intervals_by_file", {}).items()})
+        group.attrs["cancelled"] = bool(self.last_signal_events.get("cancelled", False))
+        group.attrs["settings_changed"] = bool(self.last_signal_events.get("settings_changed", False))
+        overlays = group.create_group("noise_overlays")
+        for index, (file_id, overlay) in enumerate(self.last_signal_events.get("noise_overlay_by_file", {}).items()):
+            entry = overlays.create_group(str(index))
+            entry.attrs["file_id"] = file_id
+            for key, value in overlay.items():
+                if isinstance(value, np.ndarray):
+                    self._write_h5_numeric(entry, key, value)
+                else:
+                    entry.attrs[key] = value
+
     def _load_signal_events_h5(self, parent: Optional[h5py.Group]) -> Optional[Dict[str, object]]:
         if parent is None:
             return None
@@ -14685,6 +14872,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "normalization_by_file": self._read_h5_json_any(group, "normalization_by_file_json", {}),
             "mad_threshold_by_file": self._read_h5_json_any(group, "mad_threshold_by_file_json", {}),
         }
+        out["file_summaries"] = self._read_h5_json_any(group, "file_summaries_json", [])
+        out["inter_peak_intervals_sec"] = _num("inter_peak_intervals_sec")
+        out["observed_intervals_by_file"] = self._read_h5_json_any(group, "observed_intervals_json", {})
+        out["cancelled"] = bool(group.attrs.get("cancelled", False))
+        out["settings_changed"] = bool(group.attrs.get("settings_changed", False))
+        out["noise_overlay_by_file"] = {}
+        if "noise_overlays" in group:
+            for entry in group["noise_overlays"].values():
+                overlay = dict(entry.attrs)
+                file_id = str(overlay.pop("file_id", ""))
+                for key in entry:
+                    overlay[key] = np.asarray(entry[key])
+                out["noise_overlay_by_file"][file_id] = overlay
         return out
 
     def _save_behavior_analysis_h5(self, parent: h5py.Group) -> None:
@@ -14762,6 +14962,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.last_signal_events = None
         self.last_behavior_analysis = None
         self.tbl_signal_metrics.setRowCount(0)
+        self.tbl_signal_files.setRowCount(0)
         self.tbl_behavior_metrics.setRowCount(0)
         self.lbl_behavior_summary.setText("Group metrics: -")
         for pw in (self.plot_peak_amp, self.plot_peak_ibi, self.plot_peak_rate):
@@ -15791,11 +15992,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "visual_mode": 0,
             "individual_file": self.combo_individual_file.currentText().strip(),
             "signal_source": "Use processed output trace (loaded file)",
-            "signal_scope": "Per file",
+            "signal_scope": "Selected file",
             "signal_file": self.combo_signal_file.currentText(),
             "signal_method": "SciPy find_peaks",
             "signal_prominence": 0.5,
-            "signal_auto_mad": False,
+            "signal_auto_mad": True,
+            "signal_noise_gate": True,
+            "signal_baseline_source": "window",
+            "signal_baseline_start": 0.0,
+            "signal_baseline_end": 300.0,
+            "signal_baseline_pad": 1.0,
+            "signal_baseline_behavior_file": "",
+            "signal_baseline_excluded": [],
             "signal_mad_multiplier": 5.0,
             "signal_height": 0.0,
             "signal_distance": 0.5,
@@ -15806,7 +16014,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "signal_rate_bin": 60.0,
             "signal_auc_window": 0.5,
             "signal_overlay": True,
-            "signal_noise_overlay": False,
+            "signal_noise_overlay": True,
             "behavior_analysis_name": self.combo_behavior_analysis.currentText(),
             "behavior_analysis_bin": 30.0,
             "behavior_analysis_aligned": False,
@@ -15954,6 +16162,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "signal_method": self.combo_signal_method.currentText(),
             "signal_prominence": float(self.spin_peak_prominence.value()),
             "signal_auto_mad": self.cb_peak_auto_mad.isChecked(),
+            "signal_noise_gate": self.cb_peak_noise_gate.isChecked(),
+            "signal_baseline_source": self.combo_signal_baseline_source.currentData(),
+            "signal_baseline_start": self.spin_signal_baseline_start.value(),
+            "signal_baseline_end": self.spin_signal_baseline_end.value(),
+            "signal_baseline_pad": self.spin_signal_baseline_pad.value(),
+            "signal_baseline_behavior_file": self.combo_signal_baseline_behavior_file.currentText(),
+            "signal_baseline_excluded": [self.list_signal_baseline_exclude.item(i).text() for i in range(self.list_signal_baseline_exclude.count()) if self.list_signal_baseline_exclude.item(i).checkState() == QtCore.Qt.CheckState.Checked],
             "signal_mad_multiplier": float(self.spin_peak_mad_multiplier.value()),
             "signal_height": float(self.spin_peak_height.value()),
             "signal_distance": float(self.spin_peak_distance.value()),
@@ -16111,7 +16326,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if idx >= 0:
                     self.combo_individual_file.setCurrentIndex(idx)
         _set_combo(self.combo_signal_source, data.get("signal_source"))
-        _set_combo(self.combo_signal_scope, data.get("signal_scope"))
+        _set_combo(self.combo_signal_scope, {"Per file": "Selected file", "Pooled": "All files"}.get(data.get("signal_scope"), data.get("signal_scope")))
         self._refresh_signal_file_combo()
         _set_combo(self.combo_signal_file, data.get("signal_file"))
         _set_combo(self.combo_signal_method, data.get("signal_method"))
@@ -16119,6 +16334,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_peak_prominence.setValue(float(data["signal_prominence"]))
         if "signal_auto_mad" in data:
             self.cb_peak_auto_mad.setChecked(bool(data["signal_auto_mad"]))
+        if "signal_baseline_source" in data:
+            index = self.combo_signal_baseline_source.findData(data["signal_baseline_source"])
+            if index >= 0:
+                self.combo_signal_baseline_source.setCurrentIndex(index)
+        for key, control in (("signal_baseline_start", self.spin_signal_baseline_start),
+                             ("signal_baseline_end", self.spin_signal_baseline_end),
+                             ("signal_baseline_pad", self.spin_signal_baseline_pad)):
+            if key in data:
+                control.setValue(float(data[key]))
+        _set_combo(self.combo_signal_baseline_behavior_file, data.get("signal_baseline_behavior_file"))
+        if "signal_baseline_excluded" in data:
+            self._rebuild_signal_baseline_exclude_list(set(data["signal_baseline_excluded"]))
+        if "signal_noise_gate" in data:
+            self.cb_peak_noise_gate.setChecked(bool(data["signal_noise_gate"]))
         if "signal_mad_multiplier" in data:
             self.spin_peak_mad_multiplier.setValue(float(data["signal_mad_multiplier"]))
         self._update_peak_auto_mad_enabled(queue=False)

@@ -111,6 +111,36 @@ The modeling workbench consumes the current processed recordings, behavior varia
 8. Compute individual or group PSTHs, spatial maps, behavior metrics, signal events, synchronization, or temporal models.
 9. Save the project and export the exact tables, HDF5 bundles, reports, and figures needed downstream.
 
+## Signal events in postprocessing
+
+In **Events**, choose **Selected file** or **All files**. Automatic detection estimates
+MAD noise after removing slow baseline drift, using the chosen quiet time window,
+behavior exclusions, or whole recording. The **MAD multiplier** controls automatic
+prominence and the optional **Noise height gate** above the local baseline.
+**Adjust from auto** copies a fresh estimate for the selected recording into
+**Min prominence**, switches to manual prominence, and keeps the optional height
+gate available. Change the controls and run **Detect peaks** again to update results.
+In manual mode, the absolute prominence applies to all files in a batch.
+
+The preview shows translucent noise bands at one and two estimated standard
+deviations, a dashed prominence guide, and a solid height threshold when enabled.
+Noise shading is an empirical scale, not a confidence interval. Prominence is
+measured from each peak's contour, so its baseline guide is not an absolute height
+cutoff. Filtering, peak widths, and shaded bands stop at missing intervals.
+AUC is unavailable when the full requested window crosses a cut or recording edge.
+
+Batch detection estimates noise independently per recording, reports zero-peak and
+failed files, and supports cancellation between files. Rates use observed recording
+duration; inter-peak intervals never join different files or cross cuts. The export
+includes peak rows, a per-file summary CSV, and the exact detection settings JSON.
+Projects preserve the results and threshold overlays. Duplicate filenames receive
+distinct channel/occurrence labels in the signal file selector and batch report.
+
+The reproducible synthetic benchmark in `scripts/benchmark_signal_events.py`
+compares the earlier method with residual-noise detection and the height gate.
+Synthetic results are not biological validation: a single per-file noise estimate
+can still produce false positives when noise changes sharply within a recording.
+
 ## Batch preprocessing from the CLI
 
 Version 0.45 adds `pyber-cli` for one file, many files, or an entire directory tree. Recursive discovery is on by default.
