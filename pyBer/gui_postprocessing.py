@@ -34,6 +34,7 @@ from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
 from numeric_controls import with_slider
 from file_drop import install_file_drop, expand_paths
+from behavior_import import infer_table, read_behavior_csv, detect_time_column
 from signal_events import preprocess_trace, estimate_noise, detect_peaks, observed_intervals, continuous_segments
 from postprocessing_core import (
     compute_psth_matrix, extract_complete_events, group_close_events,
@@ -486,9 +487,9 @@ def _extract_onsets_offsets(
 
 
 def _detect_time_column(df, fallback_to_first: bool = False) -> Optional[str]:
-    for c in df.columns:
-        if str(c).strip().lower() in {"time", "trial time", "recording time"}:
-            return str(c)
+    detected = detect_time_column(df)
+    if detected:
+        return detected
     if fallback_to_first and len(df.columns):
         return str(df.columns[0])
     return None
@@ -567,7 +568,8 @@ def _timestamp_columns_from_df(df) -> Dict[str, np.ndarray]:
         name = str(c).strip()
         if not name:
             continue
-        if name.lower() in {"time", "trial time", "recording time", "timestamp", "timestamps"}:
+        if name.lower() in {"time", "trial time", "recording time", "timestamp", "timestamps",
+                            "timestamp_software", "timestamp_camera"}:
             continue
         vals = pd.to_numeric(df[c], errors="coerce")
         arr = np.asarray(vals, float)
@@ -578,37 +580,33 @@ def _timestamp_columns_from_df(df) -> Dict[str, np.ndarray]:
     return behaviors
 
 
-def _load_behavior_csv(path: str, parse_mode: str = _BEHAVIOR_PARSE_BINARY, fps: float = 0.0) -> Dict[str, Any]:
-    import pandas as pd
-
-    df = pd.read_csv(path)
+def _behavior_table_info(df, parse_mode: str, fps: float) -> Dict[str, Any]:
+    """Infer a table once and adapt it to the existing behavior/PSTH interface."""
+    inferred = infer_table(df)
     row_count = int(len(df.index))
-    time_col = _detect_time_column(df)
-    trajectory = _trajectory_columns_from_df(df, time_col=time_col)
-    trajectory_time = _numeric_column_array(df, time_col) if time_col else np.array([], float)
-    if str(parse_mode) == _BEHAVIOR_PARSE_TIMESTAMPS:
-        return {
-            "kind": _BEHAVIOR_PARSE_TIMESTAMPS,
-            "time": np.array([], float),
-            "behaviors": _timestamp_columns_from_df(df),
-            "trajectory": trajectory,
-            "trajectory_time": trajectory_time if trajectory_time.size else _generated_time_array(row_count, fps),
-            "trajectory_time_col": time_col or "",
-            "row_count": row_count,
-            "needs_generated_time": bool(not time_col),
-        }
-    time_col, behaviors = _binary_columns_from_df(df)
-    time = _numeric_column_array(df, time_col) if time_col else _generated_time_array(row_count, fps)
+    time_col = inferred["time_column"]
+    time = inferred["time"] if time_col else _generated_time_array(row_count, fps)
+    timestamps = str(parse_mode) == _BEHAVIOR_PARSE_TIMESTAMPS
     return {
-        "kind": _BEHAVIOR_PARSE_BINARY,
-        "time": time,
-        "behaviors": behaviors,
-        "trajectory": trajectory,
-        "trajectory_time": trajectory_time if trajectory_time.size else (time if time.size else _generated_time_array(row_count, fps)),
+        "kind": _BEHAVIOR_PARSE_TIMESTAMPS if timestamps else _BEHAVIOR_PARSE_BINARY,
+        "time": np.array([], float) if timestamps else time,
+        "behaviors": _timestamp_columns_from_df(df) if timestamps else inferred["behaviors"],
+        "trajectory": inferred["trajectory"],
+        "trajectory_time": time,
         "trajectory_time_col": time_col or "",
         "row_count": row_count,
         "needs_generated_time": bool(not time_col),
+        "time_candidates": inferred.get("time_candidates", {}),
+        "auto_time_column": inferred.get("auto_time_column", time_col),
+        "coordinate_pairs": inferred.get("coordinate_pairs", []),
+        "default_coordinate_pair": inferred.get("default_coordinate_pair"),
+        "import_report": inferred.get("report", {}),
     }
+
+
+def _load_behavior_csv(path: str, parse_mode: str = _BEHAVIOR_PARSE_BINARY, fps: float = 0.0) -> Dict[str, Any]:
+    """Load Pykaboo or delimited behavior tables without renaming source columns."""
+    return _behavior_table_info(read_behavior_csv(path), parse_mode, fps)
 
 
 def _load_behavior_ethovision(
@@ -635,34 +633,11 @@ def _load_behavior_ethovision(
         }
     if str(parse_mode) == _BEHAVIOR_PARSE_TIMESTAMPS:
         df = pd.read_excel(path, sheet_name=sheet_name, engine="openpyxl")
-        time_col = _detect_time_column(df)
-        row_count = int(len(df.index))
-        return {
-            "kind": _BEHAVIOR_PARSE_TIMESTAMPS,
-            "time": np.array([], float),
-            "behaviors": _timestamp_columns_from_df(df),
-            "trajectory": _trajectory_columns_from_df(df, time_col=time_col),
-            "trajectory_time": _numeric_column_array(df, time_col) if time_col else _generated_time_array(row_count, fps),
-            "trajectory_time_col": time_col or "",
-            "sheet": sheet_name,
-            "row_count": row_count,
-            "needs_generated_time": bool(not time_col),
-        }
-    df = clean_sheet(Path(path), sheet_name, interpolate=True)
-    row_count = int(len(df.index))
-    time_col, behaviors = _binary_columns_from_df(df)
-    time = _numeric_column_array(df, time_col) if time_col else _generated_time_array(row_count, fps)
-    return {
-        "kind": _BEHAVIOR_PARSE_BINARY,
-        "time": time,
-        "behaviors": behaviors,
-        "trajectory": _trajectory_columns_from_df(df, time_col=time_col),
-        "trajectory_time": _numeric_column_array(df, time_col) if time_col else _generated_time_array(row_count, fps),
-        "trajectory_time_col": time_col or "",
-        "sheet": sheet_name,
-        "row_count": row_count,
-        "needs_generated_time": bool(not time_col),
-    }
+    else:
+        df = clean_sheet(Path(path), sheet_name, interpolate=True)
+    info = _behavior_table_info(df, parse_mode, fps)
+    info["sheet"] = sheet_name
+    return info
 
 
 _RULE_NUMBER_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -1845,6 +1820,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "Timestamps mode expects one column per behavior containing event times."
         )
         _compact_combo(self.combo_behavior_file_type, min_chars=10)
+        self.lbl_behavior_clock = QtWidgets.QLabel("Time column")
+        self.combo_behavior_clock = QtWidgets.QComboBox()
+        self.combo_behavior_clock.addItems(["Auto", "time", "timestamp_software", "timestamp_camera", "Trial time", "Recording time"])
+        self.combo_behavior_clock.setToolTip("Auto uses the table's time column, then software time, then camera time. Values remain in their original time origin. A missing choice falls back to that file's automatic clock.")
+        self.combo_behavior_clock.currentTextChanged.connect(self._on_behavior_clock_changed)
         self.grp_behavior_time = QtWidgets.QGroupBox("Time")
         time_layout = QtWidgets.QHBoxLayout(self.grp_behavior_time)
         time_layout.setContentsMargins(6, 6, 6, 6)
@@ -1925,6 +1905,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fal.addRow(self.lbl_dio_polarity, self.combo_dio_polarity)
         fal.addRow(self.lbl_dio_align, self.combo_dio_align)
         fal.addRow(self.lbl_behavior_file_type, self.combo_behavior_file_type)
+        fal.addRow(self.lbl_behavior_clock, self.combo_behavior_clock)
         fal.addRow(self.grp_behavior_time)
         fal.addRow(self.btn_load_beh)
         fal.addRow("Loaded files", self.lbl_beh)
@@ -6058,6 +6039,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 continue
         mode_label = "timestamps" if parse_mode == _BEHAVIOR_PARSE_TIMESTAMPS else "binary"
         self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded [{mode_label}]")
+        self._apply_behavior_clock_choice()
         self._update_behavior_time_panel()
         self._push_recent_paths("postprocess_recent_behavior_paths", paths)
         if loaded_any and not self._autosave_restoring:
@@ -8759,6 +8741,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_behavior_file_type.setVisible(use_beh)
         self.combo_behavior_file_type.setEnabled(use_beh)
         self.combo_behavior_file_type.setVisible(use_beh)
+        self.lbl_behavior_clock.setVisible(use_beh)
+        self.combo_behavior_clock.setVisible(use_beh)
+        self.combo_behavior_clock.setEnabled(use_beh and bool(self._behavior_sources))
         self.btn_load_beh.setEnabled(use_beh)
         self.btn_load_beh.setVisible(use_beh)
         self.lbl_behavior_name.setEnabled(use_beh)
@@ -8803,6 +8788,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return False
 
     def _update_behavior_time_panel(self) -> None:
+        if hasattr(self, "combo_behavior_clock"):
+            blocker = QtCore.QSignalBlocker(self.combo_behavior_clock)
+            for info in self._behavior_sources.values():
+                for name in info.get("time_candidates", {}):
+                    if self.combo_behavior_clock.findText(name) < 0:
+                        self.combo_behavior_clock.addItem(name)
+            del blocker
+            descriptions = [
+                f"{name}: time={info.get('trajectory_time_col') or 'generated from FPS'}; "
+                f"{len(info.get('behaviors', {}))} behaviors; "
+                f"{len(info.get('coordinate_pairs', []))} coordinate pairs"
+                for name, info in self._behavior_sources.items()
+            ]
+            self.lbl_beh.setToolTip("\n".join(descriptions))
         need_time = self._behavior_sources_need_generated_time()
         count = sum(1 for info in self._behavior_sources.values() if bool(info.get("needs_generated_time", False)))
         if need_time:
@@ -8812,6 +8811,41 @@ class PostProcessingPanel(QtWidgets.QWidget):
         else:
             self.lbl_behavior_time_hint.setText("No missing time columns detected.")
         self._update_align_ui()
+
+    def _apply_behavior_clock_choice(self) -> None:
+        """Switch measured clocks from cached arrays, without rereading files."""
+        choice = self.combo_behavior_clock.currentText()
+        for info in self._behavior_sources.values():
+            candidates = info.get("time_candidates", {})
+            name = choice if choice in candidates else info.get("auto_time_column", "")
+            if name not in candidates:
+                continue
+            time = np.asarray(candidates[name], float)
+            info["trajectory_time"] = time.copy()
+            info["trajectory_time_col"] = name
+            if info.get("kind", _BEHAVIOR_PARSE_BINARY) == _BEHAVIOR_PARSE_BINARY:
+                info["time"] = time.copy()
+            # Threshold-derived events must follow the selected trajectory clock.
+            # Explicit event timestamp imports retain their original event times.
+            for event in info.get("event_behaviors", {}).values():
+                variable, rule = event.get("variable"), event.get("rule")
+                values = info.get("trajectory", {}).get(variable)
+                if values is not None and rule:
+                    on, off, duration, _ = _continuous_threshold_events(time, values, rule, variable)
+                    event.update(on=on, off=off, dur=duration)
+
+    def _on_behavior_clock_changed(self, *_args) -> None:
+        """Refresh dependent analysis after an explicit timestamp selection."""
+        if self._is_restoring_settings:
+            return
+        self._apply_behavior_clock_choice()
+        self._project_dirty = True
+        self._update_behavior_time_panel()
+        self._refresh_behavior_list()
+        self._schedule_psth()
+        self._refresh_sync_sources()
+        self._sync_temporal_modeling_context()
+        self._queue_settings_save()
 
     def _apply_behavior_time_settings(self) -> None:
         fps = float(self.spin_behavior_fps.value()) if hasattr(self, "spin_behavior_fps") else 0.0
@@ -10348,38 +10382,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
             cols.update(str(k) for k in trajectory.keys())
         ordered = sorted(cols)
 
-        for combo in (self.combo_spatial_x, self.combo_spatial_y):
-            combo.blockSignals(True)
+        # Select a coherent inferred pair before releasing signals. Adding items
+        # selects index zero, so checking currentText afterwards never ran inference.
+        pair = next((info.get("default_coordinate_pair") for info in self._behavior_sources.values()
+                     if info.get("default_coordinate_pair") and
+                     all(name in cols for name in info["default_coordinate_pair"])), None)
+        if prev_x in cols and prev_y in cols and prev_x != prev_y:
+            chosen = (prev_x, prev_y)
+        elif pair:
+            chosen = pair
+        else:
+            chosen = (self._guess_spatial_column(ordered, "x"),
+                      self._guess_spatial_column(ordered, "y")) if ordered else ("", "")
+        blockers = [QtCore.QSignalBlocker(combo) for combo in (self.combo_spatial_x, self.combo_spatial_y)]
+        for combo, value in zip((self.combo_spatial_x, self.combo_spatial_y), chosen):
             combo.clear()
             combo.addItems(ordered)
-            combo.blockSignals(False)
-
-        if not ordered:
-            return
-
-        if prev_x:
-            ix = self.combo_spatial_x.findText(prev_x)
-            if ix >= 0:
-                self.combo_spatial_x.setCurrentIndex(ix)
-        if prev_y:
-            iy = self.combo_spatial_y.findText(prev_y)
-            if iy >= 0:
-                self.combo_spatial_y.setCurrentIndex(iy)
-
-        if not self.combo_spatial_x.currentText().strip():
-            gx = self._guess_spatial_column(ordered, "x")
-            if gx:
-                self.combo_spatial_x.setCurrentText(gx)
-        if not self.combo_spatial_y.currentText().strip():
-            gy = self._guess_spatial_column(ordered, "y")
-            if gy:
-                self.combo_spatial_y.setCurrentText(gy)
-
-        if self.combo_spatial_x.currentText().strip() == self.combo_spatial_y.currentText().strip() and len(ordered) > 1:
-            for col in ordered:
-                if col != self.combo_spatial_x.currentText().strip():
-                    self.combo_spatial_y.setCurrentText(col)
-                    break
+            combo.setCurrentIndex(combo.findText(value) if value else -1)
+        del blockers
 
     def _update_spatial_clip_enabled(self) -> None:
         enabled = bool(self.cb_spatial_clip.isChecked() and self.cb_spatial_clip.isEnabled())
@@ -11183,6 +11203,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if key_clean == stem_clean:
                     info = val
                     break
+        if info is None:
+            # Pykaboo appends _metadata to the recording name. Match this
+            # convention before the legacy positional fallback for batches.
+            def canonical(name):
+                return re.sub(r"_metadata$", "", _strip_ain_suffix(name), flags=re.IGNORECASE).casefold()
+            matches = [value for key, value in self._behavior_sources.items()
+                       if canonical(key) == canonical(stem)]
+            if len(matches) == 1:
+                info = matches[0]
         if info is None and self._processed and self._behavior_sources:
             try:
                 idx = next(i for i, p in enumerate(self._processed) if (p is proc) or (p.path == proc.path))
@@ -15250,6 +15279,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 entry.attrs["stem"] = str(stem)
                 entry.attrs["kind"] = str(source.get("kind", _BEHAVIOR_PARSE_BINARY))
                 entry.attrs["trajectory_time_col"] = str(source.get("trajectory_time_col", "") or "")
+                self._write_h5_json_any(entry, "import_metadata", {
+                    name: source.get(name) for name in ("auto_time_column", "coordinate_pairs",
+                    "default_coordinate_pair", "import_report", "row_count", "needs_generated_time")
+                })
+                clocks = entry.create_group("time_candidates")
+                for clock_index, (name, values) in enumerate((source.get("time_candidates") or {}).items()):
+                    dataset = clocks.create_dataset(f"item_{clock_index:04d}", data=np.asarray(values, float), compression="gzip")
+                    dataset.attrs["name"] = name
                 if source.get("sheet") is not None:
                     entry.attrs["sheet"] = str(source.get("sheet"))
                 if source.get("source_path") is not None:
@@ -15540,6 +15577,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         info["sheet"] = self._h5_text(entry.attrs.get("sheet", ""), "")
                     if "source_path" in entry.attrs:
                         info["source_path"] = self._h5_text(entry.attrs.get("source_path", ""), "")
+                    metadata = self._read_h5_json_any(entry, "import_metadata", {})
+                    if isinstance(metadata, dict):
+                        info.update({key: value for key, value in metadata.items() if value is not None})
+                    info["time_candidates"] = {}
+                    clocks = entry.get("time_candidates")
+                    if isinstance(clocks, h5py.Group):
+                        for key in sorted(clocks):
+                            dataset = clocks[key]
+                            name = self._h5_text(dataset.attrs.get("name", key), key)
+                            info["time_candidates"][name] = np.asarray(dataset[()], float)
 
                     behaviors_group = entry.get("behaviors")
                     if isinstance(behaviors_group, h5py.Group):
@@ -16273,6 +16320,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "sync_export_format": self.combo_sync_export_format.currentText(),
             "behavior_file_type": self.combo_behavior_file_type.currentText(),
             "behavior_time_fps": float(self.spin_behavior_fps.value()),
+            "behavior_clock": self.combo_behavior_clock.currentText(),
             "behavior": self.combo_behavior_name.currentText(),
             "behavior_align": self.combo_behavior_align.currentText(),
             "behavior_from": self.combo_behavior_from.currentText(),
@@ -16403,6 +16451,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _set_combo(self.combo_sync_export_format, data.get("sync_export_format"))
         self._on_sync_auto_threshold_toggled(self.cb_sync_auto_threshold.isChecked())
         _set_combo(self.combo_behavior_file_type, data.get("behavior_file_type"))
+        clock = str(data.get("behavior_clock", "Auto"))
+        if self.combo_behavior_clock.findText(clock) < 0:
+            self.combo_behavior_clock.addItem(clock)
+        _set_combo(self.combo_behavior_clock, clock)
         if "behavior_time_fps" in data:
             self.spin_behavior_fps.setValue(float(data["behavior_time_fps"]))
         _set_combo(self.combo_behavior_name, data.get("behavior"))
@@ -16877,8 +16929,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         try:
             painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
             painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
-            # Keep alpha background while rendering children.
-            widget.render(
+            # PlotWidget inherits QGraphicsView, whose render overload accepts
+            # scene rectangles rather than QWidget's offset/region arguments.
+            # Dispatch explicitly to QWidget so ordinary panels and plots use
+            # the same complete-widget export, retaining the alpha background.
+            QtWidgets.QWidget.render(
+                widget,
                 painter,
                 QtCore.QPoint(),
                 QtGui.QRegion(),
@@ -16908,7 +16964,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         try:
             painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
             painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
-            widget.render(
+            # The page size above uses 96-DPI widget pixels, whereas the PDF
+            # painter uses 300-DPI device pixels. Fill the intended page rather
+            # than shrinking every plot to roughly one third of its width.
+            painter.scale(writer.resolution() / 96.0, writer.resolution() / 96.0)
+            QtWidgets.QWidget.render(
+                widget,
                 painter,
                 QtCore.QPoint(),
                 QtGui.QRegion(),
