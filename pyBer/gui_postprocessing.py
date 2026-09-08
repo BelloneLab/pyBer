@@ -31,6 +31,7 @@ from analysis_core import (
 from ethovision_process_gui import clean_sheet
 from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, create_plot_card, style_plot
 from plot_empty_state import PlotEmptyState, set_plot_has_data
+from plot_trace import with_time_gap_breaks
 from postprocessing_core import (
     compute_psth_matrix, extract_complete_events, group_close_events,
     mean_sem, normalize_events, window_metrics, paired_summary,
@@ -12204,7 +12205,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fit_trace = previous_source is None or any(
             current is not previous for current, previous in zip(source, previous_source)
         )
-        self.curve_trace.setData(t, y, connect="finite", skipFiniteCheck=True)
+        plot_t, plot_y = with_time_gap_breaks(t, y)
+        self.curve_trace.setData(plot_t, plot_y, connect="finite", skipFiniteCheck=True)
         self._update_behavior_overlay(proc)
 
         # draw event lines if possible

@@ -13,8 +13,11 @@ os.environ.setdefault("PYBER_SMOKE_TEST", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pyBer"))
 
 import numpy as np
-from PySide6 import QtCore, QtWidgets
-from analysis_core import ProcessedTrial
+from PySide6 import QtCore, QtGui, QtWidgets
+from analysis_core import (
+    ProcessedTrial, export_processed_csv, export_processed_h5,
+    load_processed_csv, load_processed_h5,
+)
 from gui_postprocessing import PostProcessingPanel
 
 
@@ -111,6 +114,55 @@ class PostprocessingEmptyStateTests(unittest.TestCase):
         panel.receive_current_processed([processed])
         self.app.processEvents()
         self.assertGreaterEqual(panel.plot_trace.viewRange()[0][1], time.max())
+
+    def test_cut_intervals_remain_gaps_in_rendered_preview(self):
+        """Cut samples stay absent, including in the downsampled painter path."""
+        panel = self.panel
+        time = np.linspace(0, 100, 20001)
+        time = time[(time < 30) | (time > 40)]
+        signal = np.sin(time)
+        original_time, original_signal = time.copy(), signal.copy()
+        processed = ProcessedTrial(
+            path="cut_fixture.csv", channel_id="AIN01", time=time,
+            raw_signal=signal, raw_reference=np.cos(time),
+            output=signal, output_label="dFF",
+        )
+        panel.receive_current_processed([processed])
+        self.app.processEvents()
+        curve = panel.curve_trace
+        self.assertTrue(np.any(np.isnan(curve.yData)))
+        observed = np.isfinite(curve.yData)
+        np.testing.assert_array_equal(curve.xData[observed], original_time)
+        np.testing.assert_array_equal(curve.yData[observed], original_signal)
+
+        # Check actual drawing commands, both at full extent and when zoomed.
+        # No line segment may cross the middle of the removed interval.
+        for bounds in ((0, 100), (25, 45)):
+            panel.plot_trace.setXRange(*bounds, padding=0)
+            self.app.processEvents()
+            path = curve.curve.getPath()
+            self.assertGreater(path.elementCount(), 0)
+            for index in range(1, path.elementCount()):
+                previous, current = path.elementAt(index - 1), path.elementAt(index)
+                if current.type == QtGui.QPainterPath.ElementType.LineToElement:
+                    self.assertFalse(previous.x < 35 < current.x)
+        np.testing.assert_array_equal(processed.time, original_time)
+        np.testing.assert_array_equal(processed.output, original_signal)
+
+        # File import must preserve the same missing timestamps as direct transfer.
+        with tempfile.TemporaryDirectory(prefix="pyber-cut-roundtrip-") as directory:
+            for suffix, writer, reader in (
+                ("csv", export_processed_csv, load_processed_csv),
+                ("h5", export_processed_h5, load_processed_h5),
+            ):
+                filename = str(Path(directory) / f"cut.{suffix}")
+                writer(filename, processed)
+                loaded = reader(filename)
+                self.assertIsNotNone(loaded)
+                np.testing.assert_allclose(loaded.time, original_time)
+                np.testing.assert_allclose(loaded.output, original_signal)
+                panel.receive_current_processed([loaded])
+                self.assertTrue(np.any(np.isnan(panel.curve_trace.yData)))
 
     def test_results_clear_and_reload_without_losing_color_scale_choice(self):
         panel = self.panel

@@ -3999,35 +3999,10 @@ class PlotDashboard(QtWidgets.QWidget):
         return (r * scale) + offset
 
     def _with_time_gap_breaks(self, t: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        x = np.asarray(t, float)
-        vals = np.asarray(y, float)
-        n = min(x.size, vals.size)
-        x, vals = x[:n], vals[:n]
-        if n < 3:
-            return x, vals
-        diffs = np.diff(x)
-        good = diffs[np.isfinite(diffs) & (diffs > 0)]
-        if good.size == 0:
-            return x, vals
-        dt = float(np.nanmedian(good))
-        if not np.isfinite(dt) or dt <= 0:
-            return x, vals
-        gap_after = np.where(diffs > max(dt * 3.0, dt + 1e-9))[0]
-        if gap_after.size == 0:
-            return x, vals
+        """Use the same display-only gap separators as postprocessing."""
+        from plot_trace import with_time_gap_breaks
 
-        x_parts: List[np.ndarray] = []
-        y_parts: List[np.ndarray] = []
-        start = 0
-        for idx in gap_after:
-            x_parts.append(x[start:idx + 1])
-            y_parts.append(vals[start:idx + 1])
-            x_parts.append(np.asarray([(x[idx] + x[idx + 1]) * 0.5], dtype=float))
-            y_parts.append(np.asarray([np.nan], dtype=float))
-            start = int(idx + 1)
-        x_parts.append(x[start:])
-        y_parts.append(vals[start:])
-        return np.concatenate(x_parts), np.concatenate(y_parts)
+        return with_time_gap_breaks(t, y)
 
     def _clear_artifact_overlays(self) -> None:
         for item in self._artifact_regions:
