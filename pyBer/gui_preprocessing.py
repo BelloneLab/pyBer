@@ -27,6 +27,7 @@ from analysis_core import (
     SMART_ARTIFACT_MODE,
 )
 from sensor_registry import SENSOR_UNKNOWN
+from numeric_controls import with_slider
 
 
 def _optimize_plot(w: pg.PlotWidget) -> None:
@@ -2078,9 +2079,9 @@ class ParameterPanel(QtWidgets.QGroupBox):
         art_form.addRow(self.cb_show_artifact_overlay)
         art_form.addRow(self._label_with_help("Method", "artifact_mode"), self.combo_artifact)
         art_form.addRow(self._label_with_help("Handling", "artifact_handling"), self.combo_artifact_handling)
-        art_form.addRow(self._label_with_help("MAD threshold (k)", "mad_k"), self.spin_mad)
-        art_form.addRow(self._label_with_help("Adaptive window (s)", "adaptive_window_s"), self.spin_adapt_win)
-        art_form.addRow(self._label_with_help("Artifact pad (s)", "artifact_pad_s"), self.spin_pad)
+        art_form.addRow(self._label_with_help("MAD threshold (k)", "mad_k"), with_slider(self.spin_mad))
+        art_form.addRow(self._label_with_help("Adaptive window (s)", "adaptive_window_s"), with_slider(self.spin_adapt_win, logarithmic=True))
+        art_form.addRow(self._label_with_help("Artifact pad (s)", "artifact_pad_s"), with_slider(self.spin_pad, logarithmic=True))
         self.reco_artifacts = RecommendationPanel()
         art_content = self._section_content(art_form_widget, self.reco_artifacts)
 
@@ -2117,12 +2118,12 @@ class ParameterPanel(QtWidgets.QGroupBox):
         filt_form = QtWidgets.QFormLayout(filt_form_widget)
         filt_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         filt_form.addRow(self.cb_filtering)
-        filt_form.addRow(self._label_with_help("Low-pass cutoff (Hz)", "lowpass_hz"), self.spin_lowpass)
+        filt_form.addRow(self._label_with_help("Low-pass cutoff (Hz)", "lowpass_hz"), with_slider(self.spin_lowpass, logarithmic=True))
         filt_form.addRow(self._label_with_help("Filter order", "filter_order"), self.spin_filt_order)
         filt_form.addRow(self._label_with_help("Target FS (Hz)", "target_fs_hz"), self.spin_target_fs)
         filt_form.addRow(self._label_with_help("Enable smoothing", "smoothing_enabled"), self.cb_smoothing)
         filt_form.addRow(self._label_with_help("Smoothing method", "smoothing_method"), self.combo_smoothing)
-        filt_form.addRow(self._label_with_help("Smoothing window (s)", "smoothing_window_s"), self.spin_smoothing_window)
+        filt_form.addRow(self._label_with_help("Smoothing window (s)", "smoothing_window_s"), with_slider(self.spin_smoothing_window, logarithmic=True))
         filt_form.addRow(self._label_with_help("Savitzky polyorder", "smoothing_polyorder"), self.spin_smoothing_poly)
         filt_form.addRow(self._label_with_help("Invert signal polarity", "invert_polarity"), self.cb_invert)
         self.reco_filtering = RecommendationPanel()
@@ -2146,7 +2147,8 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_iter = mk_spin()
         self.spin_iter.setRange(1, 200)
         self.spin_iter.setValue(50)
-        self.spin_tol = mk_dspin(decimals=6)
+        # Keep the smallest valid tolerance representable in the numeric editor.
+        self.spin_tol = mk_dspin(decimals=8)
         self.spin_tol.setRange(1e-8, 1e-1)
         self.spin_tol.setValue(1e-3)
         self.spin_asls_p = mk_dspin(decimals=4)
@@ -2168,7 +2170,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         baseline_adv_form.addRow(self._label_with_help("diff_order", "baseline_diff_order"), self.spin_diff)
         baseline_adv_form.addRow(self._label_with_help("max_iter", "baseline_max_iter"), self.spin_iter)
         baseline_adv_form.addRow(self._label_with_help("tol", "baseline_tol"), self.spin_tol)
-        baseline_adv_form.addRow(self._label_with_help("AsLS p", "asls_p"), self.spin_asls_p)
+        baseline_adv_form.addRow(self._label_with_help("AsLS p", "asls_p"), with_slider(self.spin_asls_p, logarithmic=True))
 
         self.btn_toggle_advanced = QtWidgets.QPushButton("Show advanced baseline options")
         self.btn_toggle_advanced.setProperty("class", "compactSmall")
@@ -2222,7 +2224,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.spin_rlm_max_iter = mk_spin()
         self.spin_rlm_max_iter.setRange(1, 500)
         self.spin_rlm_max_iter.setValue(50)
-        self.spin_rlm_tol = mk_dspin(decimals=8)
+        self.spin_rlm_tol = mk_dspin(decimals=12)
         self.spin_rlm_tol.setRange(1e-12, 1e-2)
         self.spin_rlm_tol.setValue(1e-6)
         self.spin_prominence_top = mk_dspin(decimals=3)

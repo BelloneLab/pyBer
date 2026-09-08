@@ -32,6 +32,7 @@ from ethovision_process_gui import clean_sheet
 from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, create_plot_card, style_plot
 from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
+from numeric_controls import with_slider
 from signal_events import preprocess_trace, estimate_noise, detect_peaks, observed_intervals, continuous_segments
 from postprocessing_core import (
     compute_psth_matrix, extract_complete_events, group_close_events,
@@ -2092,7 +2093,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fw.addRow("Window (s)", win_widget)
         fw.addRow("Baseline (s)", base_widget)
         fw.addRow("Resample (Hz)", self.spin_resample)
-        fw.addRow("Smooth sigma (s)", self.spin_smooth)
+        fw.addRow("Smooth sigma (s)", with_slider(self.spin_smooth, logarithmic=True))
         fw.addRow("Normalization", self.combo_psth_normalization)
 
         # =======================================================
@@ -2413,14 +2414,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fs_det = _sig_form()
         _sig_add(fs_det, "Method", self.combo_signal_method)
         _sig_add(fs_det, "Auto MAD threshold", self.cb_peak_auto_mad)
-        _sig_add(fs_det, "MAD multiplier", self.spin_peak_mad_multiplier)
+        _sig_add(fs_det, "MAD multiplier", with_slider(self.spin_peak_mad_multiplier))
         _sig_add(fs_det, "Noise height gate", self.cb_peak_noise_gate)
         _sig_add(fs_det, "Min prominence", self.spin_peak_prominence)
         fs_det.addRow(self.btn_peak_use_auto)
         fs_det.addRow(self.lbl_peak_threshold)
         _sig_add(fs_det, "Min height (0=off)", self.spin_peak_height)
-        _sig_add(fs_det, "Min distance", self.spin_peak_distance)
-        _sig_add(fs_det, "Smooth sigma", self.spin_peak_smooth)
+        _sig_add(fs_det, "Min distance", with_slider(self.spin_peak_distance, logarithmic=True))
+        _sig_add(fs_det, "Smooth sigma", with_slider(self.spin_peak_smooth, logarithmic=True))
         sub_sig_detect.add_layout(fs_det)
 
         # Baseline subsection (the headline fix).
@@ -2433,7 +2434,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         fs_base = _sig_form()
         _sig_add(fs_base, "Baseline handling", self.combo_peak_baseline)
-        _sig_add(fs_base, "Detrend window", self.spin_peak_baseline_window)
+        _sig_add(fs_base, "Detrend window", with_slider(self.spin_peak_baseline_window, logarithmic=True))
         _sig_add(fs_base, "Normalize amplitude", self.cb_peak_norm_prominence)
         _sig_add(fs_base, "Baseline source", self.combo_signal_baseline_source)
 
@@ -2469,8 +2470,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "Rate aggregation, AUC window, and trace overlays.",
         )
         fs_out = _sig_form()
-        _sig_add(fs_out, "Rate bin", self.spin_peak_rate_bin)
-        _sig_add(fs_out, "AUC window +/-", self.spin_peak_auc_window)
+        _sig_add(fs_out, "Rate bin", with_slider(self.spin_peak_rate_bin, logarithmic=True))
+        _sig_add(fs_out, "AUC window +/-", with_slider(self.spin_peak_auc_window, logarithmic=True))
         fs_out.addRow(self.cb_peak_overlay)
         fs_out.addRow(self.cb_peak_noise_overlay)
         sub_sig_output.add_layout(fs_out)
@@ -2838,7 +2839,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         f2 = _form()
         _add_row(f2, "Bins", bins_widget)
         _add_row(f2, "Map value", self.combo_spatial_weight)
-        _add_row(f2, "Smoothing", self.spin_spatial_smooth)
+        _add_row(f2, "Smoothing", with_slider(self.spin_spatial_smooth, logarithmic=True))
         _add_row(f2, "Log scale", self.cb_spatial_log)
         _add_row(f2, "Invert Y axis", self.cb_spatial_invert_y)
         sub_occ.add_layout(f2)

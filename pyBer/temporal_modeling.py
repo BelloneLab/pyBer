@@ -1593,9 +1593,9 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         gl.addRow("Regularization:", self.combo_reg)
 
         self.spin_alpha = QtWidgets.QDoubleSpinBox()
+        self.spin_alpha.setDecimals(3)
         self.spin_alpha.setRange(0.001, 1000.0)
         self.spin_alpha.setValue(1.0)
-        self.spin_alpha.setDecimals(3)
         gl.addRow("Alpha (λ):", self.spin_alpha)
 
         self.spin_kernel_pre = QtWidgets.QDoubleSpinBox()
@@ -1991,9 +1991,9 @@ class TemporalModelingWidget(QtWidgets.QWidget):
         ), self.combo_reg)
 
         self.spin_alpha = QtWidgets.QDoubleSpinBox()
+        self.spin_alpha.setDecimals(3)
         self.spin_alpha.setRange(0.001, 1000.0)
         self.spin_alpha.setValue(1.0)
-        self.spin_alpha.setDecimals(3)
         gl.addRow(self._help_label(
             "Alpha",
             "Regularization strength for Ridge or Lasso. Larger alpha gives smoother, smaller kernels and less variance, "

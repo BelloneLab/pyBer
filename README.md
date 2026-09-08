@@ -31,6 +31,8 @@
 
 pyBer combines a visual workflow with a deterministic processing backend. The GUI is designed for inspection and parameter discovery. The CLI is designed for unattended cohorts and reproducibility. Both use the same loaders, recommendations, signal processing, metadata schema, and exports.
 
+Numeric settings in both panels accept direct keyboard entry: select the value, type, and press Enter or Tab to apply. Selected threshold, smoothing and timing fields also have sliders alongside the exact value. Broad time/frequency ranges use logarithmic sliders for finer adjustment near small values. Alt-drag adjusts any numeric field; ordinary dragging selects text. Disabled fields become editable when their associated method is enabled; use **Adjust from auto** to edit an automatic peak-prominence estimate.
+
 | Stage | Capabilities |
 |---|---|
 | Ingest | Current and legacy Doric HDF5 layouts, generic `.h5` / `.hdf5`, RWD fluorescence CSV exports, multiple channels, DIO/AOUT triggers, and recursive folder discovery. |
