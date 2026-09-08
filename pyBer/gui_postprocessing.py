@@ -35,6 +35,8 @@ from plot_trace import with_time_gap_breaks
 from numeric_controls import with_slider
 from file_drop import install_file_drop, expand_paths
 from behavior_import import infer_table, read_behavior_csv, detect_time_column
+from baseline_advisor import BaselineRecording
+from baseline_advisor_dialog import BaselineAdvisorDialog
 from signal_events import preprocess_trace, estimate_noise, detect_peaks, observed_intervals, continuous_segments
 from postprocessing_core import (
     compute_psth_matrix, extract_complete_events, group_close_events,
@@ -2069,6 +2071,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fw.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
         fw.addRow("Window (s)", win_widget)
         fw.addRow("Baseline (s)", base_widget)
+        self.btn_recommend_baseline = QtWidgets.QPushButton("Recommend baseline")
+        self.btn_recommend_baseline.setToolTip(
+            "Assess event spacing and pre-event signal quality, then review a suggested "
+            "baseline. The current analysis changes only after you apply the suggestion."
+        )
+        self.btn_recommend_baseline.clicked.connect(self._open_baseline_advisor)
+        fw.addRow(self.btn_recommend_baseline)
         fw.addRow("Resample (Hz)", self.spin_resample)
         fw.addRow("Smooth sigma (s)", with_slider(self.spin_smooth, logarithmic=True))
         fw.addRow("Normalization", self.combo_psth_normalization)
@@ -9371,6 +9380,91 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if self.tab_visual_mode.currentIndex() == 1:
             self.lbl_plot_file.setText(f"Group view: {rows} {level} from {n_files} recording(s)")
         self.lbl_plot_file.setToolTip(f"{self.lbl_plot_file.text()}\n{status_msg}")
+
+    def _baseline_advisor_recordings(self) -> Tuple[List[BaselineRecording], str]:
+        """Snapshot the visible scope with filtered targets and all contaminating bouts.
+
+        Target selection follows the same source and filters as the PSTH. Events
+        rejected by those filters still exclude their full bouts from candidate
+        baselines. For transition alignment both component behaviors are retained,
+        including bouts that never met the selected transition rule.
+        """
+        processed = list(self._processed)
+        group = self.tab_sources.currentIndex() == 1 and self.tab_visual_mode.currentIndex() == 1
+        if not group and processed:
+            selected = self.combo_individual_file.currentText().strip()
+            processed = [next((proc for proc in processed if self._file_id_for_proc(proc) == selected), processed[0])]
+        source_is_doric = _is_doric_channel_align(self.combo_align.currentText())
+        alignment = self.combo_dio_align.currentText() if source_is_doric else self.combo_behavior_align.currentText()
+        offset_aligned = alignment.endswith("offset")
+        recordings: List[BaselineRecording] = []
+        for proc in processed:
+            raw_events, raw_durations = self._get_events_for_proc(proc)
+            raw_events = np.asarray(raw_events, float).reshape(-1)
+            raw_durations = np.asarray(raw_durations, float).reshape(-1)
+            if raw_durations.size != raw_events.size:
+                raw_durations = np.zeros(raw_events.shape, float)
+            durations = np.where(np.isfinite(raw_durations) & (raw_durations > 0), raw_durations, 0)
+            starts = raw_events - durations if offset_aligned else raw_events
+            stops = raw_events if offset_aligned else raw_events + durations
+            exclusions = np.column_stack((starts, stops))
+            if not source_is_doric and alignment.startswith("Transition"):
+                source = self._match_behavior_source(proc)
+                if source:
+                    extra = []
+                    for behavior in (self.combo_behavior_from.currentText(), self.combo_behavior_to.currentText()):
+                        on, off, _ = self._extract_behavior_events(source, behavior.strip())
+                        if on.size and on.size == off.size:
+                            extra.append(np.column_stack((on, off)))
+                    if extra:
+                        exclusions = np.vstack([exclusions, *extra])
+            exclusions = exclusions[np.all(np.isfinite(exclusions), axis=1)]
+            events, _ = self._filter_events(raw_events, raw_durations)
+            recordings.append(BaselineRecording(
+                label=self._file_id_for_proc(proc), time=np.asarray(self._proc_time(proc), float).copy(),
+                signal=np.asarray(proc.output, float).copy(), events=events.copy(),
+                exclusion_intervals=exclusions.copy(),
+            ))
+        labels = ", ".join(recording.label for recording in recordings[:3])
+        if len(recordings) > 3:
+            labels += f", and {len(recordings) - 3} others"
+        mode = "Group: every loaded recording" if group else "Individual: selected recording"
+        scope = f"{mode} ({len(recordings)}). {labels}\nAll unfiltered selected-source bouts remain excluded."
+        if group:
+            scope += " One shared relative window is checked in every file, including files excluded from the displayed PSTH."
+        return recordings, scope
+
+    def _open_baseline_advisor(self) -> None:
+        """Review an optional recommendation without altering default normalization."""
+        recordings, scope = self._baseline_advisor_recordings()
+        if not recordings:
+            self.statusUpdate.emit("Load a processed recording before recommending a baseline.", 5000)
+            return
+        dialog = BaselineAdvisorDialog(
+            recordings, current_window=(self.spin_b0.value(), self.spin_b1.value()),
+            scope=scope, parent=self,
+        )
+        accepted = dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted
+        self._last_baseline_advisor_report = dialog.report
+        if accepted and dialog.proposed_window is not None:
+            self._apply_recommended_baseline(dialog.proposed_window)
+        dialog.deleteLater()
+
+    def _apply_recommended_baseline(self, window: Tuple[float, float]) -> bool:
+        """Apply a reviewed window atomically as one undoable settings change."""
+        start, end = map(float, window)
+        if not np.isfinite(start + end) or not self.spin_b0.minimum() <= start < end <= self.spin_b1.maximum():
+            return False
+        with QtCore.QSignalBlocker(self.spin_b0), QtCore.QSignalBlocker(self.spin_b1):
+            self.spin_b0.setValue(start)
+            self.spin_b1.setValue(end)
+        self._queue_settings_save()
+        self._schedule_psth()
+        self.statusUpdate.emit(
+            f"Applied recommended baseline: {start:.2f} to {end:.2f} s. "
+            "Usable PSTH trial counts may change with baseline validity.", 7000
+        )
+        return True
 
     def _schedule_psth(self, *_args: object) -> None:
         """Debounce edits so a changed control cannot silently label old results."""
