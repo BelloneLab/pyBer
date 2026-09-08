@@ -1,22 +1,51 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="24 22 452 452">
+  <title>pyBer: mouse, optical rings and photometry fiber</title>
+  <desc>The original charcoal mouse and pale blue optics, redrawn as layered vector artwork.</desc>
   <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#5837a5"/><stop offset="1" stop-color="#171b38"/>
+    <linearGradient id="optics" x1="0" y1="0" x2="0.7" y2="1">
+      <stop stop-color="#e4f3ff" /><stop offset="0.5" stop-color="#cce6fc" /><stop offset="1" stop-color="#9dc7ec" />
     </linearGradient>
-    <linearGradient id="mouse" x1="0" y1="0" x2="0.8" y2="1">
-      <stop stop-color="#ffffff"/><stop offset="1" stop-color="#c6b5f5"/>
+    <linearGradient id="fur" x1="0.15" y1="0" x2="0.8" y2="1">
+      <stop stop-color="#56535d" /><stop offset="0.5" stop-color="#35323a" /><stop offset="1" stop-color="#25232b" />
+    </linearGradient>
+    <linearGradient id="ear" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#76717d" /><stop offset="1" stop-color="#494650" />
+    </linearGradient>
+    <linearGradient id="fiber" x1="0" y1="0" x2="0.5" y2="1">
+      <stop stop-color="#c6ebff" /><stop offset="1" stop-color="#79b8ed" />
     </linearGradient>
   </defs>
-  <rect x="5" y="5" width="246" height="246" rx="56" fill="url(#tile)" stroke="#9276d8" stroke-width="3"/>
-  <path d="M173 198 H202 Q225 198 224 174 V139 Q224 124 238 124"
-        fill="none" stroke="#b8a0ef" stroke-width="10" stroke-linecap="round"/>
-  <path d="M32 176 Q46 151 80 142 Q96 118 130 125 C176 116 203 144 201 183
-           Q201 203 179 203 H89 Q61 200 41 185 Q32 181 32 176Z" fill="url(#mouse)"/>
-  <circle cx="104" cy="137" r="31" fill="#e6dcff"/>
-  <circle cx="104" cy="137" r="18" fill="#8766be"/>
-  <circle cx="67" cy="169" r="6" fill="#24213f"/>
-  <path d="M33 176 L40 174 L39 183Z" fill="#24213f"/>
-  <path d="M147 200 Q145 178 167 169" fill="none" stroke="#9a81c6" stroke-width="9" stroke-linecap="round"/>
-  <path d="M164 32 V53 C164 81 129 77 129 105" fill="none" stroke="#58e3ec" stroke-width="12" stroke-linecap="round"/>
-  <circle cx="129" cy="109" r="9" fill="#b3ffff"/>
+
+  <path d="M125 34 V118 M195 160 H300" fill="none" stroke="url(#optics)" stroke-width="34" />
+  <g fill="none" stroke="url(#optics)" stroke-width="34">
+    <circle cx="143" cy="179" r="54" /><circle cx="356" cy="179" r="54" />
+  </g>
+  <g fill="none" stroke="#effaff" stroke-width="3" opacity="0.64">
+    <path d="M104 145 A53 53 0 0 1 175 137 M318 142 A53 53 0 0 1 389 139" />
+  </g>
+
+  <path d="M269 35 C270 103 253 132 214 152 C156 181 143 216 139 318" fill="none" stroke="url(#fiber)" stroke-width="12" stroke-linecap="round" />
+  <path d="M266 39 C267 105 249 132 211 151 C158 181 145 220 142 313" fill="none" stroke="#e3f6ff" stroke-width="2.5" opacity="0.85" />
+  <path d="M223 194 V204 M264 204 L259 213 M287 239 L277 243" fill="none" stroke="#98c7ee" stroke-width="12" stroke-linecap="round" />
+
+  <path d="M357 455 H408 Q432 455 432 431 V276 Q432 250 456 250" fill="none" stroke="#38353e" stroke-width="16" stroke-linecap="round" />
+  <path d="M408 449 Q425 449 425 429 V276 Q425 250 450 247" fill="none" stroke="#7c7885" stroke-width="2.5" stroke-linecap="round" />
+
+  <path d="M108 450 C109 422 130 397 151 367 C169 319 211 280 264 286 C340 290 384 330 389 391 Q395 424 378 453 Z" fill="url(#fur)" stroke="#66616e" stroke-width="2" />
+  <path d="M179 329 Q226 370 198 431 H364 Q381 417 379 390 C375 336 339 310 292 300 C356 306 400 353 389 410 Q389 439 378 454 H108 Q111 437 122 420Z" fill="#25232a" opacity="0.76" />
+  <path d="M41 376 C73 334 112 313 152 317 C184 317 205 341 205 373 C205 409 177 431 137 428 C99 426 68 412 43 397 Q31 388 41 376Z" fill="url(#fur)" stroke="#65616d" stroke-width="2" />
+  <path d="M43 397 C95 420 158 425 181 384 Q194 363 184 339 C205 355 210 380 197 400 C181 433 142 435 106 425 Q70 417 43 397Z" fill="#68636e" opacity="0.8" />
+
+  <path d="M146 320 C145 274 169 240 201 240 C237 238 254 264 254 298 C254 322 234 338 208 339 H156 Q144 337 146 320Z" fill="url(#ear)" stroke="#86808b" stroke-width="2" />
+  <path d="M150 306 C149 271 170 246 199 246 C227 244 241 259 241 278 C239 300 222 311 198 311 H151Z" fill="#35323b" />
+  <path d="M163 269 Q179 246 202 249" fill="none" stroke="#a49ba9" stroke-width="2.5" stroke-linecap="round" opacity="0.65" />
+  <path d="M258 431 Q262 387 304 367" fill="none" stroke="#211f26" stroke-width="13" stroke-linecap="round" />
+  <path d="M270 424 Q277 392 306 378" fill="none" stroke="#5e5867" stroke-width="2" stroke-linecap="round" opacity="0.6" />
+
+  <circle cx="117" cy="361" r="14.5" fill="#9ecdf2" />
+  <circle cx="113" cy="357" r="4" fill="#e5f7ff" opacity="0.88" />
+  <path d="M42 375 Q30 384 41 397 Q52 392 49 384Z" fill="#211f26" />
+  <path d="M55 389 L82 385 M55 396 L80 401" fill="none" stroke="#a09aa9" stroke-width="1.8" stroke-linecap="round" opacity="0.6" />
+  <path d="M55 457 H407" fill="none" stroke="#302d35" stroke-width="14" stroke-linecap="round" />
+  <path d="M63 451 H109 M319 449 H365" fill="none" stroke="#7e7688" stroke-width="2" stroke-linecap="round" />
 </svg>

@@ -184,6 +184,7 @@ from gui_preprocessing import (
 from gui_sensors import SensorDialog
 from gui_postprocessing import PostProcessingPanel
 from numeric_controls import install_spinbox_scrubbers
+from file_drop import local_paths, expand_paths
 from onboarding import (
     ToastManager,
     TutorialOverlay,
@@ -2694,6 +2695,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Wiring - file panel
         self.file_panel.openFileRequested.connect(self._open_files_dialog)
+        self.file_panel.filesDropped.connect(self._on_preprocessing_files_dropped)
         self.file_panel.openFolderRequested.connect(self._open_folder_dialog)
         self.file_panel.selectionChanged.connect(self._on_file_selection_changed)
         self.file_panel.channelChanged.connect(self._on_channel_changed)
@@ -8779,24 +8781,51 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------- Drag and drop ----------------
 
+    def _on_preprocessing_files_dropped(self, paths: List[str]) -> None:
+        """Load directly from the data drawer, including when it is detached."""
+        urls = [QtCore.QUrl.fromLocalFile(path) for path in paths]
+        supported = self._expand_dropped_url_paths(urls)
+        if supported:
+            self.settings.setValue("last_open_dir", os.path.dirname(supported[0]))
+            self._push_recent_preprocessing_files(supported)
+            self._add_files(supported)
+        else:
+            self._show_status_message("No supported photometry files found in the drop.", 5000)
+
     def dragEnterEvent(self, event) -> None:
         mime = event.mimeData()
-        if mime and mime.hasUrls() and any(u.isLocalFile() for u in mime.urls()):
-            event.acceptProposedAction()
+        if local_paths(mime, (".doric", ".h5", ".hdf5", ".csv", ".xlsx")) and event.possibleActions() & QtCore.Qt.DropAction.CopyAction:
+            event.setDropAction(QtCore.Qt.DropAction.CopyAction)
+            event.accept()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:
-        mime = event.mimeData()
-        if mime and mime.hasUrls() and any(u.isLocalFile() for u in mime.urls()):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
+        self.dragEnterEvent(event)
 
     def dropEvent(self, event) -> None:
         mime = event.mimeData()
         if not mime or not mime.hasUrls():
             event.ignore()
+            return
+        if not event.possibleActions() & QtCore.Qt.DropAction.CopyAction:
+            event.ignore()
+            return
+        if hasattr(self, "tabs") and self.tabs.currentWidget() is self.post_tab:
+            # XLSX belongs to behavior; CSV is ambiguous, so the dedicated
+            # Behavior target handles CSV while general drops load traces.
+            paths = expand_paths(local_paths(mime), (".csv", ".h5", ".hdf5", ".xlsx"))
+            if not paths:
+                event.ignore()
+                return
+            event.setDropAction(QtCore.Qt.DropAction.CopyAction)
+            event.accept()
+            behavior = [p for p in paths if p.lower().endswith(".xlsx")]
+            processed = [p for p in paths if not p.lower().endswith(".xlsx")]
+            if behavior:
+                QtCore.QTimer.singleShot(0, self.post_tab, lambda: self.post_tab._on_behavior_files_dropped(behavior))
+            if processed:
+                QtCore.QTimer.singleShot(0, self.post_tab, lambda: self.post_tab._on_preprocessed_files_dropped(processed))
             return
         paths = self._expand_dropped_url_paths(list(mime.urls()))
         if not paths:
@@ -8806,17 +8835,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 6000,
             )
             return
-        event.acceptProposedAction()
+        event.setDropAction(QtCore.Qt.DropAction.CopyAction)
+        event.accept()
         first_dir = next(
             (os.path.dirname(p) for p in paths if os.path.isfile(p)), ""
         )
         if first_dir:
             self.settings.setValue("last_open_dir", first_dir)
         self._push_recent_preprocessing_files(paths)
-        self._handle_drop(paths)
-        self._show_status_message(
-            f"Loaded {len(paths)} file(s) via drag-and-drop.", 5000,
-        )
+        QtCore.QTimer.singleShot(0, self, lambda: self._handle_drop(paths))
 
     def _handle_drop(self, paths: List[str]) -> None:
         doric_paths: List[str] = []

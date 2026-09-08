@@ -33,6 +33,7 @@ from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, crea
 from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
 from numeric_controls import with_slider
+from file_drop import install_file_drop, expand_paths
 from signal_events import preprocess_trace, estimate_noise, detect_peaks, observed_intervals, continuous_segments
 from postprocessing_core import (
     compute_psth_matrix, extract_complete_events, group_close_events,
@@ -358,31 +359,26 @@ class FileDropList(QtWidgets.QListWidget):
         self.setDropIndicatorShown(True)
         self.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
         self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragDrop)
+        install_file_drop(self, self.filesDropped.emit)
 
     def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            return
-        super().dragEnterEvent(event)
+        if event.source() is self:
+            super().dragEnterEvent(event)
+        else:
+            event.ignore()
 
     def dragMoveEvent(self, event: QtGui.QDragMoveEvent) -> None:
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            return
-        super().dragMoveEvent(event)
+        if event.source() is self:
+            super().dragMoveEvent(event)
+        else:
+            event.ignore()
 
     def dropEvent(self, event: QtGui.QDropEvent) -> None:
-        if event.mimeData().hasUrls():
-            paths = []
-            for url in event.mimeData().urls():
-                if url.isLocalFile():
-                    path = url.toLocalFile()
-                    if path:
-                        paths.append(path)
-            if paths:
-                self.filesDropped.emit(paths)
-                event.acceptProposedAction()
-                return
+        # External file URLs are handled by the viewport filter as copies.
+        # Only reorder within this list; cross-list moves would lose records.
+        if event.source() is not self:
+            event.ignore()
+            return
         super().dropEvent(event)
         self.orderChanged.emit()
 
@@ -4436,9 +4432,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_sync_led_end.valueChanged.connect(lambda _value=0: self._sync_persist_current_video_roi())
         self.cb_sync_use_aligned.toggled.connect(lambda _checked=False: self._on_sync_use_aligned_changed())
         self.list_preprocessed.filesDropped.connect(self._on_preprocessed_files_dropped)
+        self.list_preprocessed._file_drop_target.extensions = (".csv", ".h5", ".hdf5")
+        self.list_preprocessed.setToolTip("Drop processed CSV/H5 files or folders here. Drag existing rows to reorder.")
+        for target in (self.btn_load_processed_single, self.btn_load_processed):
+            install_file_drop(target, self._on_preprocessed_files_dropped, (".csv", ".h5", ".hdf5"))
         self.list_preprocessed.orderChanged.connect(self._sync_processed_order_from_list)
         self.list_preprocessed.itemSelectionChanged.connect(self._compute_spatial_heatmap)
         self.list_behaviors.filesDropped.connect(self._on_behavior_files_dropped)
+        self.list_behaviors._file_drop_target.extensions = (".csv", ".xlsx")
+        self.list_behaviors.setToolTip("Drop behavior CSV/XLSX files or folders here. Drag existing rows to reorder.")
+        install_file_drop(self.btn_load_beh, self._on_behavior_files_dropped, (".csv", ".xlsx"))
         self.list_behaviors.orderChanged.connect(self._sync_behavior_order_from_list)
         self.list_behaviors.itemSelectionChanged.connect(self._compute_spatial_heatmap)
         self.btn_compute.clicked.connect(self._compute_psth)
@@ -8723,14 +8726,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _on_preprocessed_files_dropped(self, paths: List[str]) -> None:
         allowed = {".csv", ".h5", ".hdf5"}
-        keep = [p for p in paths if os.path.splitext(p)[1].lower() in allowed]
+        keep = expand_paths(paths, allowed)
         if not keep:
             return
         self._load_processed_paths(keep, replace=False)
 
     def _on_behavior_files_dropped(self, paths: List[str]) -> None:
         allowed = {".csv", ".xlsx"}
-        keep = [p for p in paths if os.path.splitext(p)[1].lower() in allowed]
+        keep = expand_paths(paths, allowed)
         if not keep:
             return
         self._load_behavior_paths(keep, replace=False)

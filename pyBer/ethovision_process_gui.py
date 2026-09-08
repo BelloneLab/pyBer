@@ -29,7 +29,9 @@ class _LazyPandas:
 pd = _LazyPandas()
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent
+from PySide6 import QtWidgets
+from file_drop import install_file_drop, expand_paths
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -450,20 +452,16 @@ class MainWindow(QMainWindow):
         act_quit.triggered.connect(self.close)
         file_menu.addAction(act_quit)
 
-    # Drag & drop
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            if urls and urls[0].toLocalFile().lower().endswith(".xlsx"):
-                event.acceptProposedAction()
+        # Child text/table viewports otherwise consume Explorer drops, and
+        # detached/native windows cannot rely on bubbling to a parent.
+        for target in [self, open_btn, self.file_label, *self.findChildren(QtWidgets.QAbstractScrollArea)]:
+            install_file_drop(target, self._load_dropped_workbook, (".xlsx",))
 
-    def dropEvent(self, event: QDropEvent):
-        urls = event.mimeData().urls()
-        if not urls:
-            return
-        path = Path(urls[0].toLocalFile())
-        if path.suffix.lower() == ".xlsx":
-            self.load_workbook(path)
+    def _load_dropped_workbook(self, paths):
+        """Open the first supported workbook using the normal, read-only loader."""
+        supported = expand_paths(paths, (".xlsx",))
+        if supported:
+            self.load_workbook(Path(supported[0]))
 
     # File handling
     def open_file(self):

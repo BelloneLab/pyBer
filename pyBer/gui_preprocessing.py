@@ -28,6 +28,7 @@ from analysis_core import (
 )
 from sensor_registry import SENSOR_UNKNOWN
 from numeric_controls import with_slider
+from file_drop import install_file_drop
 
 
 def _optimize_plot(w: pg.PlotWidget) -> None:
@@ -1115,6 +1116,7 @@ class ArtifactPanel(QtWidgets.QDialog):
 # ----------------------------- File queue panel -----------------------------
 
 class FileQueuePanel(QtWidgets.QGroupBox):
+    filesDropped = QtCore.Signal(list)
     openFileRequested = QtCore.Signal()
     openFolderRequested = QtCore.Signal()
     selectionChanged = QtCore.Signal()
@@ -1183,6 +1185,8 @@ class FileQueuePanel(QtWidgets.QGroupBox):
 
         # File list fills available height
         self.list_files = PlaceholderListWidget("Drop Doric/HDF5/CSV files here\nor click Open File")
+        for target in (self.list_files, self.btn_open, self.btn_folder):
+            install_file_drop(target, self.filesDropped.emit, (".doric", ".h5", ".hdf5", ".csv"))
         self.list_files.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list_files.setMinimumHeight(210)
         self.list_files.setUniformItemSizes(True)

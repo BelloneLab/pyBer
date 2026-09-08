@@ -36,7 +36,10 @@ class AppIconTests(unittest.TestCase):
                 self.assertGreater(len(colors), 10)
                 visible = sum(image.pixelColor(x, y).alpha() > 0
                               for y in range(size) for x in range(size))
-                self.assertGreater(visible, size * size // 2)
+                # A frameless optical/mouse mark intentionally leaves empty space.
+                self.assertGreater(visible, size * size * 0.3)
+                for x, y in ((0, 0), (0, size - 1), (size - 1, 0), (size - 1, size - 1)):
+                    self.assertLessEqual(image.pixelColor(x, y).alpha(), 32)
 
     def test_corrupt_ico_falls_back_to_original_brand_png(self):
         """A present but unreadable ICO must not prevent the usable PNG fallback."""
