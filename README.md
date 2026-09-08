@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.51/pyBer-windows.zip"><strong>Download the Windows GUI (zip)</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.51/pyBer-windows.exe"><strong>Download the Windows GUI (exe)</strong></a>
   &nbsp;|&nbsp;
   <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.51/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
   &nbsp;|&nbsp;
@@ -221,6 +221,8 @@ Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neuropho
 
 ## What changed in v0.51
 
+- Windows GUI ships as a single executable. Download and run `pyBer-windows.exe`.
+
 - Fixed the Qt rendering error in image/PDF exports and corrected PDF plot sizing.
 - Pykaboo metadata imports automatically detect behavior states, software/camera clocks and trajectory coordinates without renaming columns.
 - Select the behavior clock, retain it in saved projects, and automatically match `_metadata.csv` files to recordings in batches.
@@ -255,7 +257,7 @@ Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neuropho
 
 ## What changed in v0.47
 
-- The Windows GUI now ships as a zip archive of a one-folder build: extract it anywhere and run `pyBer\pyBer.exe`. The previous single-file executable unpacked its entire runtime on every launch; warm start-to-window time dropped from roughly 36 s to 16 s on the reference machine.
+- This older release shipped the Windows GUI as a zip archive of a one-folder build (v0.51 restores a single executable): extract it anywhere and run `pyBer\pyBer.exe`. The previous single-file executable unpacked its entire runtime on every launch; warm start-to-window time dropped from roughly 36 s to 16 s on the reference machine.
 - Plot rendering was reworked for speed and quality together: interactive pan/zoom on a 10-minute 120 Hz recording went from about 1-6 frames per second to 18-27, and traces are antialiased instead of pixelated. All long traces draw with thin crisp pens; the decorative glow strokes introduced in v0.46 were removed because they forced Qt's slowest rendering path.
 - Smart artifact detection gained a session-corroboration gate: borderline threshold crossings are flagged only when the recording also contains at least one unambiguous strong artifact. Clean recordings with heavy-tailed channel noise no longer accumulate false positive regions, while artifact-laden sessions detect exactly as before.
 - Regenerated the documentation screenshots from the current application and extended the artifact regression suite with corroboration-gate coverage.
