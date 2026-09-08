@@ -81,6 +81,37 @@ class PostprocessingEmptyStateTests(unittest.TestCase):
         self.assertIs(panel._results_stack.currentWidget(), panel._empty_results)
         self.assertFalse(panel.plot_trace.getPlotItem().isVisible())
 
+    def test_new_trace_fits_axes_and_refresh_preserves_zoom(self):
+        """Loading and replacing traces must recover from fixed empty axes."""
+        panel = self.panel
+        for start, amplitude in ((100.0, 25.0), (1000.0, 250.0)):
+            time = np.linspace(start, start + 100, 1001)
+            signal = amplitude * np.sin(time)
+            processed = ProcessedTrial(
+                path=f"fixture_{start}.csv", channel_id="AIN01", time=time,
+                raw_signal=signal, raw_reference=np.cos(time),
+                output=signal, output_label="dFF",
+            )
+            panel.receive_current_processed([processed])
+            self.app.processEvents()
+            x_range, y_range = panel.plot_trace.viewRange()
+            self.assertLessEqual(x_range[0], time.min())
+            self.assertGreaterEqual(x_range[1], time.max())
+            self.assertLessEqual(y_range[0], signal.min())
+            self.assertGreaterEqual(y_range[1], signal.max())
+
+            # Routine event refreshes must leave the user's chosen view intact.
+            panel.plot_trace.setXRange(start + 20, start + 30, padding=0)
+            panel.plot_trace.setYRange(-2, 2, padding=0)
+            zoom = panel.plot_trace.viewRange()
+            panel._update_trace_preview()
+            np.testing.assert_allclose(panel.plot_trace.viewRange(), zoom)
+
+        panel.receive_current_processed([])
+        panel.receive_current_processed([processed])
+        self.app.processEvents()
+        self.assertGreaterEqual(panel.plot_trace.viewRange()[0][1], time.max())
+
     def test_results_clear_and_reload_without_losing_color_scale_choice(self):
         panel = self.panel
         time = np.linspace(-2, 3, 101)

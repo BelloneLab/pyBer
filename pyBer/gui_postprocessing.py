@@ -12091,6 +12091,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._event_regions.append(reg)
 
     def _clear_trace_preview(self) -> None:
+        self._trace_preview_source = None
         set_plot_has_data(self.plot_trace, False)
         self.curve_trace.setData([], [])
         self.curve_behavior.setData([], [])
@@ -12196,6 +12197,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._clear_trace_preview()
             return
 
+        # Fit a newly displayed recording, but retain manual zoom when only
+        # event annotations or analysis controls change for the same trace.
+        previous_source = getattr(self, "_trace_preview_source", None)
+        source = (proc, proc.time, proc.output)
+        fit_trace = previous_source is None or any(
+            current is not previous for current, previous in zip(source, previous_source)
+        )
         self.curve_trace.setData(t, y, connect="finite", skipFiniteCheck=True)
         self._update_behavior_overlay(proc)
 
@@ -12243,6 +12251,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._trace_preview_durations = np.array([], float)
             self.plot_trace.setTitle("Trace preview")
         self._refresh_signal_overlay()
+
+        if fit_trace:
+            # Use original finite samples: clip-to-view/downsampling can make
+            # autoRange see only the small portion inside the previous view.
+            finite = np.isfinite(t) & np.isfinite(y)
+            self.plot_trace.setRange(
+                xRange=(float(np.min(t[finite])), float(np.max(t[finite]))),
+                yRange=(float(np.min(y[finite])), float(np.max(y[finite]))),
+                padding=0.03,
+            )
+        self._trace_preview_source = source
 
     def _update_behavior_overlay(self, proc: ProcessedTrial) -> None:
         # The trace preview should only show the processed signal trace.
