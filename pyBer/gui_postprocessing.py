@@ -3897,10 +3897,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         view_row.addWidget(self.combo_plot_preset)
         self.combo_heat_scale = QtWidgets.QComboBox()
         self.combo_heat_scale.addItems(["Full range", "Robust (2-98%)", "Symmetric about zero"])
-        self.combo_heat_scale.setToolTip("Display contrast only. Exported numeric values are unchanged. Manual Plot Styling limits take priority.")
+        self.combo_heat_scale.setToolTip("Choose automatic heatmap contrast. Selecting a mode resets manual limits; numeric values are unchanged.")
         _compact_combo(self.combo_heat_scale, min_chars=8)
         view_row.addWidget(QtWidgets.QLabel("Contrast"))
         view_row.addWidget(self.combo_heat_scale)
+        self.btn_auto_heat_scale = QtWidgets.QPushButton("Auto scale")
+        self.btn_auto_heat_scale.setToolTip("Reset heatmap colors to the selected contrast mode using the displayed trials. Normalization changes also reset the color scale.")
+        self.btn_auto_heat_scale.clicked.connect(self._autoscale_heatmap)
+        view_row.addWidget(self.btn_auto_heat_scale)
         self.btn_fit_psth = QtWidgets.QPushButton("Fit plots")
         self.btn_fit_psth.setToolTip("Restore the full time window and fit the trace and average vertically.")
         view_row.addWidget(self.btn_fit_psth)
@@ -4527,7 +4531,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         ):
             w.currentIndexChanged.connect(self._schedule_psth)
         self.spin_transition_gap.valueChanged.connect(self._schedule_psth)
-        self.combo_psth_normalization.currentIndexChanged.connect(self._schedule_psth)
+        self.combo_psth_normalization.currentIndexChanged.connect(self._on_psth_normalization_changed)
         for w in (
             self.spin_pre,
             self.spin_post,
@@ -9372,15 +9376,37 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _refresh_psth_contrast(self, *_args: object) -> None:
         """Change display contrast without recomputing or changing samples."""
+        # The combo supplies its new index; theme-only redraws supply no args.
+        if _args and not self._is_restoring_settings:
+            self._clear_heatmap_manual_limits()
         if self._last_mat is not None and self._last_tvec is not None:
             self._render_heatmap(self._last_mat, self._last_tvec, self._last_display_labels)
         self._queue_view_settings_save()
+
+    def _clear_heatmap_manual_limits(self) -> None:
+        """Discard limits that no longer describe the current display units."""
+        self._style.update(heatmap_levels_manual=False, heatmap_min=None, heatmap_max=None)
+
+    def _on_psth_normalization_changed(self, *_args: object) -> None:
+        """Recompute with a fresh color scale when the signal units change."""
+        if self._is_restoring_settings:
+            return
+        self._clear_heatmap_manual_limits()
+        self._schedule_psth()
+
+    def _autoscale_heatmap(self, *_args: object) -> None:
+        """Restore automatic colors, flushing any pending normalization first."""
+        self._clear_heatmap_manual_limits()
+        if self._ensure_current_psth():
+            self._refresh_psth_contrast()
+        self._queue_settings_save()
 
     def _refresh_heatmap_scale_visibility(self, *_args: object) -> None:
         """Never expose a default numeric scale before a valid heatmap exists."""
         ready = bool(self.plot_heat.property("hasPlotData"))
         self.btn_edit_scale.setEnabled(ready)
         self.combo_heat_scale.setEnabled(ready)
+        self.btn_auto_heat_scale.setEnabled(ready)
         detailed = self.btn_edit_scale.isChecked()
         self.heat_lut.setVisible(ready and detailed)
         self.heat_colorbar_widget.setVisible(ready and not detailed)
@@ -14089,6 +14115,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # ImageItem maps axis-0 -> x and axis-1 -> y; transpose so time is x, trials are y.
         img = np.asarray(mat, float).T
         cmap_name = str(self._style.get("heatmap_cmap", "viridis"))
+        previous_suppression = self._suppress_heatmap_level_store
+        self._suppress_heatmap_level_store = True
         try:
             cmap = pg.colormap.get(cmap_name)
             lut = cmap.getLookupTable()
@@ -14099,6 +14127,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self.heat_colorbar.setColorMap(cmap)
         except Exception:
             pass
+        finally:
+            self._suppress_heatmap_level_store = previous_suppression
         finite = img[np.isfinite(img)]
         if finite.size:
             lo = float(np.nanmin(finite))
@@ -14710,12 +14740,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
         cmap_name = str(self._style.get("heatmap_cmap", "viridis"))
+        previous_suppression = self._suppress_heatmap_level_store
+        self._suppress_heatmap_level_store = True
         try:
             cmap = pg.colormap.get(cmap_name)
             if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
                 self.heat_lut.item.gradient.setColorMap(cmap)
         except Exception:
             pass
+        finally:
+            self._suppress_heatmap_level_store = previous_suppression
 
         preset = self._style.get("postprocessing_preset", "Midnight")
         palette = copy.deepcopy(POSTPROCESSING_PRESETS.get(preset, POSTPROCESSING_PRESETS["Midnight"]))
