@@ -1632,6 +1632,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._psth_timer.setSingleShot(True)
         self._psth_timer.setInterval(200)
         self._psth_timer.timeout.connect(self._compute_psth)
+        # Coalesce edits; automatic batches yield to Qt between recordings.
+        self._signal_preview_timer = QtCore.QTimer(self)
+        self._signal_preview_timer.setSingleShot(True)
+        self._signal_preview_timer.setInterval(300)
+        self._signal_preview_timer.timeout.connect(self._start_signal_preview)
+        self._signal_preview_step_timer = QtCore.QTimer(self)
+        self._signal_preview_step_timer.setSingleShot(True)
+        self._signal_preview_step_timer.timeout.connect(self._advance_signal_preview)
+        self._signal_live_job = None
+        self._signal_preview_requested = False
         self._last_tvec: Optional[np.ndarray] = None
         self._last_events: Optional[np.ndarray] = None
         self._last_durations: Optional[np.ndarray] = None
@@ -2237,7 +2247,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         self.btn_peak_use_auto = QtWidgets.QPushButton("Adjust from auto")
         self.btn_peak_use_auto.setProperty("class", "compactSmall")
-        self.lbl_peak_threshold = QtWidgets.QLabel("Run detection to inspect the noise estimate.")
+        self.lbl_peak_threshold = QtWidgets.QLabel("Preview updates automatically as you adjust settings.")
         self.lbl_peak_threshold.setWordWrap(True)
         self.lbl_peak_threshold.setProperty("class", "hint")
         self.spin_peak_mad_multiplier = QtWidgets.QDoubleSpinBox()
@@ -4464,16 +4474,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_signal_file.currentIndexChanged.connect(self._refresh_signal_baseline_status)
         self.cb_peak_auto_mad.toggled.connect(self._update_peak_auto_mad_enabled)
         self.cb_peak_noise_gate.toggled.connect(self._update_signal_baseline_source_visibility)
+        self.cb_sync_use_aligned.toggled.connect(self._mark_signal_settings_changed)
 
         for control in (self.spin_peak_prominence, self.spin_peak_mad_multiplier, self.spin_peak_height,
                         self.spin_peak_distance, self.spin_peak_smooth, self.spin_peak_baseline_window,
-                        self.spin_peak_auc_window, self.spin_signal_baseline_start,
+                        self.spin_peak_auc_window, self.spin_peak_rate_bin, self.spin_signal_baseline_start,
                         self.spin_signal_baseline_end, self.spin_signal_baseline_pad):
             control.valueChanged.connect(self._mark_signal_settings_changed)
         for control in (self.cb_peak_auto_mad, self.cb_peak_noise_gate, self.cb_peak_norm_prominence):
             control.toggled.connect(self._mark_signal_settings_changed)
         for control in (self.combo_peak_baseline, self.combo_signal_baseline_source,
-                        self.combo_signal_baseline_behavior_file):
+                        self.combo_signal_baseline_behavior_file, self.combo_signal_source,
+                        self.combo_signal_scope, self.combo_signal_file):
             control.currentIndexChanged.connect(self._mark_signal_settings_changed)
             control.currentIndexChanged.connect(self._queue_settings_save)
         self.list_signal_baseline_exclude.itemChanged.connect(self._mark_signal_settings_changed)
@@ -5269,6 +5281,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 pass
 
     def _toggle_section_popup(self, key: str, checked: bool) -> None:
+        if checked:
+            self._signal_preview_requested = key == "signal"
+        elif key == "signal":
+            self._signal_preview_requested = False
+        if key == "signal" and checked:
+            self._queue_signal_preview()
         if key == "sync":
             if checked:
                 self._open_sync_dialog()
@@ -5761,6 +5779,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     @QtCore.Slot(list)
     def receive_current_processed(self, processed_list: List[ProcessedTrial]) -> None:
+        self._cancel_signal_preview()
         self.last_signal_events = None
         self._signal_preview_proc = None
         self._update_signal_metrics_table()
@@ -5786,10 +5805,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._compute_psth()
             self._compute_spatial_heatmap()
 
+        self._queue_signal_preview()
+
     def append_processed(self, processed_list: List[ProcessedTrial]) -> None:
         if not processed_list:
             return
         self._processed.extend(processed_list)
+        self._cancel_signal_preview()
         if not self._autosave_restoring:
             self._project_dirty = True
         self._update_file_lists()
@@ -8893,8 +8915,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         has_multi = self.combo_signal_file.count() > 1
         self.combo_signal_scope.setEnabled(has_multi)
         self.combo_signal_file.setEnabled(bool(self._processed))
-        self.btn_detect_peaks.setText("Detect all files" if self.combo_signal_scope.currentText() == "All files" else "Detect peaks")
+        self.btn_detect_peaks.setText("Refresh all now" if self.combo_signal_scope.currentText() == "All files" else "Refresh now")
         self._refresh_signal_overlay()
+        self._queue_signal_preview()
 
     def _on_signal_file_changed(self, _index: int = 0) -> None:
         if not hasattr(self, "combo_signal_file"):
@@ -9287,12 +9310,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             duration = float(metrics.get("observed_duration_s", 0))
             message = f"Signal events | {count} peaks | {files} file(s) | {duration:.1f} observed seconds"
             if result.get("settings_changed"):
-                message += " | Settings changed: run detection to update"
+                message += " | Preview updating"
             elif result.get("cancelled"):
                 message += " | Batch cancelled; completed files retained"
             compact = f"{count} peaks | {files} file(s)"
             if result.get("settings_changed"):
-                compact += " | Settings changed"
+                compact += " | Updating"
             elif result.get("cancelled"):
                 compact += " | Cancelled"
             self.lbl_status.setText(compact)
@@ -9418,13 +9441,72 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._queue_settings_save()
 
     def _mark_signal_settings_changed(self, *_args) -> None:
-        """Distinguish the last completed run from controls edited afterward."""
-        if getattr(self, "_signal_detection_running", False) or self._autosave_restoring or not self.last_signal_events:
+        """Replace stale detections automatically after the user pauses editing."""
+        if self._autosave_restoring or self._is_restoring_settings:
             return
-        self.last_signal_events["settings_changed"] = True
-        self.lbl_signal_msg.setText("Settings changed. Detect peaks to refresh the results; exports still describe the previous run.")
+        if getattr(self, "_signal_detection_running", False) and self._signal_live_job is None:
+            return
+        if self.last_signal_events:
+            self.last_signal_events["settings_changed"] = True
+        self._queue_signal_preview()
         self._refresh_signal_overlay()
         self._update_status_strip()
+
+    def _cancel_signal_preview(self) -> None:
+        """Discard unpublished work without touching the last completed result."""
+        self._signal_preview_timer.stop()
+        self._signal_preview_step_timer.stop()
+        if self._signal_live_job is not None:
+            self._signal_live_job.close()
+            self._signal_live_job = None
+            self._signal_detection_running = False
+
+    def _queue_signal_preview(self, *_args) -> None:
+        """Debounce only while the signal-events workflow is in use."""
+        if self._autosave_restoring or self._is_restoring_settings or self._app_closing:
+            return
+        if getattr(self, "_signal_detection_running", False) and self._signal_live_job is None:
+            return
+        button = getattr(self, "_section_buttons", {}).get("signal")
+        active = self._signal_preview_requested or bool(button is not None and button.isChecked())
+        if not (active or self.last_signal_events or self.combo_view_layout.currentText() == "Signal events"):
+            return
+        self._cancel_signal_preview()
+        if not self._processed:
+            return
+        self.lbl_signal_msg.setText("Updating preview automatically...")
+        self._signal_preview_timer.start()
+
+    def _start_signal_preview(self) -> None:
+        """Start a non-modal refresh of the current selected or all-files scope."""
+        if self._autosave_restoring or self._is_restoring_settings or self._app_closing:
+            return
+        if getattr(self, "_signal_detection_running", False) and self._signal_live_job is None:
+            return
+        self._cancel_signal_preview()
+        targets = self._resolve_signal_detection_targets()
+        if not targets:
+            return
+        self._signal_detection_running = True
+        self._signal_live_job = self._iter_signal_event_detection(targets)
+        self._advance_signal_preview()
+
+    def _advance_signal_preview(self) -> None:
+        """Process at most one recording per Qt turn and publish only a full run."""
+        if self._signal_live_job is None:
+            return
+        try:
+            file_id, number, total = next(self._signal_live_job)
+        except StopIteration:
+            self._signal_live_job = None
+            self._signal_detection_running = False
+        except Exception as exc:
+            self._cancel_signal_preview()
+            self.lbl_signal_msg.setText(f"Preview failed: {exc}")
+            _LOG.exception("Automatic signal preview failed")
+        else:
+            self.lbl_signal_msg.setText(f"Updating preview: {number}/{total} - {file_id}")
+            self._signal_preview_step_timer.start(0)
 
     def _update_peak_auto_mad_enabled(self, _checked: object = None, *, queue: bool = True) -> None:
         has_processed = bool(self._processed)
@@ -12450,7 +12532,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_peak_prominence.setDecimals(8)
         self.spin_peak_prominence.setValue(value)
         self.cb_peak_auto_mad.setChecked(False)
-        self.lbl_peak_threshold.setText(f"{file_id}: automatic prominence {value:.6g} copied. Adjust Min prominence, then Detect peaks. The manual value applies to every file in a batch.")
+        self.lbl_peak_threshold.setText(f"{file_id}: automatic prominence {value:.6g} copied. Adjust Min prominence; the preview updates automatically. The manual value applies to every file in a batch.")
         self._queue_settings_save()
 
     # ------------------------------------------------------------------
@@ -12821,6 +12903,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _detect_signal_events(self) -> None:
         """Analyze files independently; cancellation is checked between recordings."""
+        self._cancel_signal_preview()
         if getattr(self, "_signal_detection_running", False):
             return
         targets = self._resolve_signal_detection_targets()
@@ -12847,6 +12930,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._signal_detection_running = False
 
     def _run_signal_event_detection(self, targets, progress=None) -> None:
+        """Explicit detection consumes the same computation used by live preview."""
+        for _ in self._iter_signal_event_detection(targets, progress):
+            pass
+
+    def _iter_signal_event_detection(self, targets, progress=None):
         """Collect complete per-file results, including empty and failed recordings."""
         all_times: List[float] = []
         all_idx: List[int] = []
@@ -12873,6 +12961,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         observed_by_file = {}
         cancelled = False
         for file_number, (file_id, t_raw, y_raw) in enumerate(targets):
+            yield file_id, file_number + 1, len(targets)
             if progress is not None:
                 progress.setLabelText(f"{file_number + 1}/{len(targets)}: {file_id}")
                 progress.setValue(file_number)
@@ -13677,6 +13766,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if self._last_mat is not None and self.combo_view_layout.currentText() == "Signal events":
                 self.combo_view_layout.setCurrentText("Standard")
             self._update_status_strip()
+            source = getattr(self, "combo_signal_source", None)
+            if source is not None and source.currentText().startswith("Use PSTH input trace"):
+                self._mark_signal_settings_changed()
 
     def _compute_psth_impl(self) -> None:
         self._queue_settings_save()
@@ -14982,6 +15074,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         }
 
     def _clear_cached_analysis_outputs(self) -> None:
+        self._cancel_signal_preview()
         self.last_signal_events = None
         self.last_behavior_analysis = None
         self.tbl_signal_metrics.setRowCount(0)
@@ -17550,7 +17643,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
         else:
             QtWidgets.QMessageBox.warning(self, "Export failed", "Could not export spatial figure as PNG/PDF.")
 
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        """A closed panel must never publish a queued or unfinished preview."""
+        self._cancel_signal_preview()
+        super().closeEvent(event)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        """Resume automatic preview when returning to the signal workspace."""
+        super().showEvent(event)
+        self._queue_signal_preview()
+
     def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        self._cancel_signal_preview()
         super().hideEvent(event)
         if self._app_closing:
             return

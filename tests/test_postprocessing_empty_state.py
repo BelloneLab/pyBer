@@ -34,6 +34,18 @@ class PostprocessingEmptyStateTests(unittest.TestCase):
         self.previous_format = QtCore.QSettings.defaultFormat()
         QtCore.QSettings.setDefaultFormat(QtCore.QSettings.Format.IniFormat)
         QtCore.QSettings.setPath(QtCore.QSettings.Format.IniFormat, QtCore.QSettings.Scope.UserScope, temporary)
+        class IsolatedSettings(QtCore.QSettings):
+            """Named QSettings constructors must also use this test's INI file.
+
+            On Windows the organization/application overload otherwise retains
+            the native store despite setDefaultFormat, leaking state between
+            tests and into the user's running application.
+            """
+
+            def __init__(self, *_args, **_kwargs):
+                super().__init__(str(Path(temporary) / "preferences.ini"), QtCore.QSettings.Format.IniFormat)
+
+        self.resources.enter_context(patch.object(QtCore, "QSettings", IsolatedSettings))
         self.resources.enter_context(patch.object(PostProcessingPanel, "_restore_project_autosave_if_needed"))
         self.resources.enter_context(patch.object(PostProcessingPanel, "_autosave_project_cache_path",
                                                  return_value=str(Path(temporary) / "autosave.h5")))

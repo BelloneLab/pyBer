@@ -119,7 +119,9 @@ behavior exclusions, or whole recording. The **MAD multiplier** controls automat
 prominence and the optional **Noise height gate** above the local baseline.
 **Adjust from auto** copies a fresh estimate for the selected recording into
 **Min prominence**, switches to manual prominence, and keeps the optional height
-gate available. Change the controls and run **Detect peaks** again to update results.
+gate available. Opening Events or changing detection settings automatically refreshes
+the peaks, thresholds, and charts after a 300 ms pause. **Refresh now** remains
+available for an immediate rerun. Manual zoom is retained during these updates.
 In manual mode, the absolute prominence applies to all files in a batch.
 
 The preview shows translucent noise bands at one and two estimated standard
@@ -135,6 +137,9 @@ duration; inter-peak intervals never join different files or cross cuts. The exp
 includes peak rows, a per-file summary CSV, and the exact detection settings JSON.
 Projects preserve the results and threshold overlays. Duplicate filenames receive
 distinct channel/occurrence labels in the signal file selector and batch report.
+Automatic refresh follows the selected scope without a modal dialog, yields between
+recordings, and replaces results only when the entire run is complete. New edits
+discard unfinished work and restart with the latest settings.
 
 The reproducible synthetic benchmark in `scripts/benchmark_signal_events.py`
 compares the earlier method with residual-noise detection and the height gate.
