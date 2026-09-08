@@ -127,10 +127,17 @@ def apply_native_window_icon(window: QtWidgets.QWidget) -> None:
         sender.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
         sender.restype = wintypes.LPARAM
         hwnd = int(window.winId())
+        native_ready = False
         for kind, size in enumerate(_native_window_sizes(hwnd)):
             handle = _native_icon(size)
             if handle:
                 sender(hwnd, 0x80, kind, handle)
+                native_ready = True
+        if native_ready and window.windowType() in (QtCore.Qt.WindowType.Window, QtCore.Qt.WindowType.Dialog):
+            if getattr(window, "_pyber_taskbar_identity_hwnd", None) != hwnd:
+                from windows_taskbar import install_window_identity
+                install_window_identity(hwnd, APP_USER_MODEL_ID, icon_path())
+                window._pyber_taskbar_identity_hwnd = hwnd
     except (AttributeError, OSError, RuntimeError) as exc:
         logging.warning("Native window icon update failed: %s", exc)
 

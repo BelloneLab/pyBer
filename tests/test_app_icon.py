@@ -148,6 +148,46 @@ class AppIconTests(unittest.TestCase):
             window.destroy()
             delete(window)
 
+    @unittest.skipUnless(os.name == "nt", "Windows taskbar property store")
+    def test_taskbar_properties_reference_durable_visible_artwork(self):
+        """Verify shell branding independently of Qt/WM_GETICON handles."""
+        if QtGui.QGuiApplication.platformName() != "windows":
+            self.skipTest("Requires native HWND")
+        import windows_taskbar
+        window = QtWidgets.QWidget()
+        try:
+            app_icon.apply_native_window_icon(window)
+            values = windows_taskbar.window_properties(int(window.winId()))
+            self.assertEqual(values[5], app_icon.APP_USER_MODEL_ID)
+            self.assertEqual(values[4], "pyBer")
+            self.assertIn("main.py", values[2])
+            self.assertTrue(values[3].endswith(",0"))
+            asset = Path(values[3][:-2])
+            self.assertTrue(asset.is_file())
+            self.assertEqual(asset.read_bytes(), Path(app_icon.icon_path()).read_bytes())
+            self.assertFalse(QtGui.QIcon(str(asset)).pixmap(32, 32).isNull())
+        finally:
+            window.destroy()
+            delete(window)
+
+    def test_shell_icon_cache_is_content_versioned_and_preserves_original(self):
+        """New artwork gets a new durable resource name without deleting old pins."""
+        import windows_taskbar
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.ico"
+            source.write_bytes(Path(app_icon.icon_path()).read_bytes())
+            windows_taskbar.persistent_icon.cache_clear()
+            with patch.dict(os.environ, {"LOCALAPPDATA": directory}):
+                first = Path(windows_taskbar.persistent_icon(str(source)))
+                original = first.read_bytes()
+                source.write_bytes(original + b"new-version")
+                windows_taskbar.persistent_icon.cache_clear()
+                second = Path(windows_taskbar.persistent_icon(str(source)))
+                self.assertNotEqual(first, second)
+                self.assertEqual(first.read_bytes(), original)
+                self.assertEqual(second.read_bytes(), source.read_bytes())
+            windows_taskbar.persistent_icon.cache_clear()
+
 
 if __name__ == "__main__":
     unittest.main()
