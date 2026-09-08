@@ -82,6 +82,24 @@ _SYNC_LED_ROI_CACHE_KEY = "sync_led_roi_cache_v1"
 _SYNC_LED_ROI_SIDECAR_SUFFIX = "_pyber_led_roi.json"
 
 
+class _CompactContextLabel(QtWidgets.QLabel):
+    """Keep plot context on one line, with overflow readable in its tooltip."""
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+
+    def paintEvent(self, event) -> None:
+        """Elide the display only; retain the full source text for context."""
+        painter = QtGui.QPainter(self)
+        painter.setPen(self.palette().color(QtGui.QPalette.ColorRole.WindowText))
+        painter.setFont(self.font())
+        text = self.fontMetrics().elidedText(self.text(), QtCore.Qt.TextElideMode.ElideRight, self.contentsRect().width())
+        painter.drawText(self.contentsRect(), self.alignment() | QtCore.Qt.AlignmentFlag.AlignVCenter, text)
+
+
 def _opt_plot(w: pg.PlotWidget) -> None:
     w.setMenuEnabled(True)
     w.showGrid(x=True, y=True, alpha=0.25)
@@ -3817,26 +3835,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
         rv.setSpacing(8)
 
         header_row = QtWidgets.QHBoxLayout()
-        self.lbl_plot_file = QtWidgets.QLabel("File: (none)")
+        self.lbl_plot_file = _CompactContextLabel("File: (none)")
         header_font = self.lbl_plot_file.font()
         header_font.setBold(True)
         self.lbl_plot_file.setFont(header_font)
-        self.lbl_plot_file.setWordWrap(True)
-        header_row.addWidget(self.lbl_plot_file)
-        header_row.addStretch(1)
+        header_row.addWidget(self.lbl_plot_file, 3)
         self._plot_file_context = QtWidgets.QWidget()
         self._plot_file_context.setLayout(header_row)
+        self._plot_file_context.setFixedHeight(28)
         header_row.setContentsMargins(0, 0, 0, 0)
         rv.addWidget(self._plot_file_context)
 
-        # Keep analysis provenance visible beside the plots, even when drawers
-        # are closed. Wrapped text also works on smaller laptop displays.
-        self.lbl_status = QtWidgets.QLabel("Load a processed recording and select events to begin.")
-        self.lbl_status.setWordWrap(True)
-        self.lbl_status.setProperty("class", "hint")
-        self.lbl_status.setContentsMargins(10, 8, 10, 8)
-        self.lbl_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        rv.addWidget(self.lbl_status)
+        # Provenance shares the filename row; detailed guidance stays in hover
+        # text so neither long filenames nor empty results consume plot height.
+        self.lbl_status = _CompactContextLabel()
+        self.lbl_status.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        header_row.addWidget(self.lbl_status, 2)
 
         # --- Visual mode tabs: Individual / Group ---
         visual_bar = QtWidgets.QHBoxLayout()
@@ -9258,11 +9272,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         level = getattr(self, "_last_psth_display_level", "trials")
         excluded = len(self._psth_excluded_files)
         self.lbl_status.setText(
-            f"{state}  |  {align_detail} / {align_mode.replace('Align to ', '')}  |  "
-            f"{rows} {level}  |  -{self.spin_pre.value():g} to +{self.spin_post.value():g} s"
+            ("Updating PSTH" if pending else f"PSTH: {rows} {level}")
+            + f"  |  -{self.spin_pre.value():g} to +{self.spin_post.value():g} s"
             + (f"  |  {excluded} file(s) excluded" if excluded else "")
-            + ("\nAdjust the event selection, baseline, or inclusion threshold." if not ready and not pending else "")
         )
+        self.lbl_status.setVisible(n_files > 0 and bool(ready or pending))
+        status_msg = f"{state}\n{status_msg}"
+        if not ready and not pending:
+            status_msg += "\nAdjust the event selection, baseline, or inclusion threshold."
         if self.combo_view_layout.currentText() == "Signal events":
             result = self.last_signal_events or {}
             metrics = result.get("derived_metrics", {})
@@ -9274,7 +9291,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 message += " | Settings changed: run detection to update"
             elif result.get("cancelled"):
                 message += " | Batch cancelled; completed files retained"
-            self.lbl_status.setText(message)
+            compact = f"{count} peaks | {files} file(s)"
+            if result.get("settings_changed"):
+                compact += " | Settings changed"
+            elif result.get("cancelled"):
+                compact += " | Cancelled"
+            self.lbl_status.setText(compact)
+            self.lbl_status.setVisible(n_files > 0 and bool(result))
             status_msg = message
         self.lbl_status.setToolTip(status_msg)
         for name in ("btn_export", "btn_action_export"):
@@ -9283,6 +9306,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 button.setEnabled(ready and not pending)
         if self.tab_visual_mode.currentIndex() == 1:
             self.lbl_plot_file.setText(f"Group view: {rows} {level} from {n_files} recording(s)")
+        self.lbl_plot_file.setToolTip(f"{self.lbl_plot_file.text()}\n{status_msg}")
 
     def _schedule_psth(self, *_args: object) -> None:
         """Debounce edits so a changed control cannot silently label old results."""
@@ -14625,8 +14649,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for error_bar in (self.metrics_err_pre, self.metrics_err_post, self.global_err_amp, self.global_err_freq):
             error_bar.setData(pen=pg.mkPen(palette["text"], width=1.2))
         self.lbl_status.setStyleSheet(
-            f"background: {palette['accent_soft']}; color: {palette['text']}; "
-            "border-radius: 8px; font-size: 12px;"
+            f"background: transparent; color: {palette['text']}; "
+            "border: none; padding: 0px; font-size: 12px;"
         )
 
     def _on_heatmap_levels_changed(self) -> None:
