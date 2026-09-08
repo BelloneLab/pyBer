@@ -1,53 +1,41 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500">
-  <title>pyBer: mouse, optical rings and photometry fiber</title>
-  <desc>The original charcoal mouse and pale blue optics, redrawn as layered vector artwork.</desc>
-  <defs>
-    <linearGradient id="optics" x1="0" y1="0" x2="0.7" y2="1">
-      <stop stop-color="#e4f3ff"/><stop offset="0.5" stop-color="#cce6fc"/><stop offset="1" stop-color="#9dc7ec"/>
-    </linearGradient>
-    <linearGradient id="fur" x1="0.15" y1="0" x2="0.8" y2="1">
-      <stop stop-color="#56535d"/><stop offset="0.5" stop-color="#35323a"/><stop offset="1" stop-color="#25232b"/>
-    </linearGradient>
-    <linearGradient id="ear" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#76717d"/><stop offset="1" stop-color="#494650"/>
-    </linearGradient>
-    <linearGradient id="fiber" x1="0" y1="0" x2="0.5" y2="1">
-      <stop stop-color="#c6ebff"/><stop offset="1" stop-color="#79b8ed"/>
-    </linearGradient>
-  </defs>
-  <!-- The full-size logo retains its original optical frame. The taskbar build omits it. -->
-  <path id="logo-frame" d="M20 18 H480 V482 H20 Z" fill="none" stroke="#cce6fc" stroke-width="36" stroke-linejoin="bevel"/>
-  <!-- Two optical rings and their bridge retain the original silhouette. -->
-  <path d="M125 34 V118 M195 160 H300" fill="none" stroke="url(#optics)" stroke-width="34"/>
-  <g fill="none" stroke="url(#optics)" stroke-width="34">
-    <circle cx="143" cy="179" r="54"/><circle cx="356" cy="179" r="54"/>
-  </g>
-  <g fill="none" stroke="#effaff" stroke-width="3" opacity="0.64">
-    <path d="M104 145 A53 53 0 0 1 175 137 M318 142 A53 53 0 0 1 389 139"/>
-  </g>
-  <!-- Descending illumination fiber and three light rays. -->
-  <path d="M269 35 C270 103 253 132 214 152 C156 181 143 216 139 318" fill="none" stroke="url(#fiber)" stroke-width="12" stroke-linecap="round"/>
-  <path d="M266 39 C267 105 249 132 211 151 C158 181 145 220 142 313" fill="none" stroke="#e3f6ff" stroke-width="2.5" opacity="0.85"/>
-  <path d="M223 194 V204 M264 204 L259 213 M287 239 L277 243" fill="none" stroke="#98c7ee" stroke-width="12" stroke-linecap="round"/>
-  <!-- Curled tail is separate from the body, with a small cool edge highlight. -->
-  <path d="M357 455 H408 Q432 455 432 431 V276 Q432 250 456 250" fill="none" stroke="#38353e" stroke-width="16" stroke-linecap="round"/>
-  <path d="M408 449 Q425 449 425 429 V276 Q425 250 450 247" fill="none" stroke="#7c7885" stroke-width="2.5" stroke-linecap="round"/>
-  <!-- Body, chest and muzzle. -->
-  <path d="M108 450 C109 422 130 397 151 367 C169 319 211 280 264 286 C340 290 384 330 389 391 Q395 424 378 453 Z" fill="url(#fur)" stroke="#66616e" stroke-width="2"/>
-  <path d="M179 329 Q226 370 198 431 H364 Q381 417 379 390 C375 336 339 310 292 300 C356 306 400 353 389 410 Q389 439 378 454 H108 Q111 437 122 420Z" fill="#25232a" opacity="0.76"/>
-  <path d="M41 376 C73 334 112 313 152 317 C184 317 205 341 205 373 C205 409 177 431 137 428 C99 426 68 412 43 397 Q31 388 41 376Z" fill="url(#fur)" stroke="#65616d" stroke-width="2"/>
-  <path d="M43 397 C95 420 158 425 181 384 Q194 363 184 339 C205 355 210 380 197 400 C181 433 142 435 106 425 Q70 417 43 397Z" fill="#68636e" opacity="0.8"/>
-  <!-- Sculpted ear, with the large curled shape of the original mark. -->
-  <path d="M146 320 C145 274 169 240 201 240 C237 238 254 264 254 298 C254 322 234 338 208 339 H156 Q144 337 146 320Z" fill="url(#ear)" stroke="#86808b" stroke-width="2"/>
-  <path d="M150 306 C149 271 170 246 199 246 C227 244 241 259 241 278 C239 300 222 311 198 311 H151Z" fill="#35323b"/>
-  <path d="M163 269 Q179 246 202 249" fill="none" stroke="#a49ba9" stroke-width="2.5" stroke-linecap="round" opacity="0.65"/>
-  <path d="M258 431 Q262 387 304 367" fill="none" stroke="#211f26" stroke-width="13" stroke-linecap="round"/>
-  <path d="M270 424 Q277 392 306 378" fill="none" stroke="#5e5867" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
-  <!-- Cyan eye, tiny reflected light, nose and restrained whisker details. -->
-  <circle cx="117" cy="361" r="14.5" fill="#9ecdf2"/>
-  <circle cx="113" cy="357" r="4" fill="#e5f7ff" opacity="0.88"/>
-  <path d="M42 375 Q30 384 41 397 Q52 392 49 384Z" fill="#211f26"/>
-  <path d="M55 389 L82 385 M55 396 L80 401" fill="none" stroke="#a09aa9" stroke-width="1.8" stroke-linecap="round" opacity="0.6"/>
-  <path d="M55 457 H407" fill="none" stroke="#302d35" stroke-width="14" stroke-linecap="round"/>
-  <path d="M63 451 H109 M319 449 H365" fill="none" stroke="#7e7688" stroke-width="2" stroke-linecap="round"/>
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="100%" height="100%" viewBox="0 0 500 500" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:bevel;">
+    <rect id="logo-frame" x="20" y="18" width="460" height="464" style="fill:none;fill-rule:nonzero;stroke:rgb(204,230,252);stroke-width:36px;"/>
+    <path d="M125,34L125,118M195,160L300,160" style="fill:none;fill-rule:nonzero;stroke:url(#_Linear1);stroke-width:34px;stroke-linejoin:miter;"/>
+    <g>
+        <circle cx="143" cy="179" r="54" style="fill:none;stroke:url(#_Linear2);stroke-width:34px;stroke-linejoin:miter;"/>
+        <circle cx="356" cy="179" r="54" style="fill:none;stroke:url(#_Linear3);stroke-width:34px;stroke-linejoin:miter;"/>
+    </g>
+    <g opacity="0.64">
+        <path d="M104,145C121.948,124.491 152.938,121 175,137M318,142C337.294,123.028 368.175,121.723 389,139" style="fill:none;fill-rule:nonzero;stroke:rgb(239,250,255);stroke-width:3px;stroke-linejoin:miter;"/>
+    </g>
+    <path d="M269,35C270,103 253,132 214,152C156,181 143,216 139,318" style="fill:none;fill-rule:nonzero;stroke:url(#_Linear4);stroke-width:12px;stroke-linecap:round;stroke-linejoin:miter;"/>
+    <path d="M266,39C267,105 249,132 211,151C158,181 145,220 142,313" style="fill:none;fill-rule:nonzero;stroke:rgb(227,246,255);stroke-opacity:0.85;stroke-width:2.5px;stroke-linejoin:miter;"/>
+    <path d="M223,194L223,204M264,204L259,213M287,239L277,243" style="fill:none;fill-rule:nonzero;stroke:rgb(152,199,238);stroke-width:12px;stroke-linecap:round;stroke-linejoin:miter;"/>
+    <path d="M357,455L408,455C424,455 432,447 432,431L432,276C432,258.667 440,250 456,250" style="fill:none;fill-rule:nonzero;stroke:rgb(56,53,62);stroke-width:16px;stroke-linecap:round;stroke-linejoin:miter;"/>
+    <path d="M408,449C419.333,449 425,442.333 425,429L425,276C425,258.667 433.333,249 450,247" style="fill:none;fill-rule:nonzero;stroke:rgb(124,120,133);stroke-width:2.5px;stroke-linecap:round;stroke-linejoin:miter;"/>
+    <path d="M108,450C109,422 130,397 151,367C169,319 211,280 264,286C340,290 384,330 389,391C393,413 389.333,433.667 378,453L108,450Z" style="fill:url(#_Linear5);fill-rule:nonzero;stroke:rgb(102,97,110);stroke-width:2px;stroke-linejoin:miter;"/>
+    <path d="M179,329C210.333,356.333 216.667,390.333 198,431L364,431C375.333,421.667 380.333,408 379,390C375,336 339,310 292,300C356,306 400,353 389,410C389,429.333 385.333,444 378,454L108,454C110,442.667 114.667,431.333 122,420L179,329Z" style="fill:rgb(37,35,42);fill-opacity:0.76;fill-rule:nonzero;"/>
+    <path d="M41,376C73,334 112,313 152,317C184,317 205,341 205,373C205,409 177,431 137,428C99,426 68,412 43,397C35,391 34.333,384 41,376Z" style="fill:url(#_Linear6);fill-rule:nonzero;stroke:rgb(101,97,109);stroke-width:2px;stroke-linejoin:miter;"/>
+    <path d="M43,397C95,420 158,425 181,384C189.667,370 190.667,355 184,339C205,355 210,380 197,400C181,433 142,435 106,425C82,419.667 61,410.333 43,397Z" style="fill:rgb(104,99,110);fill-opacity:0.8;fill-rule:nonzero;"/>
+    <path d="M146,320C145,274 169,240 201,240C237,238 254,264 254,298C254,322 234,338 208,339L156,339C148,337.667 144.667,331.333 146,320Z" style="fill:url(#_Linear7);fill-rule:nonzero;stroke:rgb(134,128,139);stroke-width:2px;stroke-linejoin:miter;"/>
+    <path d="M150,306C149,271 170,246 199,246C227,244 241,259 241,278C239,300 222,311 198,311L151,311L150,306Z" style="fill:rgb(53,50,59);fill-rule:nonzero;"/>
+    <path d="M163,269C173.667,253.667 186.667,247 202,249" style="fill:none;fill-rule:nonzero;stroke:rgb(164,155,169);stroke-opacity:0.65;stroke-width:2.5px;stroke-linecap:round;stroke-linejoin:miter;"/>
+    <path d="M258,431C260.667,401.667 276,380.333 304,367" style="fill:none;fill-rule:nonzero;stroke:rgb(33,31,38);stroke-width:13px;stroke-linecap:round;stroke-linejoin:miter;"/>
+    <path d="M270,424C274.667,402.667 286.667,387.333 306,378" style="fill:none;fill-rule:nonzero;stroke:rgb(94,88,103);stroke-opacity:0.6;stroke-width:2px;stroke-linecap:round;stroke-linejoin:miter;"/>
+    <circle cx="117" cy="361" r="14.5" style="fill:rgb(158,205,242);"/>
+    <circle cx="113" cy="357" r="4" style="fill:rgb(229,247,255);fill-opacity:0.88;"/>
+    <path d="M42,375C34,381 33.667,388.333 41,397C48.333,393.667 51,389.333 49,384L42,375Z" style="fill:rgb(33,31,38);fill-rule:nonzero;"/>
+    <path d="M55,389L82,385M55,396L80,401" style="fill:none;fill-rule:nonzero;stroke:rgb(160,154,169);stroke-opacity:0.6;stroke-width:1.8px;stroke-linecap:round;stroke-linejoin:miter;"/>
+    <path d="M55,457L407,457" style="fill:none;fill-rule:nonzero;stroke:rgb(48,45,53);stroke-width:14px;stroke-linecap:round;stroke-linejoin:miter;"/>
+    <defs>
+        <linearGradient id="_Linear1" x1="0" y1="0" x2="1" y2="0" gradientUnits="userSpaceOnUse" gradientTransform="matrix(122.5,126,-126,122.5,125,34)"><stop offset="0" style="stop-color:rgb(228,243,255);stop-opacity:1"/><stop offset="0.5" style="stop-color:rgb(204,230,252);stop-opacity:1"/><stop offset="1" style="stop-color:rgb(157,199,236);stop-opacity:1"/></linearGradient>
+        <linearGradient id="_Linear2" x1="0" y1="0" x2="1" y2="0" gradientUnits="userSpaceOnUse" gradientTransform="matrix(75.6,108,-108,75.6,89,125)"><stop offset="0" style="stop-color:rgb(228,243,255);stop-opacity:1"/><stop offset="0.5" style="stop-color:rgb(204,230,252);stop-opacity:1"/><stop offset="1" style="stop-color:rgb(157,199,236);stop-opacity:1"/></linearGradient>
+        <linearGradient id="_Linear3" x1="0" y1="0" x2="1" y2="0" gradientUnits="userSpaceOnUse" gradientTransform="matrix(75.6,108,-108,75.6,302,125)"><stop offset="0" style="stop-color:rgb(228,243,255);stop-opacity:1"/><stop offset="0.5" style="stop-color:rgb(204,230,252);stop-opacity:1"/><stop offset="1" style="stop-color:rgb(157,199,236);stop-opacity:1"/></linearGradient>
+        <linearGradient id="_Linear4" x1="0" y1="0" x2="1" y2="0" gradientUnits="userSpaceOnUse" gradientTransform="matrix(65.020791,283,-283,65.020791,139,35)"><stop offset="0" style="stop-color:rgb(198,235,255);stop-opacity:1"/><stop offset="1" style="stop-color:rgb(121,184,237);stop-opacity:1"/></linearGradient>
+        <linearGradient id="_Linear5" x1="0" y1="0" x2="1" y2="0" gradientUnits="userSpaceOnUse" gradientTransform="matrix(183.667391,167.611118,-167.611118,183.667391,150.384783,285.388882)"><stop offset="0" style="stop-color:rgb(86,83,93);stop-opacity:1"/><stop offset="0.5" style="stop-color:rgb(53,50,58);stop-opacity:1"/><stop offset="1" style="stop-color:rgb(37,35,43);stop-opacity:1"/></linearGradient>
+        <linearGradient id="_Linear6" x1="0" y1="0" x2="1" y2="0" gradientUnits="userSpaceOnUse" gradientTransform="matrix(109.554545,111.754492,-111.754492,109.554545,61.736364,316.517932)"><stop offset="0" style="stop-color:rgb(86,83,93);stop-opacity:1"/><stop offset="0.5" style="stop-color:rgb(53,50,58);stop-opacity:1"/><stop offset="1" style="stop-color:rgb(37,35,43);stop-opacity:1"/></linearGradient>
+        <linearGradient id="_Linear7" x1="0" y1="0" x2="1" y2="0" gradientUnits="userSpaceOnUse" gradientTransform="matrix(108.285714,99.108072,-99.108072,108.285714,145.714286,239.891928)"><stop offset="0" style="stop-color:rgb(118,113,125);stop-opacity:1"/><stop offset="1" style="stop-color:rgb(73,70,80);stop-opacity:1"/></linearGradient>
+    </defs>
 </svg>

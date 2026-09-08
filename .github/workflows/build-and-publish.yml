@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: v0.49
+  RELEASE_VERSION: v0.50
 
 jobs:
   build-windows:
@@ -126,6 +126,8 @@ jobs:
       )
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download Windows Artifact
         uses: actions/download-artifact@v4
         with:
@@ -146,11 +148,13 @@ jobs:
             cp "$gui_path" ./publish/pyBer-windows.zip
           fi
           cp "$cli_path" ./publish/pyBer-cli-windows.exe
+          (cd publish && sha256sum pyBer-windows.zip pyBer-cli-windows.exe > SHA256SUMS.txt)
 
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "./publish/pyBer-windows.zip,./publish/pyBer-cli-windows.exe"
+          artifacts: "./publish/pyBer-windows.zip,./publish/pyBer-cli-windows.exe,./publish/SHA256SUMS.txt"
+          bodyFile: docs/releases/${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || env.RELEASE_VERSION }}.md
           token: ${{ secrets.GITHUB_TOKEN }}
           generateReleaseNotes: true
           allowUpdates: true

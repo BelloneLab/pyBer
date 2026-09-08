@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.49"><img src="https://img.shields.io/badge/release-v0.49-7c4dff" alt="v0.49 release"></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.50"><img src="https://img.shields.io/badge/release-v0.50-7c4dff" alt="v0.50 release"></a>
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-41cd52?logo=qt&logoColor=white" alt="PySide6 and pyqtgraph">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white" alt="Windows">
@@ -18,9 +18,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.49/pyBer-windows.zip"><strong>Download the Windows GUI (zip)</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.50/pyBer-windows.zip"><strong>Download the Windows GUI (zip)</strong></a>
   &nbsp;|&nbsp;
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.49/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.50/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
   &nbsp;|&nbsp;
   <a href="docs/index.md"><strong>Read the full guide</strong></a>
 </p>
@@ -217,7 +217,15 @@ The flagged table collects processing failures, excessive artifact load, poor fi
 | Processed data | Self-describing CSV with `.pyber.json` sidecar and HDF5 with embedded metadata. |
 | Reports | Preprocessing PNG, strict QC report images, batch summaries, flagged-recording tables, analysis CSVs, model tables, and publication figure exports. |
 
-Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.49 builds target Windows; source execution on other platforms is not part of the tested release path.
+Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.50 builds target Windows; source execution on other platforms is not part of the tested release path.
+
+## What changed in v0.50
+
+- Automatic signal-event previews, adjustable automatic thresholds, shaded noise bands, and improved per-file batch summaries.
+- Corrected initial trace fitting and cut-gap display, plus heatmap autoscaling when PSTH normalization changes.
+- Direct keyboard value editing and synchronized sliders, with a more compact postprocessing workspace.
+- Windows file/folder drops work in detached panels; the original SVG logo has a frameless taskbar variant and explicit Windows shell branding.
+- See [the full release notes](docs/releases/v0.50.md) for numerical compatibility and installation details.
 
 ## What changed in v0.49
 
