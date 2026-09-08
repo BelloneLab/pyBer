@@ -15,7 +15,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 
 APP_USER_MODEL_ID = "BelloneLab.pyBer.FiberPhotometry"
-ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
+ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
 _NATIVE_HANDLES: dict[tuple[str, int], int] = {}
 
 
