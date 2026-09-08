@@ -39,6 +39,9 @@ class _Control:
     def currentText(self):
         return str(self.state)
 
+    def currentData(self):
+        return self.state
+
     def isChecked(self):
         return bool(self.state)
 
@@ -59,6 +62,9 @@ def _panel():
         combo_align=_Control("Behavior (CSV/XLSX)"),
         combo_behavior_name=_Control("Contact"),
         combo_behavior_align=_Control("Align to onset"),
+        combo_psth_behavior_metric=_Control("duration"),
+        spin_psth_behavior_bin=_Control(30.0),
+        cb_psth_behavior_auto_bins=_Control(True),
         combo_behavior_from=_Control("Approach"),
         combo_behavior_to=_Control("Contact"),
         spin_pre=_Control(1.0), spin_post=_Control(1.0),
@@ -102,7 +108,10 @@ def _panel():
     panel._get_events_for_proc = lambda proc: (np.array([], float), np.array([], float))
     panel._filter_events = lambda events, durations: (events, durations)
     panel._proc_time = lambda proc: np.arange(100.0)
+    panel._per_file_event_rows = {"mouse_01": panel._last_event_rows}
+    panel._file_id_for_proc = lambda proc: Path(proc.path).stem
     _bind(panel, "_compute_psth", "_compute_psth_impl", "_ensure_current_psth",
+          "_current_psth_behavior_summary", "_psth_behavior_summary_recordings",
           "_clear_psth_result_view", "_clear_psth_cache", "_stack_psth_trial_rows", "_behavior_suffix",
           "_alignment_export_suffix", "_is_group_export_context", "_group_export_prefix",
           "_default_export_prefix", "_psth_normalization")
@@ -181,7 +190,7 @@ class ExportIdentityTests(unittest.TestCase):
         panel = _panel()
         panel.tab_sources.state = 1
         panel.combo_individual_file.state = "mouse_02"
-        panel._processed.append(SimpleNamespace(path="mouse_02.csv"))
+        panel._processed.append(SimpleNamespace(path="mouse_02.csv", output=np.arange(100.0)))
         # This file was excluded from group summaries but remains inspectable
         # individually. Its rows must come from the per-file accepted cache.
         panel._per_file_event_rows = {"mouse_02": [
@@ -206,7 +215,14 @@ class ExportIdentityTests(unittest.TestCase):
             self.assertEqual(manifest["scope"], "individual")
             self.assertEqual(manifest["event_count"], 1)
             self.assertEqual(manifest["selected_file"], "mouse_02")
-            self.assertEqual(len(manifest["outputs"]), 4)
+            self.assertEqual(manifest["status"], "complete")
+            self.assertEqual(len(manifest["outputs"]), 7)
+            summary_path = Path(folder) / f"{prefix}_behavior_summary"
+            metadata = json.loads(summary_path.with_suffix(".json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["file_ids"], ["mouse_02"])
+            self.assertEqual(metadata["metric"], "Bout duration")
+            with h5py.File(summary_path.with_suffix(".h5"), "r") as handle:
+                self.assertEqual(float(np.sum(handle["values"][:])), 1.0)
 
     def test_repeated_export_preserves_previous_bundle(self):
         panel = _panel()

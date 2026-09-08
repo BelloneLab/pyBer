@@ -37,6 +37,8 @@ from file_drop import install_file_drop, expand_paths
 from behavior_import import infer_table, read_behavior_csv, detect_time_column
 from baseline_advisor import BaselineRecording
 from baseline_advisor_dialog import BaselineAdvisorDialog
+from behavior_summary import summarize_behavior, export_behavior_summary
+from behavior_summary_plot import render_behavior_summary
 from signal_events import preprocess_trace, estimate_noise, detect_peaks, observed_intervals, continuous_segments
 from postprocessing_core import (
     compute_psth_matrix, extract_complete_events, group_close_events,
@@ -2082,6 +2084,39 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fw.addRow("Smooth sigma (s)", with_slider(self.spin_smooth, logarithmic=True))
         fw.addRow("Normalization", self.combo_psth_normalization)
 
+        # These controls redraw the cached accepted events without rerunning PSTH.
+        grp_behavior_panel = QtWidgets.QGroupBox("Behavior panel")
+        grp_behavior_panel.setStyleSheet(_psth_section_qss)
+        fb_panel = QtWidgets.QFormLayout(grp_behavior_panel)
+        fb_panel.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.combo_psth_behavior_metric = QtWidgets.QComboBox()
+        for label, code in (("Bout duration", "duration"), ("Frequency over time", "frequency"),
+                            ("Inter-bout interval", "ibi"), ("Cumulative duration", "cumulative")):
+            self.combo_psth_behavior_metric.addItem(label, code)
+        self.combo_psth_behavior_metric.setToolTip(
+            "Summarizes the accepted events in the displayed PSTH scope. Group time curves "
+            "give each recording equal weight, with thin recording traces and mean +/- SEM. "
+            "Inter-bout interval runs from a selected bout's end to the next selected onset. "
+            "Time starts at each recording's beginning; cuts contribute no observed time."
+        )
+        self.spin_psth_behavior_bin = QtWidgets.QDoubleSpinBox()
+        self.spin_psth_behavior_bin.setRange(.001, 1e6)
+        self.spin_psth_behavior_bin.setDecimals(3)
+        self.spin_psth_behavior_bin.setValue(30)
+        self.spin_psth_behavior_bin.setSuffix(" s")
+        self.spin_psth_behavior_bin.setKeyboardTracking(False)
+        self.spin_psth_behavior_bin.setToolTip("Type an exact bin width in seconds, then press Enter.")
+        self.cb_psth_behavior_auto_bins = QtWidgets.QCheckBox("Auto distribution bins")
+        self.cb_psth_behavior_auto_bins.setChecked(True)
+        self.lbl_psth_behavior_bin = QtWidgets.QLabel("Distribution bin")
+        fb_panel.addRow("Display", self.combo_psth_behavior_metric)
+        fb_panel.addRow(self.lbl_psth_behavior_bin, self.spin_psth_behavior_bin)
+        fb_panel.addRow(self.cb_psth_behavior_auto_bins)
+        self.combo_psth_behavior_metric.currentIndexChanged.connect(self._on_psth_behavior_panel_changed)
+        self.spin_psth_behavior_bin.valueChanged.connect(self._on_psth_behavior_panel_changed)
+        self.cb_psth_behavior_auto_bins.toggled.connect(self._on_psth_behavior_panel_changed)
+        self.spin_psth_behavior_bin.setEnabled(False)
+
         # =======================================================
         # Section 2 - Event filters
         # =======================================================
@@ -2163,6 +2198,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _psth_vbox.setSpacing(4)
         _psth_vbox.addWidget(grp_align_psth)
         _psth_vbox.addWidget(grp_window)
+        _psth_vbox.addWidget(grp_behavior_panel)
         _psth_vbox.addWidget(grp_filt)
         _psth_vbox.addWidget(grp_include)
         _psth_vbox.addWidget(grp_met)
@@ -9491,13 +9527,77 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return f"{label} (baseline subtracted)" if self._psth_normalization() == "subtract" else label
 
     def _refresh_psth_duration_view(self) -> None:
-        """Keep the duration histogram on the same recording scope as exports."""
-        durations = self._last_durations
+        """Keep the chosen behavioral chart on the same recording scope as exports."""
+        try:
+            summary = self._current_psth_behavior_summary()
+        except ValueError as exc:
+            # A requested bin count may exceed the numerical safety limit. Do
+            # not let a Qt slot exception leave an old chart under new settings.
+            self.plot_dur.clear()
+            set_plot_has_data(self.plot_dur, False)
+            self.plot_dur.setToolTip(str(exc))
+            self.statusUpdate.emit(f"Behavior panel: {exc}", 6000)
+            return
+        preset = self._style.get("postprocessing_preset", "Midnight")
+        palette = POSTPROCESSING_PRESETS.get(preset, POSTPROCESSING_PRESETS["Midnight"])
+        render_behavior_summary(self.plot_dur, summary, palette)
+        set_plot_has_data(self.plot_dur, bool(summary["has_data"]))
+
+    def _psth_behavior_summary_recordings(self) -> List[Dict[str, object]]:
+        """Snapshot accepted event rows and observed intervals without touching data.
+
+        Offset-aligned trials store the alignment at the bout end, so reconstruct
+        the onset before computing behavioral duration or frequency. Unknown
+        durations stay missing, making point-event limitations explicit.
+        """
         if self.tab_visual_mode.currentIndex() == 0:
             selected = self.combo_individual_file.currentText().strip()
-            rows = getattr(self, "_per_file_event_rows", {}).get(selected, [])
-            durations = np.asarray([row.get("duration_sec", np.nan) for row in rows], float)
-        self._render_duration_hist(np.asarray(durations, float) if durations is not None else np.array([], float))
+            rows = list(getattr(self, "_per_file_event_rows", {}).get(selected, []))
+        else:
+            rows = list(getattr(self, "_last_event_rows", []) or [])
+        by_file = {}
+        for row in rows:
+            by_file.setdefault(str(row.get("file_id", "")), []).append(row)
+        doric = _is_doric_channel_align(self.combo_align.currentText())
+        alignment = self.combo_dio_align.currentText() if doric else self.combo_behavior_align.currentText()
+        offset_aligned = getattr(self, "_psth_behavior_offset_aligned", alignment.endswith("offset"))
+        recordings = []
+        for proc in self._processed:
+            file_id = self._file_id_for_proc(proc)
+            event_rows = by_file.get(file_id, [])
+            if not event_rows:
+                continue
+            t = np.asarray(self._proc_time(proc), float)
+            finite_time = t[np.isfinite(t)]
+            if not finite_time.size:
+                continue
+            events = np.asarray([row.get("event_time_sec", np.nan) for row in event_rows], float)
+            duration = np.asarray([row.get("duration_sec", np.nan) for row in event_rows], float)
+            known = np.isfinite(duration) & (duration > 0)
+            onsets = events - np.where(known, duration, 0) if offset_aligned else events.copy()
+            offsets = np.where(known, events if offset_aligned else events + duration, np.nan)
+            recordings.append({"file_id": file_id, "start": float(finite_time[0]),
+                               "end": float(finite_time[-1]), "onsets": onsets, "offsets": offsets,
+                               "observed_intervals": observed_intervals(t, np.asarray(proc.output, float))})
+        return recordings
+
+    def _current_psth_behavior_summary(self) -> Dict[str, object]:
+        """Expose the same numerical summary for the screen and exported tables."""
+        return summarize_behavior(self._psth_behavior_summary_recordings(),
+                                  str(self.combo_psth_behavior_metric.currentData() or "duration"),
+                                  bin_s=float(self.spin_psth_behavior_bin.value()),
+                                  auto_bins=self.cb_psth_behavior_auto_bins.isChecked())
+
+    def _on_psth_behavior_panel_changed(self, *_args: object) -> None:
+        """Update the selected chart immediately; these are display-only settings."""
+        histogram = self.combo_psth_behavior_metric.currentData() in ("duration", "ibi")
+        self.cb_psth_behavior_auto_bins.setVisible(histogram)
+        self.lbl_psth_behavior_bin.setText("Distribution bin" if histogram else "Time bin")
+        self.spin_psth_behavior_bin.setEnabled(not histogram or not self.cb_psth_behavior_auto_bins.isChecked())
+        if self._is_restoring_settings or not hasattr(self, "plot_dur"):
+            return
+        self._refresh_psth_duration_view()
+        self._queue_settings_save()
 
     def _ensure_current_psth(self) -> bool:
         """Flush pending edits before any output uses current control labels."""
@@ -13973,6 +14073,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             exclude_low_events = bool(group_mode and self._psth_exclude_low_event_animals_enabled())
             excluded_files: Dict[str, Dict[str, object]] = {}
 
+            align_combo = self.combo_dio_align if _is_doric_channel_align(self.combo_align.currentText()) else self.combo_behavior_align
+            self._psth_behavior_offset_aligned = align_combo.currentText().endswith("offset")
+
             for proc in self._processed:
                 ev, dur = self._get_events_for_proc(proc)
                 ev, dur = self._filter_events(ev, dur)
@@ -14346,7 +14449,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         set_plot_has_data(self.plot_dur, True)
         bins = min(20, max(5, int(np.sqrt(d.size))))
         hist, edges = np.histogram(d, bins=bins)
-        bg = pg.BarGraphItem(x=edges[:-1], height=hist, width=np.diff(edges), brush=pg.mkBrush(90, 143, 214))
+        bg = pg.BarGraphItem(x=(edges[:-1] + edges[1:]) / 2, height=hist, width=np.diff(edges) * .72, brush=pg.mkBrush(90, 143, 214), pen=pg.mkPen(None))
         self.plot_dur.addItem(bg)
         self.plot_dur.setXRange(float(edges[0]), float(edges[-1]), padding=0.05)
         self.plot_dur.setYRange(0, float(np.max(hist)) if hist.size else 1.0, padding=0.1)
@@ -14904,6 +15007,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             f"background: transparent; color: {palette['text']}; "
             "border: none; padding: 0px; font-size: 12px;"
         )
+        if hasattr(self, "combo_psth_behavior_metric"):
+            self._refresh_psth_duration_view()
 
     def _on_heatmap_levels_changed(self) -> None:
         if self._is_restoring_settings or self._suppress_heatmap_level_store:
@@ -16261,6 +16366,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "window_post": 5.0,
             "baseline_start": -1.0,
             "baseline_end": 0.0,
+            "psth_behavior_metric": "duration",
+            "psth_behavior_bin_s": 30.0,
+            "psth_behavior_auto_bins": True,
             "resample": 50.0,
             "smooth": 0.0,
             "filter_enabled": True,
@@ -16428,6 +16536,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "resample": float(self.spin_resample.value()),
             "smooth": float(self.spin_smooth.value()),
             "psth_normalization": self.combo_psth_normalization.currentText(),
+            "psth_behavior_metric": self.combo_psth_behavior_metric.currentData(),
+            "psth_behavior_bin_s": float(self.spin_psth_behavior_bin.value()),
+            "psth_behavior_auto_bins": self.cb_psth_behavior_auto_bins.isChecked(),
             "filter_enabled": self.cb_filter_events.isChecked(),
             "event_start": int(self.spin_event_start.value()),
             "event_end": int(self.spin_event_end.value()),
@@ -16611,6 +16722,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.cb_global_freq.setChecked(bool(data["global_freq"]))
         _set_combo(self.combo_view_layout, data.get("view_layout"))
         _set_combo(self.combo_psth_normalization, data.get("psth_normalization", "Baseline z-score"))
+        with QtCore.QSignalBlocker(self.combo_psth_behavior_metric), QtCore.QSignalBlocker(self.spin_psth_behavior_bin), QtCore.QSignalBlocker(self.cb_psth_behavior_auto_bins):
+            _set_combo_data(self.combo_psth_behavior_metric, data.get("psth_behavior_metric", "duration"))
+            self.spin_psth_behavior_bin.setValue(float(data.get("psth_behavior_bin_s", 30.0)))
+            self.cb_psth_behavior_auto_bins.setChecked(bool(data.get("psth_behavior_auto_bins", True)))
+        self._on_psth_behavior_panel_changed()
         _set_combo(self.combo_heat_scale, data.get("heatmap_contrast", "Full range"))
         if "visual_mode" in data:
             try:
@@ -16729,6 +16845,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._compute_spatial_heatmap()
         self._update_data_availability()
         self._update_status_strip()
+        self._refresh_psth_duration_view()
 
     def _save_settings(self) -> None:
         try:
@@ -17296,6 +17413,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if do_h5:
                     with h5py.File(f"{dur_base}.h5", "w") as hf:
                         hf.create_dataset("duration_sec", data=export_durations)
+                summary = self._current_psth_behavior_summary()
+                export_behavior_summary(summary, os.path.join(out_dir, f"{prefix}_behavior_summary"),
+                                        write_csv=do_csv, write_h5=do_h5)
                 _finish_export_step("Exported event durations")
 
             if choices.get("metrics") and (self._last_metrics or self._last_global_metrics):
@@ -18400,7 +18520,7 @@ class ExportDialog(QtWidgets.QDialog):
         self.cb_heatmap_aligned = QtWidgets.QCheckBox("Heatmap aligned (time-locked matrix)")
         self.cb_avg = QtWidgets.QCheckBox("Average PSTH")
         self.cb_events = QtWidgets.QCheckBox("Event times")
-        self.cb_durations = QtWidgets.QCheckBox("Event durations")
+        self.cb_durations = QtWidgets.QCheckBox("Event durations + selected behavior summary")
         self.cb_metrics = QtWidgets.QCheckBox("Metrics table")
         for cb in (self.cb_heatmap, self.cb_heatmap_aligned, self.cb_avg,
                    self.cb_events, self.cb_durations, self.cb_metrics):
@@ -18433,7 +18553,7 @@ class ExportDialog(QtWidgets.QDialog):
         fmt_row.addWidget(self.cb_pdf)
         fmt_row.addStretch(1)
         plot_layout.addLayout(fmt_row)
-        self.cb_plot_heatmap = QtWidgets.QCheckBox("Heatmap + durations")
+        self.cb_plot_heatmap = QtWidgets.QCheckBox("Heatmap + selected behavior panel")
         self.cb_plot_avg = QtWidgets.QCheckBox("Average PSTH + metrics")
         self.cb_plot_trace = QtWidgets.QCheckBox("Trace preview")
         for cb in (self.cb_plot_heatmap, self.cb_plot_avg, self.cb_plot_trace):

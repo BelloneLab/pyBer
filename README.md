@@ -43,7 +43,7 @@ Drop files or folders onto the preprocessing file list or Open/Add Folder button
 | Artifact review | Smart multi-evidence detection, adaptive or global MAD modes, manual regions, interpolation, cutting, strong local low-pass repair, or annotation without modification. |
 | Quality control | Strict PASS / WARN / FAIL checks for artifact burden, motion bleed, fitted-reference signal retention, corrected-output SNR, reference noise, coverage, signal noise, coupling stability, output shape, and photobleaching. Includes report images and batch flagging. |
 | Event alignment | DIO onset or offset, behavior onset or offset, state transitions, continuous variables, individual recordings, and grouped animals. |
-| PSTH and behavior | Trial heatmaps, mean with SEM, event durations, pre/post metrics, global summaries, behavior rasters, rates, durations, and start-time distributions. |
+| PSTH and behavior | Trial heatmaps, mean with SEM, selectable duration/frequency/IBI/cumulative behavior panels with adjustable bins, pre/post metrics, global summaries, and behavior rasters. |
 | Baseline advisor (source) | Optional [baseline recommendation](docs/baseline_advisor.md) from event spacing, observed coverage, distribution stability and autocorrelation, checked on later events with explicit abstention. |
 | Spatial analysis | Occupancy-normalized activity maps, trajectories, and velocity-aware views when tracking coordinates are available. |
 | Signal events | SciPy peak detection, manual or MAD-noise thresholds, minimum height/prominence/distance, smoothing, baseline-prominence normalization, AUC, amplitude, inter-peak interval, and rate-over-time summaries. |
