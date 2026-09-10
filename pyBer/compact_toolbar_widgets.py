@@ -37,8 +37,7 @@ def compact_preprocessing_toolbar(owner, bar):
     plots._inline_toolbar = True
     plots._plot_header.hide()
     plots._plot_tools.hide()
-    owner.btn_workflow_qc.setText("QC")
-    owner.btn_workflow_qc.setToolTip("Run quality control on the active recording")
+    owner.btn_workflow_qc.hide()
     owner.btn_workflow_export.setText("Export")
     owner.btn_pre_selection = QtWidgets.QToolButton(bar)
     owner.btn_pre_selection.setText("Selection")
@@ -62,8 +61,6 @@ def compact_preprocessing_toolbar(owner, bar):
     thresholds.triggered.connect(lambda checked: plots.btn_thresholds.setChecked(checked))
     owner.menu_plot_style.setTitle("Plot style")
     view.addMenu(owner.menu_plot_style)
-    view.addSeparator()
-    view.addAction("Sensor...", owner.btn_sensor.click)
 
     def refresh():
         """Menu states track loading, keyboard actions and programmatic changes."""
@@ -78,7 +75,7 @@ def compact_preprocessing_toolbar(owner, bar):
     plots.lbl_title.setStyleSheet("font-weight: 600; font-size: 12px;")
     plots.lbl_status.setMaximumWidth(360)
     plots.lbl_status.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-    for widget in (owner.btn_workflow_load, owner.btn_workflow_qc, owner.btn_workflow_export,
+    for widget in (owner.btn_workflow_load, owner.btn_sensor, owner.btn_workflow_export,
                    plots.btn_undo, plots.btn_redo, owner.btn_pre_selection, owner.btn_pre_view,
                    plots.lbl_title, plots.lbl_status):
         layout.addWidget(widget, 2 if widget is plots.lbl_title else 1 if widget is plots.lbl_status else 0)
