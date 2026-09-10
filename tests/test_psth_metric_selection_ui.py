@@ -55,7 +55,7 @@ class MetricSelectionUITests(unittest.TestCase):
         grid = panel.metric_panels_widget.layout()
         primary_card = panel._plot_card_by_widget[panel.plot_metrics]
         extra_card = panel._plot_card_by_widget[panel._extra_metric_plots["mean"]]
-        self.assertEqual(panel.row_avg_trace.layout().indexOf(primary_card), 0)
+        self.assertEqual(panel._view_splitters["comparison"].indexOf(primary_card), 0)
         self.assertIs(grid.itemAtPosition(0, 0).widget(), extra_card)
         self.assertEqual(grid.indexOf(primary_card), -1)
         panel.cb_metrics.setChecked(False)

@@ -4,12 +4,15 @@ import tempfile
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
 import test_postprocessing_empty_state as gui_fixture
 from gui_postprocessing import _load_behavior_csv, _behavior_table_info
+from analysis_core import ProcessedTrial
+from PySide6 import QtWidgets
 
 
 class BehaviorImportGuiTests(unittest.TestCase):
@@ -78,6 +81,63 @@ class BehaviorImportGuiTests(unittest.TestCase):
                                                 "groom": [12., np.nan, 15.]}), "timestamp_columns", 30.)
         self.assertEqual(set(info["behaviors"]), {"groom"})
         np.testing.assert_equal(info["behaviors"]["groom"], [12, 15])
+
+    def test_project_open_restores_embedded_behavior_without_source_files(self):
+        """Both project Open and signal/drop Open restore the complete snapshot."""
+        panel = self.panel
+        with tempfile.TemporaryDirectory() as directory:
+            time = np.arange(0., 60., .1)
+            source_path = Path(directory) / "recording_metadata.csv"
+            pd.DataFrame({
+                "timestamp_software": time,
+                "timestamp_camera": time + .25,
+                "rearing": ((time % 10 >= 4) & (time % 10 < 6)).astype(int),
+                "mouse_center_x": np.sin(time), "mouse_center_y": np.cos(time),
+            }).to_csv(source_path, index=False)
+            panel._processed = [ProcessedTrial(
+                path=str(Path(directory) / "recording.csv"), channel_id="AIN01",
+                time=time, raw_signal=np.sin(time), raw_reference=np.cos(time),
+                output=np.sin(time), output_label="dFF")]
+            panel._load_behavior_paths([str(source_path)], replace=True)
+            panel._refresh_behavior_list()
+            panel.combo_behavior_clock.setCurrentText("timestamp_camera")
+            panel.combo_behavior_name.setCurrentText("rearing")
+            panel.spin_b0.setValue(-3.)
+            panel.spin_b1.setValue(-1.)
+            expected = panel._behavior_sources["recording_metadata"]
+            project = str(Path(directory) / "snapshot.h5")
+            panel._save_project_h5(project)
+            # Existing linked files must not cause a reload prompt or override.
+            with patch.object(QtWidgets.QMessageBox, "question") as question:
+                self.assertTrue(panel._load_project_from_path(project))
+                question.assert_not_called()
+            source_path.unlink()
+            for route in ("project", "signal", "drop"):
+                with self.subTest(route=route):
+                    panel._behavior_sources = {}
+                    panel._processed = []
+                    panel.combo_behavior_clock.setCurrentText("Auto")
+                    with patch.object(QtWidgets.QMessageBox, "question") as question:
+                        if route == "project":
+                            self.assertTrue(panel._load_project_from_path(project))
+                        elif route == "signal":
+                            with patch.object(QtWidgets.QFileDialog, "getOpenFileNames", return_value=([project], "")):
+                                panel.btn_load_processed_single.click()
+                        else:
+                            panel._on_preprocessed_files_dropped([project])
+                        question.assert_not_called()
+                    restored = panel._behavior_sources["recording_metadata"]
+                    self.assertEqual(len(panel._processed), 1)
+                    self.assertEqual(panel.combo_behavior_name.currentText(), "rearing")
+                    self.assertEqual(panel.combo_behavior_clock.currentText(), "timestamp_camera")
+                    self.assertIn("1 file(s) loaded", panel.lbl_beh.text())
+                    np.testing.assert_equal(restored["time"], expected["time"])
+                    np.testing.assert_equal(restored["behaviors"]["rearing"], expected["behaviors"]["rearing"])
+                    for name, values in expected["trajectory"].items():
+                        np.testing.assert_equal(restored["trajectory"][name], values)
+                    for name, values in expected["time_candidates"].items():
+                        np.testing.assert_equal(restored["time_candidates"][name], values)
+                    self.assertGreater(np.asarray(panel._last_events).size, 0)
 
     def test_metadata_batch_matches_recordings_before_load_order(self):
         """Reversed metadata import order cannot swap the recording association."""

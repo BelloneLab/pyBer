@@ -15,6 +15,28 @@ additional comparisons remain available through **More metrics**, with three
 compact cards per additional row. Heatmap image export includes the paired PSTH;
 PSTH/dashboard export includes the shared cards and comparison summaries.
 
+## View menu and saved layout
+
+The toolbar **View** menu contains layout, theme, heatmap contrast, automatic
+scaling, plot fitting and the detailed scale editor. This replaces the separate
+controls row. **Save current view** writes preferences immediately; normal edits
+and divider drags save automatically.
+
+Drag dividers to resize the trace versus the dashboard, the time plots versus
+summaries, the behavior row versus comparisons, and each pair of side plots.
+**Reset panel sizes** returns to the default proportions. Hidden sections retain
+their proportions. Sizes, selected view settings and scale-editor visibility are
+included in project files and app preferences. An explicitly selected Paper
+theme remains Paper when the app restarts with a dark application theme.
+
+The trace has a 190-pixel plot minimum and a 240-pixel card minimum, so its time
+axis remains inside the panel even with the signal-detection caption visible.
+Smaller windows scroll the results rather than cutting off plot labels.
+
+Projects restore their embedded behavior, trajectory and time-column data when
+opened through Project Open, the processed-file button, or drag-and-drop. Linked
+CSV files are not needed and cannot silently replace the saved snapshot.
+
 Choose the two behavior plots independently under **Behavior panel**. Their
 shared bin width and automatic distribution-bin option apply consistently to
 both plots. Both numerical summaries are exported, with `_second` identifying

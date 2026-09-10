@@ -12,7 +12,10 @@ class AlignedTimeAxes(QtCore.QObject):
 
     def __init__(self, first, second, parent=None):
         super().__init__(parent)
+        self.plots = (first, second)
         self.views = (first.getViewBox(), second.getViewBox())
+        for plot in self.plots:
+            plot.installEventFilter(self)
         self._updating = False
         for view in self.views:
             view.sigXRangeChanged.connect(self._sync)
@@ -29,3 +32,9 @@ class AlignedTimeAxes(QtCore.QObject):
                     view.setXRange(float(limits[0]), float(limits[1]), padding=0)
         finally:
             self._updating = False
+
+    def eventFilter(self, watched, event):
+        """A long title must never force one scene wider than its plot widget."""
+        if event.type() in (QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Show):
+            watched.plotItem.titleLabel.setMinimumWidth(0)
+        return False

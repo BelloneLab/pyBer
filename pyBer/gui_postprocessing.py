@@ -36,6 +36,7 @@ from numeric_controls import with_slider
 from psth_metrics import METRICS, metric_id, summarize_metrics, draw_metric_matplotlib, export_selected_metrics
 from psth_metric_panels import MetricPanel, MetricGrid
 from aligned_time_axes import AlignedTimeAxes
+from postprocessing_view_controls import split_plot_layout, PlotSplitterPreferences, create_view_menu
 from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_metrics
 from file_drop import install_file_drop, expand_paths
 from behavior_import import infer_table, read_behavior_csv, detect_time_column
@@ -3974,7 +3975,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._plot_view_controls = QtWidgets.QWidget()
         self._plot_view_controls.setLayout(view_row)
         view_row.setContentsMargins(0, 0, 0, 0)
-        rv.addWidget(self._plot_view_controls)
+        self._plot_view_controls.hide()
+        # Original controls remain as menu-backed state holders, without a row.
+        self._plot_view_controls.setParent(self)
 
         self.plot_trace = pg.PlotWidget(title="Trace preview")
         self.plot_heat = pg.PlotWidget(title="Heatmap")
@@ -4260,7 +4263,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spatial_plot_dialog.hide()
 
         # Keep a visible minimum plot footprint even with aggressive docking/resizing.
-        self.plot_trace.setMinimumHeight(140)
+        self.plot_trace.setMinimumHeight(190)
         self.row_heat.setMinimumHeight(180)
         self.row_avg.setMinimumHeight(140)
 
@@ -4350,7 +4353,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for index, widget in enumerate((self.trace_card, self.row_heat, self.row_signal, self.row_behavior)):
             self._results_splitter.addWidget(widget)
             self._results_splitter.setStretchFactor(index, 1 if index == 0 else 2)
-        self._results_splitter.setSizes([170, 500, 180, 180])
+        self._results_splitter.setSizes([240, 500, 220, 360])
+        self.trace_card.setMinimumHeight(240)
+        self._view_splitters = {
+            "rows": self._results_splitter,
+            "columns": split_plot_layout(self.row_heat, QtCore.Qt.Orientation.Horizontal),
+            "details": split_plot_layout(self.dashboard_side, QtCore.Qt.Orientation.Vertical),
+            "bouts": split_plot_layout(self.bout_figure, QtCore.Qt.Orientation.Horizontal),
+            "comparison": split_plot_layout(self.row_avg_trace, QtCore.Qt.Orientation.Horizontal),
+        }
+        self.plot_splitter_preferences = PlotSplitterPreferences(self._view_splitters, self)
+        self.plot_splitter_preferences.changed.connect(self._queue_view_settings_save)
+        self.btn_view_menu = create_view_menu(self)
+        tb_layout.insertWidget(tb_layout.indexOf(self.btn_style), self.btn_view_menu)
         self._results_scroll = QtWidgets.QScrollArea()
         self._results_scroll.setWidgetResizable(True)
         self._results_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -8789,6 +8804,27 @@ class PostProcessingPanel(QtWidgets.QWidget):
             _LOG.debug("Could not sync temporal modeling context", exc_info=True)
 
     def _load_processed_paths(self, paths: List[str], replace: bool) -> None:
+        # A saved project is a complete workspace, not a processed trace. Route
+        # it through the project reader even when opened from the signal button
+        # or drop area, so embedded behavior and trajectory tables are restored.
+        project_paths = []
+        for path in paths:
+            if os.path.splitext(path)[1].lower() not in (".h5", ".hdf5"):
+                continue
+            try:
+                with h5py.File(path, "r") as handle:
+                    if self._h5_text(handle.attrs.get("project_type", ""), "") == "pyber_postprocessing_project":
+                        project_paths.append(path)
+            except (OSError, ValueError):
+                pass  # The ordinary loader provides the existing error handling.
+        if project_paths:
+            if len(paths) != 1:
+                QtWidgets.QMessageBox.warning(
+                    self, "Load project", "Open one project at a time, separately from processed trace files."
+                )
+                return
+            self._load_project_from_path(project_paths[0])
+            return
         loaded: List[ProcessedTrial] = []
         for p in paths:
             ext = os.path.splitext(p)[1].lower()
@@ -9060,7 +9096,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if hasattr(self, "_results_splitter"):
             # All panels must keep a legible plotting area. Extra rows scroll
             # vertically instead of compressing titles and axes into one another.
-            minima = ((self.trace_card, 160), (self.row_heat, 440 if show_heat and show_avg else 220), (self.row_signal, 220), (self.row_behavior, 360))
+            minima = ((self.trace_card, 240), (self.row_heat, 440 if show_heat and show_avg else 220), (self.row_signal, 220), (self.row_behavior, 360))
             visible = [(widget, height) for widget, height in minima if not widget.isHidden()]
             for widget, height in minima:
                 widget.setMinimumHeight(height)
@@ -9434,7 +9470,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if hasattr(self, "_results_stack"):
             self._results_stack.setCurrentWidget(self._results_scroll if n_files else self._empty_results)
         self.lbl_status.setVisible(n_files > 0)
-        for controls in (self._plot_file_context, self._plot_scope_controls, self._plot_view_controls):
+        for controls in (self._plot_file_context, self._plot_scope_controls):
             controls.setVisible(n_files > 0)
         self._refresh_heatmap_scale_visibility()
         src_mode = "Group" if self.tab_sources.currentIndex() == 1 else "Single"
@@ -16189,6 +16225,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._set_resample_from_processed()
             if isinstance(settings_data, dict) and settings_data:
                 self._apply_settings(settings_data)
+            self._update_behavior_time_panel()
             if isinstance(tab_idx, int) and 0 <= tab_idx < self.tab_sources.count():
                 self.tab_sources.setCurrentIndex(tab_idx)
             self._update_trace_preview()
@@ -16213,28 +16250,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
 
-        proc_raw = recent_paths.get("processed_paths", []) if isinstance(recent_paths, dict) else []
-        beh_raw = recent_paths.get("behavior_paths", []) if isinstance(recent_paths, dict) else []
-        proc_existing = [str(p).strip() for p in (proc_raw if isinstance(proc_raw, list) else []) if str(p).strip() and os.path.isfile(str(p).strip())]
-        beh_existing = [str(p).strip() for p in (beh_raw if isinstance(beh_raw, list) else []) if str(p).strip() and os.path.isfile(str(p).strip())]
-        has_referenced_sources = bool(proc_existing or beh_existing)
-
-        imported_sources = False
-        if has_referenced_sources and not from_autosave:
-            ask_sources = QtWidgets.QMessageBox.question(
-                self,
-                "Load project",
-                "Import linked source files from this project (last opened data)?",
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                QtWidgets.QMessageBox.StandardButton.No,
-            )
-            if ask_sources == QtWidgets.QMessageBox.StandardButton.Yes:
-                imported_sources = self._import_project_source_paths(recent_paths)
-
+        # Embedded arrays are the saved project's authoritative snapshot. Do not
+        # replace them with linked files that may have changed or disappeared.
         if self._processed:
             self._compute_psth()
             self._compute_spatial_heatmap()
-        elif not imported_sources and not from_autosave:
+        elif not from_autosave:
             ask = QtWidgets.QMessageBox.question(
                 self,
                 "Load project",
@@ -16533,6 +16554,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "spatial_activity_norm": self.combo_spatial_activity_mode.currentText().strip().lower().startswith("mean"),
             "spatial_log": self.cb_spatial_log.isChecked(),
             "spatial_invert_y": self.cb_spatial_invert_y.isChecked(),
+            "plot_splitters": self.plot_splitter_preferences.snapshot(),
+            "heatmap_scale_editor": self.btn_edit_scale.isChecked(),
             "style": dict(self._style),
         }
 
@@ -16778,6 +16801,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_data_availability()
         self._update_status_strip()
         self._refresh_psth_duration_view()
+        self.plot_splitter_preferences.restore(data.get("plot_splitters", {}))
+        self.btn_edit_scale.setChecked(bool(data.get("heatmap_scale_editor", False)))
 
     def _save_settings(self) -> None:
         try:
@@ -16795,11 +16820,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         was_restoring = self._is_restoring_settings
         self._is_restoring_settings = True
         try:
+            data = {}
             raw = self._settings.value("postprocess_json", "", type=str)
             if raw:
                 data = json.loads(raw)
                 self._apply_settings(data)
-            if self._app_theme_mode == "dark":
+            if self._app_theme_mode == "dark" and not data.get("style", {}).get("postprocessing_preset"):
                 bg = self._style_color_tuple("plot_bg", self._theme_plot_background())
                 legacy_dark_defaults = {(36, 42, 52), (18, 22, 30), (5, 8, 13)}
                 if (sum(bg[:3]) / 3.0) >= 180.0 or tuple(bg[:3]) in legacy_dark_defaults:
@@ -17766,10 +17792,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._remember_export_dir(out_dir)
             ok, png_path, pdf_path = self._export_widget_png_pdf(widget, base_path, transparent=True)
             if ok:
-                if suffix == "heatmap":
+                if suffix in {"heatmap", "heatmap_psth"}:
                     self._write_export_parameter_file(base_path, self._collect_psth_parameter_sections(include_heatmap=True))
-                elif suffix in {"avg_metrics", "psth_figure"}:
-                    self._write_export_parameter_file(base_path, self._collect_psth_parameter_sections(include_heatmap=(suffix == "psth_figure")))
+                elif suffix in {"avg_metrics", "psth_figure", "psth_dashboard"}:
+                    self._write_export_parameter_file(base_path, self._collect_psth_parameter_sections(include_heatmap=(suffix in {"psth_figure", "psth_dashboard"})))
                 elif suffix == "spatial":
                     self._write_export_parameter_file(base_path, self._collect_spatial_parameter_sections())
                 self.statusUpdate.emit(
@@ -17790,10 +17816,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             base_path = os.path.join(out_dir, f"{prefix}_{suffix}")
             ok, _png_path, _pdf_path = self._export_widget_png_pdf(widget, base_path, transparent=True)
             if ok:
-                if suffix == "heatmap":
+                if suffix in {"heatmap", "heatmap_psth"}:
                     self._write_export_parameter_file(base_path, self._collect_psth_parameter_sections(include_heatmap=True))
-                elif suffix in {"avg_metrics", "psth_figure"}:
-                    self._write_export_parameter_file(base_path, self._collect_psth_parameter_sections(include_heatmap=(suffix == "psth_figure")))
+                elif suffix in {"avg_metrics", "psth_figure", "psth_dashboard"}:
+                    self._write_export_parameter_file(base_path, self._collect_psth_parameter_sections(include_heatmap=(suffix in {"psth_figure", "psth_dashboard"})))
                 elif suffix == "spatial":
                     self._write_export_parameter_file(base_path, self._collect_spatial_parameter_sections())
                 ok_count += 1

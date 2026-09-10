@@ -33,7 +33,7 @@ class CompactDashboardTests(unittest.TestCase):
         self.assertIs(panel._plot_card_by_widget[panel.plot_heat], panel._plot_card_by_widget[panel.plot_avg])
         self.assertIs(panel._plot_card_by_widget[panel.plot_dur], panel._plot_card_by_widget[panel.plot_bout_second])
         self.assertEqual(panel.bout_figure.layout().spacing(), 2)
-        self.assertGreaterEqual(panel.row_avg_trace.layout().indexOf(panel._plot_card_by_widget[panel.plot_metrics]), 0)
+        self.assertGreaterEqual(panel._view_splitters["comparison"].indexOf(panel._plot_card_by_widget[panel.plot_metrics]), 0)
         self.assertTrue(panel.metric_panels_widget.isHidden())
 
     def test_shared_time_axes_align_after_resize_zoom_and_scale_changes(self):
