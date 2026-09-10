@@ -8,6 +8,10 @@ In **Postprocessing > PSTH > Behavior panel**, choose the parameter to display:
 | Frequency over time | Selected bout onsets per observed minute in each time bin. |
 | Inter-bout interval | Time from the previous selected bout's end to the next selected bout's onset. |
 | Cumulative duration | Accumulated observed time spent in the selected bouts. |
+| Occupancy over time | Percentage of observed time covered by the union of known selected bouts. |
+| Cumulative bout count | Running count of observed selected-bout onsets, including point events. |
+| Onset-to-onset interval | Distribution of time between adjacent selected onsets within one observed segment. |
+| Bout duration over time | Complete-bout median duration and interquartile range (IQR), assigned to the bout onset's bin. |
 
 Type a bin width in seconds and press Enter. Time plots always use that width;
 distribution plots allow automatic bins or a manually entered width. Choices
@@ -31,7 +35,8 @@ IBIs are formed within each recording and observed segment only. They use
 offset-to-onset gaps, not onset-to-onset intervals. Overlapping bouts are treated
 as one occupied period when determining the next gap. An unknown end prevents
 constructing an interval from that bout to its successor. Point-event files can
-show frequency, but unknown durations are not invented for the other metrics.
+show frequency, cumulative counts and onset-to-onset intervals. Unknown durations
+are not invented for duration, occupancy or offset-to-onset IBI metrics.
 
 Cumulative duration integrates each bout across bin boundaries. Overlapping
 bouts count once, and only the observed portions contribute. It carries the last
@@ -46,6 +51,33 @@ duration information. Faint curves show individual files and the shaded band
 shows SEM where at least two files contribute. Files are the averaging units,
 which only correspond to animals if each file represents a different animal.
 
+Occupancy divides the union of known occupied seconds by observed seconds in
+each bin and multiplies by 100. Overlaps never produce occupancy above 100%.
+When some bout ends are unknown, the reported known occupied time is a lower
+bound on true occupancy. Point-only files have unavailable occupancy, not zero.
+Cumulative counts retain the fixed recording cohort and carry the final observed
+count through gaps and beyond each recording's end, just like cumulative duration.
+
+**Bout duration over time is a descriptive median/IQR plot, not a mean/SEM plot.**
+Only bouts entirely inside an observed segment enter it. Their full duration is
+assigned to their onset bin, even when the bout spans several display bins.
+Empty bins remain missing. One recording shows the median and IQR of its bouts;
+groups show the median and IQR of recording-level medians in each bin, giving
+each contributing recording equal weight. The shaded IQR is spread, not a
+confidence interval. Per-recording quartiles are also exported.
+
+## Median and quartile annotations
+
+Histograms display a dashed median marker and a compact median/IQR annotation.
+These statistics use the exact unbinned observations, so changing the histogram
+bin width cannot move the median. Time plots report a median and IQR across
+recordings of a clearly defined whole-recording quantity: total onsets per
+observed minute, overall occupancy, final cumulative count/duration, or the
+complete-bout duration median. They do not take the median of the visible bins.
+The figure tooltip and exported statistics explicitly state the definition and
+sample count. For a single recording the between-recording IQR is necessarily
+zero; it must not be interpreted as no within-recording variability.
+
 ## Appearance and export
 
 The panel uses the active plot palette, spaced slender histogram bars, restrained
@@ -56,6 +88,10 @@ In **Export Results**, **Event durations + selected behavior summary** retains
 the original duration export and adds `_behavior_summary.csv` and/or `.h5`, plus
 a JSON description of the metric, binning, file IDs and units. The table contains
 the exact displayed bins, group values, SEM and each recording's values.
+Median/IQR definitions, values and per-file statistics are in the JSON and H5
+metadata. Duration-over-time exports add `lower` and `upper` IQR columns/datasets;
+SEM is unavailable for this median display, and is exported as NaN rather than
+being mislabeled as IQR.
 **Heatmap + selected behavior panel** exports the currently chosen chart next to
 the heatmap.
 

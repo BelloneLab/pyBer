@@ -53,8 +53,8 @@ open and does not change system permissions.
 | Artifact review | Smart multi-evidence detection, adaptive or global MAD modes, manual regions, interpolation, cutting, strong local low-pass repair, or annotation without modification. |
 | Quality control | Strict PASS / WARN / FAIL checks for artifact burden, motion bleed, fitted-reference signal retention, corrected-output SNR, reference noise, coverage, signal noise, coupling stability, output shape, and photobleaching. Includes report images and batch flagging. |
 | Event alignment | DIO onset or offset, behavior onset or offset, state transitions, continuous variables, individual recordings, and grouped animals. |
-| PSTH and behavior | Trial heatmaps, mean with SEM, selectable duration/frequency/IBI/cumulative behavior panels with adjustable bins, pre/post metrics, global summaries, and behavior rasters. |
-| Baseline advisor (source) | Optional [baseline recommendation](docs/baseline_advisor.md) from event spacing, observed coverage, distribution stability and autocorrelation, checked on later events with explicit abstention. |
+| PSTH and behavior | Trial heatmaps, mean with SEM, eight [behavior measures](docs/behavior_summary.md) with medians and adjustable bins, and seven [selectable PSTH metrics](docs/psth_metric_panels.md), each in its own panel. |
+| Baseline suggestions (source) | Automatic pre-event choices below the baseline fields, ranked by suitability with one-click Apply. The score describes signal and event coverage, not statistical confidence. [Method and limitations](docs/baseline_advisor.md). |
 | Spatial analysis | Occupancy-normalized activity maps, trajectories, and velocity-aware views when tracking coordinates are available. |
 | Signal events | SciPy peak detection, manual or MAD-noise thresholds, minimum height/prominence/distance, smoothing, baseline-prominence normalization, AUC, amplitude, inter-peak interval, and rate-over-time summaries. |
 | Synchronization | Align photometry to an external signal or video ROI, detect shared TTL/barcode edges, estimate lag and drift, review matching quality, batch apply, and export `time_aligned`. |

@@ -79,6 +79,22 @@ class BehaviorPanelTests(unittest.TestCase):
             self.assertIn("frequency", p.plot_dur.getPlotItem().titleLabel.text.lower())
             compute.assert_not_called()
 
+    def test_all_metrics_and_exact_median_annotation(self):
+        p = self.panel
+        self.assertEqual(p.combo_psth_behavior_metric.count(), 8)
+        reference = next(item for item in p.plot_dur.items() if isinstance(item, pg.InfiniteLine))
+        self.assertEqual(reference.value(), 3)
+        annotation = next(item for item in p.plot_dur.items() if isinstance(item, pg.TextItem))
+        self.assertIn("Median 3 s", annotation.toPlainText())
+        with patch.object(p, "_compute_psth") as compute:
+            for code in ("occupancy", "cumulative_count", "onset_interval", "duration_time"):
+                p.combo_psth_behavior_metric.setCurrentIndex(p.combo_psth_behavior_metric.findData(code))
+                self.assertTrue(p._current_psth_behavior_summary()["has_data"])
+                self.assertTrue(p.plot_dur.property("hasPlotData"))
+                self.assertIn("Median" if code != "cumulative_count" else "median", next(
+                    item for item in p.plot_dur.items() if isinstance(item, pg.TextItem)).toPlainText())
+            compute.assert_not_called()
+
     def test_individual_group_and_offset_reconstruction(self):
         p = self.panel
         self.assertEqual(p._current_psth_behavior_summary()["file_ids"], ["mouse1"])

@@ -33,10 +33,13 @@ from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, crea
 from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
 from numeric_controls import with_slider
+from psth_metrics import METRICS, metric_id, summarize_metrics, draw_metric_matplotlib, export_selected_metrics
+from psth_metric_panels import MetricPanel, MetricGrid
 from file_drop import install_file_drop, expand_paths
 from behavior_import import infer_table, read_behavior_csv, detect_time_column
 from baseline_advisor import BaselineRecording
-from baseline_advisor_dialog import BaselineAdvisorDialog
+from baseline_suggestions import BaselineSuggestionConfig
+from baseline_suggestions_widget import BaselineSuggestionsWidget
 from behavior_summary import summarize_behavior, export_behavior_summary
 from behavior_summary_plot import render_behavior_summary
 from signal_events import preprocess_trace, estimate_noise, detect_peaks, observed_intervals, continuous_segments
@@ -1728,9 +1731,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         app = QtWidgets.QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._on_about_to_quit)
-        QtCore.QTimer.singleShot(0, self._restore_project_autosave_if_needed)
-        QtCore.QTimer.singleShot(0, self._reset_history_snapshot)
-        QtCore.QTimer.singleShot(0, self._mark_project_clean)
+        QtCore.QTimer.singleShot(0, self, self._restore_project_autosave_if_needed)
+        QtCore.QTimer.singleShot(0, self, self._reset_history_snapshot)
+        QtCore.QTimer.singleShot(0, self, self._mark_project_clean)
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
@@ -1993,8 +1996,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_hide_metrics.setText("Hide")
         self.btn_hide_metrics.setCheckable(True)
         self.combo_metric = QtWidgets.QComboBox()
-        self.combo_metric.addItems(["AUC", "Mean signal"])
+        self.combo_metric.addItems(list(METRICS.values()))
         _compact_combo(self.combo_metric, min_chars=6)
+        self.btn_more_metrics = QtWidgets.QToolButton()
+        self.btn_more_metrics.setText("More metrics")
+        self.btn_more_metrics.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        metric_menu = QtWidgets.QMenu(self.btn_more_metrics)
+        self._metric_actions = {}
+        for key, label in METRICS.items():
+            action = metric_menu.addAction(label)
+            action.setCheckable(True)
+            action.toggled.connect(self._on_metric_selection_changed)
+            self._metric_actions[key] = action
+        self.btn_more_metrics.setMenu(metric_menu)
+        self.btn_more_metrics.setToolTip("Add independent metric panels. Lines show medians; diamonds show means and descriptive SEM.")
         self.spin_metric_pre0 = QtWidgets.QDoubleSpinBox(); self.spin_metric_pre0.setRange(-120, 0); self.spin_metric_pre0.setValue(-1.0); self.spin_metric_pre0.setDecimals(2)
         self.spin_metric_pre1 = QtWidgets.QDoubleSpinBox(); self.spin_metric_pre1.setRange(-120, 0); self.spin_metric_pre1.setValue(0.0); self.spin_metric_pre1.setDecimals(2)
         self.spin_metric_post0 = QtWidgets.QDoubleSpinBox(); self.spin_metric_post0.setRange(0, 120); self.spin_metric_post0.setValue(0.0); self.spin_metric_post0.setDecimals(2)
@@ -2073,13 +2088,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fw.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
         fw.addRow("Window (s)", win_widget)
         fw.addRow("Baseline (s)", base_widget)
-        self.btn_recommend_baseline = QtWidgets.QPushButton("Recommend baseline")
-        self.btn_recommend_baseline.setToolTip(
-            "Assess event spacing and pre-event signal quality, then review a suggested "
-            "baseline. The current analysis changes only after you apply the suggestion."
+        self.baseline_suggestions = BaselineSuggestionsWidget(
+            snapshot=self._baseline_advisor_recordings,
+            config=lambda: BaselineSuggestionConfig(pre_window_s=min(60., float(self.spin_pre.value()))),
+            parent=self,
         )
-        self.btn_recommend_baseline.clicked.connect(self._open_baseline_advisor)
-        fw.addRow(self.btn_recommend_baseline)
+        self.baseline_suggestions.selected.connect(self._apply_recommended_baseline)
+        fw.addRow(self.baseline_suggestions)
         fw.addRow("Resample (Hz)", self.spin_resample)
         fw.addRow("Smooth sigma (s)", with_slider(self.spin_smooth, logarithmic=True))
         fw.addRow("Normalization", self.combo_psth_normalization)
@@ -2091,13 +2106,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fb_panel.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
         self.combo_psth_behavior_metric = QtWidgets.QComboBox()
         for label, code in (("Bout duration", "duration"), ("Frequency over time", "frequency"),
-                            ("Inter-bout interval", "ibi"), ("Cumulative duration", "cumulative")):
+                            ("Inter-bout interval", "ibi"), ("Cumulative duration", "cumulative"),
+                            ("Occupancy over time", "occupancy"), ("Cumulative bout count", "cumulative_count"),
+                            ("Onset-to-onset interval", "onset_interval"), ("Bout duration over time", "duration_time")):
             self.combo_psth_behavior_metric.addItem(label, code)
         self.combo_psth_behavior_metric.setToolTip(
             "Summarizes the accepted events in the displayed PSTH scope. Group time curves "
             "give each recording equal weight, with thin recording traces and mean +/- SEM. "
             "Inter-bout interval runs from a selected bout's end to the next selected onset. "
-            "Time starts at each recording's beginning; cuts contribute no observed time."
+            "Onset interval measures onset to next onset, including point events. Occupancy is the "
+            "percentage of observed time covered by known bouts. Duration over time shows median "
+            "bout duration and IQR (group: median of file medians). Time starts at each recording's "
+            "beginning; cuts contribute no observed time. Median/IQR annotations use exact unbinned "
+            "observations or recording-level totals, not histogram bin centers."
         )
         self.spin_psth_behavior_bin = QtWidgets.QDoubleSpinBox()
         self.spin_psth_behavior_bin.setRange(.001, 1e6)
@@ -2168,7 +2189,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_metric = QtWidgets.QLabel("Metric")
         self.lbl_metric_pre = QtWidgets.QLabel("Pre window (s)")
         self.lbl_metric_post = QtWidgets.QLabel("Post window (s)")
-        fm.addRow(self.lbl_metric, self.combo_metric)
+        metric_selection = QtWidgets.QHBoxLayout()
+        metric_selection.setContentsMargins(0, 0, 0, 0)
+        metric_selection.addWidget(self.combo_metric, 1)
+        metric_selection.addWidget(self.btn_more_metrics)
+        self.metric_selection_widget = QtWidgets.QWidget()
+        self.metric_selection_widget.setLayout(metric_selection)
+        fm.addRow(self.lbl_metric, self.metric_selection_widget)
         fm.addRow(self.lbl_metric_pre, metric_pre_widget)
         fm.addRow(self.lbl_metric_post, metric_post_widget)
 
@@ -3940,7 +3967,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_heat = pg.PlotWidget(title="Heatmap")
         self.plot_dur = pg.PlotWidget(title="Event duration")
         self.plot_avg = pg.PlotWidget(title="Average PSTH +/- SEM")
-        self.plot_metrics = pg.PlotWidget(title="PSTH metrics")
+        self.plot_metrics = MetricPanel()
+        self._extra_metric_plots = {}
+        for key in METRICS:
+            widget = MetricPanel()
+            setattr(self, "plot_metric_" + key, widget)
+            self._extra_metric_plots[key] = widget
+        self._last_metric_panels = {}
         self.plot_global = pg.PlotWidget(title="Global metrics")
         self.plot_peak_amp = pg.PlotWidget(title="Peak amplitudes")
         self.plot_peak_ibi = pg.PlotWidget(title="Inter-peak intervals")
@@ -4069,54 +4102,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         self.plot_avg.addItem(self.sem_band)
         self.plot_avg.addLine(x=0, pen=pg.mkPen((200, 200, 200), style=QtCore.Qt.PenStyle.DashLine))
-        self.metrics_bar_pre = pg.BarGraphItem(x=[0], height=[0], width=0.6, brush=(90, 143, 214))
-        self.metrics_bar_post = pg.BarGraphItem(x=[1], height=[0], width=0.6, brush=(214, 122, 90))
-        self.plot_metrics.addItem(self.metrics_bar_pre)
-        self.plot_metrics.addItem(self.metrics_bar_post)
-        # Overlay paired trial/event points (pre vs post) and links.
-        self.metrics_pairs_curve = self.plot_metrics.plot(
-            pen=pg.mkPen((210, 215, 225, 130), width=1.0),
-            connect="finite",
-            skipFiniteCheck=True,
-        )
-        self.metrics_scatter_pre = self.plot_metrics.plot(
-            pen=None,
-            symbol="o",
-            symbolSize=5,
-            symbolBrush=pg.mkBrush(90, 143, 214, 220),
-            symbolPen=pg.mkPen((90, 143, 214), width=0.8),
-        )
-        self.metrics_scatter_post = self.plot_metrics.plot(
-            pen=None,
-            symbol="o",
-            symbolSize=5,
-            symbolBrush=pg.mkBrush(214, 122, 90, 220),
-            symbolPen=pg.mkPen((214, 122, 90), width=0.8),
-        )
-        self.metrics_err_pre = pg.ErrorBarItem(
-            x=np.array([0.0], float),
-            y=np.array([0.0], float),
-            top=np.array([0.0], float),
-            bottom=np.array([0.0], float),
-            beam=0.22,
-            pen=pg.mkPen((230, 236, 246), width=2.0),
-        )
-        self.metrics_err_post = pg.ErrorBarItem(
-            x=np.array([1.0], float),
-            y=np.array([0.0], float),
-            top=np.array([0.0], float),
-            bottom=np.array([0.0], float),
-            beam=0.22,
-            pen=pg.mkPen((230, 236, 246), width=2.0),
-        )
-        self.plot_metrics.addItem(self.metrics_err_pre)
-        self.plot_metrics.addItem(self.metrics_err_post)
-        self.metrics_p_text = pg.TextItem("", color=(230, 236, 246), anchor=(0.5, 1.0))
-        self.metrics_p_text.setZValue(20)
-        self.metrics_p_text.setVisible(False)
-        self.plot_metrics.addItem(self.metrics_p_text)
-        self.plot_metrics.setXRange(-0.5, 1.5, padding=0)
-        self.plot_metrics.getAxis("bottom").setTicks([[(0, "pre"), (1, "post")]])
+        # Backward-compatible handles refer to the primary metric panel.
+        self.metrics_bar_pre, self.metrics_bar_post = self.plot_metrics.bars
+        self.metrics_pairs_curve = self.plot_metrics.pairs
+        self.metrics_scatter_pre, self.metrics_scatter_post = self.plot_metrics.points
+        self.metrics_err_pre, self.metrics_err_post = self.plot_metrics.errors
+        self.metrics_p_text = self.plot_metrics.note
 
         self.global_bar_amp = pg.BarGraphItem(x=[0], height=[0], width=0.6, brush=(120, 180, 220))
         self.global_bar_freq = pg.BarGraphItem(x=[1], height=[0], width=0.6, brush=(220, 160, 120))
@@ -4167,12 +4158,27 @@ class PostProcessingPanel(QtWidgets.QWidget):
         heat_row.addWidget(self.plot_dur, stretch=1)
 
         self.row_avg = QtWidgets.QWidget()
-        avg_row = QtWidgets.QHBoxLayout(self.row_avg)
+        avg_outer = QtWidgets.QVBoxLayout(self.row_avg)
+        avg_outer.setContentsMargins(0, 0, 0, 0)
+        avg_outer.setSpacing(8)
+        self.row_avg_trace = QtWidgets.QWidget()
+        avg_row = QtWidgets.QHBoxLayout(self.row_avg_trace)
         avg_row.setContentsMargins(0, 0, 0, 0)
         avg_row.setSpacing(8)
         avg_row.addWidget(self.plot_avg, stretch=4)
-        avg_row.addWidget(self.plot_metrics, stretch=1)
         avg_row.addWidget(self.plot_global, stretch=1)
+        self.metric_panels_widget = MetricGrid()
+        self.metric_panels_widget.columnsChanged.connect(self._sync_metric_panel_layout)
+        metric_grid = QtWidgets.QGridLayout(self.metric_panels_widget)
+        metric_grid.setContentsMargins(0, 0, 0, 0)
+        metric_grid.setSpacing(8)
+        metric_grid.addWidget(self.plot_metrics, 0, 0)
+        for index, plot in enumerate(self._extra_metric_plots.values(), start=1):
+            _opt_plot(plot)
+            metric_grid.addWidget(plot, index // 2, index % 2)
+            plot.hide()
+        avg_outer.addWidget(self.row_avg_trace)
+        avg_outer.addWidget(self.metric_panels_widget)
 
         self.row_signal = QtWidgets.QWidget()
         signal_row = QtWidgets.QHBoxLayout(self.row_signal)
@@ -4246,7 +4252,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # plot objects so export, zoom and scientific rendering share one view.
         self._postprocessing_plot_cards = []
         self._plot_card_by_widget = {}
-        for row in (self.row_heat, self.row_avg, self.row_signal, self.row_behavior):
+        for row in (self.row_heat, self.row_avg_trace, self.metric_panels_widget, self.row_signal, self.row_behavior):
             layout = row.layout()
             for index in range(layout.count()):
                 widget = layout.itemAt(index).widget()
@@ -4540,8 +4546,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.tab_sources.currentChanged.connect(self._refresh_signal_file_combo)
         self.tab_visual_mode.currentChanged.connect(self._on_visual_mode_changed)
         self.tab_visual_mode.currentChanged.connect(self._queue_view_settings_save)
+        self.tab_visual_mode.currentChanged.connect(self.baseline_suggestions.queue)
         self.combo_individual_file.currentIndexChanged.connect(self._on_individual_file_changed)
         self.combo_individual_file.currentIndexChanged.connect(self._queue_view_settings_save)
+        self.combo_individual_file.currentIndexChanged.connect(self.baseline_suggestions.queue)
 
         self.combo_align.currentIndexChanged.connect(self._update_align_ui)
         self.combo_behavior_file_type.currentIndexChanged.connect(self._update_align_ui)
@@ -4583,6 +4591,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         ):
             w.valueChanged.connect(self._schedule_psth)
         self.combo_metric.currentIndexChanged.connect(self._schedule_psth)
+        self.combo_metric.currentIndexChanged.connect(self._on_metric_selection_changed)
         self.cb_exclude_low_event_animals.toggled.connect(self._update_psth_inclusion_controls)
         self.cb_exclude_low_event_animals.toggled.connect(self._schedule_psth)
         self.cb_group_keep_trials.toggled.connect(self._schedule_psth)
@@ -8974,7 +8983,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             visible = [(widget, height) for widget, height in minima if not widget.isHidden()]
             for widget, height in minima:
                 widget.setMinimumHeight(height)
-            self._results_splitter.setMinimumHeight(sum(height for _, height in visible) + 6 * max(0, len(visible) - 1))
+            self._sync_metric_panel_layout()
+            self._results_splitter.setMinimumHeight(sum(widget.minimumHeight() for widget, _ in visible) + 6 * max(0, len(visible) - 1))
 
     def _signal_file_id(self, proc: ProcessedTrial) -> str:
         """Disambiguate repeated filenames/channels in signal batch results."""
@@ -9465,31 +9475,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if len(recordings) > 3:
             labels += f", and {len(recordings) - 3} others"
         mode = "Group: every loaded recording" if group else "Individual: selected recording"
-        scope = f"{mode} ({len(recordings)}). {labels}\nAll unfiltered selected-source bouts remain excluded."
+        scope = f"{mode} ({len(recordings)}). {labels}\nAll unfiltered selected-source bouts are checked for overlap."
         if group:
             scope += " One shared relative window is checked in every file, including files excluded from the displayed PSTH."
         return recordings, scope
 
     def _open_baseline_advisor(self) -> None:
-        """Review an optional recommendation without altering default normalization."""
-        recordings, scope = self._baseline_advisor_recordings()
-        if not recordings:
-            self.statusUpdate.emit("Load a processed recording before recommending a baseline.", 5000)
-            return
-        dialog = BaselineAdvisorDialog(
-            recordings, current_window=(self.spin_b0.value(), self.spin_b1.value()),
-            scope=scope, parent=self,
-        )
-        accepted = dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted
-        self._last_baseline_advisor_report = dialog.report
-        if accepted and dialog.proposed_window is not None:
-            self._apply_recommended_baseline(dialog.proposed_window)
-        dialog.deleteLater()
+        """Refresh the inline choices; retained for older command integrations."""
+        self.baseline_suggestions.queue()
 
     def _apply_recommended_baseline(self, window: Tuple[float, float]) -> bool:
         """Apply a reviewed window atomically as one undoable settings change."""
         start, end = map(float, window)
-        if not np.isfinite(start + end) or not self.spin_b0.minimum() <= start < end <= self.spin_b1.maximum():
+        if not np.isfinite(start + end) or not self.spin_b0.minimum() <= start < end < 0:
             return False
         with QtCore.QSignalBlocker(self.spin_b0), QtCore.QSignalBlocker(self.spin_b1):
             self.spin_b0.setValue(start)
@@ -9504,6 +9502,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _schedule_psth(self, *_args: object) -> None:
         """Debounce edits so a changed control cannot silently label old results."""
+        suggestions = getattr(self, "baseline_suggestions", None)
+        if suggestions is not None:
+            suggestions.queue()
         if self._is_restoring_settings or self._psth_computing:
             return
         self._psth_pending = True
@@ -9590,7 +9591,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _on_psth_behavior_panel_changed(self, *_args: object) -> None:
         """Update the selected chart immediately; these are display-only settings."""
-        histogram = self.combo_psth_behavior_metric.currentData() in ("duration", "ibi")
+        histogram = self.combo_psth_behavior_metric.currentData() in ("duration", "ibi", "onset_interval")
         self.cb_psth_behavior_auto_bins.setVisible(histogram)
         self.lbl_psth_behavior_bin.setText("Distribution bin" if histogram else "Time bin")
         self.spin_psth_behavior_bin.setEnabled(not histogram or not self.cb_psth_behavior_auto_bins.isChecked())
@@ -9673,6 +9674,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _update_metrics_enabled(self) -> None:
         enabled = self.cb_metrics.isChecked()
+        self.btn_more_metrics.setEnabled(enabled)
         for w in (
             self.combo_metric,
             self.spin_metric_pre0,
@@ -10387,6 +10389,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _toggle_metrics_panel(self, hide: bool) -> None:
         self.btn_hide_metrics.setText("Show" if hide else "Hide")
+        self.metric_selection_widget.setVisible(not hide)
         for w in (
             self.lbl_metric,
             self.lbl_metric_pre,
@@ -12556,6 +12559,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._last_mat = None
         self._last_tvec = None
         self._last_metrics = None
+        self._last_metric_panels = {}
         self._last_durations = np.array([], float)
         self._last_global_metrics = None
         self._last_events = np.array([], float)
@@ -12611,6 +12615,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             pass
 
     def _update_trace_preview(self) -> None:
+        suggestions = getattr(self, "baseline_suggestions", None)
+        if suggestions is not None:
+            suggestions.queue()
         # show first processed trace
         if not self._processed:
             self._clear_trace_preview()
@@ -14514,157 +14521,69 @@ class PostProcessingPanel(QtWidgets.QWidget):
             bottom=np.array([ee], float),
         )
 
+    def _selected_metric_ids(self) -> List[str]:
+        """Keep the primary legacy choice first, followed by requested panels."""
+        primary = metric_id(self.combo_metric.currentText())
+        return [primary] + [key for key, action in getattr(self, "_metric_actions", {}).items()
+                            if action.isChecked() and key != primary]
+
+    def _on_metric_selection_changed(self, *_args) -> None:
+        """Redraw selected reductions immediately without reloading source data."""
+        if getattr(self, "_is_restoring_settings", False):
+            return
+        if hasattr(self, "_last_mat") and self._last_mat is not None and self._last_tvec is not None:
+            self._render_metrics(self._last_mat, self._last_tvec)
+        self._queue_settings_save()
+
     def _render_metrics(self, mat: np.ndarray, tvec: np.ndarray) -> None:
-        set_plot_has_data(self.plot_metrics, False)
-        if mat.size == 0 or not self.cb_metrics.isChecked():
-            self.metrics_bar_pre.setOpts(height=[0])
-            self.metrics_bar_post.setOpts(height=[0])
-            self.metrics_pairs_curve.setData([], [])
-            self.metrics_scatter_pre.setData([], [])
-            self.metrics_scatter_post.setData([], [])
-            self._set_error_bar(self.metrics_err_pre, 0.0, 0.0, 0.0)
-            self._set_error_bar(self.metrics_err_post, 1.0, 0.0, 0.0)
-            self.metrics_p_text.setVisible(False)
-            self._last_metrics = None
-            return
-        metric = self.combo_metric.currentText()
-        pre0 = float(self.spin_metric_pre0.value())
-        pre1 = float(self.spin_metric_pre1.value())
-        post0 = float(self.spin_metric_post0.value())
-        post1 = float(self.spin_metric_post1.value())
-
-        def _window_vals(a: float, b: float) -> np.ndarray:
-            mask = (tvec >= a) & (tvec <= b)
-            if not np.any(mask):
-                return np.array([], float)
-            return mat[:, mask]
-
-        pre = _window_vals(pre0, pre1)
-        post = _window_vals(post0, post1)
-        if pre.size == 0 or post.size == 0:
-            self.metrics_bar_pre.setOpts(height=[0])
-            self.metrics_bar_post.setOpts(height=[0])
-            self.metrics_pairs_curve.setData([], [])
-            self.metrics_scatter_pre.setData([], [])
-            self.metrics_scatter_post.setData([], [])
-            self._set_error_bar(self.metrics_err_pre, 0.0, 0.0, 0.0)
-            self._set_error_bar(self.metrics_err_post, 1.0, 0.0, 0.0)
-            self.metrics_p_text.setVisible(False)
-            self._last_metrics = None
-            return
-
-        reduction = "auc" if metric.startswith("AUC") else "mean"
-        pre_vals_all = window_metrics(mat, tvec, pre0, pre1, reduction)
-        post_vals_all = window_metrics(mat, tvec, post0, post1, reduction)
-        pre_vals_finite = pre_vals_all[np.isfinite(pre_vals_all)]
-        post_vals_finite = post_vals_all[np.isfinite(post_vals_all)]
-        set_plot_has_data(self.plot_metrics, bool(pre_vals_finite.size or post_vals_finite.size))
-        pre_mean, pre_sem, pre_n = self._finite_mean_sem(pre_vals_finite)
-        post_mean, post_sem, post_n = self._finite_mean_sem(post_vals_finite)
-        self.metrics_bar_pre.setOpts(height=[pre_mean])
-        self.metrics_bar_post.setOpts(height=[post_mean])
-        group_mode = self.tab_sources.currentIndex() == 1
-
-        pair_mask = np.isfinite(pre_vals_all) & np.isfinite(post_vals_all)
-        pre_pair = pre_vals_all[pair_mask]
-        post_pair = post_vals_all[pair_mask]
-        p_value = np.nan
-        n_pair = int(min(pre_pair.size, post_pair.size))
-        if pre_pair.size and post_pair.size:
-            pre_pair = pre_pair[:n_pair]
-            post_pair = post_pair[:n_pair]
-            # Group trial rows share animals and cannot be treated as
-            # independent replicates. Infer only on the animal-level view.
-            summary = paired_summary(
-                pre_pair, post_pair,
-                independent_units=(not group_mode or self._last_psth_display_level == "animals"),
+        """Render each selected metric with identical screen/export definitions."""
+        self._last_metric_panels = {}
+        self._last_metrics = None
+        for plot in [self.plot_metrics, *self._extra_metric_plots.values()]:
+            plot.show_result(None)
+            set_plot_has_data(plot, False)
+        if mat.size and tvec.size and self.cb_metrics.isChecked():
+            grouped = self.tab_sources.currentIndex() == 1
+            file_rows = grouped and self._last_psth_display_level == "animals"
+            self._last_metric_panels = summarize_metrics(
+                mat, tvec, self._selected_metric_ids(),
+                (float(self.spin_metric_pre0.value()), float(self.spin_metric_pre1.value())),
+                (float(self.spin_metric_post0.value()), float(self.spin_metric_post1.value())),
+                self._psth_units(), independent_units=(not grouped or file_rows),
+                row_unit="files" if file_rows else "trials",
             )
-            p_value = summary["paired_p"]
-            # Build segmented polyline: (0, pre_i) -> (1, post_i), NaN separator.
-            x_line = np.empty(n_pair * 3, dtype=float)
-            y_line = np.empty(n_pair * 3, dtype=float)
-            x_line[0::3] = 0.0
-            x_line[1::3] = 1.0
-            x_line[2::3] = np.nan
-            y_line[0::3] = pre_pair
-            y_line[1::3] = post_pair
-            y_line[2::3] = np.nan
-            self.metrics_pairs_curve.setData(x_line, y_line, connect="finite", skipFiniteCheck=True)
-            if group_mode:
-                x_pre = self._jittered_x(0.0, n_pair, half_width=0.16)
-                x_post = self._jittered_x(1.0, n_pair, half_width=0.16)
-            else:
-                x_pre = np.zeros(n_pair, dtype=float)
-                x_post = np.ones(n_pair, dtype=float)
-            self.metrics_scatter_pre.setData(x_pre, pre_pair)
-            self.metrics_scatter_post.setData(x_post, post_pair)
-        else:
-            self.metrics_pairs_curve.setData([], [])
-            self.metrics_scatter_pre.setData([], [])
-            self.metrics_scatter_post.setData([], [])
+            for index, (key, result) in enumerate(self._last_metric_panels.items()):
+                plot = self.plot_metrics if index == 0 else self._extra_metric_plots[key]
+                plot.show_result(result)
+                summary = result["summary"]
+                set_plot_has_data(plot, bool(summary["pre_n"] or summary["post_n"]))
+            if self._last_metric_panels:
+                self._last_metrics = next(iter(self._last_metric_panels.values()))["summary"]
+        self._sync_metric_panel_layout()
 
-        if group_mode:
-            self._set_error_bar(self.metrics_err_pre, 0.0, pre_mean, pre_sem)
-            self._set_error_bar(self.metrics_err_post, 1.0, post_mean, post_sem)
-        else:
-            self._set_error_bar(self.metrics_err_pre, 0.0, 0.0, 0.0)
-            self._set_error_bar(self.metrics_err_post, 1.0, 0.0, 0.0)
-
-        finite_all = np.concatenate(
-            [
-                pre_vals_finite if pre_vals_finite.size else np.array([], float),
-                post_vals_finite if post_vals_finite.size else np.array([], float),
-                np.array(
-                    [
-                        pre_mean,
-                        post_mean,
-                        pre_mean - pre_sem,
-                        pre_mean + pre_sem,
-                        post_mean - post_sem,
-                        post_mean + post_sem,
-                        0.0,
-                    ],
-                    float,
-                ),
-            ]
-        )
-        finite_all = finite_all[np.isfinite(finite_all)]
-        if finite_all.size:
-            ymin = float(np.nanmin(finite_all))
-            ymax = float(np.nanmax(finite_all))
-        else:
-            ymin, ymax = 0.0, 1.0
-        if ymin == ymax:
-            ymax = ymin + 1.0
-        self.plot_metrics.setYRange(ymin, ymax, padding=0.2)
-        span = float(ymax - ymin) if np.isfinite(ymax - ymin) and ymax != ymin else 1.0
-        self.plot_metrics.setYRange(ymin, ymax + 0.35 * span, padding=0.08)
-        if n_pair >= 2:
-            if np.isfinite(p_value):
-                p_label = "sign-test p < 1e-4" if p_value < 1e-4 else f"sign-test p = {p_value:.4g}"
-            else:
-                p_label = "Descriptive only"
-            self.metrics_p_text.setText(p_label)
-            self.metrics_p_text.setPos(0.5, ymax + 0.14 * span)
-            self.metrics_p_text.setVisible(True)
-        else:
-            self.metrics_p_text.setVisible(False)
-        self._last_metrics = {
-            "pre": pre_mean,
-            "post": post_mean,
-            "pre_sem": pre_sem,
-            "post_sem": post_sem,
-            "pre_n": float(pre_n),
-            "post_n": float(post_n),
-            "paired_n": float(n_pair),
-            "paired_p": float(p_value) if np.isfinite(p_value) else np.nan,
-            "metric": metric,
-        }
-        self._last_metrics.update(paired_summary(
-            pre_pair, post_pair,
-            independent_units=(not group_mode or self._last_psth_display_level == "animals"),
-        ))
-        self.plot_metrics.setToolTip(str(self._last_metrics["assumption_note"]))
+    def _sync_metric_panel_layout(self) -> None:
+        """Arrange independent cards in two columns while preserving figure space."""
+        if not hasattr(self, "metric_panels_widget"):
+            return
+        selected = self._selected_metric_ids()
+        layout_name = self.combo_view_layout.currentText()
+        show = self.cb_metrics.isChecked() and layout_name not in ("Heatmap focus", "Trace focus", "Signal events")
+        self.metric_panels_widget.setVisible(show)
+        visible = [self.plot_metrics] + [self._extra_metric_plots[key] for key in selected[1:]]
+        grid = self.metric_panels_widget.layout()
+        for plot in [self.plot_metrics, *self._extra_metric_plots.values()]:
+            card = getattr(self, "_plot_card_by_widget", {}).get(plot, plot)
+            grid.removeWidget(card)
+            plot.setVisible(plot in visible)
+            card.setVisible(plot in visible)
+        columns = self.metric_panels_widget.columns
+        for index, plot in enumerate(visible):
+            card = getattr(self, "_plot_card_by_widget", {}).get(plot, plot)
+            grid.addWidget(card, index // columns, index % columns)
+        height = 230 * ((len(visible) + columns - 1) // columns)
+        self.metric_panels_widget.setMinimumHeight(height)
+        if hasattr(self, "row_avg"):
+            self.row_avg.setMinimumHeight(230 + (height if show else 0))
 
     def _compute_global_metrics_for_trace(
         self,
@@ -15001,6 +14920,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.metrics_pairs_curve.setPen(pg.mkPen(accent.red(), accent.green(), accent.blue(), 65))
         self.metrics_p_text.setColor(palette["text"])
         self.metrics_p_text.setFont(QtGui.QFont("Segoe UI", 9))
+        for plot in [self.plot_metrics, *self._extra_metric_plots.values()]:
+            plot.set_colors(palette)
         for error_bar in (self.metrics_err_pre, self.metrics_err_post, self.global_err_amp, self.global_err_freq):
             error_bar.setData(pen=pg.mkPen(palette["text"], width=1.2))
         self.lbl_status.setStyleSheet(
@@ -16550,6 +16471,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "psth_group_keep_trials": self.cb_group_keep_trials.isChecked(),
             "metrics_enabled": self.cb_metrics.isChecked(),
             "metric": self.combo_metric.currentText(),
+            "extra_metrics": [key for key, action in self._metric_actions.items() if action.isChecked()],
             "metric_pre0": float(self.spin_metric_pre0.value()),
             "metric_pre1": float(self.spin_metric_pre1.value()),
             "metric_post0": float(self.spin_metric_post0.value()),
@@ -16703,6 +16625,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_psth_inclusion_controls()
         self.cb_metrics.setChecked(bool(data.get("metrics_enabled", True)))
         _set_combo(self.combo_metric, "Mean signal" if data.get("metric") == "Mean z" else data.get("metric"))
+        for key, action in self._metric_actions.items():
+            with QtCore.QSignalBlocker(action):
+                action.setChecked(key in data.get("extra_metrics", []))
         if "metric_pre0" in data:
             self.spin_metric_pre0.setValue(float(data["metric_pre0"]))
         if "metric_pre1" in data:
@@ -17422,6 +17347,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 _start_export_step("Exporting metrics table...")
                 import csv
                 met_base = os.path.join(out_dir, f"{prefix}_metrics")
+                export_selected_metrics(getattr(self, "_last_metric_panels", {}), met_base, do_csv, do_h5)
                 if do_csv:
                     with open(f"{met_base}.csv", "w", newline="") as f:
                         w = csv.writer(f)
@@ -17461,6 +17387,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 _start_export_step("Exporting average plot...")
                 base = os.path.join(out_dir, f"{prefix}_plot_avg")
                 self._export_widget_selective(self.row_avg, base, do_png, do_pdf)
+                for index, key in enumerate(getattr(self, "_last_metric_panels", {})):
+                    plot = self.plot_metrics if index == 0 else self._extra_metric_plots[key]
+                    self._export_widget_selective(plot, os.path.join(out_dir, f"{prefix}_plot_metric_{key}"), do_png, do_pdf)
                 _require_output_files(base, [ext for enabled, ext in ((do_png, "png"), (do_pdf, "pdf")) if enabled])
                 _finish_export_step("Exported average plot")
             if choices.get("plot_trace") and hasattr(self, "plot_trace"):
@@ -17591,7 +17520,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         show_heat = "Heatmap" in pub_content
         show_avg = "Avg" in pub_content or "PSTH" in pub_content
         show_metrics = "Metrics" in pub_content
-        n_cols = int(show_heat) + int(show_avg) + int(show_metrics)
+        selected_metrics = (self._selected_metric_ids() if hasattr(self, "_selected_metric_ids")
+                            else [metric_id(self.combo_metric.currentText())])
+        n_cols = int(show_heat) + int(show_avg) + (len(selected_metrics) if show_metrics else 0)
         if n_cols == 0:
             n_cols = 3
             show_heat = show_avg = show_metrics = True
@@ -17618,7 +17549,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if show_avg:
             width_ratios.append(2.5)
         if show_metrics:
-            width_ratios.append(1.2)
+            width_ratios.extend([1.45] * len(selected_metrics))
 
         fig_w = sum(width_ratios) * 1.8
         fig_h = max(3.5, n_rows * 1.8)
@@ -17658,12 +17589,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     ax.set_yticks([]); ax.set_xticks([])
                     col += 1
                 if show_metrics:
-                    ax = fig.add_subplot(gs[row_i, col])
-                    if not titled:
-                        ax.set_title(beh_name, fontweight="bold", fontsize=10, loc="left", pad=8)
-                    ax.text(0.5, 0.5, "N/A", ha="center", va="center",
-                            transform=ax.transAxes, fontsize=8, color="#999")
-                    ax.set_yticks([]); ax.set_xticks([])
+                    for key in selected_metrics:
+                        ax = fig.add_subplot(gs[row_i, col])
+                        ax.set_title(METRICS[key], fontsize=9)
+                        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+                        ax.set_yticks([]); ax.set_xticks([])
+                        col += 1
                 continue
 
             avg, sem, _counts = mean_sem(mat)
@@ -17729,82 +17660,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 ax_avg.spines["right"].set_visible(False)
                 col += 1
 
-            # --- Metrics bar with t-test ---
+            # Each metric uses its own units, paired values and corrected test.
             if show_metrics:
-                ax_met = fig.add_subplot(gs[row_i, col])
-                if not first_ax_placed:
-                    ax_met.set_title(beh_name, fontweight="bold", fontsize=10, loc="left", pad=8)
-                    first_ax_placed = True
-                elif row_i == 0:
-                    ax_met.set_title(f"{metric_name} (paired sign test)", fontweight="bold")
-                pre_mask = (tvec >= pre0) & (tvec <= pre1)
-                post_mask = (tvec >= post0) & (tvec <= post1)
-                if np.any(pre_mask) and np.any(post_mask):
-                    pre_vals = mat[:, pre_mask]
-                    post_vals = mat[:, post_mask]
-                    reduction = "auc" if metric_name.startswith("AUC") else "mean"
-                    per_row_pre = window_metrics(mat, tvec, pre0, pre1, reduction)
-                    per_row_post = window_metrics(mat, tvec, post0, post1, reduction)
-
-                    # Filter valid paired data
-                    valid = np.isfinite(per_row_pre) & np.isfinite(per_row_post)
-                    pre_v = per_row_pre[valid]
-                    post_v = per_row_post[valid]
-                    n_pairs = int(pre_v.size)
-
-                    mean_pre, sem_pre, _pre_n = self._finite_mean_sem(per_row_pre)
-                    mean_post, sem_post, _post_n = self._finite_mean_sem(per_row_post)
-
-                    colors = ["#5B8CD6", "#D67B5B"]
-                    bars = ax_met.bar([0, 1], [mean_pre, mean_post], width=0.55,
-                                       color=colors, edgecolor="white", linewidth=0.5, alpha=0.85)
-                    ax_met.errorbar([0, 1], [mean_pre, mean_post], yerr=[sem_pre, sem_post],
-                                     fmt="none", ecolor="#333", elinewidth=1.0, capsize=3, capthick=0.8)
-
-                    # Paired lines + scatter
-                    if n_pairs > 0 and n_pairs <= 50:
-                        for j in range(n_pairs):
-                            ax_met.plot([0, 1], [pre_v[j], post_v[j]],
-                                         color="#888", linewidth=0.4, alpha=0.5, zorder=1)
-                        jitter_pre = np.random.default_rng(42).uniform(-0.08, 0.08, n_pairs)
-                        jitter_post = np.random.default_rng(43).uniform(-0.08, 0.08, n_pairs)
-                        ax_met.scatter(jitter_pre, pre_v, s=12, color="#3B6CB0",
-                                        edgecolors="white", linewidths=0.3, zorder=3, alpha=0.8)
-                        ax_met.scatter(1 + jitter_post, post_v, s=12, color="#B05B3B",
-                                        edgecolors="white", linewidths=0.3, zorder=3, alpha=0.8)
-
-                    # Use the same test and replication unit as the GUI.
-                    independent = (self.tab_sources.currentIndex() != 1 or
-                                   (self.tab_visual_mode.currentIndex() == 1 and
-                                    not self._psth_group_trial_view_enabled()))
-                    test_result = paired_summary(pre_v, post_v, independent_units=independent)
-                    p_val = test_result["paired_p"]
-                    if np.isfinite(p_val):
-                        if p_val < 0.001:
-                            sig_str = "***"
-                        elif p_val < 0.01:
-                            sig_str = "**"
-                        elif p_val < 0.05:
-                            sig_str = "*"
-                        else:
-                            sig_str = "n.s."
-                        lower, upper = ax_met.get_ylim()
-                        span = max(upper - lower, 1e-9)
-                        bar_y = upper + 0.06 * span
-                        ax_met.plot([0, 0, 1, 1], [bar_y, bar_y + 0.04 * span, bar_y + 0.04 * span, bar_y],
-                                     color="#333", linewidth=0.8)
-                        ax_met.text(0.5, bar_y + 0.06 * span, f"{sig_str}\np={p_val:.3g}",
-                                     ha="center", va="bottom", fontsize=7, color="#333")
-                        ax_met.set_ylim(lower, upper + 0.36 * span)
-                else:
-                    ax_met.text(0.5, 0.5, "N/A", ha="center", va="center",
-                                transform=ax_met.transAxes, fontsize=8, color="#999")
-
-                ax_met.set_xticks([0, 1])
-                ax_met.set_xticklabels(["Pre", "Post"], fontsize=8)
-                ax_met.set_ylabel(metric_name, fontsize=8)
-                ax_met.spines["top"].set_visible(False)
-                ax_met.spines["right"].set_visible(False)
+                file_rows = (self.tab_sources.currentIndex() == 1 and
+                             self.tab_visual_mode.currentIndex() == 1 and
+                             not self._psth_group_trial_view_enabled())
+                summaries = summarize_metrics(
+                    mat, tvec, selected_metrics, (pre0, pre1), (post0, post1), self._psth_units(),
+                    independent_units=(self.tab_sources.currentIndex() != 1 or file_rows),
+                    row_unit="files" if file_rows else "trials",
+                )
+                for key, result in summaries.items():
+                    ax_met = fig.add_subplot(gs[row_i, col])
+                    title = result["summary"]["metric"]
+                    if not first_ax_placed:
+                        title = beh_name + " / " + title
+                        first_ax_placed = True
+                    draw_metric_matplotlib(ax_met, result, title)
+                    col += 1
 
         # Save
         fig_base = os.path.join(out_dir, f"{prefix}_publication_figure")
@@ -17958,12 +17831,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         """A closed panel must never publish a queued or unfinished preview."""
+        self.baseline_suggestions.stop()
         self._cancel_signal_preview()
         super().closeEvent(event)
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         """Resume automatic preview when returning to the signal workspace."""
         super().showEvent(event)
+        self.baseline_suggestions.resume()
         self._queue_signal_preview()
 
     def hideEvent(self, event: QtGui.QHideEvent) -> None:
@@ -18081,7 +17956,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._setup_section_popups()
         if not self._section_popups:
             # Defer until the widget is fully attached to a main-window host.
-            QtCore.QTimer.singleShot(0, self._setup_section_popups)
+            QtCore.QTimer.singleShot(0, self, self._setup_section_popups)
         if self._force_fixed_default_layout and self._section_popups:
             self.apply_fixed_default_layout()
             self._dock_layout_restored = True
@@ -18223,7 +18098,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if self._pending_fixed_layout_retry:
             return
         self._pending_fixed_layout_retry = True
-        QtCore.QTimer.singleShot(0, self._retry_apply_fixed_default_layout)
+        QtCore.QTimer.singleShot(0, self, self._retry_apply_fixed_default_layout)
 
     def _retry_apply_fixed_default_layout(self) -> None:
         self._pending_fixed_layout_retry = False
@@ -18476,7 +18351,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._applying_fixed_default_layout = False
 
         # Re-apply once after queued dock events for extra stability.
-        QtCore.QTimer.singleShot(0, self._enforce_fixed_post_default_visibility)
+        QtCore.QTimer.singleShot(0, self, self._enforce_fixed_post_default_visibility)
         self._persist_fixed_post_default_state()
         self._enforce_only_post_docks_visible()
 

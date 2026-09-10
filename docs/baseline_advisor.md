@@ -1,164 +1,134 @@
-# PSTH baseline advisor
+# Automatic PSTH baseline suggestions
 
-In **Postprocessing > PSTH > Window & baseline**, choose **Recommend baseline**.
-Review the suggested window and its diagnostics, then choose **Apply suggested
-window**. Applying the suggestion is undoable and preserves the normalization
-method and event selections. The existing PSTH validity rules still apply, so
-usable trial counts can change after changing the baseline.
+**Postprocessing > PSTH > Window & baseline** shows up to three suggested windows
+directly below the baseline inputs. Loading a signal, choosing events, changing
+the pre-event duration or switching recording scope refreshes them automatically.
+Click a choice to apply it. There is no separate dialog or Estimate step.
 
-The tool recommends a reference for a specific recording and event definition.
-It can return **No reliable common baseline window found**. It does not claim a
-universally optimal baseline or validate neural-response significance.
+Every choice ends strictly before event time zero and lies inside the displayed
+pre-event span, up to the baseline controls' 60-second limit. Applying a choice
+changes only baseline start/end, preserves normalization and event selection,
+and creates one undoable change. Usable PSTH trial counts may change under the
+existing baseline validity rules.
 
-## Controls and scope
+## Reading the scores
 
-- **Search before event:** maximum lookback, independent of the displayed PSTH
-  window. A reference can start before the plotted epoch.
-- **Pre-event guard:** time excluded before every known selected-source event.
-- **Post-bout recovery:** time excluded after each known bout ends. Choose this
-  from the sensor and experimental protocol. Autocorrelation is not a direct
-  measurement of sensor decay or biological recovery.
-- **Minimum duration:** shortest candidate to assess. Duration alone is not a
-  guarantee of sufficient information.
-- Individual view assesses the selected recording. Group view requires the same
-  relative window to pass in every loaded recording, including files excluded
-  from the displayed group PSTH.
+The displayed percentage is **a fit score out of 100, not a confidence
+probability, p-value or biological validation**. It ranks available candidates
+using signal information, distribution stability, data coverage and known-event
+timing. It does not establish a universally optimal baseline.
 
-Whole bouts are excluded, including events removed by the PSTH filters. For
-offset alignment the current bout can occupy negative relative times and is
-excluded too. Transition alignment also excludes its two component behaviors.
-Unknown durations are represented as point events and reported. Other behavior
-types that are not part of the selected event source are not automatically
-excluded; their potential effects still require experimental judgment.
+Best available windows remain visible when evidence is limited. Their scores
+are capped and the inline status identifies the main limitation. Hover over each
+choice for coverage, event-free coverage, estimated information, recording scope
+and specific cautions.
 
-## How the recommendation is made
+Limitations include few events, slowly varying signals, cuts, preceding-bout
+overlap, a short-window SD unlike the wider reference, and SD variation across
+events. If every candidate is flat, missing, lacks enough native samples, or is
+consistently dominated by a nearly deterministic slope, there is no choice. The
+tool also abstains when no observed event-free reference can be assessed.
 
-1. **Validate native measurements.** Timestamps must be finite and increasing.
-   NaN cuts and timestamp gaps are preserved. Candidate windows need observed
-   samples throughout; interpolation never supplies extra information.
-2. **Separate events chronologically.** Earlier events form the search set.
-   Later events form the checking set, with the entire search lookback purged
-   from their boundary plus a training-derived temporal buffer. This reduces
-   shared data and nearby dependence. It does not prove statistical independence.
-3. **Estimate temporal information.** Estimate the autocorrelation of both the
-   signal and its centered squared values within contiguous reference segments.
-   Squared-value dependence matters for estimating a standard deviation.
-   The approximate information timescale is
-   `dt * (1 + 2 * sum(positive autocorrelations))`.
-   Both the broad search context and each candidate are checked; the slower
-   timescale is retained. Effective sample count is approximately reference
-   duration divided by this timescale, capped by the observed sample count.
-   Truncated or unsupported estimates fail the information check.
-4. **Check distribution stability.** Compare the means and standard deviations
-   of the first and second halves of each window, and the distribution of
-   baseline SDs across trials. Skewness and tail frequency are reported without
-   assuming Gaussian signals. A stationary skewed signal is not automatically
-   rejected because it is skewed.
-5. **Rank on the earlier references only.** Reward observed event-free coverage,
-   adequate information, stable location/scale and proximity to the event.
-   The absolute size of the SD, post-event response amplitude and statistical
-   significance are never optimization targets. The search score is a heuristic
-   ranking, not a confidence percentage or probability.
-6. **Check the first choice once on later events.** All files must pass again,
-   including a check for a change of SD between the earlier and later blocks.
-   A failed check causes abstention. The tool does not try other candidates
-   against the same later events until one passes.
-7. **Audit every selected event.** Search work is capped using evenly spaced
-   events for large batches. A proposed window is then checked against all
-   selected events before being offered. Full coverage is reported explicitly.
+## Scope and event protection
 
-The baseline quality checks do not modify the signal or independently remove
-PSTH trials. Current-window diagnostics allow comparison with the proposal.
+Individual view uses the selected recording. Group view assesses every loaded
+recording and offers one shared relative window. Weak files remain represented
+in the score rather than disappearing from the assessment.
 
-## Default policies
+Every selected alignment event and every unfiltered selected-source bout is
+checked, including bouts removed by PSTH event filters. Offset alignment protects
+the complete preceding bout. Transition alignment additionally protects both
+component behaviors, including bouts not forming a qualifying transition.
+Unknown durations are point events. Other unselected behavior types are not
+automatically treated as contamination.
 
-These are conservative software heuristics that have been tested on simulations,
-not universal thresholds established by the literature. All are configurable in
-`BaselineAdvisorConfig` at the beginning of `pyBer/baseline_advisor.py` and are
-included in exported reports.
+Known bouts are expanded by 0.10 seconds before onset and 0.50 seconds after
+offset. These are explicit engineering settings, not an inferred sensor decay
+constant or a guarantee of biological recovery. Actual inter-bout spacing
+determines which candidate windows overlap these protected intervals.
 
-| Policy | Default |
+Signal statistics use only completely observed, event-free candidate windows.
+Coverage and overlap still count **every selected event**. A choice with some
+overlap can be shown as Limited with its overlap fraction and capped score.
+Applying it does not silently mask those events. Review that limitation before
+use, especially for confirmatory analysis.
+
+## Calculation
+
+1. Validate native clocks and contiguous finite segments. NaN cuts and timestamp
+   gaps larger than three median native sample intervals break a segment.
+   Interpolation never supplies baseline information.
+2. Search a bounded grid of durations and offsets inside the current Pre span.
+   Endpoints have 0.01-second precision and remain before the pre-event guard,
+   including its boundary.
+3. Check data and protected-bout coverage at every target event. Sample at most
+   32 eligible events evenly through each recording for expensive statistics,
+   retaining every loaded recording.
+4. Estimate information from initial positive autocorrelations of the signal
+   and its centered squared values within each candidate. Information is capped
+   by the sampled native observations. This is an approximation, not a count of
+   proven independent observations.
+5. Check half-window mean/SD differences, SD variation across events, robust
+   distribution shape and candidate SD relative to a wider event-free pre-event
+   reference. Minimizing SD is never rewarded; an accidentally small denominator
+   can score poorly.
+6. Combine information, stability, representative scale, coverage and recency.
+   File scores use 60% of their equal-file mean and 40% of their minimum, so weak
+   recordings cannot be hidden by many strong ones. Explicit caps reflect
+   overlap, missing coverage, few events and weak information. Display the three
+   highest-ranking sufficiently distinct windows.
+
+Signal diagnostics never inspect samples at or after the target event. Known
+preceding-bout responses do not supply candidate statistics. Post-event amplitude,
+pre/post effect size and significance are not optimization objectives.
+
+## Defaults and performance
+
+`BaselineSuggestionConfig`, at the beginning of `pyBer/baseline_suggestions.py`,
+exposes the policy:
+
+| Setting | Default |
 | --- | --- |
-| Search lookback / minimum duration | 30 s / 1 s |
-| Pre-event guard / post-bout recovery | 0.25 s / 1 s |
-| Minimum native samples per reference | 20 |
-| Minimum estimated effective samples, lower decile | 20 |
-| Minimum usable references in each recording | 80% |
-| Minimum earlier / later events | 8 / 4 |
-| Maximum half-window mean difference, in window SDs, upper decile | 1 |
-| Maximum half-window SD ratio, upper decile | 3 |
-| Maximum across-trial baseline SD ratio, 90th / 10th percentile | 4 |
-| Maximum earlier / later median baseline SD ratio | 3 |
-| Search event cap per block and recording | 100 |
-| Maximum rate used for autocorrelation estimation | 100 Hz |
+| Search span | Current Pre value, capped at 60 s |
+| Guard / post-bout protection | 0.10 s / 0.50 s |
+| Minimum candidate duration | 0.25 s |
+| Minimum native observations per assessed window | 6 |
+| Maximum sampled events per recording | 32 |
+| Maximum native samples per quality segment | 256 |
+| Information target for Supported choices | 20 estimated effective samples |
 
-For high-rate recordings, autocorrelation is evaluated on bin means formed
-inside contiguous segments only. It does not count the display resampling rate
-as independent information. Information estimates are approximate; no exact
-confidence interval for SD or false-positive probability is claimed.
+Native samples are selected evenly when a segment exceeds the computation cap.
+Compatible-length segments use batched statistics and FFTs without padding or
+interpolation of observations. The GUI debounces edits for 240 ms, uses a
+background thread pool, retains at most one numerical job per panel, and discards
+superseded results. Baseline or normalization edits reuse cached choices when
+signal, events and Pre span are unchanged.
 
-## Validation and reproduction
+The earlier [strict advisor](baseline_advisor_strict.md) remains a separate API.
+Its mandatory chronological holdout and abstention policy is not silently
+represented as a percentage in this faster descriptive ranking. Repeatedly
+searching the same data is not independent validation.
 
-Run `python scripts/validate_baseline_advisor.py --seeds 10` in the pyBer
-environment, or run that script directly from an IDE. Experiment parameters,
-random seeds and figure styles are at the top of the script. Outputs go to
-`_test/baseline_advisor_validation`: per-run CSV, summaries, configuration,
-invariance checks and figures in PNG, PDF and SVG.
+## Validation
 
-The repeated scenarios include white and correlated noise, sparse asymmetric
-transients, dense events, long preceding bouts, cuts, strong drift, flat signals
-and later changes of scale. Comparisons use the existing one-second fixed
-reference as a descriptive benchmark. An unrelated-event average looking
-closer to zero is not used to select windows and is not treated as proof of
-correct inference.
+Run `python scripts/validate_inline_baseline.py` in the pyBer environment for
+repeatable synthetic and read-only example-data benchmarks against the strict
+advisor. The script writes timing/choice tables and figures. Tests cover sparse
+events, known-bout overlap, gaps, constants, deterministic drift, units and
+excluded-response invariance, batched/scalar numerical parity, automatic refresh,
+cache reuse, stale-result suppression and explicit apply/undo.
 
-Additional regression checks cover offset alignment, filtered-out neighboring
-events, mixed clean/unreliable groups, source preservation, invariance to changes
-inside excluded responses, conversion of units, candidate-local dependence,
-single-candidate validation, and GUI apply/undo and worker lifecycle behavior.
+The September 2026 validation used 27 seeded scenarios plus the provided
+social-contact recording. All pre-event geometry, bounded-score, unit-invariance,
+excluded-response-invariance and input-integrity checks passed. Median numerical
+runtime was 0.118 seconds versus 0.991 seconds for the previous strict advisor;
+the provided recording took 0.125 seconds. These timings exclude the deliberate
+240 ms edit debounce and vary by machine and recording size. The two methods
+have different evidence requirements, so this is a workflow-cost comparison.
 
-Validation snapshot with the default policy, seeds 5100 to 5109:
-
-| Simulated reference | Recommendations / 10 runs |
-| --- | --- |
-| Stationary white noise | 10 |
-| Stationary correlated noise | 10 |
-| Sparse asymmetric transients | 2 |
-| Dense events with overlapping protection intervals | 0 |
-| Long preceding bouts with adequate intervening time | 10 |
-| Repeated cuts | 0 |
-| Strong drift | 0 |
-| Flat signal | 0 |
-| Later increase in variance | 0 |
-
-All ten later-variance cases failed the later-event check. The final batch passed
-nine declared invariance/abstention checks. Typical median runtime was 0.28 to
-0.49 seconds per recording on the validation machine; heavily fragmented cuts
-took about 1.96 seconds. The correlated-noise scenario had approximately 1.8
-effective samples for the fixed one-second reference versus 29 for the advised
-reference. These are descriptive engineering results, not a validation of
-neural-response accuracy or a statistical false-positive rate.
-
-Simulation performance does not establish biological validity for arbitrary
-recordings. For confirmatory experiments, specify the baseline policy using the
-protocol or independent pilot data, then lock it. Repeatedly changing settings
-and rerunning on the same recordings does not create fresh validation data.
-
-## Methodological basis
-
-The advisor is a new engineering method informed by these principles:
-
-- [PASTa methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC12224222/): stable
-  reference periods and normalization-dependent interpretation.
-- [Published photometry protocol](https://www.nature.com/articles/s41467-021-22260-7):
-  reference selection justified by the inter-trial interval and preceding events.
-- [Stan effective sample size documentation](https://mc-stan.org/docs/2_38/reference-manual/analysis.html):
-  information loss under autocorrelation. Applying related diagnostics to
-  baseline variance is an approximation, not an exact inferential procedure.
-- [Roberts et al., 2017](https://doi.org/10.1111/ecog.02881): validation strategies
-  must account for temporal and hierarchical dependence.
-- [Kriegeskorte et al., 2009](https://www.nature.com/articles/nn.2303): dependent
-  selection and analysis can bias conclusions.
-- [NIST standard deviation confidence limits](https://itl.nist.gov/div898/software/dataplot/refman1/auxillar/sdconfli.htm):
-  exact normal-theory SD intervals depend on assumptions that should not be
-  silently applied to correlated photometry samples.
+Literature supports several baseline-referenced transformations, including
+[GuPPy's per-event subtraction](https://www.nature.com/articles/s41598-021-03626-9)
+and [FiPhA's baseline normalization](https://pmc.ncbi.nlm.nih.gov/articles/PMC10885510/).
+These do not establish a universal baseline-selection score. This ranking is an
+explicit software heuristic that should be checked against the protocol, ideally
+using independent pilot recordings before locking a policy.
