@@ -1,16 +1,19 @@
 # Compact PSTH dashboard
 
-The Standard view has two aligned rows beneath the trace preview:
+The Standard view keeps related plots in two shared cards beneath the trace preview:
 
-| Main figure | Compact figure | Compact figure |
-| --- | --- | --- |
-| Heatmap and color scale | First behavior choice | Second behavior choice |
-| Average PSTH | Selected pre/post comparison | Selected global metric |
+- Left: heatmap above average PSTH in one continuous card. Both use identical
+  plot widths and left-axis margins. The time axis is labeled once below PSTH;
+  zooming or panning either plot updates both. The color-scale column is reserved
+  beside both plots, including when the detailed histogram editor is open.
+- Upper right: both selected behavior plots in one shared card, separated by
+  just 2 pixels rather than two padded frames.
+- Lower right: the compact pre/post comparison and selected global summary.
 
-The main column receives half the width and each side column one quarter.
-The primary comparison shares the PSTH row instead of adding a full-width row.
-Optional additional comparisons remain available through **More metrics**, with
-three compact cards per additional row.
+The left and right sections each receive half the available width. Optional
+additional comparisons remain available through **More metrics**, with three
+compact cards per additional row. Heatmap image export includes the paired PSTH;
+PSTH/dashboard export includes the shared cards and comparison summaries.
 
 Choose the two behavior plots independently under **Behavior panel**. Their
 shared bin width and automatic distribution-bin option apply consistently to
@@ -53,3 +56,9 @@ gaps, selected-file scope, group aggregation, persistence, independent behavior
 choices, and placement. A local benchmark on 100,000 synthetic samples measured
 about 11 ms for all ten summaries versus 4.9 ms for the previous two. The minimum
 height of the PSTH plus primary-comparison area falls from 460 to 220 pixels.
+
+
+The shared-card alignment regression checks time coordinates to within one pixel
+at 1000- and 1400-pixel dashboard widths, with both compact and detailed color
+scales, and after zooming from either time plot. Plot ranges are synchronized
+explicitly so a temporary resize mismatch cannot change the shared time limits.

@@ -35,6 +35,7 @@ from plot_trace import with_time_gap_breaks
 from numeric_controls import with_slider
 from psth_metrics import METRICS, metric_id, summarize_metrics, draw_metric_matplotlib, export_selected_metrics
 from psth_metric_panels import MetricPanel, MetricGrid
+from aligned_time_axes import AlignedTimeAxes
 from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_metrics
 from file_drop import install_file_drop, expand_paths
 from behavior_import import infer_table, read_behavior_csv, detect_time_column
@@ -4281,17 +4282,64 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     placeholder.deleteLater()
                     self._postprocessing_plot_cards.append(card)
                     self._plot_card_by_widget[widget] = card
-        # Treat the heatmap and its scale as one column so both dashboard rows
-        # share the same two compact side-column widths.
+        # Merge related plots without rebuilding their data or export objects.
+        # Both time plots occupy the same grid column; the scale has its own
+        # column, so it can never steal horizontal space from just the heatmap.
         self.heat_figure = QtWidgets.QWidget()
-        heat_figure_layout = QtWidgets.QHBoxLayout(self.heat_figure)
-        heat_figure_layout.setContentsMargins(0, 0, 0, 0)
-        heat_figure_layout.setSpacing(4)
-        heat_card = self._plot_card_by_widget[self.plot_heat]
-        for widget in (heat_card, self.heat_colorbar_widget, self.heat_lut):
+        time_grid = QtWidgets.QGridLayout(self.heat_figure)
+        time_grid.setContentsMargins(0, 0, 0, 0)
+        time_grid.setHorizontalSpacing(4)
+        time_grid.setVerticalSpacing(2)
+        self.bout_figure = QtWidgets.QWidget()
+        bout_layout = QtWidgets.QHBoxLayout(self.bout_figure)
+        bout_layout.setContentsMargins(0, 0, 0, 0)
+        bout_layout.setSpacing(2)
+        for plot in (self.plot_heat, self.plot_avg, self.plot_dur, self.plot_bout_second):
+            old_card = self._plot_card_by_widget.pop(plot)
+            old_card.layout().removeWidget(plot)
+            plot.setParent(None)
+            self._postprocessing_plot_cards.remove(old_card)
+            old_card.setParent(None)
+            old_card.deleteLater()
+        time_grid.addWidget(self.plot_heat, 0, 0)
+        time_grid.addWidget(self.plot_avg, 1, 0)
+        scales = QtWidgets.QWidget()
+        scale_layout = QtWidgets.QHBoxLayout(scales)
+        scale_layout.setContentsMargins(0, 0, 0, 0)
+        scale_layout.setSpacing(0)
+        for widget in (self.heat_colorbar_widget, self.heat_lut):
             heat_row.removeWidget(widget)
-            heat_figure_layout.addWidget(widget, stretch=1 if widget is heat_card else 0)
-        heat_row.insertWidget(0, self.heat_figure, stretch=2)
+            scale_layout.addWidget(widget)
+        time_grid.addWidget(scales, 0, 1)
+        time_grid.setColumnStretch(0, 1)
+        time_grid.setRowStretch(0, 1)
+        time_grid.setRowStretch(1, 1)
+        self.psth_scale_container = scales
+        self.psth_shared_card = create_plot_card(self.heat_figure, "")
+        self.bout_shared_card = create_plot_card(self.bout_figure, "")
+        for card in (self.psth_shared_card, self.bout_shared_card):
+            card.title_label.hide()
+            card.layout().setContentsMargins(8, 8, 8, 8)
+            self._postprocessing_plot_cards.append(card)
+        for plot in (self.plot_heat, self.plot_avg):
+            self._plot_card_by_widget[plot] = self.psth_shared_card
+            plot.getAxis("left").setWidth(76)
+        self.plot_heat.getAxis("bottom").setStyle(showValues=False)
+        self.plot_heat.getAxis("bottom").setHeight(8)
+        self.plot_heat.setLabel("bottom", "")
+        self._aligned_time_axes = AlignedTimeAxes(self.plot_heat, self.plot_avg, self)
+        for plot in (self.plot_dur, self.plot_bout_second):
+            self._plot_card_by_widget[plot] = self.bout_shared_card
+            bout_layout.addWidget(plot, 1)
+        # One continuous dashboard replaces the splitter between the time plots.
+        self.dashboard_side = QtWidgets.QWidget()
+        side_layout = QtWidgets.QVBoxLayout(self.dashboard_side)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+        side_layout.setSpacing(6)
+        side_layout.addWidget(self.bout_shared_card, 1)
+        side_layout.addWidget(self.row_avg, 1)
+        heat_row.addWidget(self.psth_shared_card, 1)
+        heat_row.addWidget(self.dashboard_side, 1)
         self.trace_card = create_plot_card(self.plot_trace, "")
         self.trace_card.title_label.hide()
         self._postprocessing_plot_cards.append(self.trace_card)
@@ -4299,10 +4347,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._results_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         self._results_splitter.setChildrenCollapsible(False)
         self._results_splitter.setHandleWidth(6)
-        for index, widget in enumerate((self.trace_card, self.row_heat, self.row_avg, self.row_signal, self.row_behavior)):
+        for index, widget in enumerate((self.trace_card, self.row_heat, self.row_signal, self.row_behavior)):
             self._results_splitter.addWidget(widget)
             self._results_splitter.setStretchFactor(index, 1 if index == 0 else 2)
-        self._results_splitter.setSizes([170, 300, 250, 180, 180])
+        self._results_splitter.setSizes([170, 500, 180, 180])
         self._results_scroll = QtWidgets.QScrollArea()
         self._results_scroll.setWidgetResizable(True)
         self._results_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -8996,17 +9044,23 @@ class PostProcessingPanel(QtWidgets.QWidget):
             show_signal = True
 
         self.plot_trace.setVisible(show_trace)
-        self.row_heat.setVisible(show_heat)
+        self.row_heat.setVisible(show_heat or show_avg)
+        self.plot_heat.setVisible(show_heat)
+        self.plot_avg.setVisible(show_avg)
+        self.psth_scale_container.setVisible(show_heat)
         self.row_avg.setVisible(show_avg)
         self.row_signal.setVisible(show_signal)
         self.row_behavior.setVisible(show_behavior)
         for plot, card in getattr(self, "_plot_card_by_widget", {}).items():
             card.setVisible(not plot.isHidden())
+        self.psth_shared_card.setVisible(show_heat or show_avg)
+        self.bout_shared_card.setVisible(show_heat and not self.plot_dur.isHidden())
+        self.dashboard_side.setVisible(not self.bout_shared_card.isHidden() or
+                                       (show_avg and (not self.plot_metrics.isHidden() or not self.plot_global.isHidden())))
         if hasattr(self, "_results_splitter"):
             # All panels must keep a legible plotting area. Extra rows scroll
             # vertically instead of compressing titles and axes into one another.
-            minima = ((self.trace_card, 160), (self.row_heat, 220),
-                      (self.row_avg, 210), (self.row_signal, 220), (self.row_behavior, 360))
+            minima = ((self.trace_card, 160), (self.row_heat, 440 if show_heat and show_avg else 220), (self.row_signal, 220), (self.row_behavior, 360))
             visible = [(widget, height) for widget, height in minima if not widget.isHidden()]
             for widget, height in minima:
                 widget.setMinimumHeight(height)
@@ -9246,7 +9300,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._last_mat = mat
                 self._last_tvec = tvec
                 self.lbl_plot_file.setText(f"File: {sel_id}")
-                self.plot_avg.setTitle("Average across trials +/- SEM")
+                self.plot_avg.setTitle("PSTH: mean +/- SEM")
         # Always refresh the trace preview to match the selected file
         if self._last_mat is None:
             self._clear_psth_result_view()
@@ -14463,7 +14517,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         y_axis.setTicks([ticks])
         try:
             y_axis.setStyle(tickTextOffset=6, autoExpandTextSpace=False)
-            y_axis.setWidth(58 if n_rows > 12 else 76)
+            y_axis.setWidth(76)
         except Exception:
             pass
         label_kind = "Animals" if is_animal_level else "Trials"
@@ -14515,9 +14569,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_avg.setXRange(float(tvec[0]), float(tvec[-1]), padding=0)
         display_level = str(getattr(self, "_last_psth_display_level", "trials") or "trials")
         if display_level == "animals":
-            self.plot_avg.setTitle("Average across animals \u00b1 SEM")
+            self.plot_avg.setTitle("PSTH: animals \u00b1 SEM")
         else:
-            self.plot_avg.setTitle("Average across trials \u00b1 SEM")
+            self.plot_avg.setTitle("PSTH: mean \u00b1 SEM")
 
     @staticmethod
     def _finite_mean_sem(values: np.ndarray) -> Tuple[float, float, int]:
@@ -17336,13 +17390,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if choices.get("plot_heatmap") and hasattr(self, "row_heat"):
                 _start_export_step("Exporting heatmap plot...")
                 base = os.path.join(out_dir, f"{prefix}_plot_heatmap")
-                self._export_widget_selective(self.row_heat, base, do_png, do_pdf)
+                self._export_widget_selective(self.psth_shared_card, base, do_png, do_pdf)
                 _require_output_files(base, [ext for enabled, ext in ((do_png, "png"), (do_pdf, "pdf")) if enabled])
                 _finish_export_step("Exported heatmap plot")
             if choices.get("plot_avg") and hasattr(self, "row_avg"):
                 _start_export_step("Exporting average plot...")
                 base = os.path.join(out_dir, f"{prefix}_plot_avg")
-                self._export_widget_selective(self.row_avg, base, do_png, do_pdf)
+                self._export_widget_selective(self.row_heat, base, do_png, do_pdf)
                 for index, key in enumerate(getattr(self, "_last_metric_panels", {})):
                     plot = self.plot_metrics if index == 0 else self._extra_metric_plots[key]
                     self._export_widget_selective(plot, os.path.join(out_dir, f"{prefix}_plot_metric_{key}"), do_png, do_pdf)
@@ -17675,9 +17729,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if choices.get("trace"):
                 export_targets.append(("trace", self.plot_trace))
             if choices.get("heat"):
-                export_targets.append(("heatmap", self.row_heat))
+                export_targets.append(("heatmap_psth", self.psth_shared_card))
             if choices.get("avg"):
-                export_targets.append(("avg_metrics", self.row_avg))
+                export_targets.append(("psth_dashboard", self.row_heat))
             if choices.get("signal"):
                 export_targets.append(("signal", self.row_signal))
             if choices.get("behavior"):

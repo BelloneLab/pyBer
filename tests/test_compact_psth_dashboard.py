@@ -27,16 +27,44 @@ class CompactDashboardTests(unittest.TestCase):
         self.panel.combo_individual_file.addItems([self.panel._file_id_for_proc(proc) for proc in records])
         return records
 
-    def test_standard_rows_have_three_plots_and_no_separate_primary_row(self):
+    def test_shared_cards_keep_related_plots_together(self):
         panel = self.panel
         panel._apply_view_layout()
-        for row, plots in ((panel.row_heat, [panel.plot_heat, panel.plot_dur, panel.plot_bout_second]),
-                           (panel.row_avg_trace, [panel.plot_avg, panel.plot_metrics, panel.plot_global])):
-            for plot in plots:
-                owner = panel.heat_figure if plot is panel.plot_heat else row
-                self.assertGreaterEqual(owner.layout().indexOf(panel._plot_card_by_widget[plot]), 0)
+        self.assertIs(panel._plot_card_by_widget[panel.plot_heat], panel._plot_card_by_widget[panel.plot_avg])
+        self.assertIs(panel._plot_card_by_widget[panel.plot_dur], panel._plot_card_by_widget[panel.plot_bout_second])
+        self.assertEqual(panel.bout_figure.layout().spacing(), 2)
+        self.assertGreaterEqual(panel.row_avg_trace.layout().indexOf(panel._plot_card_by_widget[panel.plot_metrics]), 0)
         self.assertTrue(panel.metric_panels_widget.isHidden())
-        self.assertLessEqual(panel.row_avg.minimumHeight(), 230)
+
+    def test_shared_time_axes_align_after_resize_zoom_and_scale_changes(self):
+        from PySide6 import QtCore
+        panel = self.panel
+        t = np.linspace(-5., 5., 201)
+        matrix = np.random.default_rng(5).normal(size=(27, t.size))
+        panel._render_heatmap(matrix, t)
+        panel._render_avg(matrix, t)
+        panel.row_heat.setParent(None)
+        panel.row_heat.show()
+        try:
+            for width in (1000, 1400):
+                panel.row_heat.resize(width, 500)
+                for detail in (False, True):
+                    panel.btn_edit_scale.setChecked(detail)
+                    self.app.processEvents()
+                    panel.plot_heat.setXRange(-2., 3., padding=0)
+                    self.app.processEvents()
+                    np.testing.assert_allclose(panel.plot_heat.viewRange()[0], panel.plot_avg.viewRange()[0], atol=1e-9)
+                    for time in (-2., 0., 3.):
+                        positions = []
+                        for plot in (panel.plot_heat, panel.plot_avg):
+                            point = plot.plotItem.vb.mapViewToScene(QtCore.QPointF(time, 0.))
+                            positions.append(plot.mapToGlobal(point.toPoint()).x())
+                        self.assertLessEqual(abs(positions[0] - positions[1]), 1)
+            panel.plot_avg.setXRange(-1., 1., padding=0)
+            self.app.processEvents()
+            np.testing.assert_allclose(panel.plot_heat.viewRange()[0], panel.plot_avg.viewRange()[0], atol=1e-9)
+        finally:
+            panel.row_heat.setParent(panel)
 
     def test_global_menu_displays_one_metric_and_respects_individual_scope(self):
         records = self.load_signals()
