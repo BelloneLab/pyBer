@@ -69,6 +69,31 @@ class PreprocessingEmptyStateTests(unittest.TestCase):
         """The initial scene contains neither default axes nor selection fill."""
         self._assert_empty()
 
+    def test_output_details_wrap_inside_resized_plot(self):
+        """Long processing metadata stays readable without widening linked axes."""
+        processed = self._processed()
+        context = (
+            "Artifacts: Cut | smart artifacts: n=7, core=0.89%, padded=1.89%, "
+            "repeated shared dips corroborated | Baseline: asls (lambda=1.00e+09)"
+        )
+        self.dashboard.show_output(processed.time, processed.output,
+                                   label="dFF (motion corrected)", output_context=context)
+        heights = []
+        for width in (1100, 550, 1100):
+            self.dashboard.resize(width, 800)
+            for _ in range(8):
+                self.app.processEvents()
+            plot = self.dashboard.plot_out
+            title = plot.getPlotItem().titleLabel
+            bounds = title.item.mapRectToParent(title.item.boundingRect())
+            self.assertLessEqual(bounds.right(), title.rect().right() + 1)
+            self.assertLessEqual(bounds.bottom(), title.rect().bottom() + 1)
+            self.assertLessEqual(title.sceneBoundingRect().right(), plot.viewport().width() + 1)
+            self.assertIn(context, title.item.toPlainText())
+            heights.append(title.rect().height())
+        self.assertGreater(heights[1], heights[0])
+        self.assertAlmostEqual(heights[0], heights[2], delta=1)
+
     def test_theme_changes_do_not_reveal_empty_plots(self):
         """Appearance settings apply while keeping absent data hidden."""
         for background in ("white", "dark"):

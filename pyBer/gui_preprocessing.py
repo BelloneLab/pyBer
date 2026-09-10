@@ -3505,13 +3505,9 @@ class PlotDashboard(QtWidgets.QWidget):
         self._history_available = (False, False)
         for w in (self.plot_raw, self.plot_proc, self.plot_out):
             _optimize_plot(w)
-        # LabelItem reports the full unwrapped title width as its minimum
-        # layout width. The detailed output context can be several thousand
-        # pixels wide, which silently makes the output ViewBox much wider than
-        # the raw/proc ViewBoxes and destabilizes linked x ranges. Cap only the
-        # on-canvas title width; show_output() keeps the complete text as a
-        # tooltip for inspection.
-        self.plot_out.getPlotItem().titleLabel.setMaximumWidth(720.0)
+        # Keep full processing details readable without widening the output axis.
+        from wrapped_plot_title import install_wrapped_title
+        install_wrapped_title(self.plot_out.getPlotItem())
 
         # Empty-state hints removed by design - keep plots visually clean.
         self._preproc_empty_hints = []
