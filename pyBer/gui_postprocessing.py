@@ -35,6 +35,7 @@ from plot_trace import with_time_gap_breaks
 from numeric_controls import with_slider
 from psth_metrics import METRICS, metric_id, summarize_metrics, draw_metric_matplotlib, export_selected_metrics
 from psth_metric_panels import MetricPanel, MetricGrid
+from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_metrics
 from file_drop import install_file_drop, expand_paths
 from behavior_import import infer_table, read_behavior_csv, detect_time_column
 from baseline_advisor import BaselineRecording
@@ -2130,7 +2131,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_psth_behavior_auto_bins = QtWidgets.QCheckBox("Auto distribution bins")
         self.cb_psth_behavior_auto_bins.setChecked(True)
         self.lbl_psth_behavior_bin = QtWidgets.QLabel("Distribution bin")
-        fb_panel.addRow("Display", self.combo_psth_behavior_metric)
+        self.combo_psth_behavior_metric_second = QtWidgets.QComboBox()
+        for index in range(self.combo_psth_behavior_metric.count()):
+            self.combo_psth_behavior_metric_second.addItem(
+                self.combo_psth_behavior_metric.itemText(index), self.combo_psth_behavior_metric.itemData(index))
+        self.combo_psth_behavior_metric_second.setCurrentIndex(2)
+        self.combo_psth_behavior_metric_second.setToolTip(self.combo_psth_behavior_metric.toolTip())
+        self.combo_psth_behavior_metric_second.currentIndexChanged.connect(self._on_psth_behavior_panel_changed)
+        fb_panel.addRow("First plot", self.combo_psth_behavior_metric)
+        fb_panel.addRow("Second plot", self.combo_psth_behavior_metric_second)
         fb_panel.addRow(self.lbl_psth_behavior_bin, self.spin_psth_behavior_bin)
         fb_panel.addRow(self.cb_psth_behavior_auto_bins)
         self.combo_psth_behavior_metric.currentIndexChanged.connect(self._on_psth_behavior_panel_changed)
@@ -2209,13 +2218,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fg.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
         fg.addRow(self.cb_global_metrics)
         fg.addRow("Range (s)", global_widget)
-        global_opts = QtWidgets.QHBoxLayout()
-        global_opts.setContentsMargins(0, 0, 0, 0); global_opts.setSpacing(6)
-        global_opts.addWidget(self.cb_global_amp)
-        global_opts.addWidget(self.cb_global_freq)
-        global_opts.addStretch(1)
-        global_opts_widget = QtWidgets.QWidget(); global_opts_widget.setLayout(global_opts)
-        fg.addRow("Compute", global_opts_widget)
+        # Legacy flags remain available for loading older project files.
+        self.cb_global_amp.hide()
+        self.cb_global_freq.hide()
+        self.combo_global_metric = QtWidgets.QComboBox()
+        for key, info in GLOBAL_SIGNAL_METRICS.items():
+            self.combo_global_metric.addItem(info["label"], key)
+            self.combo_global_metric.setItemData(self.combo_global_metric.count() - 1,
+                                                info["description"], QtCore.Qt.ItemDataRole.ToolTipRole)
+        self.combo_global_metric.currentIndexChanged.connect(self._on_global_metric_changed)
+        fg.addRow("Display", self.combo_global_metric)
         fg.addRow("", self.lbl_global_metrics)
 
         # Container for all subsections (replaces old grp_opt)
@@ -3966,6 +3978,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_trace = pg.PlotWidget(title="Trace preview")
         self.plot_heat = pg.PlotWidget(title="Heatmap")
         self.plot_dur = pg.PlotWidget(title="Event duration")
+        self.plot_bout_second = pg.PlotWidget(title="Inter-bout intervals")
         self.plot_avg = pg.PlotWidget(title="Average PSTH +/- SEM")
         self.plot_metrics = MetricPanel()
         self._extra_metric_plots = {}
@@ -3990,6 +4003,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_trace,
             self.plot_heat,
             self.plot_dur,
+            self.plot_bout_second,
             self.plot_avg,
             self.plot_metrics,
             self.plot_global,
@@ -4152,10 +4166,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         heat_row = QtWidgets.QHBoxLayout(self.row_heat)
         heat_row.setContentsMargins(0, 0, 0, 0)
         heat_row.setSpacing(8)
-        heat_row.addWidget(self.plot_heat, stretch=4)
+        heat_row.addWidget(self.plot_heat, stretch=2)
         heat_row.addWidget(self.heat_colorbar_widget, stretch=0)
         heat_row.addWidget(self.heat_lut, stretch=0)
         heat_row.addWidget(self.plot_dur, stretch=1)
+        heat_row.addWidget(self.plot_bout_second, stretch=1)
 
         self.row_avg = QtWidgets.QWidget()
         avg_outer = QtWidgets.QVBoxLayout(self.row_avg)
@@ -4165,14 +4180,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         avg_row = QtWidgets.QHBoxLayout(self.row_avg_trace)
         avg_row.setContentsMargins(0, 0, 0, 0)
         avg_row.setSpacing(8)
-        avg_row.addWidget(self.plot_avg, stretch=4)
+        avg_row.addWidget(self.plot_avg, stretch=2)
+        avg_row.addWidget(self.plot_metrics, stretch=1)
         avg_row.addWidget(self.plot_global, stretch=1)
         self.metric_panels_widget = MetricGrid()
         self.metric_panels_widget.columnsChanged.connect(self._sync_metric_panel_layout)
         metric_grid = QtWidgets.QGridLayout(self.metric_panels_widget)
         metric_grid.setContentsMargins(0, 0, 0, 0)
         metric_grid.setSpacing(8)
-        metric_grid.addWidget(self.plot_metrics, 0, 0)
         for index, plot in enumerate(self._extra_metric_plots.values(), start=1):
             _opt_plot(plot)
             metric_grid.addWidget(plot, index // 2, index % 2)
@@ -4266,6 +4281,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     placeholder.deleteLater()
                     self._postprocessing_plot_cards.append(card)
                     self._plot_card_by_widget[widget] = card
+        # Treat the heatmap and its scale as one column so both dashboard rows
+        # share the same two compact side-column widths.
+        self.heat_figure = QtWidgets.QWidget()
+        heat_figure_layout = QtWidgets.QHBoxLayout(self.heat_figure)
+        heat_figure_layout.setContentsMargins(0, 0, 0, 0)
+        heat_figure_layout.setSpacing(4)
+        heat_card = self._plot_card_by_widget[self.plot_heat]
+        for widget in (heat_card, self.heat_colorbar_widget, self.heat_lut):
+            heat_row.removeWidget(widget)
+            heat_figure_layout.addWidget(widget, stretch=1 if widget is heat_card else 0)
+        heat_row.insertWidget(0, self.heat_figure, stretch=2)
         self.trace_card = create_plot_card(self.plot_trace, "")
         self.trace_card.title_label.hide()
         self._postprocessing_plot_cards.append(self.trace_card)
@@ -4586,11 +4612,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_metric_pre1,
             self.spin_metric_post0,
             self.spin_metric_post1,
-            self.spin_global_start,
-            self.spin_global_end,
         ):
             w.valueChanged.connect(self._schedule_psth)
-        self.combo_metric.currentIndexChanged.connect(self._schedule_psth)
+        for control in (self.spin_global_start, self.spin_global_end):
+            control.valueChanged.connect(self._on_global_metric_changed)
         self.combo_metric.currentIndexChanged.connect(self._on_metric_selection_changed)
         self.cb_exclude_low_event_animals.toggled.connect(self._update_psth_inclusion_controls)
         self.cb_exclude_low_event_animals.toggled.connect(self._schedule_psth)
@@ -8939,6 +8964,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         show_behavior = False
 
         self.plot_dur.setVisible(True)
+        self.plot_bout_second.setVisible(True)
         self.plot_metrics.setVisible(True)
         self.plot_global.setVisible(self.cb_global_metrics.isChecked())
 
@@ -8946,6 +8972,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             show_signal = False
             show_behavior = False
             self.plot_dur.setVisible(False)
+            self.plot_bout_second.setVisible(False)
             self.plot_metrics.setVisible(False)
             self.plot_global.setVisible(False)
         elif layout == "Trace focus":
@@ -8959,7 +8986,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             show_signal = False
             show_behavior = False
             self.plot_metrics.setVisible(True)
-            self.plot_global.setVisible(True)
+            self.plot_global.setVisible(self.cb_global_metrics.isChecked())
         elif layout == "All":
             show_signal = True
             show_behavior = True
@@ -9226,6 +9253,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_trace_preview()
         self._update_status_strip()
         self._refresh_psth_duration_view()
+        self._render_global_metrics()
         self._sync_temporal_modeling_context()
 
     def _update_data_availability(self) -> None:
@@ -9529,20 +9557,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _refresh_psth_duration_view(self) -> None:
         """Keep the chosen behavioral chart on the same recording scope as exports."""
-        try:
-            summary = self._current_psth_behavior_summary()
-        except ValueError as exc:
-            # A requested bin count may exceed the numerical safety limit. Do
-            # not let a Qt slot exception leave an old chart under new settings.
-            self.plot_dur.clear()
-            set_plot_has_data(self.plot_dur, False)
-            self.plot_dur.setToolTip(str(exc))
-            self.statusUpdate.emit(f"Behavior panel: {exc}", 6000)
-            return
         preset = self._style.get("postprocessing_preset", "Midnight")
         palette = POSTPROCESSING_PRESETS.get(preset, POSTPROCESSING_PRESETS["Midnight"])
-        render_behavior_summary(self.plot_dur, summary, palette)
-        set_plot_has_data(self.plot_dur, bool(summary["has_data"]))
+        for plot, combo in ((self.plot_dur, self.combo_psth_behavior_metric),
+                            (self.plot_bout_second, self.combo_psth_behavior_metric_second)):
+            try:
+                summary = self._current_psth_behavior_summary(combo.currentData())
+                render_behavior_summary(plot, summary, palette)
+                set_plot_has_data(plot, bool(summary["has_data"]))
+            except ValueError as exc:
+                plot.clear()
+                set_plot_has_data(plot, False)
+                plot.setToolTip(str(exc))
+                self.statusUpdate.emit(f"Behavior panel: {exc}", 6000)
 
     def _psth_behavior_summary_recordings(self) -> List[Dict[str, object]]:
         """Snapshot accepted event rows and observed intervals without touching data.
@@ -9582,19 +9609,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
                                "observed_intervals": observed_intervals(t, np.asarray(proc.output, float))})
         return recordings
 
-    def _current_psth_behavior_summary(self) -> Dict[str, object]:
+    def _current_psth_behavior_summary(self, metric=None) -> Dict[str, object]:
         """Expose the same numerical summary for the screen and exported tables."""
         return summarize_behavior(self._psth_behavior_summary_recordings(),
-                                  str(self.combo_psth_behavior_metric.currentData() or "duration"),
+                                  str(metric or self.combo_psth_behavior_metric.currentData() or "duration"),
                                   bin_s=float(self.spin_psth_behavior_bin.value()),
                                   auto_bins=self.cb_psth_behavior_auto_bins.isChecked())
 
     def _on_psth_behavior_panel_changed(self, *_args: object) -> None:
         """Update the selected chart immediately; these are display-only settings."""
-        histogram = self.combo_psth_behavior_metric.currentData() in ("duration", "ibi", "onset_interval")
+        histograms = ("duration", "ibi", "onset_interval")
+        modes = (self.combo_psth_behavior_metric.currentData(), self.combo_psth_behavior_metric_second.currentData())
+        histogram = any(mode in histograms for mode in modes)
+        time_curve = any(mode not in histograms for mode in modes)
         self.cb_psth_behavior_auto_bins.setVisible(histogram)
-        self.lbl_psth_behavior_bin.setText("Distribution bin" if histogram else "Time bin")
-        self.spin_psth_behavior_bin.setEnabled(not histogram or not self.cb_psth_behavior_auto_bins.isChecked())
+        self.lbl_psth_behavior_bin.setText("Bin width (shared)" if histogram and time_curve else "Distribution bin" if histogram else "Time bin")
+        self.spin_psth_behavior_bin.setEnabled(time_curve or not self.cb_psth_behavior_auto_bins.isChecked())
         if self._is_restoring_settings or not hasattr(self, "plot_dur"):
             return
         self._refresh_psth_duration_view()
@@ -9650,6 +9680,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         apply_plot_preset(self, name)
         self._refresh_psth_contrast()
         self._refresh_signal_overlay()
+        self._render_global_metrics()
 
     def _fit_psth_plots(self) -> None:
         """Restore useful plot bounds after zooming or panning."""
@@ -9694,6 +9725,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_global_end,
             self.cb_global_amp,
             self.cb_global_freq,
+            self.combo_global_metric,
         ):
             w.setEnabled(enabled)
         self._render_global_metrics()
@@ -14562,28 +14594,31 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._sync_metric_panel_layout()
 
     def _sync_metric_panel_layout(self) -> None:
-        """Arrange independent cards in two columns while preserving figure space."""
+        """Keep the primary comparison beside PSTH, with optional extras three per row."""
         if not hasattr(self, "metric_panels_widget"):
             return
         selected = self._selected_metric_ids()
         layout_name = self.combo_view_layout.currentText()
         show = self.cb_metrics.isChecked() and layout_name not in ("Heatmap focus", "Trace focus", "Signal events")
-        self.metric_panels_widget.setVisible(show)
-        visible = [self.plot_metrics] + [self._extra_metric_plots[key] for key in selected[1:]]
+        primary = getattr(self, "_plot_card_by_widget", {}).get(self.plot_metrics, self.plot_metrics)
+        self.plot_metrics.setVisible(show)
+        primary.setVisible(show)
+        visible = [self._extra_metric_plots[key] for key in selected[1:]]
+        self.metric_panels_widget.setVisible(show and bool(visible))
         grid = self.metric_panels_widget.layout()
-        for plot in [self.plot_metrics, *self._extra_metric_plots.values()]:
+        for plot in self._extra_metric_plots.values():
             card = getattr(self, "_plot_card_by_widget", {}).get(plot, plot)
             grid.removeWidget(card)
             plot.setVisible(plot in visible)
             card.setVisible(plot in visible)
-        columns = self.metric_panels_widget.columns
         for index, plot in enumerate(visible):
             card = getattr(self, "_plot_card_by_widget", {}).get(plot, plot)
-            grid.addWidget(card, index // columns, index % columns)
-        height = 230 * ((len(visible) + columns - 1) // columns)
+            grid.addWidget(card, index // 3, index % 3)
+        for column in range(3):
+            grid.setColumnStretch(column, 1)
+        height = 220 * ((len(visible) + 2) // 3)
         self.metric_panels_widget.setMinimumHeight(height)
-        if hasattr(self, "row_avg"):
-            self.row_avg.setMinimumHeight(230 + (height if show else 0))
+        self.row_avg.setMinimumHeight(220 + (height if show and visible else 0))
 
     def _compute_global_metrics_for_trace(
         self,
@@ -14592,185 +14627,96 @@ class PostProcessingPanel(QtWidgets.QWidget):
         start_s: float,
         end_s: float,
     ) -> Optional[Dict[str, float]]:
-        tt = np.asarray(t, float)
-        yy = np.asarray(y, float)
-        m = np.isfinite(tt) & np.isfinite(yy)
-        tt = tt[m]
-        yy = yy[m]
-        if tt.size < 3:
-            return None
+        """Summarize original processed units without connecting removed intervals."""
+        return compute_global_signal_metrics(t, y, start_s, end_s)
 
-        if np.isfinite(start_s) and np.isfinite(end_s) and end_s > start_s:
-            mask = (tt >= start_s) & (tt <= end_s)
-            tt = tt[mask]
-            yy = yy[mask]
-            if tt.size < 3:
-                return None
-
-        med = float(np.nanmedian(yy))
-        mad = float(np.nanmedian(np.abs(yy - med)))
-        hi_thr = med + 2.0 * mad
-        if yy.size >= 3:
-            peak_idx = np.where((yy[1:-1] > yy[:-2]) & (yy[1:-1] > yy[2:]))[0] + 1
-            hi_idx = peak_idx[yy[peak_idx] > hi_thr]
-            mask = np.ones(yy.size, dtype=bool)
-            mask[hi_idx] = False
-            yy_filt = yy[mask]
-        else:
-            yy_filt = yy
-        med_filt = float(np.nanmedian(yy_filt)) if yy_filt.size else med
-        thr = 3.0 * med_filt
-
-        if yy.size < 3:
-            return None
-        peak_idx = np.where((yy[1:-1] > yy[:-2]) & (yy[1:-1] > yy[2:]) & (yy[1:-1] >= thr))[0] + 1
-        peak_vals = yy[peak_idx]
-        amp = float(np.nanmean(peak_vals)) if peak_vals.size else 0.0
-        duration = float(tt[-1] - tt[0]) if tt.size > 1 else 0.0
-        freq = float(peak_vals.size) / duration if duration > 0 else 0.0
-        return {
-            "amp": amp,
-            "freq": freq,
-            "thr": thr,
-            "peaks": float(peak_vals.size),
-            "duration": duration,
-        }
+    def _on_global_metric_changed(self, *_args) -> None:
+        """Switch the single global summary without recalculating PSTH trials."""
+        if self._is_restoring_settings or not hasattr(self, "plot_global"):
+            return
+        self._render_global_metrics()
+        self._queue_settings_save()
 
     def _render_global_metrics(self) -> None:
+        """Draw one scale with recording points, median and mean/SEM in group view."""
+        key = self.combo_global_metric.currentData() or "amp"
+        info = GLOBAL_SIGNAL_METRICS[key]
+        palette = POSTPROCESSING_PRESETS.get(self._style.get("postprocessing_preset", "Midnight"),
+                                            POSTPROCESSING_PRESETS["Midnight"])
+        self.plot_global.setTitle(info["label"], color=palette["text"], size="11pt")
+        self.plot_global.setLabel("left", info["unit"])
+        self.plot_global.setToolTip(info["description"] +
+            "\nUses the displayed recording scope and original processed units. "
+            "Group points are recordings, the line is the median, and the diamond is mean +/- SEM. "
+            "Peak summaries retain the historical global detector, independent of Signal Events settings.")
+        for item in (self.global_bar_amp, self.global_bar_freq, self.global_scatter_amp,
+                     self.global_scatter_freq, self.global_err_amp, self.global_err_freq):
+            item.hide()
+        if not hasattr(self, "global_median"):
+            self.global_median = self.plot_global.plot(pen=pg.mkPen(palette["accent"], width=2))
+        self.global_median.setData([], [])
+        self._last_global_metrics = None
         set_plot_has_data(self.plot_global, False)
+        self.lbl_global_metrics.setText("No observed signal in this range.")
         if not self.cb_global_metrics.isChecked():
-            self._last_global_metrics = None
-            self.lbl_global_metrics.setText("Global metrics: -")
-            self.global_bar_amp.setOpts(height=[0])
-            self.global_bar_freq.setOpts(height=[0])
-            self.global_scatter_amp.setData([], [])
-            self.global_scatter_freq.setData([], [])
-            self._set_error_bar(self.global_err_amp, 0.0, 0.0, 0.0)
-            self._set_error_bar(self.global_err_freq, 1.0, 0.0, 0.0)
+            self.lbl_global_metrics.setText("Global metrics disabled")
             return
-
-        if not (self.cb_global_amp.isChecked() or self.cb_global_freq.isChecked()):
-            self._last_global_metrics = None
-            self.lbl_global_metrics.setText("Global metrics: -")
-            self.global_bar_amp.setOpts(height=[0])
-            self.global_bar_freq.setOpts(height=[0])
-            self.global_scatter_amp.setData([], [])
-            self.global_scatter_freq.setData([], [])
-            self._set_error_bar(self.global_err_amp, 0.0, 0.0, 0.0)
-            self._set_error_bar(self.global_err_freq, 1.0, 0.0, 0.0)
-            return
-
-        start_s = float(self.spin_global_start.value())
-        end_s = float(self.spin_global_end.value())
-
-        amps = []
-        freqs = []
-        peaks = []
-        durations = []
-        thrs = []
-
-        for proc in self._processed:
+        start_s, end_s = float(self.spin_global_start.value()), float(self.spin_global_end.value())
+        grouped = self.tab_visual_mode.currentIndex() == 1
+        selected = self.combo_individual_file.currentText().strip()
+        recordings = list(self._processed)
+        if not grouped:
+            recordings = [proc for proc in recordings if self._file_id_for_proc(proc) == selected] if selected else recordings[:1]
+        results = []
+        for proc in recordings:
             if proc.output is None or proc.time is None:
                 continue
-            res = self._compute_global_metrics_for_trace(self._proc_time(proc), proc.output, start_s, end_s)
-            if not res:
+            try:
+                result = self._compute_global_metrics_for_trace(self._proc_time(proc), proc.output, start_s, end_s)
+            except ValueError as exc:
+                self.lbl_global_metrics.setToolTip(str(exc))
                 continue
-            amps.append(res["amp"])
-            freqs.append(res["freq"])
-            peaks.append(res["peaks"])
-            durations.append(res["duration"])
-            thrs.append(res["thr"])
-
-        amp_vals = np.asarray(amps, float)
-        freq_vals = np.asarray(freqs, float)
-        amp_vals = amp_vals[np.isfinite(amp_vals)]
-        freq_vals = freq_vals[np.isfinite(freq_vals)]
-        if amp_vals.size == 0 and freq_vals.size == 0:
-            self._last_global_metrics = None
-            self.lbl_global_metrics.setText("Global metrics: -")
-            self.global_bar_amp.setOpts(height=[0])
-            self.global_bar_freq.setOpts(height=[0])
-            self.global_scatter_amp.setData([], [])
-            self.global_scatter_freq.setData([], [])
-            self._set_error_bar(self.global_err_amp, 0.0, 0.0, 0.0)
-            self._set_error_bar(self.global_err_freq, 1.0, 0.0, 0.0)
+            if result is not None:
+                results.append(result)
+        if not results:
             return
-
-        avg_amp, sem_amp, n_amp = self._finite_mean_sem(amp_vals)
+        # Preserve the legacy flat export fields and add every new summary.
+        summary = {"start": start_s, "end": end_s}
+        for name in results[0]:
+            values = np.asarray([row[name] for row in results], float)
+            mean, sem, n = self._finite_mean_sem(values)
+            summary.update({name: mean, name + "_sem": sem, name + "_n": float(n)})
+        summary["peaks"] = float(sum(row["peaks"] for row in results))
+        self._last_global_metrics = summary
+        values = np.asarray([row[key] for row in results], float)
+        values = values[np.isfinite(values)]
+        if not values.size:
+            self.lbl_global_metrics.setText("Not enough detected peaks for this metric.")
+            return
+        mean, sem, n = self._finite_mean_sem(values)
+        median = float(np.median(values))
         set_plot_has_data(self.plot_global, True)
-        avg_freq, sem_freq, n_freq = self._finite_mean_sem(freq_vals)
-        total_peaks = float(np.nansum(peaks)) if peaks else 0.0
-        avg_thr = float(np.nanmean(thrs)) if thrs else 0.0
-        avg_dur = float(np.nanmean(durations)) if durations else 0.0
-        group_mode = self.tab_sources.currentIndex() == 1
-
-        self._last_global_metrics = {
-            "amp": avg_amp,
-            "amp_sem": sem_amp,
-            "amp_n": float(n_amp),
-            "freq": avg_freq,
-            "freq_sem": sem_freq,
-            "freq_n": float(n_freq),
-            "peaks": total_peaks,
-            "thr": avg_thr,
-            "duration": avg_dur,
-            "start": start_s,
-            "end": end_s,
-        }
-
-        parts = []
-        if self.cb_global_amp.isChecked():
-            if group_mode:
-                parts.append(f"amp={avg_amp:.4g}+-{sem_amp:.3g}")
-            else:
-                parts.append(f"amp={avg_amp:.4g}")
-        if self.cb_global_freq.isChecked():
-            if group_mode:
-                parts.append(f"freq={avg_freq:.4g}+-{sem_freq:.3g} Hz")
-            else:
-                parts.append(f"freq={avg_freq:.4g} Hz")
-        parts.append(f"peaks={int(total_peaks)}")
-        self.lbl_global_metrics.setText("Global metrics: " + " | ".join(parts))
-
-        self.global_bar_amp.setOpts(height=[avg_amp if self.cb_global_amp.isChecked() else 0.0])
-        self.global_bar_freq.setOpts(height=[avg_freq if self.cb_global_freq.isChecked() else 0.0])
-        if group_mode:
-            if self.cb_global_amp.isChecked() and amp_vals.size:
-                self.global_scatter_amp.setData(self._jittered_x(0.0, int(amp_vals.size), half_width=0.16), amp_vals)
-                self._set_error_bar(self.global_err_amp, 0.0, avg_amp, sem_amp)
-            else:
-                self.global_scatter_amp.setData([], [])
-                self._set_error_bar(self.global_err_amp, 0.0, 0.0, 0.0)
-            if self.cb_global_freq.isChecked() and freq_vals.size:
-                self.global_scatter_freq.setData(self._jittered_x(1.0, int(freq_vals.size), half_width=0.16), freq_vals)
-                self._set_error_bar(self.global_err_freq, 1.0, avg_freq, sem_freq)
-            else:
-                self.global_scatter_freq.setData([], [])
-                self._set_error_bar(self.global_err_freq, 1.0, 0.0, 0.0)
-        else:
-            self.global_scatter_amp.setData([], [])
-            self.global_scatter_freq.setData([], [])
-            self._set_error_bar(self.global_err_amp, 0.0, 0.0, 0.0)
-            self._set_error_bar(self.global_err_freq, 1.0, 0.0, 0.0)
-        y_candidates: List[float] = [0.0]
-        if self.cb_global_amp.isChecked():
-            y_candidates.extend([avg_amp, avg_amp - sem_amp, avg_amp + sem_amp])
-            if group_mode and amp_vals.size:
-                y_candidates.extend(np.asarray(amp_vals, float).tolist())
-        if self.cb_global_freq.isChecked():
-            y_candidates.extend([avg_freq, avg_freq - sem_freq, avg_freq + sem_freq])
-            if group_mode and freq_vals.size:
-                y_candidates.extend(np.asarray(freq_vals, float).tolist())
-        y_arr = np.asarray(y_candidates, float)
-        y_arr = y_arr[np.isfinite(y_arr)]
-        if y_arr.size:
-            ymin = float(np.nanmin(y_arr))
-            ymax = float(np.nanmax(y_arr))
-        else:
-            ymin, ymax = 0.0, 1.0
-        if ymin == ymax:
-            ymax = ymin + 1.0
-        self.plot_global.setYRange(ymin, ymax, padding=0.2)
+        self.global_scatter_amp.setData(self._jittered_x(0., n, half_width=.12), values,
+                                       symbol="o", symbolSize=5, symbolBrush=pg.mkBrush(palette["accent"]),
+                                       symbolPen=None)
+        self.global_scatter_amp.show()
+        self.global_median.setPen(pg.mkPen(palette["accent"], width=2))
+        self.global_median.setData([-.20, .20], [median, median])
+        if grouped and n > 1:
+            self.global_scatter_freq.setData([.28], [mean], symbol="d", symbolSize=7,
+                                            symbolBrush=pg.mkBrush(palette["text"]), symbolPen=None)
+            self.global_scatter_freq.show()
+            self.global_err_amp.setData(pen=pg.mkPen(palette["text"], width=1))
+            self._set_error_bar(self.global_err_amp, .28, mean, sem)
+            self.global_err_amp.show()
+        self.plot_global.getAxis("bottom").setTicks([[(0., f"{n} recordings" if grouped else "Recording")]])
+        self.plot_global.setXRange(-.5, .5, padding=0)
+        low, high = min(float(values.min()), mean-sem), max(float(values.max()), mean+sem)
+        margin = max((high-low)*.2, abs(mean)*.12, 1e-6)
+        self.plot_global.setYRange(low-margin, high+margin, padding=0)
+        self.lbl_global_metrics.setText(f"{info['label']}: {median:.4g} {info['unit']}" +
+                                       (f" (median, n={n})" if grouped else ""))
+        self.lbl_global_metrics.setToolTip(self.plot_global.toolTip())
 
     def _update_metric_regions(self) -> None:
         if self._pre_region is not None:
@@ -14845,6 +14791,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_trace,
             self.plot_heat,
             self.plot_dur,
+            self.plot_bout_second,
             self.plot_avg,
             self.plot_metrics,
             self.plot_global,
@@ -16288,6 +16235,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "baseline_start": -1.0,
             "baseline_end": 0.0,
             "psth_behavior_metric": "duration",
+            "psth_behavior_metric_second": "ibi",
+            "global_metric": "amp",
             "psth_behavior_bin_s": 30.0,
             "psth_behavior_auto_bins": True,
             "resample": 50.0,
@@ -16458,6 +16407,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "smooth": float(self.spin_smooth.value()),
             "psth_normalization": self.combo_psth_normalization.currentText(),
             "psth_behavior_metric": self.combo_psth_behavior_metric.currentData(),
+            "psth_behavior_metric_second": self.combo_psth_behavior_metric_second.currentData(),
+            "global_metric": self.combo_global_metric.currentData(),
             "psth_behavior_bin_s": float(self.spin_psth_behavior_bin.value()),
             "psth_behavior_auto_bins": self.cb_psth_behavior_auto_bins.isChecked(),
             "filter_enabled": self.cb_filter_events.isChecked(),
@@ -16645,6 +16596,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.cb_global_amp.setChecked(bool(data["global_amp"]))
         if "global_freq" in data:
             self.cb_global_freq.setChecked(bool(data["global_freq"]))
+        _set_combo_data(self.combo_global_metric, data.get("global_metric", "amp"))
+        _set_combo_data(self.combo_psth_behavior_metric_second, data.get("psth_behavior_metric_second", "ibi"))
         _set_combo(self.combo_view_layout, data.get("view_layout"))
         _set_combo(self.combo_psth_normalization, data.get("psth_normalization", "Baseline z-score"))
         with QtCore.QSignalBlocker(self.combo_psth_behavior_metric), QtCore.QSignalBlocker(self.spin_psth_behavior_bin), QtCore.QSignalBlocker(self.cb_psth_behavior_auto_bins):
@@ -17341,6 +17294,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 summary = self._current_psth_behavior_summary()
                 export_behavior_summary(summary, os.path.join(out_dir, f"{prefix}_behavior_summary"),
                                         write_csv=do_csv, write_h5=do_h5)
+                if hasattr(self, "combo_psth_behavior_metric_second"):
+                    second = self._current_psth_behavior_summary(self.combo_psth_behavior_metric_second.currentData())
+                    export_behavior_summary(second, os.path.join(out_dir, f"{prefix}_behavior_summary_second"),
+                                            write_csv=do_csv, write_h5=do_h5)
                 _finish_export_step("Exported event durations")
 
             if choices.get("metrics") and (self._last_metrics or self._last_global_metrics):
@@ -17357,16 +17314,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         if self._last_global_metrics:
                             if self._last_metrics:
                                 w.writerow([])
-                            w.writerow(["global_amp", "global_freq_hz", "global_start_s", "global_end_s", "global_peaks", "global_threshold", "global_duration_s"])
-                            w.writerow([
-                                self._last_global_metrics.get("amp", ""),
-                                self._last_global_metrics.get("freq", ""),
-                                self._last_global_metrics.get("start", ""),
-                                self._last_global_metrics.get("end", ""),
-                                self._last_global_metrics.get("peaks", ""),
-                                self._last_global_metrics.get("thr", ""),
-                                self._last_global_metrics.get("duration", ""),
-                            ])
+                            legacy = [("global_amp", "amp"), ("global_freq_hz", "freq"),
+                                      ("global_start_s", "start"), ("global_end_s", "end"),
+                                      ("global_peaks", "peaks"), ("global_threshold", "thr"),
+                                      ("global_duration_s", "duration")]
+                            extra = [("global_" + key, key) for key in self._last_global_metrics
+                                     if key not in {key for _, key in legacy}]
+                            columns = legacy + extra
+                            w.writerow([label for label, _ in columns])
+                            w.writerow([self._last_global_metrics[key] for _, key in columns])
                 if do_h5:
                     with h5py.File(f"{met_base}.h5", "w") as hf:
                         for key, value in (self._last_metrics or {}).items():

@@ -46,7 +46,7 @@ class MetricSelectionUITests(unittest.TestCase):
         self.assertIsNone(panel.plot_metrics.result)
         self.assertIsNone(panel._extra_metric_plots["median"].result)
 
-    def test_narrow_results_use_single_column_and_disabled_metrics_hide(self):
+    def test_primary_comparison_stays_beside_psth_and_extras_use_compact_grid(self):
         panel = self.panel
         with QtCore.QSignalBlocker(panel._metric_actions["mean"]):
             panel._metric_actions["mean"].setChecked(True)
@@ -55,8 +55,9 @@ class MetricSelectionUITests(unittest.TestCase):
         grid = panel.metric_panels_widget.layout()
         primary_card = panel._plot_card_by_widget[panel.plot_metrics]
         extra_card = panel._plot_card_by_widget[panel._extra_metric_plots["mean"]]
-        self.assertIs(grid.itemAtPosition(0, 0).widget(), primary_card)
-        self.assertIs(grid.itemAtPosition(1, 0).widget(), extra_card)
+        self.assertEqual(panel.row_avg_trace.layout().indexOf(primary_card), 1)
+        self.assertIs(grid.itemAtPosition(0, 0).widget(), extra_card)
+        self.assertEqual(grid.indexOf(primary_card), -1)
         panel.cb_metrics.setChecked(False)
         panel._sync_metric_panel_layout()
         self.assertTrue(panel.metric_panels_widget.isHidden())
