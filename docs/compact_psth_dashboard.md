@@ -22,8 +22,9 @@ keeps File, PSTH, Export, undo/redo, View, Individual/Group, the recording selec
 status and the drawer toggle together. Reset is in File; plot styling and help
 are in View. Full recording names remain available on hover.
 
-Preprocessing keeps File, Sensor, Export, undo/redo, Selection, View and recording
-context on the same line. Selection contains Add from selector, Box select and
+Preprocessing keeps only File, Sensor, Export, undo/redo, Selection and View on
+the same line. Duplicate file-status and metadata labels are omitted.
+Selection contains Add from selector, Box select and
 Clear manual regions. View contains thresholds and plot styling.
 These menu entries use the existing editing actions and keyboard shortcuts.
 

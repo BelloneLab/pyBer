@@ -27,7 +27,7 @@ class CompactPreprocessingToolbarTests(unittest.TestCase):
         self.plots.deleteLater()
         self.app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
 
-    def test_context_stays_on_one_line_without_losing_text(self):
+    def test_controls_stay_on_one_line_without_duplicate_context(self):
         title = "Recording_" + "very_long_name_" * 12 + ".doric"
         self.plots.set_title(title)
         self.plots.set_status("Channel: AIN01 | A/D: DIO01 | Fs: 1000 -> 100 Hz | Mode: dFF")
@@ -39,8 +39,12 @@ class CompactPreprocessingToolbarTests(unittest.TestCase):
         self.assertEqual(self.plots.lbl_title.toolTip(), title)
         self.assertTrue(self.plots._plot_header.isHidden())
         self.assertTrue(self.plots._plot_tools.isHidden())
+        self.assertTrue(self.plots.lbl_title.isHidden())
+        self.assertTrue(self.plots.lbl_status.isHidden())
         for index in range(self.bar.layout().count()):
             widget = self.bar.layout().itemAt(index).widget()
+            if widget is None:
+                continue
             self.assertLessEqual(widget.geometry().right(), self.bar.width())
 
     def test_selection_and_view_actions_retain_original_signals(self):

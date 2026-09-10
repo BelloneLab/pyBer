@@ -25,7 +25,7 @@ class ContextLabel(QtWidgets.QLabel):
 
 
 def compact_preprocessing_toolbar(owner, bar):
-    """Combine workflow, selection, history and recording context in one row."""
+    """Combine workflow, selection and history in one controls-only row."""
     plots = owner.plots
     layout = bar.layout()
     while layout.count():
@@ -72,17 +72,17 @@ def compact_preprocessing_toolbar(owner, bar):
 
     selection.aboutToShow.connect(refresh)
     view.aboutToShow.connect(refresh)
-    plots.lbl_title.setStyleSheet("font-weight: 600; font-size: 12px;")
-    plots.lbl_status.setMaximumWidth(360)
-    plots.lbl_status.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+    # Recording details already appear elsewhere; keep legacy labels hidden.
+    plots.lbl_title.hide()
+    plots.lbl_status.hide()
     for widget in (owner.btn_workflow_load, owner.btn_sensor, owner.btn_workflow_export,
-                   plots.btn_undo, plots.btn_redo, owner.btn_pre_selection, owner.btn_pre_view,
-                   plots.lbl_title, plots.lbl_status):
-        layout.addWidget(widget, 2 if widget is plots.lbl_title else 1 if widget is plots.lbl_status else 0)
+                   plots.btn_undo, plots.btn_redo, owner.btn_pre_selection, owner.btn_pre_view):
+        layout.addWidget(widget)
         widget.setFixedHeight(32)
         widget.show()
         if isinstance(widget, (QtWidgets.QPushButton, QtWidgets.QToolButton)):
             widget.setStyleSheet("padding: 3px 8px; font-size: 12px;")
     plots.btn_undo.setFixedWidth(32)
     plots.btn_redo.setFixedWidth(32)
+    layout.addStretch(1)
     bar.setFixedHeight(44)
