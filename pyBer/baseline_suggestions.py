@@ -251,27 +251,25 @@ def _evaluate_recording(recording, window, config):
 
 def _candidate_windows(config):
     """Search distinct durations and offsets wholly inside the displayed pre-event span."""
-    pre = min(60.0, config.pre_window_s)
-    # A strictly negative endpoint prevents a sample at time zero entering the
-    # baseline. Centisecond rounding matches the editable PSTH input controls.
-    guard = max(0.01, config.guard_s + 0.01)
+    pre = int(np.floor(min(60.0, config.pre_window_s)))
+    # Evaluate whole-second intervals themselves, rather than rounding their
+    # labels after scoring. Stay strictly before the protected guard boundary.
+    guard = int(np.floor(config.guard_s)) + 1
+    minimum = max(1, int(np.ceil(config.min_duration_s)))
     available = pre - guard
-    if available < config.min_duration_s:
+    if available < minimum:
         return []
-    durations = {config.min_duration_s, available}
-    durations.update(available * fraction for fraction in (.18, .30, .45, .65, .82))
-    durations.update(value for value in (.5, 1., 2., 3.) if value < available)
-    ends = {guard, max(guard, .10 * pre), max(guard, .25 * pre), max(guard, .45 * pre)}
+    durations = {minimum, available}
+    durations.update(round(available * fraction) for fraction in (.18, .30, .45, .65, .82))
+    durations.update(value for value in (1, 2, 3) if value < available)
+    ends = {guard, *(max(guard, round(fraction * pre)) for fraction in (.10, .25, .45))}
     windows = set()
     for duration in durations:
-        if duration < config.min_duration_s:
+        if duration < minimum:
             continue
         for end in ends:
-            if duration + end <= pre + 1e-9:
-                start_rounded = round(-duration - end, 2)
-                end_rounded = round(-end, 2)
-                if start_rounded >= -pre and start_rounded < end_rounded < 0:
-                    windows.add((start_rounded, end_rounded))
+            if duration + end <= pre:
+                windows.add((-duration - end, -end))
     return sorted(windows)
 
 
@@ -360,9 +358,13 @@ def suggest_baselines(recordings, config=None):
                   recordings=[dict(label=row["label"], events=len(row["events"])) for row in prepared])
     if not prepared or not any(len(row["events"]) for row in prepared):
         return result
+    windows = _candidate_windows(config)
+    if not windows:
+        result["summary"] = "No whole-second window fits before the event. Increase Pre to see suggestions."
+        return result
     candidates = []
     observed_windows, clean_windows = 0, 0
-    for window in _candidate_windows(config):
+    for window in windows:
         rows = [_evaluate_recording(recording, window, config) for recording in prepared]
         observed_windows += sum(row["observed_events"] for row in rows)
         clean_windows += sum(row["event_free_observed_events"] for row in rows)

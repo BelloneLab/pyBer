@@ -20,7 +20,7 @@ from baseline_suggestions_widget import BaselineSuggestionsWidget, _ACTIVE_JOBS
 def _result(pre=5.):
     """Clearly synthetic GUI fixture; numerical quality is tested separately."""
     return dict(status="ready", summary="Synthetic fixture", config=dict(pre_window_s=pre),
-                choices=[dict(start=-pre, end=-.2, window=[-pre, -.2], score=82,
+                choices=[dict(start=-pre, end=-1, window=[-pre, -1], score=82,
                               quality="Supported", summary="Synthetic fixture", diagnostics={})])
 
 
@@ -65,11 +65,20 @@ class BaselineSuggestionsWidgetTests(unittest.TestCase):
         self.widget.queue()
         self.wait_for(lambda: self.widget.report is not None)
         self.assertEqual(choices, [])
-        self.assertTrue(self.widget.buttons[0].isEnabled())
-        self.widget.buttons[0].click()
+        self.assertIs(self.widget.menu_button.menu(), self.widget.menu)
+        self.assertEqual(self.widget.menu.actions(), self.widget.actions)
+        self.assertTrue(self.widget.actions[0].isEnabled())
+        self.widget.actions[0].trigger()
         self.assertEqual(len(choices), 1)
         self.assertLess(choices[0][1], 0)
-        self.assertIn("not confidence", self.widget.buttons[0].toolTip())
+        self.assertTrue(all(value == int(value) for value in choices[0]))
+        start, end = choices[0]
+        self.assertTrue(self.widget.actions[0].text().startswith(f"{start:.0f} to {end:.0f} s"))
+        self.assertIn("not confidence", self.widget.actions[0].toolTip())
+        self.widget.queue()
+        self.assertFalse(self.widget.menu_button.isEnabled())
+        self.widget._apply(0)
+        self.assertEqual(len(choices), 1)
 
     def test_unchanged_baseline_edits_hit_cache_but_prewindow_changes_recompute(self):
         with patch("baseline_suggestions_widget.suggest_baselines", wraps=suggest_baselines) as estimate:
@@ -78,7 +87,7 @@ class BaselineSuggestionsWidgetTests(unittest.TestCase):
             self.assertEqual(estimate.call_count, 1)
             for _ in range(3):
                 self.widget.queue()
-            self.wait_for(lambda: not self.widget.timer.isActive() and self.widget.buttons[0].isEnabled())
+            self.wait_for(lambda: not self.widget.timer.isActive() and self.widget.actions[0].isEnabled())
             self.assertEqual(estimate.call_count, 1)
             self.config = BaselineSuggestionConfig(pre_window_s=4.)
             self.widget.queue()
@@ -133,7 +142,7 @@ class BaselineSuggestionsWidgetTests(unittest.TestCase):
                 release.set()
                 self.wait_for(lambda: not _ACTIVE_JOBS)
                 self.assertIsNone(self.widget.report)
-                self.assertTrue(all(not button.isEnabled() for button in self.widget.buttons))
+                self.assertTrue(all(not button.isEnabled() for button in self.widget.actions))
                 self.assertIn("new input is invalid", self.widget.status.text())
             finally:
                 release.set()

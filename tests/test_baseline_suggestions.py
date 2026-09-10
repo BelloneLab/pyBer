@@ -9,12 +9,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pyBer"))
 from baseline_advisor import BaselineRecording
 from baseline_suggestions import (
     BaselineSuggestionConfig, suggest_baselines, _batch_window_statistics,
-    _window_statistics,
+    _window_statistics, _candidate_windows,
 )
 
 
 class BaselineSuggestionsTests(unittest.TestCase):
     """Compare controlled inputs and independent invariants of the ranking."""
+
+    def test_integer_grid_respects_fractional_limits_and_guard(self):
+        """Scored endpoints are exact integers, inside both user and guard limits."""
+        for pre in (1.9, 2., 4.7, 5., 60.):
+            for guard in (.1, 1., 1.8):
+                config = BaselineSuggestionConfig(pre_window_s=pre, guard_s=guard)
+                windows = _candidate_windows(config)
+                self.assertLessEqual(len(windows), 40)
+                for start, end in windows:
+                    self.assertEqual(start, int(start))
+                    self.assertEqual(end, int(end))
+                    self.assertGreaterEqual(start, -pre)
+                    self.assertLessEqual(start + 1, end)
+                    self.assertLess(end, -guard)
+        self.assertEqual(_candidate_windows(BaselineSuggestionConfig(pre_window_s=1.9)), [])
+        self.assertEqual(_candidate_windows(BaselineSuggestionConfig(pre_window_s=2.)), [(-2, -1)])
 
     def fixture(self, seed=5, events=None):
         """Create a deterministic stationary signal without altering any user data."""

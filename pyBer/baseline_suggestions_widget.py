@@ -63,7 +63,7 @@ def _snapshot_key(recordings, config):
 
 
 class BaselineSuggestionsWidget(QtWidgets.QWidget):
-    """Show three scored windows inline; only an explicit click changes a baseline."""
+    """Offer scored windows in one menu; only an explicit selection changes a baseline."""
 
     selected = QtCore.Signal(object)
 
@@ -87,17 +87,23 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
         self.title = QtWidgets.QLabel("Suggested baseline")
         self.title.setStyleSheet("font-weight: 600;")
         layout.addWidget(self.title)
-        self.buttons = []
+        self.menu_button = QtWidgets.QPushButton("Choose a window")
+        self.menu_button.setMinimumHeight(31)
+        self.menu_button.setStyleSheet("QPushButton { padding: 4px 24px 4px 8px; }")
+        self.menu_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.menu_button.setAccessibleName("Suggested baseline windows")
+        self.menu = QtWidgets.QMenu(self.menu_button)
+        self.menu.setToolTipsVisible(True)
+        self.actions = []
         for index in range(3):
-            button = QtWidgets.QPushButton()
-            button.setMaximumHeight(31)
-            button.setMinimumHeight(27)
-            button.setStyleSheet("QPushButton { padding: 2px 8px; font-size: 12px; }")
-            button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            button.setVisible(False)
-            button.clicked.connect(lambda _checked=False, number=index: self._apply(number))
-            self.buttons.append(button)
-            layout.addWidget(button)
+            action = self.menu.addAction("")
+            action.setVisible(False)
+            action.setEnabled(False)
+            action.triggered.connect(lambda _checked=False, number=index: self._apply(number))
+            self.actions.append(action)
+        self.menu_button.setMenu(self.menu)
+        self.menu_button.setEnabled(False)
+        layout.addWidget(self.menu_button)
         self.status = QtWidgets.QLabel("Select a signal and events.")
         self.status.setProperty("class", "hint")
         self.status.setWordWrap(True)
@@ -110,7 +116,9 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
             return
         self._wanted_key = None
         self._pending = None
-        for button in self.buttons:
+        self.menu.close()
+        self.menu_button.setEnabled(False)
+        for button in self.actions:
             button.setEnabled(False)
         self.timer.start()
 
@@ -193,7 +201,9 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
     def _show_unavailable(self, message):
         """Empty or unusable signals produce a compact status, not made-up choices."""
         self.report = None
-        for button in self.buttons:
+        self.menu_button.setEnabled(False)
+        self.menu_button.setText("No suggested window")
+        for button in self.actions:
             button.setVisible(False)
             button.setEnabled(False)
         self.status.setText(message)
@@ -203,14 +213,16 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
         """Present fit scores with explicit limitations in every choice tooltip."""
         self.report = report
         choices = report.get("choices", [])
-        for index, button in enumerate(self.buttons):
+        self.menu_button.setEnabled(bool(choices))
+        self.menu_button.setText("Choose a window" if choices else "No suggested window")
+        for index, button in enumerate(self.actions):
             visible = index < len(choices)
             button.setVisible(visible)
             button.setEnabled(visible)
             if not visible:
                 continue
             choice = choices[index]
-            button.setText(f"{choice['start']:.2f} to {choice['end']:.2f} s  ·  {choice['score']}%  ·  Apply")
+            button.setText(f"{choice['start']:.0f} to {choice['end']:.0f} s  ·  {choice['score']}%  ·  Apply")
             diagnostic = choice.get("diagnostics", {})
             tooltip = (
                 f"{choice['quality']} fit. Score {choice['score']}/100 is a descriptive ranking, not confidence.\n"
@@ -223,7 +235,6 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
                 + self.scope
             )
             button.setToolTip(tooltip)
-            button.setAccessibleName(f"Apply baseline {choice['start']:.2f} to {choice['end']:.2f} seconds, {choice['score']} percent fit score, {choice['quality'].lower()}")
         if not choices:
             self.status.setText(report.get("summary", "No usable pre-event baseline."))
         else:
@@ -233,13 +244,13 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
                 short = cautions[0].split(":")[0].lower() if cautions else "limited signal information"
                 self.status.setText(f"Limited: {short}. Hover for details.")
             else:
-                self.status.setText("Fit score, not confidence. Click to apply.")
+                self.status.setText("Fit score, not confidence. Select a window to apply.")
         self.status.setToolTip(report.get("summary", ""))
 
     def _apply(self, index):
         """Only enabled current choices can be applied, never an outdated result."""
         choices = (self.report or {}).get("choices", [])
-        if 0 <= index < len(choices) and self.buttons[index].isEnabled():
+        if 0 <= index < len(choices) and self.actions[index].isEnabled():
             self.selected.emit(tuple(choices[index]["window"]))
 
     def stop(self):

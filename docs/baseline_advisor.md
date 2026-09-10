@@ -1,9 +1,9 @@
 # Automatic PSTH baseline suggestions
 
-**Postprocessing > PSTH > Window & baseline** shows up to three suggested windows
+**Postprocessing > PSTH > Window & baseline** offers up to three scored windows in a compact dropdown menu
 directly below the baseline inputs. Loading a signal, choosing events, changing
 the pre-event duration or switching recording scope refreshes them automatically.
-Click a choice to apply it. There is no separate dialog or Estimate step.
+Open the menu and select a choice to apply it. There is no separate dialog or Estimate step.
 
 Every choice ends strictly before event time zero and lies inside the displayed
 pre-event span, up to the baseline controls' 60-second limit. Applying a choice
@@ -59,8 +59,9 @@ use, especially for confirmatory analysis.
    gaps larger than three median native sample intervals break a segment.
    Interpolation never supplies baseline information.
 2. Search a bounded grid of durations and offsets inside the current Pre span.
-   Endpoints have 0.01-second precision and remain before the pre-event guard,
-   including its boundary.
+   Endpoints are whole seconds, evaluated exactly as displayed, and remain before
+   the pre-event guard, including its boundary. Fractional Pre limits are rounded
+   inward. If no whole-second interval fits, no suggestion is offered.
 3. Check data and protected-bout coverage at every target event. Sample at most
    32 eligible events evenly through each recording for expensive statistics,
    retaining every loaded recording.
@@ -91,7 +92,7 @@ exposes the policy:
 | --- | --- |
 | Search span | Current Pre value, capped at 60 s |
 | Guard / post-bout protection | 0.10 s / 0.50 s |
-| Minimum candidate duration | 0.25 s |
+| Minimum candidate duration | 1 s on the whole-second grid |
 | Minimum native observations per assessed window | 6 |
 | Maximum sampled events per recording | 32 |
 | Maximum native samples per quality segment | 256 |
