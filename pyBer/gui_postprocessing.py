@@ -36,7 +36,7 @@ from numeric_controls import with_slider
 from psth_metrics import METRICS, metric_id, summarize_metrics, draw_metric_matplotlib, export_selected_metrics
 from psth_metric_panels import MetricPanel, MetricGrid
 from aligned_time_axes import AlignedTimeAxes
-from postprocessing_view_controls import split_plot_layout, PlotSplitterPreferences, create_view_menu
+from postprocessing_view_controls import split_plot_layout, PlotSplitterPreferences, create_view_menu, compact_results_toolbar
 from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_metrics
 from file_drop import install_file_drop, expand_paths
 from behavior_import import infer_table, read_behavior_csv, detect_time_column
@@ -3917,7 +3917,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._plot_file_context.setLayout(header_row)
         self._plot_file_context.setFixedHeight(28)
         header_row.setContentsMargins(0, 0, 0, 0)
-        rv.addWidget(self._plot_file_context)
+        self._plot_file_context.hide()
+        self._plot_file_context.setParent(self)
 
         # Provenance shares the filename row; detailed guidance stays in hover
         # text so neither long filenames nor empty results consume plot height.
@@ -3944,7 +3945,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         visual_bar.addStretch(1)
         self._plot_scope_controls = QtWidgets.QWidget()
         self._plot_scope_controls.setLayout(visual_bar)
-        rv.addWidget(self._plot_scope_controls)
+        self._plot_scope_controls.hide()
+        self._plot_scope_controls.setParent(self)
 
         view_row = QtWidgets.QHBoxLayout()
         view_row.addWidget(QtWidgets.QLabel("View layout"))
@@ -4366,6 +4368,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_splitter_preferences.changed.connect(self._queue_view_settings_save)
         self.btn_view_menu = create_view_menu(self)
         tb_layout.insertWidget(tb_layout.indexOf(self.btn_style), self.btn_view_menu)
+        compact_results_toolbar(self)
         self._results_scroll = QtWidgets.QScrollArea()
         self._results_scroll.setWidgetResizable(True)
         self._results_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -9470,8 +9473,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if hasattr(self, "_results_stack"):
             self._results_stack.setCurrentWidget(self._results_scroll if n_files else self._empty_results)
         self.lbl_status.setVisible(n_files > 0)
-        for controls in (self._plot_file_context, self._plot_scope_controls):
-            controls.setVisible(n_files > 0)
+        self.combo_toolbar_scope.setEnabled(n_files > 0)
+        self.combo_individual_file.setEnabled(n_files > 0)
         self._refresh_heatmap_scale_visibility()
         src_mode = "Group" if self.tab_sources.currentIndex() == 1 else "Single"
         if self._processed:
@@ -9481,6 +9484,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 proc0 = next((p for p in self._processed if self._file_id_for_proc(p) == selected), proc0)
             file_txt = os.path.basename(proc0.path) if proc0.path else "import"
             self.lbl_plot_file.setText(f"File: {file_txt}")
+            self.combo_individual_file.setPlaceholderText(file_txt)
+            self.combo_individual_file.setToolTip(str(proc0.path or file_txt))
             fs_actual = float(proc0.fs_actual) if np.isfinite(proc0.fs_actual) else np.nan
             fs_used = float(proc0.fs_used) if np.isfinite(proc0.fs_used) else np.nan
             fs_txt = f"{fs_actual:.3g}->{fs_used:.3g}" if np.isfinite(fs_actual) and np.isfinite(fs_used) else "-"

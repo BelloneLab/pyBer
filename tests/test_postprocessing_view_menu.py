@@ -24,6 +24,34 @@ class ViewMenuTests(unittest.TestCase):
                             raw_signal=np.ones(5), raw_reference=np.ones(5), output=np.ones(5), output_label="dFF")]
         panel._update_status_strip()
         self.assertTrue(panel._plot_view_controls.isHidden())
+        self.assertTrue(panel._plot_file_context.isHidden())
+        self.assertTrue(panel._plot_scope_controls.isHidden())
+
+    def test_single_row_scope_binding_and_secondary_actions(self):
+        """The compact controls preserve old signals, shortcuts and project state."""
+        panel = self.panel
+        panel.combo_toolbar_scope.setCurrentIndex(1)
+        self.assertEqual(panel.tab_visual_mode.currentIndex(), 1)
+        panel.tab_visual_mode.setCurrentIndex(0)
+        self.assertEqual(panel.combo_toolbar_scope.currentIndex(), 0)
+        self.assertIn("Plot style...", [action.text() for action in panel.btn_view_menu.menu().actions()])
+        self.assertIn("Reset analysis...", [action.text() for action in panel.menu_action_load.actions()])
+        toolbar = panel._post_transport_bar
+        toolbar.setParent(None)
+        try:
+            toolbar.resize(1050, 44)
+            toolbar.show()
+            self.app.processEvents()
+            controls = (panel.btn_action_load, panel.btn_action_compute, panel.btn_action_export,
+                        panel.btn_view_menu, panel.combo_toolbar_scope, panel.combo_individual_file,
+                        panel.btn_action_hide)
+            centers = [widget.geometry().center().y() for widget in controls]
+            self.assertLessEqual(max(centers) - min(centers), 1)
+            self.assertEqual(toolbar.height(), 44)
+            for widget in controls:
+                self.assertLessEqual(widget.geometry().right(), toolbar.width())
+        finally:
+            toolbar.setParent(panel)
 
     def test_named_sizes_and_paper_theme_survive_preferences_and_project_settings(self):
         panel = self.panel

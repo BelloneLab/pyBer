@@ -2614,6 +2614,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # so existing wiring (signals, references) remains intact.
         self.btn_workflow_artifacts.setVisible(False)
 
+        from compact_toolbar_widgets import compact_preprocessing_toolbar
+        compact_preprocessing_toolbar(self, transport_bar)
+        self._pre_transport_bar = transport_bar
+
         center_panel = QtWidgets.QFrame()
         center_panel.setObjectName("centerPanel")
         center_panel_layout = QtWidgets.QVBoxLayout(center_panel)

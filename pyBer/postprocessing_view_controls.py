@@ -104,7 +104,7 @@ def create_view_menu(panel):
     menu.addAction("Fit plots", panel.btn_fit_psth.click)
     edit = menu.addAction("Edit heatmap scale")
     edit.setCheckable(True)
-    edit.triggered.connect(panel.btn_edit_scale.setChecked)
+    edit.triggered.connect(lambda checked: panel.btn_edit_scale.setChecked(checked))
     menu.addSeparator()
     menu.addAction("Reset panel sizes", panel.plot_splitter_preferences.reset)
     menu.addAction("Save current view", panel._save_settings)
@@ -120,3 +120,60 @@ def create_view_menu(panel):
 
     menu.aboutToShow.connect(refresh)
     return button
+
+
+def compact_results_toolbar(panel):
+    """Put actions, scope, file and elided status on one non-wrapping row."""
+    layout = panel._post_transport_bar.layout()
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = item.widget()
+        if widget is not None:
+            widget.hide()
+    layout.setContentsMargins(8, 4, 8, 4)
+    layout.setSpacing(5)
+    panel.btn_action_compute.setText("PSTH")
+    panel.btn_action_compute.setToolTip("Compute PSTH with the current analysis settings")
+    panel.btn_action_export.setText("Export")
+    panel.combo_toolbar_scope = QtWidgets.QComboBox(panel)
+    panel.combo_toolbar_scope.addItems(["Individual", "Group"])
+    panel.combo_toolbar_scope.setToolTip("Choose one recording or the group summary")
+    panel.combo_toolbar_scope.setFixedWidth(112)
+    panel.combo_toolbar_scope.currentIndexChanged.connect(panel.tab_visual_mode.setCurrentIndex)
+
+    def reflect_scope(index):
+        """Project restoration and other navigation keep the visible picker current."""
+        with QtCore.QSignalBlocker(panel.combo_toolbar_scope):
+            panel.combo_toolbar_scope.setCurrentIndex(index)
+
+    panel.tab_visual_mode.currentChanged.connect(reflect_scope)
+    reflect_scope(panel.tab_visual_mode.currentIndex())
+    panel.combo_individual_file.setMinimumWidth(100)
+    panel.combo_individual_file.setMaximumWidth(420)
+    panel.combo_individual_file.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                            QtWidgets.QSizePolicy.Policy.Fixed)
+    panel.combo_individual_file.setAccessibleName("Displayed recording")
+    for combo in (panel.combo_toolbar_scope, panel.combo_individual_file):
+        combo.setStyleSheet("QComboBox { padding: 3px 22px 3px 8px; min-height: 20px; font-size: 12px; }")
+    panel.lbl_status.setMinimumWidth(0)
+    panel.lbl_status.setMaximumWidth(260)
+    for widget in (panel.btn_action_load, panel.btn_action_compute, panel.btn_action_export,
+                   panel.btn_action_undo, panel.btn_action_redo, panel.btn_view_menu,
+                   panel.combo_toolbar_scope, panel.combo_individual_file, panel.lbl_status,
+                   panel.btn_action_hide):
+        layout.addWidget(widget, 2 if widget is panel.combo_individual_file else
+                         1 if widget is panel.lbl_status else 0)
+        widget.setFixedHeight(32)
+        widget.show()
+        if isinstance(widget, (QtWidgets.QPushButton, QtWidgets.QToolButton)):
+            widget.setStyleSheet("padding: 3px 8px; font-size: 12px;")
+    panel.btn_action_undo.setFixedWidth(32)
+    panel.btn_action_redo.setFixedWidth(32)
+    panel._post_transport_bar.setFixedHeight(44)
+    # Keep secondary operations accessible without spending permanent width.
+    menu = panel.btn_view_menu.menu()
+    menu.addSeparator()
+    menu.addAction("Plot style...", panel.btn_style.click)
+    menu.addAction("Help", panel.btn_action_help.click)
+    panel.menu_action_load.addSeparator()
+    panel.menu_action_load.addAction("Reset analysis...", panel.btn_action_reset.click)

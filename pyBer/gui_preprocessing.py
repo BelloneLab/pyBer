@@ -1,5 +1,6 @@
 # gui_preprocessing.py
 from __future__ import annotations
+from compact_toolbar_widgets import ContextLabel
 
 from typing import Callable, Dict, List, Optional, Tuple
 import json
@@ -3433,9 +3434,9 @@ class PlotDashboard(QtWidgets.QWidget):
         v.setSpacing(8)
 
         top = QtWidgets.QHBoxLayout()
-        self.lbl_title = QtWidgets.QLabel("No file loaded")
+        self.lbl_title = ContextLabel("No file loaded")
         self.lbl_title.setStyleSheet("font-weight: 600; font-size: 12pt;")
-        self.lbl_status = QtWidgets.QLabel("Channel: - | A/D: None | Fs: - -> - Hz | Mode: -")
+        self.lbl_status = ContextLabel("Channel: - | A/D: None | Fs: - -> - Hz | Mode: -")
         self.lbl_status.setProperty("class", "hint")
         self.lbl_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         top.addWidget(self.lbl_title)
@@ -3642,8 +3643,8 @@ class PlotDashboard(QtWidgets.QWidget):
         self._plot_data_available[plot] = available
         plot.getPlotItem().setVisible(available)
         has_data = any(self._plot_data_available.values())
-        self._plot_header.setVisible(has_data)
-        self._plot_tools.setVisible(self._plot_data_available.get(self.plot_raw, False))
+        self._plot_header.setVisible(has_data and not getattr(self, "_inline_toolbar", False))
+        self._plot_tools.setVisible(self._plot_data_available.get(self.plot_raw, False) and not getattr(self, "_inline_toolbar", False))
         self.plot_workspace.setCurrentWidget(
             self.plot_splitter if any(self._plot_data_available.values()) else self.plot_empty_state
         )

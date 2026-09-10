@@ -17,6 +17,16 @@ PSTH/dashboard export includes the shared cards and comparison summaries.
 
 ## View menu and saved layout
 
+Both workflows use a single 44-pixel toolbar above their plots. Postprocessing
+keeps File, PSTH, Export, undo/redo, View, Individual/Group, the recording selector,
+status and the drawer toggle together. Reset is in File; plot styling and help
+are in View. Full recording names remain available on hover.
+
+Preprocessing keeps File, QC, Export, undo/redo, Selection, View and recording
+context on the same line. Selection contains Add from selector, Box select and
+Clear manual regions. View contains thresholds, plot styling and sensor settings.
+These menu entries use the existing editing actions and keyboard shortcuts.
+
 The toolbar **View** menu contains layout, theme, heatmap contrast, automatic
 scaling, plot fitting and the detailed scale editor. This replaces the separate
 controls row. **Save current view** writes preferences immediately; normal edits
