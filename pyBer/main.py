@@ -184,7 +184,7 @@ from gui_preprocessing import (
 from gui_sensors import SensorDialog
 from gui_postprocessing import PostProcessingPanel
 from numeric_controls import install_spinbox_scrubbers
-from file_drop import local_paths, expand_paths
+from file_drop import local_paths, expand_paths, create_drop_privilege_notice
 from onboarding import (
     ToastManager,
     TutorialOverlay,
@@ -2390,6 +2390,10 @@ class MainWindow(QtWidgets.QMainWindow):
         export_progress_layout.addWidget(self._export_progress_bar)
         self._export_progress_widget.setVisible(False)
         self._status_bar.addPermanentWidget(self._export_progress_widget)
+
+        self._drop_privilege_notice = create_drop_privilege_notice(self._status_bar)
+        if self._drop_privilege_notice is not None:
+            self._status_bar.addPermanentWidget(self._drop_privilege_notice)
 
         self._status_bar.addPermanentWidget(QtWidgets.QLabel("App theme"))
         self._status_bar.addPermanentWidget(self.btn_app_theme)

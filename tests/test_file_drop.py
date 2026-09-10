@@ -8,7 +8,8 @@ from unittest.mock import Mock, patch
 
 import test_postprocessing_empty_state as fixture
 from PySide6 import QtCore, QtGui, QtWidgets
-from file_drop import expand_paths, install_file_drop, local_paths
+from file_drop import (expand_paths, install_file_drop, local_paths,
+                       create_drop_privilege_notice, ELEVATED_DROP_HELP)
 from gui_preprocessing import FileQueuePanel
 
 
@@ -67,6 +68,43 @@ class FileDropTests(unittest.TestCase):
                 self.assertEqual(len(received), 1)
                 self.assertEqual(Path(received[0][0]), self.source)
                 self.assertEqual(self.source.read_bytes(), original)
+
+    def test_elevated_mode_explains_drop_restriction_after_show(self):
+        """The real Windows restriction is visible even when no drop arrives."""
+        with patch("file_drop.is_process_elevated", return_value=True):
+            panel = FileQueuePanel()
+            notice = create_drop_privilege_notice(panel)
+        self.addCleanup(self.dispose, panel)
+        panel.setAttribute(QtCore.Qt.WidgetAttribute.WA_DontShowOnScreen)
+        panel.btn_open.setToolTip("Choose a recording")
+        panel.show()
+        self.app.processEvents()
+        for target in (panel.list_files.viewport(), panel.btn_open, panel.btn_folder):
+            self.assertIn(ELEVATED_DROP_HELP, target.toolTip())
+        self.assertTrue(panel.btn_open.toolTip().startswith("Choose a recording"))
+        self.assertIn("administrator mode", notice.text())
+        self.assertIn("Save your work", notice.toolTip())
+        panel.hide()
+        panel.show()
+        self.app.processEvents()
+        self.assertEqual(panel.btn_open.toolTip().count(ELEVATED_DROP_HELP), 1)
+
+    def test_normal_mode_keeps_drop_targets_and_status_uncluttered(self):
+        """Ordinary launches retain their original tooltips and no warning."""
+        button = QtWidgets.QPushButton()
+        self.addCleanup(self.dispose, button)
+        button.setAttribute(QtCore.Qt.WidgetAttribute.WA_DontShowOnScreen)
+        button.setToolTip("Choose a recording")
+        received = []
+        with patch("file_drop.is_process_elevated", return_value=False):
+            install_file_drop(button, received.append, (".csv",))
+            self.assertIsNone(create_drop_privilege_notice(button))
+        button.show()
+        self.app.processEvents()
+        self.assertEqual(button.toolTip(), "Choose a recording")
+        self.assertTrue(send_drop(button, [QtCore.QUrl.fromLocalFile(str(self.source))])[-1].isAccepted())
+        self.app.processEvents()
+        self.assertEqual(len(received), 1)
 
     def test_detached_preprocessing_dock_receives_viewport_drop(self):
         window = QtWidgets.QMainWindow()

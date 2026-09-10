@@ -35,6 +35,16 @@ Numeric settings in both panels accept direct keyboard entry: select the value, 
 
 Drop files or folders onto the preprocessing file list or Open/Add Folder buttons. In postprocessing, drop onto the **Preprocessed Files** or **Behaviors** list, or its load button, to choose the appropriate loader for CSV files. Drops also work in detached drawers and import files without moving the originals.
 
+On Windows, launch pyBer without **Run as administrator**. An administrator
+VS Code session also starts Python elevated, so Windows blocks incoming drops
+from ordinary File Explorer before they reach pyBer. Save your session and
+reopen VS Code normally, or launch the executable directly from Explorer.
+The status bar and drop-target tooltips explain this when elevation is detected;
+the load buttons still work. Source users can run
+`python scripts/create_windows_shortcut.py` in the pyBer environment, then
+double-click **Launch pyBer.lnk** from Explorer. This leaves existing sessions
+open and does not change system permissions.
+
 | Stage | Capabilities |
 |---|---|
 | Ingest | Current and legacy Doric HDF5 layouts, generic `.h5` / `.hdf5`, RWD fluorescence CSV exports, multiple channels, DIO/AOUT triggers, and recursive folder discovery. |

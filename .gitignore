@@ -27,3 +27,4 @@ _test/
 # OS metadata
 .DS_Store
 Thumbs.db
+*.lnk
