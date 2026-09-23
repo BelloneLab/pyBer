@@ -119,7 +119,9 @@ class BehaviorPsthBar(QtWidgets.QWidget):
         card = panel._plot_card_by_widget.get(plot, plot)
         if card.isHidden():
             panel.combo_view_layout.setCurrentText("Standard")
-        y = plot.mapTo(panel._results_splitter, QtCore.QPoint(0, 0)).y()
+        # Include the heatmap's display controls, which sit above its image.
+        target = card if plot is panel.plot_heat else plot
+        y = target.mapTo(panel._results_splitter, QtCore.QPoint(0, 0)).y()
         panel._results_scroll.verticalScrollBar().setValue(max(0, y - 8))
 
     def update_summary(self) -> None:

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("PYBER_SMOKE_TEST", "1")
@@ -69,6 +70,24 @@ class PublicationRenderingTests(unittest.TestCase):
 
     def test_pooled_trials_export_descriptive_metrics_without_inferential_bracket(self):
         self._assert_exports(_publication_panel(pooled_trials=True))
+
+    def test_export_retains_selected_heatmap_palette_and_fixed_limits(self):
+        from matplotlib.axes import Axes
+        from heatmap_display import color_map
+        panel = _publication_panel()
+        panel._style.update(psth_heatmap_cmap='CET-D1', heatmap_levels_manual=True,
+                            heatmap_min=-.5, heatmap_max=.5)
+        original = Axes.imshow
+        captured = []
+        def capture(axis, *args, **kwargs):
+            captured.append(kwargs)
+            return original(axis, *args, **kwargs)
+        with patch.object(Axes, 'imshow', capture):
+            self._assert_exports(panel)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual((captured[0]['vmin'], captured[0]['vmax']), (-.5, .5))
+        np.testing.assert_array_equal(captured[0]['cmap'](np.linspace(0, 1, 256)),
+                                      color_map(panel._style).getLookupTable(nPts=256, alpha=True) / 255.)
 
 
 if __name__ == "__main__":

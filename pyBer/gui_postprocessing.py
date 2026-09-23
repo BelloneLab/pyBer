@@ -41,6 +41,7 @@ from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_m
 from file_drop import install_file_drop, expand_paths
 from behavior_import import infer_table, read_behavior_csv, detect_time_column
 from mamir_import import inspect_mamir, load_mamir
+from heatmap_display import color_name as heatmap_color_name, color_map as heatmap_color_map, color_limits as heatmap_color_limits, matplotlib_color_map
 from baseline_advisor import BaselineRecording
 from baseline_suggestions import BaselineSuggestionConfig
 from baseline_suggestions_widget import BaselineSuggestionsWidget
@@ -4077,9 +4078,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.heat_lut.setMinimumWidth(110)
         self.heat_lut.setMaximumWidth(150)
         self.heat_lut.setImageItem(self.img)
+        # Palette choices are kept in the explicit selector so redraws and
+        # exported figures cannot silently lose free-form gradient edits.
+        self.heat_lut.item.gradient.showTicks(False)
+        self.heat_lut.item.gradient.setEnabled(False)
         self.heat_colorbar_widget = pg.GraphicsLayoutWidget()
         self.heat_colorbar_widget.setFixedWidth(78)
-        self.heat_colorbar = pg.ColorBarItem(values=(0, 1), colorMap=pg.colormap.get("viridis"), width=14, interactive=False)
+        self.heat_colorbar = pg.ColorBarItem(values=(0, 1), colorMap=pg.colormap.get("viridis"),
+                                            width=14, interactive=True, rounding=.001, colorMapMenu=False)
+        self.heat_colorbar_widget.setToolTip("Drag the color handles to adjust contrast. Use Adjust for exact values or Auto to reset. Display only.")
+        self.heat_colorbar.sigLevelsChanged.connect(self._on_heatmap_colorbar_changed)
+        self.heat_colorbar.sigLevelsChangeFinished.connect(
+            lambda *_: self._on_heatmap_colorbar_changed(finished=True))
         self.heat_colorbar_widget.addItem(self.heat_colorbar)
         self.heat_lut.hide()
         self.btn_edit_scale = QtWidgets.QPushButton("Edit scale")
@@ -4338,6 +4348,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         time_grid.setRowStretch(1, 1)
         self.psth_scale_container = scales
         self.psth_shared_card = create_plot_card(self.heat_figure, "")
+        from heatmap_color_controls import HeatmapColorControls
+        self.heatmap_color_controls = HeatmapColorControls(self)
+        self.psth_shared_card.layout().insertWidget(2, self.heatmap_color_controls)
         self.bout_shared_card = create_plot_card(self.bout_figure, "")
         for card in (self.psth_shared_card, self.bout_shared_card):
             card.title_label.hide()
@@ -4780,6 +4793,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_spatial_activity_mode.currentIndexChanged.connect(self._compute_spatial_heatmap)
         self.btn_spatial_help.clicked.connect(self._show_spatial_help)
         if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
+            self.heat_lut.item.sigLevelsChanged.connect(lambda *_: self._on_heatmap_levels_changed(save=False))
             level_signal = getattr(self.heat_lut.item, "sigLevelChangeFinished", None)
             if level_signal is None:
                 level_signal = getattr(self.heat_lut.item, "sigLevelsChangeFinished", None)
@@ -9163,6 +9177,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_heat.setVisible(show_heat)
         self.plot_avg.setVisible(show_avg)
         self.psth_scale_container.setVisible(show_heat)
+        if hasattr(self, "heatmap_color_controls"):
+            self.heatmap_color_controls.sync()
         self.row_avg.setVisible(show_avg)
         self.row_signal.setVisible(show_signal)
         self.row_behavior.setVisible(show_behavior)
@@ -9172,10 +9188,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.bout_shared_card.setVisible(show_heat and not self.plot_dur.isHidden())
         self.dashboard_side.setVisible(not self.bout_shared_card.isHidden() or
                                        (show_avg and (not self.plot_metrics.isHidden() or not self.plot_global.isHidden())))
+        self._refresh_results_minimum_heights()
+
+    def _refresh_results_minimum_heights(self) -> None:
         if hasattr(self, "_results_splitter"):
             # All panels must keep a legible plotting area. Extra rows scroll
             # vertically instead of compressing titles and axes into one another.
-            minima = ((self.trace_card, 240), (self.row_heat, 440 if show_heat and show_avg else 220), (self.row_signal, 220), (self.row_behavior, 360))
+            show_heat, show_avg = not self.plot_heat.isHidden(), not self.plot_avg.isHidden()
+            controls = self.heatmap_color_controls
+            editor_height = controls.sizeHint().height() + 6 if not controls.isHidden() else 0
+            heat_height = (440 if show_heat and show_avg else 220) + editor_height
+            minima = ((self.trace_card, 240), (self.row_heat, heat_height), (self.row_signal, 220), (self.row_behavior, 360))
             visible = [(widget, height) for widget, height in minima if not widget.isHidden()]
             for widget, height in minima:
                 widget.setMinimumHeight(height)
@@ -9845,6 +9868,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         detailed = self.btn_edit_scale.isChecked()
         self.heat_lut.setVisible(ready and detailed)
         self.heat_colorbar_widget.setVisible(ready and not detailed)
+        if hasattr(self, "heatmap_color_controls"):
+            self.heatmap_color_controls.sync()
 
     def _set_plot_preset(self, name: str) -> None:
         """Apply a coordinated plot palette and keep custom styling available."""
@@ -11385,10 +11410,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         arr = np.asarray(heat, float)
         image_item.setImage(arr, autoLevels=True)
-        hmin = self._style.get("heatmap_min", None)
-        hmax = self._style.get("heatmap_max", None)
-        if hmin is not None and hmax is not None:
-            image_item.setLevels([float(hmin), float(hmax)])
+        # PSTH limits may be z-scores while these maps contain seconds,
+        # occupancy or speed. Their linked cursors own their display limits.
         xmin, xmax, ymin, ymax = extent
         dx = max(1e-9, float(xmax - xmin))
         dy = max(1e-9, float(ymax - ymin))
@@ -15035,54 +15058,31 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         # ImageItem maps axis-0 -> x and axis-1 -> y; transpose so time is x, trials are y.
         img = np.asarray(mat, float).T
-        cmap_name = str(self._style.get("heatmap_cmap", "viridis"))
         previous_suppression = self._suppress_heatmap_level_store
         self._suppress_heatmap_level_store = True
         try:
-            cmap = pg.colormap.get(cmap_name)
-            lut = cmap.getLookupTable()
-            self.img.setLookupTable(lut)
+            cmap = heatmap_color_map(self._style)
             if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
                 self.heat_lut.item.gradient.setColorMap(cmap)
             if hasattr(self, "heat_colorbar"):
                 self.heat_colorbar.setColorMap(cmap)
+            self.img.setLookupTable(cmap.getLookupTable(nPts=256, alpha=True))
         except Exception:
             pass
         finally:
             self._suppress_heatmap_level_store = previous_suppression
-        finite = img[np.isfinite(img)]
-        if finite.size:
-            lo = float(np.nanmin(finite))
-            hi = float(np.nanmax(finite))
-            scale = self.combo_heat_scale.currentIndex()
-            if scale == 1:
-                lo, hi = np.percentile(finite, [2, 98]).tolist()
-            elif scale == 2:
-                limit = max(abs(lo), abs(hi))
-                lo, hi = -limit, limit
-        else:
-            lo, hi = 0.0, 1.0
         manual_levels = bool(self._style.get("heatmap_levels_manual", False))
         if not manual_levels:
             self._style["heatmap_min"] = None
             self._style["heatmap_max"] = None
-        hmin = self._style.get("heatmap_min", None)
-        hmax = self._style.get("heatmap_max", None)
-        if manual_levels and hmin is not None and hmax is not None:
-            try:
-                lo = float(hmin)
-                hi = float(hmax)
-            except Exception:
-                pass
-        if (not np.isfinite(lo)) or (not np.isfinite(hi)) or hi <= lo:
-            center = lo if np.isfinite(lo) else 0.0
-            lo, hi = center - 0.5, center + 0.5
+        lo, hi = heatmap_color_limits(mat, self.combo_heat_scale.currentIndex(), self._style)
         self._suppress_heatmap_level_store = True
         try:
             self.img.setImage(img, autoLevels=False)
             self.img.setLevels([lo, hi])
             if hasattr(self, "heat_colorbar"):
                 self.heat_colorbar.setLevels((lo, hi))
+                self.heat_colorbar.rounding = max((hi - lo) / 1000., 1e-15)
             if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
                 try:
                     self.heat_lut.item.setLevels(lo, hi)
@@ -15128,6 +15128,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             )
         else:
             self.plot_heat.setToolTip("")
+        self.heatmap_color_controls.sync()
 
     def _render_duration_hist(self, durations: np.ndarray) -> None:
         self.plot_dur.clear()
@@ -15487,13 +15488,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     title_item.setDefaultTextColor(QtGui.QColor(*text_color))
             except Exception:
                 pass
-        cmap_name = str(self._style.get("heatmap_cmap", "viridis"))
         previous_suppression = self._suppress_heatmap_level_store
         self._suppress_heatmap_level_store = True
         try:
-            cmap = pg.colormap.get(cmap_name)
+            cmap = heatmap_color_map(self._style)
             if hasattr(self, "heat_lut") and getattr(self.heat_lut, "item", None) is not None:
                 self.heat_lut.item.gradient.setColorMap(cmap)
+            self.img.setLookupTable(cmap.getLookupTable(nPts=256, alpha=True))
         except Exception:
             pass
         finally:
@@ -15516,6 +15517,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.heat_colorbar_widget.setBackground(palette["surface"])
             self.heat_colorbar.axis.setTextPen(pg.mkPen(palette["muted"]))
             self.heat_colorbar.axis.setPen(pg.mkPen(palette["axis"]))
+            for handle in self.heat_colorbar.region.lines:
+                handle.setPen(pg.mkPen(palette["text"]))
+                handle.setHoverPen(pg.mkPen(palette["accent"], width=2))
         accent = QtGui.QColor(palette["accent"])
         self.metrics_bar_pre.setOpts(width=0.32, brush=pg.mkBrush(accent))
         self.metrics_bar_post.setOpts(width=0.32, brush=pg.mkBrush(223, 161, 111, 175))
@@ -15533,7 +15537,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if hasattr(self, "combo_psth_behavior_metric"):
             self._refresh_psth_duration_view()
 
-    def _on_heatmap_levels_changed(self) -> None:
+    def _on_heatmap_levels_changed(self, *, save: bool = True) -> None:
         if self._is_restoring_settings or self._suppress_heatmap_level_store:
             return
         if not hasattr(self, "heat_lut") or getattr(self.heat_lut, "item", None) is None:
@@ -15544,13 +15548,49 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         if not isinstance(levels, (list, tuple)) or len(levels) < 2:
             return
-        lo = float(levels[0])
-        hi = float(levels[1])
-        if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
-            self._style["heatmap_min"] = lo
-            self._style["heatmap_max"] = hi
-            self._style["heatmap_levels_manual"] = True
+        self._set_heatmap_display_levels(float(levels[0]), float(levels[1]), save=save)
+
+    def _on_heatmap_colorbar_changed(self, *_args, finished: bool = False) -> None:
+        if self._is_restoring_settings or self._suppress_heatmap_level_store:
+            return
+        self._set_heatmap_display_levels(*self.heat_colorbar.values, save=finished, from_colorbar=True)
+
+    def _set_heatmap_display_levels(self, lo: float, hi: float, *, save: bool = True,
+                                    from_colorbar: bool = False) -> bool:
+        """Synchronize display widgets only; never recompute or modify PSTH rows."""
+        if (not self.plot_heat.property("hasPlotData") or not np.all(np.isfinite([lo, hi]))
+                or hi <= lo):
+            return False
+        previous = self._suppress_heatmap_level_store
+        self._suppress_heatmap_level_store = True
+        try:
+            self._style.update(heatmap_min=float(lo), heatmap_max=float(hi), heatmap_levels_manual=True)
+            self.img.setLevels((lo, hi))
+            self.heat_lut.item.setLevels(lo, hi)
+            # Do not change the drag's reference values while handles move.
+            if not from_colorbar:
+                self.heat_colorbar.setLevels((lo, hi))
+                self.heat_colorbar.rounding = max((hi - lo) / 1000., 1e-15)
+        finally:
+            self._suppress_heatmap_level_store = previous
+        self.heatmap_color_controls.sync()
+        if save:
             self._queue_settings_save()
+        return True
+
+    def _set_heatmap_palette(self, name: str) -> None:
+        self._style["psth_heatmap_cmap"] = str(name)
+        previous = self._suppress_heatmap_level_store
+        self._suppress_heatmap_level_store = True
+        try:
+            cmap = heatmap_color_map(self._style)
+            self.heat_lut.item.gradient.setColorMap(cmap)
+            self.heat_colorbar.setColorMap(cmap)
+            self.img.setLookupTable(cmap.getLookupTable(nPts=256, alpha=True))
+        finally:
+            self._suppress_heatmap_level_store = previous
+        self.heatmap_color_controls.sync()
+        self._queue_settings_save()
 
     def _open_style_dialog(self) -> None:
         dlg = StyleDialog(self._style, self)
@@ -17601,9 +17641,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     [
                         ("rows", rows),
                         ("columns", cols),
-                        ("color_map", self._style.get("heatmap_cmap", "viridis")),
-                        ("display_min", self._style.get("heatmap_min", None)),
-                        ("display_max", self._style.get("heatmap_max", None)),
+                        ("color_map", heatmap_color_name(self._style)),
+                        ("display_min", float(self.img.getLevels()[0]) if rows and cols else None),
+                        ("display_max", float(self.img.getLevels()[1]) if rows and cols else None),
+                        ("contrast", "Fixed limits" if self._style.get("heatmap_levels_manual")
+                         else self.combo_heat_scale.currentText()),
                     ],
                 )
             )
@@ -17631,8 +17673,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     ("log_scale", data.get("spatial_log", False)),
                     ("invert_y", data.get("spatial_invert_y", False)),
                     ("color_map", self._style.get("heatmap_cmap", "viridis")),
-                    ("display_min", self._style.get("heatmap_min", None)),
-                    ("display_max", self._style.get("heatmap_max", None)),
+                    ("occupancy_display_limits", self.img_spatial_occupancy.getLevels()),
+                    ("activity_display_limits", self.img_spatial_activity.getLevels()),
+                    ("velocity_display_limits", self.img_spatial_velocity.getLevels()),
                 ],
             )
         ]
@@ -17719,14 +17762,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return True
 
     def _export_widget_png_pdf(self, widget: QtWidgets.QWidget, base_path: str, transparent: bool = True) -> Tuple[bool, Optional[str], Optional[str]]:
-        image = self._render_widget_image(widget, transparent=transparent)
-        if image is None or image.isNull():
-            return False, None, None
-        png_path = f"{base_path}.png"
-        pdf_path = f"{base_path}.pdf"
-        ok_png = bool(image.save(png_path, "PNG"))
-        ok_pdf = self._write_widget_pdf(widget, pdf_path)
-        return (ok_png and ok_pdf), (png_path if ok_png else None), (pdf_path if ok_pdf else None)
+        from heatmap_color_controls import plot_export_view
+        with plot_export_view(self, widget):
+            image = self._render_widget_image(widget, transparent=transparent)
+            if image is None or image.isNull():
+                return False, None, None
+            png_path = f"{base_path}.png"
+            pdf_path = f"{base_path}.pdf"
+            ok_png = bool(image.save(png_path, "PNG"))
+            ok_pdf = self._write_widget_pdf(widget, pdf_path)
+            return (ok_png and ok_pdf), (png_path if ok_png else None), (pdf_path if ok_pdf else None)
 
     def _export_results(self) -> None:
         if not self._ensure_current_psth():
@@ -18029,12 +18074,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _export_widget_selective(self, widget: QtWidgets.QWidget, base_path: str,
                                   do_png: bool, do_pdf: bool) -> None:
-        if do_png:
-            image = self._render_widget_image(widget, transparent=True)
-            if image and not image.isNull():
-                image.save(f"{base_path}.png", "PNG")
-        if do_pdf:
-            self._write_widget_pdf(widget, f"{base_path}.pdf")
+        from heatmap_color_controls import plot_export_view
+        with plot_export_view(self, widget):
+            if do_png:
+                image = self._render_widget_image(widget, transparent=True)
+                if image and not image.isNull():
+                    image.save(f"{base_path}.png", "PNG")
+            if do_pdf:
+                self._write_widget_pdf(widget, f"{base_path}.pdf")
 
     def _get_all_behavior_names(self) -> List[str]:
         names: List[str] = []
@@ -18168,7 +18215,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         post0 = float(self.spin_metric_post0.value())
         post1 = float(self.spin_metric_post1.value())
         metric_name = self.combo_metric.currentText()
-        cmap_name = str(self._style.get("heatmap_cmap", "viridis"))
+        cmap = matplotlib_color_map(self._style)
 
         for row_i, beh_name in enumerate(behaviors):
             mat, tvec, labels = self._compute_psth_for_behavior(beh_name)
@@ -18217,8 +18264,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     first_ax_placed = True
                 half_step = float(tvec[1] - tvec[0]) / 2 if tvec.size > 1 else 0.5
                 extent = [float(tvec[0]) - half_step, float(tvec[-1]) + half_step, 0, mat.shape[0]]
+                heat_low, heat_high = heatmap_color_limits(mat, self.combo_heat_scale.currentIndex()
+                                                          if hasattr(self, "combo_heat_scale") else 0, self._style)
                 im = ax_heat.imshow(mat, aspect="auto", origin="lower", extent=extent,
-                                     cmap=cmap_name, interpolation="nearest")
+                                     cmap=cmap, interpolation="nearest",
+                                     vmin=heat_low, vmax=heat_high)
                 ax_heat.axvline(0, color="white", linewidth=0.7, linestyle="--", alpha=0.8)
                 if labels:
                     n = min(len(labels), mat.shape[0])
@@ -19179,8 +19229,10 @@ class StyleDialog(QtWidgets.QDialog):
             self.spin_grid_alpha.setValue(0.25)
         self.combo_cmap = QtWidgets.QComboBox()
         self.combo_cmap.addItems(["viridis", "plasma", "inferno", "magma", "cividis", "turbo", "gray"])
-        if self._style.get("heatmap_cmap"):
-            self.combo_cmap.setCurrentText(str(self._style.get("heatmap_cmap")))
+        current_cmap = heatmap_color_name(self._style)
+        if self.combo_cmap.findText(current_cmap) < 0:
+            self.combo_cmap.addItem(current_cmap)
+        self.combo_cmap.setCurrentText(current_cmap)
 
         self.spin_hmin = QtWidgets.QDoubleSpinBox(); self.spin_hmin.setRange(-1e9, 1e9); self.spin_hmin.setDecimals(3)
         self.spin_hmax = QtWidgets.QDoubleSpinBox(); self.spin_hmax.setRange(-1e9, 1e9); self.spin_hmax.setDecimals(3)
@@ -19197,7 +19249,7 @@ class StyleDialog(QtWidgets.QDialog):
         layout.addRow("Plot background", self.btn_plot_bg)
         layout.addRow("Grid", self.cb_grid)
         layout.addRow("Grid alpha", self.spin_grid_alpha)
-        layout.addRow("Heatmap colormap", self.combo_cmap)
+        layout.addRow("PSTH heatmap colormap", self.combo_cmap)
         layout.addRow("Heatmap min", self.spin_hmin)
         layout.addRow("Heatmap max", self.spin_hmax)
 
@@ -19256,7 +19308,7 @@ class StyleDialog(QtWidgets.QDialog):
             self._style[key] = (col.red(), col.green(), col.blue())
 
     def get_style(self) -> Dict[str, object]:
-        self._style["heatmap_cmap"] = self.combo_cmap.currentText()
+        self._style["psth_heatmap_cmap"] = self.combo_cmap.currentText()
         manual_levels = self.spin_hmin.value() != 0.0 or self.spin_hmax.value() != 0.0
         self._style["heatmap_min"] = float(self.spin_hmin.value()) if manual_levels else None
         self._style["heatmap_max"] = float(self.spin_hmax.value()) if manual_levels else None

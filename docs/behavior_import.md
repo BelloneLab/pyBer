@@ -177,6 +177,31 @@ MAMIR's assay zone export determines membership from tracked animal centers.
 Its head-direction outputs are separate orientation measurements. A body-area
 overlap criterion should be exported and labeled separately if needed.
 
+## Adjusting heatmap colors
+
+The **Colors** controls above the PSTH heatmap work in both Zone and Behavior,
+for Individual and Group views. The original automatic modes are unchanged:
+
+- Full range uses the finite displayed minimum and maximum.
+- Robust contrast uses the 2nd and 98th percentiles to reduce the visual effect
+  of extreme values. Values outside these limits saturate in color; no data is removed.
+- Symmetric limits put zero in the middle of the color scale.
+
+Drag the compact color-bar handles, or click **Adjust** for spatial-style
+histogram cursors, exact **Min / Max** inputs and palette selection. Blue–white–red
+with symmetric limits is useful for showing positive and negative signals.
+**Auto** releases fixed limits and reapplies the selected automatic mode.
+
+Adjustments are display-only: they do not change event selection, baseline,
+normalization, signal values or statistics. Fixed limits persist when switching
+behaviors or recordings; changing normalization resets them. Use identical fixed
+limits and units when comparing colors across animals or groups: independently
+autoscaled plots need not assign the same color to the same value.
+
+Projects preserve the palette and limits. Publication figures use the same
+palette and limit policy as the live heatmap. PSTH color changes do not alter
+spatial-map colors or limits.
+
 ## PSTH baseline interpretation
 
 The existing default uses a separate baseline for each event, from -1 to 0 s
@@ -204,6 +229,7 @@ The example includes two recordings for Individual and Group comparisons and
 uses temporary preferences without changing source files or normal settings.
 Add `--zone-workbook /path/arenas.xlsx` to load arena sheets for Zone testing too.
 Do not interpret unrelated behavior and zone files as the same experiment.
+Add `--heatmap-colors` to open the heatmap color editor in the example.
 
 ## Figure export
 

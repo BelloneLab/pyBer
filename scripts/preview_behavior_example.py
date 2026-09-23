@@ -24,6 +24,7 @@ def run() -> int:
     parser.add_argument("--width", type=int, default=1900, help="Example window width")
     parser.add_argument("--height", type=int, default=1120, help="Example window height")
     parser.add_argument("--group", action="store_true", help="Open the existing Group view instead of Individual")
+    parser.add_argument("--heatmap-colors", action="store_true", help="Show the display-only heatmap color controls")
     args = parser.parse_args()
     if args.smoke:
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -175,6 +176,8 @@ def run() -> int:
                               "pyBer — VERIFIED labels — Individual — SIMULATED fiber")
         if args.zone_workbook:
             window.setWindowTitle("pyBer — BEHAVIOR + ZONE TEST — SIMULATED fiber")
+        if args.heatmap_colors:
+            window.setWindowTitle("pyBer — HEATMAP COLOR TEST — SIMULATED fiber")
         window.top_bar.set_project_name("DEMO — simulated fiber", dirty=False)
         panel.set_current_source_label("DEMO — simulated fiber", "DEMO")
         window.showNormal()
@@ -184,6 +187,12 @@ def run() -> int:
         if chosen_item:
             view.selectors["behavior"].scrollToItem(chosen_item[0])
         panel.behavior_psth_bar.heat_button.click()
+        if args.heatmap_colors:
+            panel.combo_heat_scale.setCurrentIndex(1)
+            panel.btn_edit_scale.setChecked(True)
+            panel.behavior_psth_bar.collapse_button.setChecked(True)
+            app.processEvents()
+            panel.behavior_psth_bar.heat_button.click()
         if args.screenshot:
             window.grab().save(str(args.screenshot))
         if args.smoke:
