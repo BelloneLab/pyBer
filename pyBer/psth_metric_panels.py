@@ -48,6 +48,7 @@ class MetricPanel(pg.PlotWidget):
         self.setXRange(-0.4, 1.5, padding=0)
         self.getAxis("bottom").setTicks([[(0, "Pre"), (1, "Post")]])
         self.result = None
+        self._data_bounds = None
         self.set_colors({"text": "#CED8E6", "accent": "#4D93BD"})
         self.getViewBox().sigResized.connect(self._fit_note)
         self.getViewBox().sigXRangeChanged.connect(self._fit_note)
@@ -57,7 +58,6 @@ class MetricPanel(pg.PlotWidget):
         if not self.note.isVisible():
             return
         view = self.getViewBox()
-        self.note.setPos(float(np.mean(view.viewRange()[0])), self.note.pos().y())
         font = QtGui.QFont("Segoe UI", 8)
         self.note.setFont(font)
         width = self.note.boundingRect().width()
@@ -65,6 +65,19 @@ class MetricPanel(pg.PlotWidget):
         if width > available:
             font.setPointSizeF(max(6., 8 * available / width))
             self.note.setFont(font)
+        if self._data_bounds is not None:
+            low, high = self._data_bounds
+            span = high - low or max(abs(high) * 0.1, 1.0)
+            height = max(1., view.sceneBoundingRect().height())
+            # Text has a fixed pixel height; a fixed percentage of data range
+            # cannot protect it from the highest point in short metric cards.
+            headroom = self.note.boundingRect().height() + 18.
+            data_fraction = max(.1, 1. - headroom / height)
+            bottom = low - span * .08
+            extent = span * 1.08 / data_fraction
+            self.setYRange(bottom, bottom + extent, padding=0)
+            self.note.setPos(float(np.mean(view.viewRange()[0])),
+                             bottom + extent * (1. - 4. / height))
 
     def set_colors(self, palette):
         """Respect the active plot palette without confusing summary encodings."""
@@ -85,6 +98,7 @@ class MetricPanel(pg.PlotWidget):
     def show_result(self, result):
         """Display paired native reductions and complete finite-row summaries."""
         self.result = result
+        self._data_bounds = None
         self.pairs.setData([], [])
         for item in self.points + self.medians + self.means:
             item.setData([], [])
@@ -123,6 +137,7 @@ class MetricPanel(pg.PlotWidget):
                         summary["assumption_note"] + " " + summary["reduction_level"])
         if bounds:
             low, high = min(bounds), max(bounds)
+            self._data_bounds = (low, high)
             span = high - low or max(abs(high) * 0.1, 1.0)
             self.setYRange(low - span * 0.08, high + span * 0.48, padding=0)
             pvalue = summary["paired_p_holm"]

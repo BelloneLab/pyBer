@@ -12,6 +12,11 @@ def render_behavior_summary(plot, summary, palette):
     The numerical summary owns all statistics. This function only renders those
     values, never interpolating across missing bins or changing the export data.
     """
+    view = plot.getViewBox()
+    previous_fit = getattr(plot, "_summary_note_fit", None)
+    if previous_fit is not None:
+        view.sigResized.disconnect(previous_fit)
+        plot._summary_note_fit = None
     plot.clear()
     title = {"Cumulative duration": "Cumulative duration", "cumulative": "Cumulative duration",
              "Cumulative bout count": "Cumulative bouts", "Onset-to-onset interval": "Onset intervals",
@@ -90,6 +95,7 @@ def render_behavior_summary(plot, summary, palette):
     plot.setXRange(float(edges[0]), float(edges[-1]), padding=.04)
     statistics = summary.get("statistics", {})
     median = statistics.get("median")
+    fit_annotation = None
     if median is not None and np.isfinite(median):
         # The annotation is anchored in reserved chart headroom. Histograms use
         # raw unbinned observations; time curves use a defined per-file overall
@@ -111,6 +117,29 @@ def render_behavior_summary(plot, summary, palette):
         annotation.setPos(float(edges[-1]), maximum * 1.27)
         annotation.setZValue(10)
         plot.addItem(annotation)
+        def fit_annotation(*_args):
+            # Reserve pixels, not a fraction of the signal range: the text
+            # remains the same physical size when a results card shrinks.
+            if annotation.scene() is None:
+                return
+            annotation.setFont(QtGui.QFont("Segoe UI", 8))
+            available = max(1., view.sceneBoundingRect().width() - 16.)
+            width = annotation.boundingRect().width()
+            if width > available:
+                font = annotation.textItem.font()
+                font.setPointSizeF(max(6., 8. * available / width))
+                annotation.setFont(font)
+            height = max(1., view.sceneBoundingRect().height())
+            headroom = annotation.boundingRect().height() + 18.
+            top = maximum / max(.1, 1. - headroom / height)
+            plot.setYRange(0, top, padding=0)
+            annotation.setPos(float(edges[-1]), top * (1. - 4. / height))
+            if histogram:
+                reference.setSpan(0, maximum / top)
+        plot._summary_note_fit = fit_annotation
+        view.sigResized.connect(fit_annotation)
     plot.setYRange(0, maximum * (1.30 if median is not None else 1.12), padding=0)
     plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
     plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+    if fit_annotation is not None:
+        fit_annotation()

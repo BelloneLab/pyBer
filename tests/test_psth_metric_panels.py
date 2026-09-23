@@ -120,6 +120,22 @@ class MetricRenderTests(unittest.TestCase):
             figure.savefig(Path(temporary) / "empty.svg")
         plt.close(figure)
 
+    def test_matplotlib_summary_is_above_data_and_below_title(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        matrix, time = fixture()
+        result = summarize_metrics(matrix, time, ["mean"], (-1, -.1), (.1, 1), "z")["mean"]
+        figure, axis = plt.subplots(figsize=(3.2, 2.5))
+        draw_metric_matplotlib(axis, result)
+        figure.tight_layout()
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        note = axis.texts[0].get_window_extent(renderer)
+        self.assertGreater(note.y0, axis.get_window_extent(renderer).y1)
+        self.assertLess(note.y1, axis.title.get_window_extent(renderer).y0)
+        plt.close(figure)
+
     def test_summary_annotation_stays_inside_compact_plot(self):
         matrix, time = fixture()
         plot = MetricPanel()
@@ -136,6 +152,13 @@ class MetricRenderTests(unittest.TestCase):
         self.assertLessEqual(note.bottom(), view.bottom())
         self.assertGreaterEqual(note.left(), view.left())
         self.assertLessEqual(note.right(), view.right())
+        for width, height in ((230, 230), (700, 230), (320, 500), (320, 250)):
+            plot.resize(width, height)
+            for _ in range(4):
+                self.app.processEvents()
+            note = plot.note.sceneBoundingRect()
+            highest = plot.getViewBox().mapViewToScene(QtCore.QPointF(0, plot._data_bounds[1]))
+            self.assertLess(note.bottom() + 6, highest.y(), (width, height))
         plot.close()
         plot.deleteLater()
 

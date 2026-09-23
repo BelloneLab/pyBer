@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.52"><img src="https://img.shields.io/badge/release-v0.52-7c4dff" alt="v0.52 release"></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.53"><img src="https://img.shields.io/badge/release-v0.53-7c4dff" alt="v0.53 release"></a>
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-41cd52?logo=qt&logoColor=white" alt="PySide6 and pyqtgraph">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white" alt="Windows">
@@ -18,9 +18,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.52/pyBer-windows.exe"><strong>Download the Windows GUI (exe)</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.53/pyBer-windows.exe"><strong>Download the Windows GUI (exe)</strong></a>
   &nbsp;|&nbsp;
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.52/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.53/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
   &nbsp;|&nbsp;
   <a href="docs/index.md"><strong>Read the full guide</strong></a>
 </p>
@@ -228,7 +228,17 @@ The flagged table collects processing failures, excessive artifact load, poor fi
 | Processed data | Self-describing CSV with `.pyber.json` sidecar and HDF5 with embedded metadata. |
 | Reports | Preprocessing PNG, strict QC report images, batch summaries, flagged-recording tables, analysis CSVs, model tables, and publication figure exports. |
 
-Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.52 builds target Windows; source execution on other platforms is not part of the tested release path.
+Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.53 builds target Windows; source execution on other platforms is not part of the tested release path.
+
+## What changed in v0.53
+
+- Choose Zone or Behavior in the existing postprocessing workspace; Zone retains its original pre/post analysis.
+- Automatically detect MAMIR behavior/zone exports and EthoVision arena sheets, with explicit animal-to-fiber pairing.
+- Click behaviors to compare before/during/after signal, using individual recordings or equally weighted recording means in Group view.
+- Resizable behavior controls, clearer PSTH/heatmap timing, and plot labels kept clear of data.
+- Existing generic imports, saved projects, PSTH filtering and baseline normalization remain available. Baselines are not automatically behavior-free.
+- Fixed frame-column mapping in the development MAMIR importer and View-menu submenu lifetime on affected Qt versions.
+- See [release notes](docs/releases/v0.53.md) and the [behavior/zone guide](docs/behavior_import.md).
 
 ## What changed in v0.52
 

@@ -1,5 +1,6 @@
 """Verify view menu routing, portable sizes and usable trace geometry."""
 import json
+import gc
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,7 +18,10 @@ class ViewMenuTests(unittest.TestCase):
     def test_menu_replaces_strip_and_updates_existing_controls(self):
         panel = self.panel
         menu = panel.btn_view_menu.menu()
+        gc.collect()
         layout_menu = next(action.menu() for action in menu.actions() if action.text() == "Layout")
+        self.app.processEvents()
+        gc.collect()
         next(action for action in layout_menu.actions() if action.text() == "Trace focus").trigger()
         self.assertEqual(panel.combo_view_layout.currentText(), "Trace focus")
         panel._processed = [fixture.ProcessedTrial(path="synthetic.csv", channel_id="1", time=np.arange(5.),

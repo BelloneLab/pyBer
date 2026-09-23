@@ -87,10 +87,15 @@ def create_view_menu(panel):
     button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
     menu = QtWidgets.QMenu(button)
     button.setMenu(menu)
+    # Retain the Python wrappers as well as Qt ownership. Some PySide6
+    # versions otherwise destroy a submenu when action.menu() is inspected.
+    button._view_submenus = []
     bindings = []
     for label, combo in (("Layout", panel.combo_view_layout), ("Theme", panel.combo_plot_preset),
                          ("Heatmap contrast", panel.combo_heat_scale)):
-        submenu = menu.addMenu(label)
+        submenu = QtWidgets.QMenu(label, menu)
+        menu.addMenu(submenu)
+        button._view_submenus.append(submenu)
         group = QtGui.QActionGroup(submenu)
         group.setExclusive(True)
         for index in range(combo.count()):

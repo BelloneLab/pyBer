@@ -153,9 +153,9 @@ def draw_metric_matplotlib(axis, result, title=None):
                           fmt="D", ms=3, color="#526371", capsize=2, linewidth=0.9, zorder=5)
     adjusted = summary["paired_p_holm"]
     note = f"Holm p={adjusted:.3g}" if np.isfinite(adjusted) else "Descriptive only"
-    axis.set_title(title or summary["metric"], fontsize=10, fontweight="bold")
-    axis.text(0.5, 0.99, f"{note}\nline: median  ·  diamond: mean ± SEM", transform=axis.transAxes,
-              ha="center", va="top", fontsize=6.5, color="#546274")
+    axis.set_title(title or summary["metric"], fontsize=10, fontweight="bold", pad=30)
+    axis.text(0.5, 1.015, f"{note}\nline: median  ·  diamond: mean ± SEM", transform=axis.transAxes,
+              ha="center", va="bottom", fontsize=6.5, color="#546274", clip_on=False)
     axis.margins(y=0.28)
     axis.set_xticks([0, 1], ["Pre", "Post"])
     axis.set_xlim(-0.45, 1.5)

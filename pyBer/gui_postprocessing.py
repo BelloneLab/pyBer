@@ -28,7 +28,7 @@ from analysis_core import (
     load_processed_csv,
     load_processed_h5,
 )
-from ethovision_process_gui import clean_sheet
+from ethovision_process_gui import clean_sheet, find_header_row, extract_metadata
 from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, create_plot_card, style_plot
 from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
@@ -40,6 +40,7 @@ from postprocessing_view_controls import split_plot_layout, PlotSplitterPreferen
 from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_metrics
 from file_drop import install_file_drop, expand_paths
 from behavior_import import infer_table, read_behavior_csv, detect_time_column
+from mamir_import import inspect_mamir, load_mamir
 from baseline_advisor import BaselineRecording
 from baseline_suggestions import BaselineSuggestionConfig
 from baseline_suggestions_widget import BaselineSuggestionsWidget
@@ -1582,6 +1583,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._processed: List[ProcessedTrial] = []
         self._dio_cache: Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]] = {}  # (path,dio)->(t,x)
         self._behavior_sources: Dict[str, Dict[str, Any]] = {}  # stem->behavior data
+        self.behavior_zone_panel = None
         self._sync_external_sources: Dict[str, Dict[str, Any]] = {}
         # Reference videos awaiting / holding LED extraction. Keyed by a unique
         # video key; each value holds per-video ROI (LED can move between
@@ -1816,6 +1818,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_load_beh = QtWidgets.QPushButton("Load behavior CSV/XLSX...")
         self.btn_load_beh.setProperty("class", "compactSmall")
         self.btn_load_beh.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.btn_load_beh.setToolTip(
+            "Auto-detect MAMIR behavior/zone CSVs and EthoVision workbooks; "
+            "the timestamps file type keeps the established importer.")
+        self.combo_arena = QtWidgets.QComboBox()
+        self.combo_arena.setToolTip("Select the arena sheet containing the fiber-associated animal.")
+        _compact_combo(self.combo_arena, min_chars=12)
+        self.lbl_arena = QtWidgets.QLabel("Arena / subject")
+        self.lbl_arena_hint = QtWidgets.QLabel()
+        self.lbl_arena_hint.setWordWrap(True)
+        self.lbl_arena_hint.setProperty("class", "hint")
         self.lbl_behavior_file_type = QtWidgets.QLabel("Behavior file type")
         self.combo_behavior_file_type = QtWidgets.QComboBox()
         self.combo_behavior_file_type.addItems(
@@ -1918,6 +1930,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fal.addRow(self.lbl_behavior_clock, self.combo_behavior_clock)
         fal.addRow(self.grp_behavior_time)
         fal.addRow(self.btn_load_beh)
+        fal.addRow(self.lbl_arena, self.combo_arena)
+        fal.addRow(self.lbl_arena_hint)
         fal.addRow("Loaded files", self.lbl_beh)
         fal.addRow(files_layout)
         fal.addRow(lists_layout)
@@ -1926,6 +1940,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # Behavior controls
         self.combo_behavior_name = QtWidgets.QComboBox()
         _compact_combo(self.combo_behavior_name, min_chars=6)
+        self.combo_behavior_name.setToolTip(
+            "Select any imported zone or behavior for PSTH. MAMIR behavior names "
+            "support onset, offset and Transition A->B alignment here.")
         self.combo_behavior_align = QtWidgets.QComboBox()
         self.combo_behavior_align.addItems(["Align to onset", "Align to offset", "Transition A->B"])
         _compact_combo(self.combo_behavior_align, min_chars=6)
@@ -4369,6 +4386,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_view_menu = create_view_menu(self)
         tb_layout.insertWidget(tb_layout.indexOf(self.btn_style), self.btn_view_menu)
         compact_results_toolbar(self)
+        self.combo_event_kind = QtWidgets.QComboBox()
+        self.combo_event_kind.addItem("Zone", "zone")
+        self.combo_event_kind.addItem("Behavior", "behavior")
+        self.combo_event_kind.setAccessibleName("Zone or behavior analysis")
+        self.combo_event_kind.setToolTip(
+            "Zone: existing PSTH and pre/post metrics. "
+            "Behavior: add comparisons before, during and after scored bouts.")
+        self.combo_event_kind.setFixedHeight(32)
+        tb_layout.insertWidget(tb_layout.indexOf(self.combo_toolbar_scope), self.combo_event_kind)
         self._results_scroll = QtWidgets.QScrollArea()
         self._results_scroll.setWidgetResizable(True)
         self._results_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -4379,7 +4405,47 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._results_stack = QtWidgets.QStackedWidget()
         self._results_stack.addWidget(self._empty_results)
         self._results_stack.addWidget(self._results_scroll)
-        rv.addWidget(self._results_stack, stretch=1)
+        from behavior_zone_dialog import BehaviorZonePanel, BehaviorPsthBar
+        self.behavior_zone_panel = BehaviorZonePanel(self)
+        self.behavior_zone_panel.hide()
+        self._behavior_comparison_scroll = QtWidgets.QScrollArea()
+        self._behavior_comparison_scroll.setWidgetResizable(True)
+        self._behavior_comparison_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self._behavior_comparison_scroll.setWidget(self.behavior_zone_panel)
+        self.behavior_zone_panel.hide()
+        self._behavior_comparison_scroll.hide()
+        self._behavior_plot_pane = QtWidgets.QWidget()
+        behavior_plot_layout = QtWidgets.QVBoxLayout(self._behavior_plot_pane)
+        behavior_plot_layout.setContentsMargins(0, 0, 0, 0)
+        behavior_plot_layout.setSpacing(0)
+        self.behavior_psth_bar = BehaviorPsthBar(self)
+        self.behavior_psth_bar.hide()
+        behavior_plot_layout.addWidget(self.behavior_psth_bar)
+        behavior_plot_layout.addWidget(self._results_stack, 1)
+        self._behavior_workspace = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self._behavior_workspace.setObjectName("behaviorWorkspace")
+        self._behavior_workspace.setChildrenCollapsible(False)
+        self._behavior_workspace.setHandleWidth(10)
+        self._behavior_workspace.addWidget(self._behavior_comparison_scroll)
+        self._behavior_workspace.addWidget(self._behavior_plot_pane)
+        self._behavior_workspace.handle(1).setToolTip("Drag to resize behavior comparison and PSTH plots")
+        self._behavior_workspace.setStyleSheet(
+            "QSplitter#behaviorWorkspace::handle { background: palette(button); border: 1px solid palette(mid); border-radius: 3px; }")
+        try:
+            self._behavior_workspace_sizes = [max(100, int(value)) for value in
+                                              self._settings.value("behavior_workspace_sizes", [500, 500])]
+            if len(self._behavior_workspace_sizes) != 2:
+                self._behavior_workspace_sizes = [500, 500]
+        except (TypeError, ValueError):
+            self._behavior_workspace_sizes = [500, 500]
+        self._behavior_workspace.splitterMoved.connect(self._remember_behavior_workspace_size)
+        rv.addWidget(self._behavior_workspace, stretch=1)
+        self.combo_event_kind.currentIndexChanged.connect(self._on_event_kind_changed)
+        self.tab_visual_mode.currentChanged.connect(self.behavior_zone_panel.sync_context)
+        self.combo_individual_file.currentIndexChanged.connect(self.behavior_zone_panel.sync_context)
+        self.combo_behavior_name.activated.connect(
+            lambda _index: self.behavior_zone_panel.follow_psth_selection(
+                self.combo_behavior_name.currentText()))
         for widget in (*self._plot_card_by_widget, self.plot_spatial_occupancy,
                        self.plot_spatial_activity, self.plot_spatial_velocity):
             set_plot_has_data(widget, False)
@@ -6097,8 +6163,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not path or not os.path.isfile(path):
             QtWidgets.QMessageBox.warning(self, "Load recent", "Selected recent behavior file is missing.")
             return
-        self._load_behavior_paths([path], replace=True)
-        self._refresh_behavior_list()
+        if self._current_behavior_parse_mode() == _BEHAVIOR_PARSE_TIMESTAMPS:
+            self._load_behavior_paths([path], replace=True)
+            self._refresh_behavior_list()
+        else:
+            self._load_behavior_zone_files(self._event_category(), paths=[path], allow_legacy=True)
         try:
             self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
         except Exception:
@@ -8871,6 +8940,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_status_strip()
         # _compute_psth -> _refresh_individual_file_combo picks up the pending id.
         self._pending_active_file_id = ""
+        if self.behavior_zone_panel is not None:
+            self.behavior_zone_panel.reload()
 
     def _on_preprocessed_files_dropped(self, paths: List[str]) -> None:
         allowed = {".csv", ".h5", ".hdf5"}
@@ -8884,8 +8955,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         keep = expand_paths(paths, allowed)
         if not keep:
             return
-        self._load_behavior_paths(keep, replace=False)
-        self._refresh_behavior_list()
+        if self._current_behavior_parse_mode() == _BEHAVIOR_PARSE_TIMESTAMPS:
+            fresh = self._new_behavior_source_paths(keep)
+            if fresh:
+                self._load_behavior_paths(fresh, replace=False)
+                self._refresh_behavior_list()
+        else:
+            self._load_behavior_zone_files(self._event_category(), paths=keep, allow_legacy=True)
 
     # ---- behavior files ----
 
@@ -9469,6 +9545,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _update_status_strip(self) -> None:
         if not hasattr(self, "lbl_status"):
             return
+        if hasattr(self, "behavior_psth_bar"):
+            self.behavior_psth_bar.update_summary()
         n_files = len(self._processed)
         if hasattr(self, "_results_stack"):
             self._results_stack.setCurrentWidget(self._results_scroll if n_files else self._empty_results)
@@ -10530,6 +10608,408 @@ class PostProcessingPanel(QtWidgets.QWidget):
             w.setVisible(not hide)
         self._refresh_section_scroll("psth")
 
+    def _open_behavior_zone_explorer(self) -> None:
+        """Show the optional behavior comparison inside the original dashboard."""
+        self.combo_event_kind.setCurrentIndex(1)
+        self.behavior_zone_panel.reload()
+
+    def _event_category(self) -> str:
+        return str(self.combo_event_kind.currentData() or "zone")
+
+    def _set_event_category(self, category: str) -> None:
+        index = self.combo_event_kind.findData(category)
+        if index >= 0:
+            self.combo_event_kind.setCurrentIndex(index)
+
+    def _on_event_kind_changed(self, _index: int = 0) -> None:
+        behavior = self._event_category() == "behavior"
+        self.behavior_zone_panel.setVisible(behavior)
+        self._behavior_comparison_scroll.setVisible(
+            behavior and not self.behavior_psth_bar.collapse_button.isChecked())
+        self.behavior_psth_bar.setVisible(behavior)
+        if behavior:
+            self._behavior_workspace.setSizes(self._behavior_workspace_sizes)
+            self.behavior_psth_bar.update_summary()
+        else:
+            self.plot_heat.setTitle("Heatmap")
+            self.plot_heat.setLabel("bottom", "")
+            self.plot_heat.getAxis("bottom").setStyle(showValues=False)
+            self.plot_heat.getAxis("bottom").setHeight(8)
+            self.plot_avg.setLabel("bottom", "Time from alignment (s)")
+            self.plot_avg.setTitle("PSTH: animals ± SEM" if self._last_psth_display_level == "animals"
+                                   else "PSTH: mean ± SEM")
+        self.lbl_behavior_name.setText("Behavior name" if behavior else "Zone / event name")
+        self.behavior_zone_panel.reload()
+        self._queue_settings_save()
+
+    def _remember_behavior_workspace_size(self, *_args) -> None:
+        if self._event_category() == "behavior" and not self._behavior_comparison_scroll.isHidden():
+            self._behavior_workspace_sizes = self._behavior_workspace.sizes()
+            self._settings.setValue("behavior_workspace_sizes", self._behavior_workspace_sizes)
+
+    def _inspect_arena_workbook(self, path: str) -> List[Dict[str, str]]:
+        """List workbook arenas without loading all tracking rows."""
+        import pandas as pd
+
+        with pd.ExcelFile(path, engine="openpyxl") as workbook:
+            sheets = list(workbook.sheet_names)
+        if not sheets:
+            raise ValueError("Workbook has no sheets.")
+        options = []
+        for sheet in sheets:
+            metadata = extract_metadata(Path(path), sheet)
+            arena = str(metadata.get("Arena name", "") or "").strip()
+            if not arena:
+                match = re.search(r"Arena\s*[-_ ]*\d+", sheet, re.IGNORECASE)
+                arena = match.group(0).replace("-", " ") if match else sheet
+            subject = str(metadata.get("<User-defined 1>", "") or "").strip()
+            label = f"{arena} — {subject}" if subject else arena
+            options.append({"sheet": sheet, "arena": arena, "subject": subject,
+                            "label": label})
+        seen = set()
+        for option in options:
+            if option["label"] in seen:
+                option["label"] += f" ({option['sheet']})"
+            seen.add(option["label"])
+        return options
+
+    def _load_behavior_zone_files(self, category: str, paths: Optional[List[str]] = None,
+                                  allow_legacy: bool = False) -> None:
+        """Detect the export format and retain the established plotting workflow."""
+        start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
+        if paths is None:
+            paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+                self, f"Add {category} data", start_dir,
+                "Behavior and zone files (*.csv *.xlsx)")
+        if not paths:
+            return
+        import pandas as pd
+
+        for path in paths:
+            detected = ""
+            try:
+                if Path(path).suffix.lower() == ".csv":
+                    columns = set(pd.read_csv(path, nrows=0).columns)
+                    if {"behavior", "identity", "start_s", "stop_s"}.issubset(columns) or \
+                            {"frame", "time_s", "identity"}.issubset(columns):
+                        detected = "behavior"
+                    elif {"animal_id", "zone", "start_frame", "end_frame"}.issubset(columns):
+                        detected = "zone"
+                    else:
+                        detected = "generic"
+                else:
+                    detected = "workbook"
+                if detected in {"behavior", "zone"}:
+                    self._load_mamir_files(detected, [path])
+                    self._set_event_category(detected)
+                elif detected == "workbook":
+                    options = self._inspect_arena_workbook(path)
+                    if len(options) > 1:
+                        if len(paths) > 1:
+                            raise ValueError("Choose one multi-arena workbook at a time so its arena can be selected.")
+                        self.behavior_zone_panel.choose_workbook_arena(path, category, options)
+                        self._toggle_section_popup("setup", True)
+                    else:
+                        display = self._add_generic_behavior_zone_file(
+                            path, category, sheet_name=options[0]["sheet"], arena_options=options)
+                        if display in {"behavior", "zone"}:
+                            self._set_event_category(display)
+                else:
+                    display = self._add_generic_behavior_zone_file(path, category)
+                    if display in {"behavior", "zone"}:
+                        self._set_event_category(display)
+            except ValueError as exc:
+                if allow_legacy and detected in {"generic", "workbook"} and \
+                        str(exc).startswith("No binary behavior columns found"):
+                    fresh = self._new_behavior_source_paths([path])
+                    if fresh:
+                        self._load_behavior_paths(fresh, replace=False)
+                        self._refresh_behavior_list()
+                    continue
+                QtWidgets.QMessageBox.warning(
+                    self, "Behavior / Zone import failed", f"{os.path.basename(path)}:\n{exc}")
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(
+                    self, "Behavior / Zone import failed", f"{os.path.basename(path)}:\n{exc}")
+        self._settings.setValue("postprocess_last_dir", os.path.dirname(paths[0]))
+        self.behavior_zone_panel.reload()
+
+    def _add_generic_behavior_zone_file(
+        self, path: str, category: str, *, sheet_name: Optional[str] = None,
+        arena_options: Optional[List[Dict[str, str]]] = None,
+        replace_arena: bool = False, target_index: Optional[int] = None,
+    ) -> Optional[str]:
+        """Use the established column parser for generic and EthoVision files."""
+        import pandas as pd
+
+        if Path(path).suffix.lower() == ".xlsx":
+            options = arena_options or self._inspect_arena_workbook(path)
+            if sheet_name is None:
+                if len(options) == 1:
+                    sheet = options[0]["sheet"]
+                else:
+                    labels = [option["label"] for option in options]
+                    selected, ok = QtWidgets.QInputDialog.getItem(
+                        self, "Select arena", f"{os.path.basename(path)}: choose arena",
+                        labels, 0, False)
+                    if not ok:
+                        return None
+                    sheet = options[labels.index(selected)]["sheet"]
+            else:
+                sheet = str(sheet_name)
+                if sheet not in {option["sheet"] for option in options}:
+                    raise ValueError(f"Arena sheet {sheet!r} is not in this workbook.")
+            try:
+                header_row = find_header_row(Path(path), sheet)
+            except ValueError:
+                header_row = 0
+            if header_row == 0:
+                table = pd.read_excel(path, sheet_name=sheet, engine="openpyxl")
+                info = _behavior_table_info(table, _BEHAVIOR_PARSE_BINARY, 0.0)
+                fmt = "spreadsheet"
+            else:
+                info = _load_behavior_ethovision(path, sheet_name=sheet,
+                                                  parse_mode=_BEHAVIOR_PARSE_BINARY)
+                fmt = "ethovision"
+            info["sheet"] = sheet
+            arena_option = next(option for option in options if option["sheet"] == sheet)
+        else:
+            if replace_arena:
+                raise ValueError("Arena switching requires the original workbook.")
+            info = _load_behavior_csv(path, parse_mode=_BEHAVIOR_PARSE_BINARY)
+            fmt = "csv"
+            options = []
+        behaviors = info.get("behaviors") or {}
+        zone_names = [name for name in behaviors
+                      if re.search(r"\b(zone|area|inside|in zone)\b", name, re.IGNORECASE)]
+        info["behaviors"] = {
+            f"Zone: {name}" if name in zone_names else name: values
+            for name, values in behaviors.items()
+        }
+        if not behaviors and not (options and info.get("trajectory")):
+            raise ValueError("No binary behavior columns found. Use the existing Setup importer "
+                             "for timestamp lists or continuous trajectories.")
+        incoming_labels = set(info["behaviors"])
+        zone_only = bool(incoming_labels) and all(name.startswith("Zone: ") for name in incoming_labels)
+        mixed = any(name.startswith("Zone: ") for name in incoming_labels) and not zone_only
+        display_category = ("zone" if zone_only else
+                            "mixed" if mixed else "behavior")
+        info.setdefault("event_behaviors", {})
+        info["source_path"] = str(path)
+        report = info.setdefault("import_report", {})
+        report.update(format=fmt, category=category)
+        if options:
+            report.update(arena_workbook=str(path), arena_options=options,
+                          arena_labels=list(info["behaviors"]),
+                          arena_trajectory_labels=list(info.get("trajectory") or {}),
+                          subject=arena_option.get("subject", ""))
+
+        if self._processed:
+            names = [f"{index + 1}. {proc.path or 'Recording'}"
+                     for index, proc in enumerate(self._processed)]
+            if target_index is None:
+                if len(names) == 1:
+                    target_index = 0
+                else:
+                    chosen, ok = QtWidgets.QInputDialog.getItem(
+                        self, "Pair behavior with fiber",
+                        f"{os.path.basename(path)}: select its fiber recording", names, 0, False)
+                    if not ok:
+                        return None
+                    target_index = names.index(chosen)
+            elif not 0 <= target_index < len(self._processed):
+                raise ValueError("The selected fiber recording is no longer available.")
+            paired_path = str(self._processed[target_index].path)
+            report.update(paired_index=target_index, paired_path=paired_path)
+            key = Path(paired_path).stem
+            existing_key = next((name for name, source in self._behavior_sources.items()
+                                 if (source.get("import_report") or {}).get("paired_index") == target_index
+                                 and (source.get("import_report") or {}).get("paired_path") == paired_path), None)
+            if existing_key is not None:
+                key = existing_key
+            elif sum(Path(proc.path).stem == key for proc in self._processed) > 1:
+                key = f"{key} [recording {target_index + 1}]"
+        else:
+            if target_index is not None:
+                raise ValueError("Load the fiber recording before switching its arena.")
+            key = Path(path).stem
+        previous = self._behavior_sources.get(key)
+        if replace_arena:
+            prior_report = (previous or {}).get("import_report") or {}
+            if not isinstance(prior_report, dict) or \
+                    os.path.realpath(str(prior_report.get("arena_workbook", ""))) != os.path.realpath(path):
+                raise ValueError("The selected recording is not paired with this arena workbook.")
+            old_labels = set(prior_report.get("arena_labels", []))
+            old_trajectory = set(prior_report.get("arena_trajectory_labels", []))
+            retained_behaviors = {name: values for name, values in (previous.get("behaviors") or {}).items()
+                                  if name not in old_labels}
+            retained_trajectory = {name: values for name, values in (previous.get("trajectory") or {}).items()
+                                   if name not in old_trajectory}
+            if retained_behaviors and not np.array_equal(
+                    np.asarray(previous.get("time", [])), np.asarray(info["time"])):
+                raise ValueError("Other behavior data use a different clock; the arena was not changed.")
+            if retained_trajectory and not np.array_equal(
+                    np.asarray(previous.get("trajectory_time", [])),
+                    np.asarray(info.get("trajectory_time", []))):
+                raise ValueError("Other trajectory data use a different clock; the arena was not changed.")
+            retained_events = {
+                name: event for name, event in (previous.get("event_behaviors") or {}).items()
+                if str(event.get("variable", "")) not in old_trajectory
+            }
+            collisions = (set(retained_behaviors) | set(retained_events)) & set(info["behaviors"])
+            if collisions:
+                raise ValueError("New arena labels conflict with other imported data: "
+                                 + ", ".join(sorted(collisions)[:6]))
+            info["behaviors"] = {**retained_behaviors, **info["behaviors"]}
+            info["trajectory"] = {**retained_trajectory, **(info.get("trajectory") or {})}
+            info["event_behaviors"] = retained_events
+            old_report = copy.deepcopy(prior_report)
+            old_report.update(report)
+            info["import_report"] = old_report
+            self._behavior_sources[key] = info
+        elif previous is not None:
+            occupied = set(previous.get("behaviors") or {}) | set(previous.get("event_behaviors") or {})
+            collisions = occupied & set(info["behaviors"])
+            if collisions:
+                raise ValueError("This recording already has these labels: " + ", ".join(sorted(collisions)[:6]))
+            if (previous.get("behaviors") and len(np.asarray(previous.get("time", [])))
+                    and not np.array_equal(np.asarray(previous["time"]), np.asarray(info["time"]))):
+                raise ValueError("Existing behavior data use a different time axis; import separately.")
+            if not previous.get("behaviors"):
+                for field in ("time", "time_candidates", "auto_time_column",
+                              "trajectory_time", "trajectory_time_col", "row_count",
+                              "needs_generated_time"):
+                    if field in info:
+                        previous[field] = info[field]
+            previous.setdefault("behaviors", {}).update(info["behaviors"])
+            previous.setdefault("trajectory", {}).update(info.get("trajectory") or {})
+            prior_report = previous.setdefault("import_report", {})
+            if prior_report.get("format") == "mamir":
+                prior_report.setdefault("mamir_imports", []).append(
+                    {key: value for key, value in prior_report.items() if key != "mamir_imports"})
+            prior_report.update(report)
+            previous["source_path"] = str(path)
+            if info.get("sheet"):
+                previous["sheet"] = info["sheet"]
+        else:
+            self._behavior_sources[key] = info
+        self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded")
+        self._project_dirty = True
+        self._refresh_behavior_list()
+        self._update_behavior_time_panel()
+        if replace_arena:
+            self._compute_psth()
+        self.statusUpdate.emit(f"Detected {fmt}; loaded {category} from {os.path.basename(path)}.", 5000)
+        self._push_recent_paths("postprocess_recent_behavior_paths", [path])
+        return display_category
+
+    def _load_mamir_files(self, category: str, paths: Optional[List[str]] = None) -> None:
+        """Add one MAMIR animal to the established behavior and group pipeline."""
+        start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
+        if paths is None:
+            paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+                self, f"Load MAMIR {category} files", start_dir, "MAMIR CSV (*.csv)")
+        if not paths:
+            return
+        loaded = 0
+        for path in paths:
+            try:
+                overview = inspect_mamir(path, category)
+                identities = overview["identities"]
+                if not identities:
+                    raise ValueError("This MAMIR export has no animal identities.")
+                if len(identities) == 1:
+                    identity = identities[0]
+                else:
+                    identity, ok = QtWidgets.QInputDialog.getItem(
+                        self, "Fiber-associated animal",
+                        f"{os.path.basename(path)}: select the animal with the fiber",
+                        identities, 0, False)
+                    if not ok:
+                        continue
+                partner = None
+                if category == "behavior" and overview["partners"] and overview["bouts_path"] is not None:
+                    choices = ["All partners", *overview["partners"]]
+                    partner_text, ok = QtWidgets.QInputDialog.getItem(
+                        self, "Partner filter", "Which interaction partner?", choices, 0, False)
+                    if not ok:
+                        continue
+                    if partner_text != "All partners":
+                        partner = partner_text
+                if self._processed:
+                    names = [f"{index + 1}. {proc.path or 'Recording'}"
+                             for index, proc in enumerate(self._processed)]
+                    if len(names) == 1:
+                        target_index = 0
+                    else:
+                        chosen, ok = QtWidgets.QInputDialog.getItem(
+                            self, "Pair MAMIR with fiber",
+                            f"MAMIR animal {identity} in {os.path.basename(path)}:\n"
+                            "select its fiber recording",
+                            names, 0, False)
+                        if not ok:
+                            continue
+                        target_index = names.index(chosen)
+                    paired_path = str(self._processed[target_index].path)
+                    base_key = os.path.splitext(os.path.basename(paired_path))[0]
+                    key = next((source_key for source_key, source in self._behavior_sources.items()
+                                if isinstance(source.get("import_report"), dict)
+                                and source["import_report"].get("paired_index") == target_index
+                                and source["import_report"].get("paired_path") == paired_path), None)
+                    if key is None:
+                        same_stem_count = sum(
+                            os.path.splitext(os.path.basename(proc.path))[0] == base_key
+                            for proc in self._processed)
+                        key = base_key if same_stem_count == 1 else f"{base_key} [recording {target_index + 1}]"
+                else:
+                    key = os.path.splitext(os.path.basename(path))[0]
+                info = load_mamir(path, category, identity, partner)
+                if self._processed:
+                    info["import_report"].update(
+                        paired_index=target_index, paired_path=paired_path)
+                if category == "zone":
+                    info["event_behaviors"] = {
+                        f"Zone: {name}": value
+                        for name, value in info["event_behaviors"].items()
+                    }
+                previous = self._behavior_sources.get(key)
+                if previous is not None:
+                    occupied = set(previous.get("behaviors") or {}) | set(previous.get("event_behaviors") or {})
+                    collisions = occupied & set(info["event_behaviors"])
+                    if collisions:
+                        raise ValueError("Selected recording already has these labels: "
+                                         + ", ".join(sorted(collisions)[:6]))
+                    previous.setdefault("event_behaviors", {}).update(info["event_behaviors"])
+                    report = previous.setdefault("import_report", {})
+                    if not isinstance(report, dict):
+                        report = {}
+                        previous["import_report"] = report
+                    report.setdefault("mamir_imports", []).append(info["import_report"])
+                    if self._processed:
+                        report.update(paired_index=target_index, paired_path=paired_path)
+                else:
+                    self._behavior_sources[key] = info
+                self._push_recent_paths("postprocess_recent_behavior_paths", [path])
+                loaded += 1
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(
+                    self, "MAMIR import failed", f"{os.path.basename(path)}:\n{exc}")
+        if not loaded:
+            return
+        self._settings.setValue("postprocess_last_dir", os.path.dirname(paths[0]))
+        self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded")
+        self._project_dirty = True
+        self._update_file_lists()
+        self._refresh_behavior_list()
+        self._update_behavior_time_panel()
+        self._update_data_availability()
+        self._update_status_strip()
+        self._sync_temporal_modeling_context()
+        self._refresh_sync_sources()
+        self.statusUpdate.emit(f"Loaded {loaded} MAMIR {category} source(s).", 5000)
+        if self.behavior_zone_panel is not None:
+            self.behavior_zone_panel.reload()
+
     def _load_behavior_files(self) -> None:
         start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
         if self._processed:
@@ -10545,12 +11025,33 @@ class PostProcessingPanel(QtWidgets.QWidget):
         )
         if not paths:
             return
-        self._load_behavior_paths(paths, replace=True)
+        if self._current_behavior_parse_mode() == _BEHAVIOR_PARSE_TIMESTAMPS:
+            fresh = self._new_behavior_source_paths(paths)
+            if fresh:
+                self._load_behavior_paths(fresh, replace=False)
+                self._refresh_behavior_list()
+        else:
+            self._load_behavior_zone_files(self._event_category(), paths=paths, allow_legacy=True)
         try:
             self._settings.setValue("postprocess_last_dir", os.path.dirname(paths[0]))
         except Exception:
             pass
-        self._refresh_behavior_list()
+
+    def _new_behavior_source_paths(self, paths: List[str]) -> List[str]:
+        """Keep existing imported sources intact when using legacy table modes."""
+        fresh = []
+        known = set(self._behavior_sources)
+        for path in paths:
+            stem = Path(path).stem
+            if stem in known:
+                QtWidgets.QMessageBox.warning(
+                    self, "Behavior source already loaded",
+                    f"{Path(path).name} was not added because a source named {stem!r} is already loaded. "
+                    "The existing source was left unchanged.")
+                continue
+            known.add(stem)
+            fresh.append(path)
+        return fresh
 
     def _load_processed_files(self) -> None:
         start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
@@ -10604,6 +11105,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._compute_spatial_heatmap()
             self._update_data_availability()
             self._sync_temporal_modeling_context()
+            if self.behavior_zone_panel is not None:
+                self.behavior_zone_panel.reload()
             return
         behavior_names: set[str] = set()
         for info in self._behavior_sources.values():
@@ -10641,6 +11144,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_data_availability()
         self._update_status_strip()
         self._sync_temporal_modeling_context()
+        if self.behavior_zone_panel is not None:
+            self.behavior_zone_panel.reload()
 
     def _guess_spatial_column(self, columns: List[str], axis: str) -> Optional[str]:
         if not columns:
@@ -11518,11 +12023,44 @@ class PostProcessingPanel(QtWidgets.QWidget):
     # ---- PSTH compute ----
 
     def _match_behavior_source(self, proc: ProcessedTrial) -> Optional[Dict[str, Any]]:
+        # Explicit paths remain stable when records are reordered or removed.
+        # The index is only a disambiguator for repeated identical paths.
+        def is_mamir(source: Dict[str, Any]) -> bool:
+            report = source.get("import_report") or {}
+            return isinstance(report, dict) and (
+                report.get("format") == "mamir" or bool(report.get("mamir_imports")))
+
+        def explicit_match(report: Dict[str, Any]) -> bool:
+            if report.get("paired_path") != str(proc.path):
+                return False
+            matches = [record for record in self._processed if str(record.path) == str(proc.path)]
+            if len(matches) == 1:
+                return matches[0] is proc
+            index = report.get("paired_index")
+            return (isinstance(index, int) and 0 <= index < len(self._processed)
+                    and self._processed[index] is proc)
+
+        def paired_elsewhere(source: Dict[str, Any]) -> bool:
+            report = source.get("import_report") or {}
+            if not isinstance(report, dict) or not {"paired_index", "paired_path"}.intersection(report):
+                return False
+            return not explicit_match(report)
+
+        for source in self._behavior_sources.values():
+            report = source.get("import_report") or {}
+            if not isinstance(report, dict) or report.get("paired_path") != str(proc.path):
+                continue
+            if explicit_match(report):
+                return source
         stem = os.path.splitext(os.path.basename(proc.path))[0]
         info = self._behavior_sources.get(stem, None)
+        if info is not None and paired_elsewhere(info):
+            info = None
         if info is None:
             stem_clean = _strip_ain_suffix(stem)
             for key, val in self._behavior_sources.items():
+                if paired_elsewhere(val):
+                    continue
                 key_clean = _strip_ain_suffix(key)
                 if key_clean == stem_clean:
                     info = val
@@ -11533,9 +12071,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             def canonical(name):
                 return re.sub(r"_metadata$", "", _strip_ain_suffix(name), flags=re.IGNORECASE).casefold()
             matches = [value for key, value in self._behavior_sources.items()
-                       if canonical(key) == canonical(stem)]
+                       if canonical(key) == canonical(stem) and not paired_elsewhere(value)]
             if len(matches) == 1:
                 info = matches[0]
+        # MAMIR rows carry explicit animal identity. A positional or singleton
+        # fallback could silently assign that animal to another fiber file.
         if info is None and self._processed and self._behavior_sources:
             try:
                 idx = next(i for i, p in enumerate(self._processed) if (p is proc) or (p.path == proc.path))
@@ -11544,9 +12084,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if idx is not None:
                 keys = list(self._behavior_sources.keys())
                 if 0 <= idx < len(keys):
-                    info = self._behavior_sources.get(keys[idx])
-        if info is None and len(self._behavior_sources) == 1:
-            info = next(iter(self._behavior_sources.values()))
+                    candidate = self._behavior_sources.get(keys[idx])
+                    if candidate is not None and not is_mamir(candidate) and not paired_elsewhere(candidate):
+                        info = candidate
+        if info is None:
+            generic = [source for source in self._behavior_sources.values()
+                       if not is_mamir(source) and not paired_elsewhere(source)]
+            if len(generic) == 1:
+                info = generic[0]
         return info
 
     def _file_id_for_proc(self, proc: ProcessedTrial) -> str:
@@ -12250,6 +12795,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         report["created_utc"] = datetime.now(timezone.utc).isoformat()
         proc.sync_report = report
         self._sync_results_by_file[self._file_id_for_proc(proc)] = report
+        comparison = getattr(self, "behavior_zone_panel", None)
+        if comparison is not None:
+            comparison._queue_comparison()
 
     def _preview_time_sync(self) -> None:
         proc = self._selected_proc_for_sync()
@@ -12493,7 +13041,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if align_mode.startswith("Transition"):
             beh_a = self.combo_behavior_from.currentText().strip()
             beh_b = self.combo_behavior_to.currentText().strip()
-            if beh_a not in behaviors or beh_b not in behaviors:
+            available = set(behaviors) | set(info.get("event_behaviors") or {})
+            if beh_a not in available or beh_b not in available:
                 return np.array([], float), np.array([], float)
             on_a, off_a, _ = self._extract_behavior_events(info, beh_a)
             on_b, _, dur_b = self._extract_behavior_events(info, beh_b)
@@ -13029,6 +13578,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         beh_time = np.asarray(info.get("time", np.array([], float)), float)
 
         for name in ticked:
+            if name in (info.get("event_behaviors") or {}):
+                on, off, _ = self._extract_behavior_events(info, name)
+                intervals.extend((float(start), float(stop)) for start, stop in zip(on, off)
+                                 if np.isfinite(start + stop) and stop >= start)
+                continue
             values = behaviors.get(name)
             if values is None:
                 continue
@@ -13884,7 +14438,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         for file_id, info, idx in iter_rows:
             behaviors = info.get("behaviors") or {}
-            if behavior_name not in behaviors:
+            event_behaviors = info.get("event_behaviors") or {}
+            if behavior_name not in behaviors and behavior_name not in event_behaviors:
                 continue
             kind = str(info.get("kind", _BEHAVIOR_PARSE_BINARY))
             on, off, dur = self._extract_behavior_events(info, behavior_name)
@@ -13893,6 +14448,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if kind == _BEHAVIOR_PARSE_BINARY:
                 t = np.asarray(info.get("time", np.array([], float)), float)
                 session_dur = float(t[-1] - t[0]) if t.size > 1 else 0.0
+                if session_dur <= 0 and self._processed and 0 <= idx < len(self._processed):
+                    t_proc = np.asarray(self._processed[idx].time, float)
+                    session_dur = float(t_proc[-1] - t_proc[0]) if t_proc.size > 1 else 0.0
                 total_time = float(np.nansum(dur))
                 frac_time = total_time / session_dur if session_dur > 0 else np.nan
             else:
@@ -14950,6 +15508,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if name.startswith("plot_") and isinstance(widget, pg.PlotWidget):
                 style_plot(widget, palette)
                 widget.showGrid(x=False, y=grid_enabled and widget is not self.plot_heat, alpha=grid_alpha)
+        if self.behavior_zone_panel is not None:
+            style_plot(self.behavior_zone_panel.response, palette)
         for card in getattr(self, "_postprocessing_plot_cards", []):
             card.set_preset(palette)
         if hasattr(self, "heat_colorbar_widget"):
@@ -16453,6 +17013,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _collect_settings(self) -> Dict[str, object]:
         return {
+            "event_kind": self._event_category(),
+            "behavior_comparison": self.behavior_zone_panel.settings_state(),
             "align": self.combo_align.currentText(),
             "dio_channel": self.combo_dio.currentText(),
             "dio_polarity": self.combo_dio_polarity.currentText(),
@@ -16583,6 +17145,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if idx >= 0:
                 combo.setCurrentIndex(idx)
 
+        self._set_event_category(str(data.get("event_kind", "zone")))
         _set_combo(self.combo_align, data.get("align"))
         _set_combo(self.combo_dio, data.get("dio_channel"))
         _set_combo(self.combo_dio_polarity, data.get("dio_polarity"))
@@ -16808,6 +17371,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._refresh_psth_duration_view()
         self.plot_splitter_preferences.restore(data.get("plot_splitters", {}))
         self.btn_edit_scale.setChecked(bool(data.get("heatmap_scale_editor", False)))
+        if "behavior_comparison" in data:
+            self.behavior_zone_panel.restore_settings(data["behavior_comparison"])
 
     def _save_settings(self) -> None:
         try:

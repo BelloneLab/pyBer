@@ -216,7 +216,7 @@ class PostprocessingFileDropTests(unittest.TestCase):
     def test_behavior_list_and_button_expand_folder_without_processed_routing(self):
         source = self.root / "behavior été.XLSX"
         source.write_bytes(b"source unchanged")
-        with patch.object(self.panel, "_load_behavior_paths") as behavior, \
+        with patch.object(self.panel, "_load_behavior_zone_files") as behavior, \
                 patch.object(self.panel, "_load_processed_paths") as processed:
             for target in (self.panel.list_behaviors.viewport(), self.panel.btn_load_beh):
                 behavior.reset_mock()
@@ -224,8 +224,9 @@ class PostprocessingFileDropTests(unittest.TestCase):
                 self.assertTrue(events[-1].isAccepted())
                 self.app.processEvents()
                 behavior.assert_called_once()
-                self.assertEqual([Path(path) for path in behavior.call_args.args[0]], [source])
-                self.assertEqual(behavior.call_args.kwargs, {"replace": False})
+                self.assertEqual(behavior.call_args.args, ("zone",))
+                self.assertEqual([Path(path) for path in behavior.call_args.kwargs["paths"]], [source])
+                self.assertTrue(behavior.call_args.kwargs["allow_legacy"])
             processed.assert_not_called()
         self.assertEqual(source.read_bytes(), b"source unchanged")
 

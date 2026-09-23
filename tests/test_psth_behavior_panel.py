@@ -109,6 +109,37 @@ class BehaviorPanelTests(unittest.TestCase):
             p.tab_visual_mode.setCurrentIndex(1)
         self.assertEqual(len(p._current_psth_behavior_summary()["file_ids"]), 2)
 
+    def test_summary_notes_clear_data_after_resizing_all_metrics(self):
+        from behavior_summary_plot import render_behavior_summary
+        plot = pg.PlotWidget()
+        plot.show()
+        palette = dict(text="#333333", muted="#666666", accent="#3377aa")
+        try:
+            for index in range(self.panel.combo_psth_behavior_metric.count()):
+                self.panel.combo_psth_behavior_metric.setCurrentIndex(index)
+                summary = self.panel._current_psth_behavior_summary()
+                render_behavior_summary(plot, summary, palette)
+                if not summary["has_data"]:
+                    continue
+                annotation = next(item for item in plot.items() if isinstance(item, pg.TextItem))
+                tops = np.asarray(summary["values"], float)
+                sem = np.asarray(summary.get("sem", np.zeros_like(tops)), float)
+                if sem.shape == tops.shape:
+                    tops = tops + np.where(np.isfinite(sem), sem, 0)
+                tops = np.r_[tops, np.asarray(summary.get("per_file_values", []), float).ravel(),
+                             np.asarray(summary.get("upper", []), float).ravel()]
+                highest = np.nanmax(tops)
+                for width, height in ((300, 180), (450, 250), (300, 350)):
+                    plot.resize(width, height)
+                    for _ in range(4):
+                        self.app.processEvents()
+                    pixel = plot.getViewBox().mapViewToScene(QtCore.QPointF(0, highest)).y()
+                    self.assertLess(annotation.sceneBoundingRect().bottom() + 6, pixel,
+                                    (summary["metric"], width, height))
+        finally:
+            plot.close()
+            plot.deleteLater()
+
     def test_cumulative_and_histogram_geometry_and_theme(self):
         p = self.panel
         p.combo_psth_behavior_metric.setCurrentIndex(3)
