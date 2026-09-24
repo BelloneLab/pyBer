@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.55"><img src="https://img.shields.io/badge/release-v0.55-7c4dff" alt="v0.55 release"></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.56"><img src="https://img.shields.io/badge/release-v0.56-7c4dff" alt="v0.56 release"></a>
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-41cd52?logo=qt&logoColor=white" alt="PySide6 and pyqtgraph">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white" alt="Windows">
@@ -18,9 +18,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.55/pyBer-windows.exe"><strong>Download the Windows GUI (exe)</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.56/pyBer-windows.exe"><strong>Download the Windows GUI (exe)</strong></a>
   &nbsp;|&nbsp;
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.55/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.56/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
   &nbsp;|&nbsp;
   <a href="docs/index.md"><strong>Read the full guide</strong></a>
 </p>
@@ -228,7 +228,15 @@ The flagged table collects processing failures, excessive artifact load, poor fi
 | Processed data | Self-describing CSV with `.pyber.json` sidecar and HDF5 with embedded metadata. |
 | Reports | Preprocessing PNG, strict QC report images, batch summaries, flagged-recording tables, analysis CSVs, model tables, and publication figure exports. |
 
-Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.55 builds target Windows; source execution on other platforms is not part of the tested release path.
+Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.56 builds target Windows; source execution on other platforms is not part of the tested release path.
+
+## What changed in v0.56
+
+- Combine two or more behaviors/zones into one named OR event using **Combine…** in PSTH or the Behavior comparison controls.
+- Overlapping and touching bouts merge without double counting; original labels, timestamps and missing observations are preserved.
+- Combined labels work in Individual and Group analyses, project saves and exports; definitions are recorded for reproducibility.
+- Combinations are computed separately per recording. Sources missing a selected component are excluded and reported.
+- See [release notes](docs/releases/v0.56.md) and the [combined-label guide](docs/behavior_import.md#combine-behaviors-or-zones-into-one-event).
 
 ## What changed in v0.55
 

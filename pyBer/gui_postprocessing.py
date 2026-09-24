@@ -2088,7 +2088,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fa_psth = QtWidgets.QFormLayout(grp_align_psth)
         fa_psth.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
         fa_psth.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
-        fa_psth.addRow(self.lbl_behavior_name, self.combo_behavior_name)
+        combined_row = QtWidgets.QHBoxLayout()
+        combined_row.addWidget(self.combo_behavior_name, 1)
+        self.btn_combine_events = QtWidgets.QPushButton("Combine…")
+        self.btn_combine_events.setToolTip("Create one OR event from two or more behaviors/zones; originals remain available.")
+        self.btn_combine_events.clicked.connect(self._open_combine_events)
+        combined_row.addWidget(self.btn_combine_events)
+        fa_psth.addRow(self.lbl_behavior_name, combined_row)
         fa_psth.addRow(self.lbl_behavior_align, self.combo_behavior_align)
         fa_psth.addRow(self.lbl_trans_from, self.combo_behavior_from)
         fa_psth.addRow(self.lbl_trans_to, self.combo_behavior_to)
@@ -9039,6 +9045,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_behavior_name.setVisible(use_beh)
         self.combo_behavior_name.setEnabled(use_beh)
         self.combo_behavior_name.setVisible(use_beh)
+        self.btn_combine_events.setVisible(use_beh)
         show_time_panel = bool(use_beh and self._behavior_sources_need_generated_time())
         self.grp_behavior_time.setEnabled(show_time_panel)
         self.grp_behavior_time.setVisible(show_time_panel)
@@ -10906,8 +10913,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 raise ValueError("The selected recording is not paired with this arena workbook.")
             old_labels = set(prior_report.get("arena_labels", []))
             old_trajectory = set(prior_report.get("arena_trajectory_labels", []))
+            derived_labels = set(prior_report.get("combined_labels", {}))
             retained_behaviors = {name: values for name, values in (previous.get("behaviors") or {}).items()
-                                  if name not in old_labels}
+                                  if name not in old_labels and name not in derived_labels}
             retained_trajectory = {name: values for name, values in (previous.get("trajectory") or {}).items()
                                    if name not in old_trajectory}
             if retained_behaviors and not np.array_equal(
@@ -10919,7 +10927,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 raise ValueError("Other trajectory data use a different clock; the arena was not changed.")
             retained_events = {
                 name: event for name, event in (previous.get("event_behaviors") or {}).items()
-                if str(event.get("variable", "")) not in old_trajectory
+                if str(event.get("variable", "")) not in old_trajectory and name not in derived_labels
             }
             collisions = (set(retained_behaviors) | set(retained_events)) & set(info["behaviors"])
             if collisions:
@@ -11148,7 +11156,92 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _load_processed_h5(self, path: str) -> Optional[ProcessedTrial]:
         return load_processed_h5(path)
 
+    def _open_combine_events(self, *_args) -> None:
+        from combined_events_dialog import CombineEventsDialog
+        names = sorted(self._get_all_behavior_names(), key=str.casefold)
+        if len(names) < 2:
+            QtWidgets.QMessageBox.information(self, "Combine events", "Load at least two behavior or zone labels first.")
+            return
+        selected = self.behavior_zone_panel._selected_labels() if self._event_category() == "behavior" else []
+        dialog = CombineEventsDialog(names, selected, self)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        try:
+            name, count, skipped = self._create_combined_event(dialog.name.text(), dialog.members())
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Cannot combine events", str(exc))
+            return
+        message = f"Created {name} in {count} loaded source(s)."
+        if skipped:
+            message += f" Excluded {len(skipped)} source(s) missing a selected label: " + ", ".join(skipped)
+        self.statusUpdate.emit(message, 10000)
+        if skipped:
+            QtWidgets.QMessageBox.information(self, "Combined event scope", message)
+
+    def _create_combined_event(self, name: str, members: List[str]):
+        from combined_events import combined_value
+        name = name.strip()
+        members = list(dict.fromkeys(members))
+        if not name or len(members) < 2:
+            raise ValueError("Enter a name and select at least two different labels.")
+        if all(member.startswith("Zone: ") for member in members) and not name.startswith("Zone: "):
+            name = "Zone: " + name
+        if name in members:
+            raise ValueError("Use a new name; original labels cannot be overwritten.")
+        if not set(members).issubset(self._get_all_behavior_names()):
+            raise ValueError("A selected label is no longer loaded.")
+        definition = {"operation": "OR", "members": members}
+        pending, skipped = [], []
+        for key, info in self._behavior_sources.items():
+            existing = set(info.get("behaviors") or {}) | set(info.get("event_behaviors") or {})
+            previous = (info.get("import_report") or {}).get("combined_labels", {}).get(name)
+            if (name in existing or previous is not None) and previous != definition:
+                raise ValueError(f"{name!r} already exists. Choose another combined label name.")
+            if not set(members).issubset(existing):
+                skipped.append(key)
+                continue
+            try:
+                destination, value = combined_value(info, members, self._extract_behavior_events)
+            except ValueError as exc:
+                raise ValueError(f"{key}: {exc}") from exc
+            pending.append((info, destination, value))
+        if not pending:
+            raise ValueError("No loaded recording contains all selected labels. Labels from different animals cannot be pooled.")
+        # Validate every source first so a failed/cancelled operation is atomic.
+        for info, destination, value in pending:
+            info.setdefault(destination, {})[name] = value
+            info.setdefault("import_report", {}).setdefault("combined_labels", {})[name] = copy.deepcopy(definition)
+        self._project_dirty = True
+        self._refresh_behavior_list()
+        self.combo_align.setCurrentIndex(1)
+        self.combo_behavior_name.setCurrentText(name)
+        if name.startswith("Zone: "):
+            self._set_event_category("zone")
+        else:
+            self._set_event_category("behavior")
+            listing = self.behavior_zone_panel.selectors["behavior"]
+            with QtCore.QSignalBlocker(listing):
+                for index in range(listing.count()):
+                    item = listing.item(index)
+                    item.setCheckState(QtCore.Qt.CheckState.Checked if item.text() == name
+                                       else QtCore.Qt.CheckState.Unchecked)
+            self.behavior_zone_panel.follow_psth_selection(name)
+            self.behavior_zone_panel._queue_comparison()
+        self._compute_psth()
+        self._queue_settings_save()
+        return name, len(pending), skipped
+
+    def _combined_event_definitions(self) -> Dict[str, object]:
+        return {key: copy.deepcopy(info["import_report"]["combined_labels"])
+                for key, info in self._behavior_sources.items()
+                if (info.get("import_report") or {}).get("combined_labels")}
+
     def _refresh_behavior_list(self) -> None:
+        from combined_events import refresh_combined_labels
+        for key, info in self._behavior_sources.items():
+            errors = refresh_combined_labels(info, self._extract_behavior_events)
+            if errors:
+                self.statusUpdate.emit(f"Combined labels unavailable in {key}: " + "; ".join(errors), 10000)
         prev_name = self.combo_behavior_name.currentText().strip()
         prev_analysis = self.combo_behavior_analysis.currentText().strip() if hasattr(self, "combo_behavior_analysis") else ""
         prev_from = self.combo_behavior_from.currentText().strip()
@@ -17618,6 +17711,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _collect_psth_parameter_sections(self, include_heatmap: bool = False) -> List[Tuple[str, List[Tuple[str, object]]]]:
         data = self._collect_settings()
         align_items: List[Tuple[str, object]] = [("align_source", data.get("align", ""))]
+        combined = self._combined_event_definitions()
+        if combined:
+            align_items.append(("combined_labels", json.dumps(combined, sort_keys=True)))
         align_text = str(data.get("align", ""))
         if align_text.startswith("Analog/Digital"):
             align_items.extend(

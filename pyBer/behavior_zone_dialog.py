@@ -276,6 +276,10 @@ class BehaviorZonePanel(QtWidgets.QWidget):
             self.clear_selection_button.clicked.connect(lambda: self._set_visible_selection(False, all_items=True))
             controls.addWidget(self.select_visible_button)
             controls.addWidget(self.clear_selection_button)
+            self.combine_button = QtWidgets.QPushButton("Combine…")
+            self.combine_button.setToolTip("Combine checked labels into one OR event; keep the originals.")
+            self.combine_button.clicked.connect(panel._open_combine_events)
+            controls.addWidget(self.combine_button)
             layout.addLayout(controls)
             listing = BehaviorCheckList()
             listing.setMinimumHeight(90)
@@ -884,6 +888,7 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self._last_rows = rows
         self._last_group_rows = group_recordings(rows)
         self._last_export_context = {
+            "combined_labels": json.dumps(self.panel._combined_event_definitions(), sort_keys=True),
             "scope": "group" if self.scope.currentIndex() == 1 else "individual",
             "before_window_s": self.before.value(), "after_window_s": self.after.value(),
             "comparison_offset_s": self.offset.value(),

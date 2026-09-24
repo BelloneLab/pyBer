@@ -177,6 +177,37 @@ MAMIR's assay zone export determines membership from tracked animal centers.
 Its head-direction outputs are separate orientation measurements. A body-area
 overlap criterion should be exported and labeled separately if needed.
 
+## Combine behaviors or zones into one event
+
+Click **Combine…** beside the PSTH behavior/zone selector, or in the Behavior
+comparison controls. Check two or more labels, enter a new name, and create the
+combined label. For example, combine Zone 1 and Zone 2 as "Either zone". The new
+label is selected in PSTH; a behavior combination is also selected in the
+before/during/after comparison. Original labels remain available.
+
+Combining means **OR**, not adding signals or requiring both labels at once:
+
+- The combined state is active whenever any selected state is active.
+- Overlapping or touching bouts merge into one continuous bout. Moving directly
+  between selected zones does not create a second entry into their union.
+- A known active state wins over an unknown one. If none is known active and
+  some states are unknown, the combined state remains unknown, not zero.
+- Event-list intervals use their union; duplicate point events count once.
+  Sampled state columns and event-list labels cannot be mixed in the same
+  combination because their missing-observation semantics differ.
+
+Each loaded recording is combined separately. A source missing any selected
+label is excluded and reported, not treated as a zero-valued label. Normal
+Individual/Group weighting, PSTH filters, baseline normalization and Zone
+pre/post analysis remain unchanged. No event is pooled across different animals.
+
+Projects retain the combined columns and their OR definitions; comparison
+exports and PSTH parameter files include the definitions. Derived labels are
+rebuilt when imported sources or arenas change, and removed from the choices if
+their required inputs are unavailable. After loading additional recordings,
+create the same name with the same inputs again to extend it to those sources.
+Original CSVs are never edited.
+
 ## Flat CSVs with multiple animals or arenas
 
 Some exports put several animals in one table, with one row per animal per
