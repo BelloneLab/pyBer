@@ -39,7 +39,8 @@ from aligned_time_axes import AlignedTimeAxes
 from postprocessing_view_controls import split_plot_layout, PlotSplitterPreferences, create_view_menu, compact_results_toolbar
 from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_metrics
 from file_drop import install_file_drop, expand_paths
-from behavior_import import infer_table, read_behavior_csv, detect_time_column
+from behavior_import import (infer_table, read_behavior_csv, detect_time_column,
+                             select_identity_rows, BehaviorImportCancelled)
 from mamir_import import inspect_mamir, load_mamir
 from heatmap_display import color_name as heatmap_color_name, color_map as heatmap_color_map, color_limits as heatmap_color_limits, matplotlib_color_map
 from baseline_advisor import BaselineRecording
@@ -592,8 +593,9 @@ def _timestamp_columns_from_df(df) -> Dict[str, np.ndarray]:
     return behaviors
 
 
-def _behavior_table_info(df, parse_mode: str, fps: float) -> Dict[str, Any]:
+def _behavior_table_info(df, parse_mode: str, fps: float, *, identity_chooser=None) -> Dict[str, Any]:
     """Infer a table once and adapt it to the existing behavior/PSTH interface."""
+    df, identity_report = select_identity_rows(df, identity_chooser)
     inferred = infer_table(df)
     row_count = int(len(df.index))
     time_col = inferred["time_column"]
@@ -612,13 +614,14 @@ def _behavior_table_info(df, parse_mode: str, fps: float) -> Dict[str, Any]:
         "auto_time_column": inferred.get("auto_time_column", time_col),
         "coordinate_pairs": inferred.get("coordinate_pairs", []),
         "default_coordinate_pair": inferred.get("default_coordinate_pair"),
-        "import_report": inferred.get("report", {}),
+        "import_report": {**inferred.get("report", {}), **identity_report},
     }
 
 
-def _load_behavior_csv(path: str, parse_mode: str = _BEHAVIOR_PARSE_BINARY, fps: float = 0.0) -> Dict[str, Any]:
+def _load_behavior_csv(path: str, parse_mode: str = _BEHAVIOR_PARSE_BINARY, fps: float = 0.0,
+                       *, identity_chooser=None) -> Dict[str, Any]:
     """Load Pykaboo or delimited behavior tables without renaming source columns."""
-    return _behavior_table_info(read_behavior_csv(path), parse_mode, fps)
+    return _behavior_table_info(read_behavior_csv(path), parse_mode, fps, identity_chooser=identity_chooser)
 
 
 def _load_behavior_ethovision(
@@ -626,6 +629,7 @@ def _load_behavior_ethovision(
     sheet_name: Optional[str] = None,
     parse_mode: str = _BEHAVIOR_PARSE_BINARY,
     fps: float = 0.0,
+    *, identity_chooser=None,
 ) -> Dict[str, Any]:
     import pandas as pd
 
@@ -647,7 +651,7 @@ def _load_behavior_ethovision(
         df = pd.read_excel(path, sheet_name=sheet_name, engine="openpyxl")
     else:
         df = clean_sheet(Path(path), sheet_name, interpolate=True)
-    info = _behavior_table_info(df, parse_mode, fps)
+    info = _behavior_table_info(df, parse_mode, fps, identity_chooser=identity_chooser)
     info["sheet"] = sheet_name
     return info
 
@@ -6216,9 +6220,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         self._load_project_from_path(path)
 
+    def _choose_behavior_identity(self, path: str, labels: List[str]) -> Optional[int]:
+        selected, ok = QtWidgets.QInputDialog.getItem(
+            self, "Select animal / arena ID",
+            f"{os.path.basename(path)}: choose the animal recorded by the fiber.\n"
+            "Only its rows will be used; the original file is unchanged.", labels, 0, False)
+        return labels.index(selected) if ok else None
+
     def _load_behavior_paths(self, paths: List[str], replace: bool) -> None:
-        if replace:
-            self._behavior_sources.clear()
         parse_mode = self._current_behavior_parse_mode()
         fps = float(self.spin_behavior_fps.value()) if hasattr(self, "spin_behavior_fps") else 0.0
         loaded_any = False
@@ -6227,7 +6236,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             ext = os.path.splitext(p)[1].lower()
             try:
                 if ext == ".csv":
-                    info = _load_behavior_csv(p, parse_mode=parse_mode, fps=fps)
+                    info = _load_behavior_csv(p, parse_mode=parse_mode, fps=fps,
+                                             identity_chooser=lambda labels: self._choose_behavior_identity(p, labels))
                 elif ext == ".xlsx":
                     import pandas as pd
                     xls = pd.ExcelFile(p, engine="openpyxl")
@@ -6243,7 +6253,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         )
                         if not ok:
                             continue
-                    info = _load_behavior_ethovision(p, sheet_name=sheet, parse_mode=parse_mode, fps=fps)
+                    info = _load_behavior_ethovision(p, sheet_name=sheet, parse_mode=parse_mode, fps=fps,
+                                                    identity_chooser=lambda labels: self._choose_behavior_identity(p, labels))
                 else:
                     continue
                 has_behaviors = bool(info.get("behaviors") or {})
@@ -6256,8 +6267,30 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     )
                 info.setdefault("event_behaviors", {})
                 info["source_path"] = str(p)
+                report = info.get("import_report") or {}
+                if report.get("requires_explicit_pairing"):
+                    if not self._processed:
+                        raise ValueError("Load the processed fiber recording first, then select its animal ID.")
+                    names = [f"{i + 1}. {proc.path or 'Recording'}" for i, proc in enumerate(self._processed)]
+                    index = 0
+                    if len(names) > 1:
+                        chosen, ok = QtWidgets.QInputDialog.getItem(
+                            self, "Pair behavior with fiber", f"{report['subject']}: select its fiber recording",
+                            names, 0, False)
+                        if not ok:
+                            continue
+                        index = names.index(chosen)
+                    paired_path = str(self._processed[index].path)
+                    report.update(paired_index=index, paired_path=paired_path)
+                    stem = Path(paired_path).stem
+                    if sum(str(proc.path) == paired_path for proc in self._processed) > 1:
+                        stem += f" [recording {index + 1}]"
+                if replace and not loaded_any:
+                    self._behavior_sources.clear()
                 self._behavior_sources[stem] = info
                 loaded_any = True
+            except BehaviorImportCancelled:
+                continue
             except Exception as exc:
                 QtWidgets.QMessageBox.warning(
                     self,
@@ -10743,6 +10776,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     display = self._add_generic_behavior_zone_file(path, category)
                     if display in {"behavior", "zone"}:
                         self._set_event_category(display)
+            except BehaviorImportCancelled:
+                continue
             except ValueError as exc:
                 if allow_legacy and detected in {"generic", "workbook"} and \
                         str(exc).startswith("No binary behavior columns found"):
@@ -10790,18 +10825,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 header_row = 0
             if header_row == 0:
                 table = pd.read_excel(path, sheet_name=sheet, engine="openpyxl")
-                info = _behavior_table_info(table, _BEHAVIOR_PARSE_BINARY, 0.0)
+                info = _behavior_table_info(table, _BEHAVIOR_PARSE_BINARY, 0.0,
+                                           identity_chooser=lambda labels: self._choose_behavior_identity(path, labels))
                 fmt = "spreadsheet"
             else:
                 info = _load_behavior_ethovision(path, sheet_name=sheet,
-                                                  parse_mode=_BEHAVIOR_PARSE_BINARY)
+                                                  parse_mode=_BEHAVIOR_PARSE_BINARY,
+                                                  identity_chooser=lambda labels: self._choose_behavior_identity(path, labels))
                 fmt = "ethovision"
             info["sheet"] = sheet
             arena_option = next(option for option in options if option["sheet"] == sheet)
         else:
             if replace_arena:
                 raise ValueError("Arena switching requires the original workbook.")
-            info = _load_behavior_csv(path, parse_mode=_BEHAVIOR_PARSE_BINARY)
+            info = _load_behavior_csv(path, parse_mode=_BEHAVIOR_PARSE_BINARY,
+                                     identity_chooser=lambda labels: self._choose_behavior_identity(path, labels))
             fmt = "csv"
             options = []
         behaviors = info.get("behaviors") or {}
@@ -10827,7 +10865,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             report.update(arena_workbook=str(path), arena_options=options,
                           arena_labels=list(info["behaviors"]),
                           arena_trajectory_labels=list(info.get("trajectory") or {}),
-                          subject=arena_option.get("subject", ""))
+                          subject=report.get("subject") or arena_option.get("subject", ""))
 
         if self._processed:
             names = [f"{index + 1}. {proc.path or 'Recording'}"
@@ -10855,6 +10893,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             elif sum(Path(proc.path).stem == key for proc in self._processed) > 1:
                 key = f"{key} [recording {target_index + 1}]"
         else:
+            if report.get("requires_explicit_pairing"):
+                raise ValueError("Load the processed fiber recording first, then select its animal ID.")
             if target_index is not None:
                 raise ValueError("Load the fiber recording before switching its arena.")
             key = Path(path).stem
@@ -12065,6 +12105,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         def paired_elsewhere(source: Dict[str, Any]) -> bool:
             report = source.get("import_report") or {}
+            if isinstance(report, dict) and report.get("requires_explicit_pairing") and not report.get("paired_path"):
+                return True
             if not isinstance(report, dict) or not {"paired_index", "paired_path"}.intersection(report):
                 return False
             return not explicit_match(report)

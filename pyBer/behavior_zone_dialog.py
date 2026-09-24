@@ -665,7 +665,12 @@ class BehaviorZonePanel(QtWidgets.QWidget):
             is_zone = str(name).startswith("Zone: ")
             if (category == "zone") != is_zone:
                 continue
-            on, off, _duration = self.panel._extract_behavior_events(info, name)
+            try:
+                on, off, _duration = self.panel._extract_behavior_events(info, name)
+            except ValueError as exc:
+                self.pairing.setText(f"{Path(proc.path).name}: invalid behavior timeline ({exc}). "
+                                     "Re-import the behavior file and select its animal/arena ID.")
+                return
             if on.size and off.size:
                 event_spans.append((float(np.nanmin(on)) + self.offset.value(),
                                     float(np.nanmax(off)) + self.offset.value()))
@@ -852,7 +857,12 @@ class BehaviorZonePanel(QtWidgets.QWidget):
             if info is None:
                 unmatched.append(file_id)
                 continue
-            events = self._events_for(info, labels)
+            try:
+                events = self._events_for(info, labels)
+            except ValueError as exc:
+                unmatched.append(f"{file_id} (invalid behavior timeline: {exc}; "
+                                 "re-import and select the animal/arena ID)")
+                continue
             if not events:
                 unmatched.append(file_id)
                 continue

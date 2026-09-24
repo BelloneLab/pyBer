@@ -69,6 +69,70 @@ def read_behavior_csv(path):
     return pd.read_csv(path, sep=delimiter, comment="#", encoding="utf-8-sig", low_memory=False)
 
 
+class BehaviorImportCancelled(Exception):
+    """An identity picker was cancelled; leave the loaded sources untouched."""
+
+
+def select_identity_rows(df, chooser=None):
+    """Select one recorded animal/stream without sorting or repairing its rows.
+
+    Flat multi-animal exports repeat clocks legitimately across animals. Their
+    identifiers must be resolved before inferring clocks or extracting bouts.
+    Wide tables (one column per animal) and tables without IDs are unchanged.
+    """
+    identity_keys = {"animal_id", "animal", "identity", "mouse_id", "mouse",
+                     "subject_id", "subject", "track_id", "id", "arena_id"}
+    columns = [column for column in df.columns if _key(column) in identity_keys]
+    if not columns or df.empty:
+        return df, {}
+    context = [column for column in df.columns
+               if _key(column) in {"video", "video_id", "stream", "stream_id", "session", "trial", "phase"}
+               and df[column].nunique(dropna=False) > 1]
+    keys = list(dict.fromkeys(columns + context))
+    if df[keys].isna().any().any():
+        raise ValueError("Behavior rows have missing animal/arena/stream identifiers. "
+                         "Their ownership cannot be inferred; no rows were discarded.")
+    groups = list(df.groupby(keys, sort=False, dropna=False).indices.items())
+    if len(groups) <= 1:
+        return df, {}
+
+    def display(value):
+        return str(int(value)) if isinstance(value, (float, np.floating)) and value.is_integer() else str(value)
+
+    labels, selections = [], []
+    for values, positions in groups:
+        values = values if isinstance(values, tuple) else (values,)
+        selection = {str(column): display(value) for column, value in zip(keys, values)}
+        parts = [f"{column}: {value}" for column, value in selection.items()]
+        for column in df.columns:
+            if _key(column) == "condition":
+                conditions = df.iloc[positions][column].dropna().unique()
+                if len(conditions) == 1:
+                    parts.append(str(conditions[0]))
+        labels.append(" · ".join(parts))
+        selections.append(selection)
+    if chooser is None:
+        raise ValueError(f"This table contains {len(groups)} animal/arena streams. "
+                         "Choose one ID before analyzing its timestamps.")
+    index = chooser(labels)
+    if index is None:
+        raise BehaviorImportCancelled()
+    if not isinstance(index, (int, np.integer)) or not 0 <= index < len(groups):
+        raise ValueError("Invalid animal/arena selection.")
+    selected = df.iloc[groups[index][1]].copy()
+    clock = detect_time_column(selected)
+    if clock is None:
+        raise ValueError(f"{labels[index]}: no increasing recording clock found. "
+                         "Check the time column; timestamps were not repaired.")
+    times = _numeric_values(selected[clock], clock=True)
+    if not np.all(np.isfinite(times)) or np.any(np.diff(times) <= 0):
+        raise ValueError(f"{labels[index]}: timestamps still contain missing or repeated values "
+                         "within this animal. Check the source clock; no rows were removed.")
+    return selected, {"identity_selection": selections[index], "subject": labels[index],
+                      "source_row_count": len(df), "selected_row_count": len(selected),
+                      "requires_explicit_pairing": True}
+
+
 def infer_table(df, *, time_column=None, behavior_columns=None, x_column=None, y_column=None):
     """Infer clocks, binary states and coordinate pairs with optional overrides.
 
@@ -162,7 +226,8 @@ def infer_table(df, *, time_column=None, behavior_columns=None, x_column=None, y
             return True
         if key.endswith(("_id", "_count", "_confidence", "_likelihood", "_prob", "_vector")):
             return True
-        return key in {"time", "trial_time", "recording_time", "animal_id", "session", "trial", "experiment",
+        return key in {"time", "trial_time", "recording_time", "animal_id", "id", "identity",
+                       "animal", "mouse", "subject", "frame", "session", "trial", "experiment",
                        "condition", "arena", "date", "gain_db", "sensor_width", "sensor_height", "exposure_time_us",
                        "behavior_state", "behavior_active", "behavior_decision_frame", "behavior_backend",
                        "ttl_state", "animal_detected", "mouse_1_detected", "mouse_2_detected"}

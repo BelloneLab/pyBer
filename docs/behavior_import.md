@@ -177,6 +177,33 @@ MAMIR's assay zone export determines membership from tracked animal centers.
 Its head-direction outputs are separate orientation measurements. A body-area
 overlap criterion should be exported and labeled separately if needed.
 
+## Flat CSVs with multiple animals or arenas
+
+Some exports put several animals in one table, with one row per animal per
+video frame. Repeated timestamps across animals are expected. When such a table
+has Animal ID, Arena ID, Mouse, or equivalent identity columns, pyBer asks which
+animal/arena stream to use before interpreting its clock. Choices include mouse
+and condition labels where available. Two, four, or more IDs are supported;
+separate videos/streams with reused IDs remain separate choices.
+
+Load the processed fiber recordings first, then add the behavior file, choose
+the ID, and confirm its fiber recording. Add the same CSV again to select another
+ID for another fiber. Both the Behavior/Zone add button and the Setup importer
+support selection. Existing workbook sheet/arena selection remains available.
+
+Selection only filters rows in memory. No source file, timestamp, behavior value
+or missing observation is rewritten. pyBer does not deduplicate different animals
+together, invent timing offsets, or fill missing samples. If the selected animal
+still has an invalid clock, import stops with an explanation. Cancelling selection
+leaves existing imports intact. Project saves retain the selected identity and
+explicit fiber pairing; an identity-selected source is not shared implicitly
+across the other Group recordings.
+
+If an older project contains the unsplit table, remove that behavior entry and
+re-import the original CSV to select its animal. This does not delete the file.
+Verify the video/session pairing: fiber acquisition numbers need not match the
+behavior trial numbers, and habituation and test are separate recordings.
+
 ## Adjusting heatmap colors
 
 The **Colors** controls above the PSTH heatmap work in both Zone and Behavior,
