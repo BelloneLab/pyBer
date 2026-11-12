@@ -126,6 +126,14 @@ The modeling workbench consumes the current processed recordings, behavior varia
 8. Compute individual or group PSTHs, spatial maps, behavior metrics, signal events, synchronization, or temporal models.
 9. Save the project and export the exact tables, HDF5 bundles, reports, and figures needed downstream.
 
+## Groups, seamless figure and editable export
+
+- Create recording groups (label + color), attribute recordings by clicking a group chip or by right-click, and open the recordings list in its own window for long lists.
+- PSTH **Groups** view: all groups overlaid (one mean +/- SEM per group with `n` legend and a grouped heatmap), one group only, or pooled.
+- The results area reads as one figure; dividers stay draggable. Right-click a plot to remove it or change it to another analysis.
+- Image export writes PNG plus editable vector PDF and SVG (one path per curve, real text, plain colors).
+- Details: [groups and figure export guide](docs/groups_and_figure_export.md).
+
 ## Signal events in postprocessing
 
 In **Events**, choose **Selected file** or **All files**. Automatic detection estimates

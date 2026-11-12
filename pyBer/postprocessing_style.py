@@ -122,15 +122,30 @@ class PlotCard(QtWidgets.QFrame):
         layout.addWidget(self.subtitle_label)
         self.plot_widget = widget
         layout.addWidget(widget, stretch=1)
+        self._seamless = False
+        self._preset: Preset = preset
         self.set_preset(preset)
+
+    @property
+    def seamless(self) -> bool:
+        """Seamless cards draw no frame, so neighbors read as one figure."""
+        return self._seamless
+
+    @seamless.setter
+    def seamless(self, value: bool) -> None:
+        self._seamless = bool(value)
+        self.set_preset(self._preset)
 
     def set_preset(self, preset: Preset) -> None:
         """Refresh only this card's colors, avoiding application-wide styles."""
         palette = _palette(preset)
+        self._preset = preset
+        frame = ("background: transparent; border: none; border-radius: 0px;"
+                 if getattr(self, "_seamless", False) else
+                 f"background: {palette['surface']}; border: 1px solid {palette['border']}; border-radius: 12px;")
         self.setStyleSheet(f"""
             QFrame#postprocessingPlotCard {{
-                background: {palette['surface']};
-                border: 1px solid {palette['border']}; border-radius: 12px;
+                {frame}
             }}
             QLabel#postprocessingCardTitle {{
                 color: {palette['text']}; background: transparent; border: none;

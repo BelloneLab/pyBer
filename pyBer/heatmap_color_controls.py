@@ -113,7 +113,10 @@ class HeatmapColorControls(QtWidgets.QWidget):
     def sync(self, *_args):
         panel = self.panel
         ready = bool(panel.plot_heat.property("hasPlotData"))
-        self.setVisible(ready and not panel.plot_heat.isHidden())
+        # A heatmap swapped out of the dashboard ("Change to") keeps no editor.
+        card = getattr(panel, "psth_shared_card", None)
+        placed = card is None or panel.plot_heat.isVisibleTo(card)
+        self.setVisible(ready and not panel.plot_heat.isHidden() and placed)
         self.setEnabled(ready)
         with QtCore.QSignalBlocker(self.mode), QtCore.QSignalBlocker(self.adjust):
             self.mode.setCurrentIndex(panel.combo_heat_scale.currentIndex())

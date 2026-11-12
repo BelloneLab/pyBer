@@ -96,6 +96,10 @@ a = Analysis(
     datas=[('assets/pyBer_logo_big.png', 'assets'), ('assets/pyBer.ico', 'assets')],
     hiddenimports=[
         'PySide6.QtOpenGL',
+        # Editable figure export selects these writers dynamically.
+        'matplotlib.backends.backend_agg',
+        'matplotlib.backends.backend_pdf',
+        'matplotlib.backends.backend_svg',
         'rpy2.rinterface',
         'rpy2.rinterface_lib',
         'rpy2.robjects',

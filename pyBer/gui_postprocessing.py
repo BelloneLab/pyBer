@@ -38,6 +38,11 @@ from psth_metric_panels import MetricPanel, MetricGrid
 from aligned_time_axes import AlignedTimeAxes
 from postprocessing_view_controls import split_plot_layout, PlotSplitterPreferences, create_view_menu, compact_results_toolbar
 from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_metrics
+from vector_figure_export import write_vector_figure
+from recording_groups import (RecordingGroups, GroupChipBar, GroupOutlineDelegate, DetachableSection,
+                              build_assign_menu, color_dot_icon, UNGROUPED_COLOR)
+from psth_groups import HeatmapGroupBands, build_group_display, block_summaries, block_ticks, legend_label
+from dashboard_panels import DashboardPanels, GridRowHandle, HANDLE_PX, seamless_figure_qss, draw_global_metric
 from file_drop import install_file_drop, expand_paths
 from behavior_import import (infer_table, read_behavior_csv, detect_time_column,
                              select_identity_rows, BehaviorImportCancelled)
@@ -395,6 +400,44 @@ class FileDropList(QtWidgets.QListWidget):
             return
         super().dropEvent(event)
         self.orderChanged.emit()
+
+
+def _write_widget_pdf_qt(widget: QtWidgets.QWidget, path: str) -> bool:
+    """Legacy Qt painter PDF (visually faithful, but not reliably editable)."""
+    if widget is None:
+        return False
+    size = widget.size()
+    if not size.isValid() or size.width() <= 0 or size.height() <= 0:
+        size = widget.sizeHint()
+    if not size.isValid() or size.width() <= 0 or size.height() <= 0:
+        size = QtCore.QSize(1280, 720)
+    writer = QtGui.QPdfWriter(path)
+    writer.setResolution(300)
+    width_px = float(size.width())
+    height_px = float(size.height())
+    width_pt = max(1.0, width_px * 72.0 / 96.0)
+    height_pt = max(1.0, height_px * 72.0 / 96.0)
+    writer.setPageSize(QtGui.QPageSize(QtCore.QSizeF(width_pt, height_pt), QtGui.QPageSize.Unit.Point))
+    writer.setPageMargins(QtCore.QMarginsF(0.0, 0.0, 0.0, 0.0))
+    painter = QtGui.QPainter(writer)
+    try:
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
+        # The page size above uses 96-DPI widget pixels, whereas the PDF
+        # painter uses 300-DPI device pixels. Fill the intended page rather
+        # than shrinking every plot to roughly one third of its width.
+        painter.scale(writer.resolution() / 96.0, writer.resolution() / 96.0)
+        QtWidgets.QWidget.render(
+            widget,
+            painter,
+            QtCore.QPoint(),
+            QtGui.QRegion(),
+            QtWidgets.QWidget.RenderFlag.DrawChildren,
+        )
+    finally:
+        painter.end()
+    return True
+
 
 
 def _extract_rising_edges(time: np.ndarray, dio: np.ndarray, threshold: float = 0.5) -> np.ndarray:
@@ -1938,9 +1981,32 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fal.addRow(self.lbl_arena, self.combo_arena)
         fal.addRow(self.lbl_arena_hint)
         fal.addRow("Loaded files", self.lbl_beh)
-        fal.addRow(files_layout)
-        fal.addRow(lists_layout)
-        fal.addRow(order_layout)
+        # Recording lists, group chips and ordering live in one detachable
+        # section: the same widgets move to a window for long lists.
+        self.recording_groups = RecordingGroups(self)
+        self.group_chip_bar = GroupChipBar(self.recording_groups, self._loaded_group_count, self)
+        self.group_chip_bar.assignRequested.connect(self._assign_selected_recordings_to_group)
+        self.list_preprocessed.setItemDelegate(GroupOutlineDelegate(self._recording_item_group, self.list_preprocessed))
+        self.list_behaviors.setItemDelegate(GroupOutlineDelegate(self._behavior_item_group, self.list_behaviors))
+        for file_list in (self.list_preprocessed, self.list_behaviors):
+            file_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+            file_list.customContextMenuRequested.connect(
+                lambda pos, lst=file_list: self._show_recording_list_menu(lst, pos))
+            file_list.viewport().installEventFilter(self)
+        recordings_content = QtWidgets.QWidget()
+        recordings_layout = QtWidgets.QVBoxLayout(recordings_content)
+        recordings_layout.setContentsMargins(0, 0, 0, 0)
+        recordings_layout.setSpacing(6)
+        recordings_layout.addWidget(self.group_chip_bar)
+        recordings_layout.addLayout(files_layout)
+        recordings_layout.addLayout(lists_layout, 1)
+        recordings_layout.addLayout(order_layout)
+        self.recordings_section = DetachableSection(recordings_content, "Recordings and groups",
+                                                    settings=self._settings)
+        self.recordings_section.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                                              QtWidgets.QSizePolicy.Policy.Expanding)
+        fal.addRow(self.recordings_section)
+        self.recording_groups.changed.connect(self._on_recording_groups_changed)
 
         # Behavior controls
         self.combo_behavior_name = QtWidgets.QComboBox()
@@ -2260,6 +2326,46 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fg.addRow("Display", self.combo_global_metric)
         fg.addRow("", self.lbl_global_metrics)
 
+        # =======================================================
+        # Recording groups (display only: never changes trial matrices)
+        # =======================================================
+        grp_groups = QtWidgets.QGroupBox("Groups")
+        grp_groups.setStyleSheet(_psth_section_qss)
+        fgv = QtWidgets.QFormLayout(grp_groups)
+        fgv.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        fgv.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        group_row = QtWidgets.QHBoxLayout()
+        group_row.setContentsMargins(0, 0, 0, 0)
+        group_row.setSpacing(6)
+        self.cb_group_view = QtWidgets.QCheckBox("Group view")
+        self.cb_group_view.setToolTip(
+            "Split the Group-scope heatmap and average PSTH by recording group.\n"
+            "Groups are created and attributed in Setup > Recordings and groups.")
+        self.btn_manage_groups = QtWidgets.QPushButton("Manage groups...")
+        self.btn_manage_groups.setProperty("class", "compactSmall")
+        self.btn_manage_groups.setToolTip("Open the recordings list in its own window to create and attribute groups")
+        self.btn_manage_groups.clicked.connect(self._open_group_manager)
+        group_row.addWidget(self.cb_group_view)
+        group_row.addStretch(1)
+        group_row_widget = QtWidgets.QWidget()
+        group_row_widget.setLayout(group_row)
+        fgv.addRow(group_row_widget)
+        self.btn_manage_groups.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.combo_group_display = QtWidgets.QComboBox()
+        self.combo_group_display.setToolTip(
+            "All groups: heatmap rows grouped by color and one mean +/- SEM per group.\n"
+            "Only <group>: heatmap, PSTH and summaries use that group's recordings.\n"
+            "Pooled: every recording together, as without groups.")
+        _compact_combo(self.combo_group_display, min_chars=10)
+        fgv.addRow("Show", self.combo_group_display)
+        self.lbl_group_view = QtWidgets.QLabel("No groups yet.")
+        self.lbl_group_view.setProperty("class", "hint")
+        self.lbl_group_view.setWordWrap(True)
+        fgv.addRow(self.lbl_group_view)
+        fgv.addRow(self.btn_manage_groups)
+        self.cb_group_view.toggled.connect(self._on_group_view_changed)
+        self.combo_group_display.currentIndexChanged.connect(self._on_group_view_changed)
+
         # Container for all subsections (replaces old grp_opt)
         grp_opt = QtWidgets.QWidget()
         _psth_vbox = QtWidgets.QVBoxLayout(grp_opt)
@@ -2267,6 +2373,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _psth_vbox.setSpacing(4)
         _psth_vbox.addWidget(grp_align_psth)
         _psth_vbox.addWidget(grp_window)
+        _psth_vbox.addWidget(grp_groups)
         _psth_vbox.addWidget(grp_behavior_panel)
         _psth_vbox.addWidget(grp_filt)
         _psth_vbox.addWidget(grp_include)
@@ -4343,8 +4450,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._postprocessing_plot_cards.remove(old_card)
             old_card.setParent(None)
             old_card.deleteLater()
+        # Rows: heatmap (0), invisible draggable divider (1), PSTH (2). Both
+        # plots share column 0, so their time axes stay pixel aligned.
         time_grid.addWidget(self.plot_heat, 0, 0)
-        time_grid.addWidget(self.plot_avg, 1, 0)
+        time_grid.addWidget(self.plot_avg, 2, 0)
         scales = QtWidgets.QWidget()
         scale_layout = QtWidgets.QHBoxLayout(scales)
         scale_layout.setContentsMargins(0, 0, 0, 0)
@@ -4354,8 +4463,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             scale_layout.addWidget(widget)
         time_grid.addWidget(scales, 0, 1)
         time_grid.setColumnStretch(0, 1)
-        time_grid.setRowStretch(0, 1)
-        time_grid.setRowStretch(1, 1)
+        time_grid.setVerticalSpacing(0)
+        self.psth_time_handle = GridRowHandle(time_grid, 0, 2, self.plot_heat, self.plot_avg, self.heat_figure)
+        time_grid.addWidget(self.psth_time_handle, 1, 0, 1, 2)
+        self.psth_time_handle.refresh()
         self.psth_scale_container = scales
         self.psth_shared_card = create_plot_card(self.heat_figure, "")
         from heatmap_color_controls import HeatmapColorControls
@@ -4406,6 +4517,28 @@ class PostProcessingPanel(QtWidgets.QWidget):
         }
         self.plot_splitter_preferences = PlotSplitterPreferences(self._view_splitters, self)
         self.plot_splitter_preferences.changed.connect(self._queue_view_settings_save)
+        self.psth_time_handle.splitterMoved.connect(lambda *_: self._queue_view_settings_save())
+        # One seamless figure: transparent containers, invisible dividers.
+        for widget in (self.row_heat, self.dashboard_side, self.row_avg, self.row_avg_trace,
+                       self.metric_panels_widget, self.heat_figure, self.bout_figure,
+                       self.row_signal, self.row_behavior, self.psth_scale_container,
+                       *self._view_splitters.values()):
+            widget.setObjectName("figureSurface")
+        for splitter in self._view_splitters.values():
+            splitter.setHandleWidth(HANDLE_PX)
+            splitter.setToolTip("")
+        for card in self._postprocessing_plot_cards:
+            card.seamless = True
+        # Heatmap group strips and per-group PSTH overlays (display only).
+        self._group_display = None
+        self._group_avg_items: List[object] = []
+        self.heat_group_bands = HeatmapGroupBands(self.plot_heat, parent=self)
+        self.psth_group_legend = pg.LegendItem(offset=(-10, 8), verSpacing=-4)
+        self.psth_group_legend.setParentItem(self.plot_avg.getPlotItem().vb)
+        self.plot_avg.getPlotItem().legend = self.psth_group_legend
+        self.psth_group_legend.hide()
+        self.dashboard_panels = DashboardPanels(self)
+        self.dashboard_panels.changed.connect(self._on_dashboard_panels_changed)
         self.btn_view_menu = create_view_menu(self)
         tb_layout.insertWidget(tb_layout.indexOf(self.btn_style), self.btn_view_menu)
         compact_results_toolbar(self)
@@ -4419,9 +4552,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_event_kind.setFixedHeight(32)
         tb_layout.insertWidget(tb_layout.indexOf(self.combo_toolbar_scope), self.combo_event_kind)
         self._results_scroll = QtWidgets.QScrollArea()
+        self._results_scroll.setObjectName("resultsFigure")
         self._results_scroll.setWidgetResizable(True)
         self._results_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self._results_scroll.setWidget(self._results_splitter)
+        self._results_scroll.viewport().setObjectName("resultsFigureViewport")
+        self._results_scroll.setViewportMargins(4, 4, 4, 4)
         self._empty_results = PlotEmptyState(
             "Load processed data to begin", "Your traces and analysis results will appear here.",
         )
@@ -9217,6 +9353,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_heat.setVisible(show_heat)
         self.plot_avg.setVisible(show_avg)
         self.psth_scale_container.setVisible(show_heat)
+        self.row_avg.setVisible(show_avg)
+        panels = getattr(self, "dashboard_panels", None)
+        if panels is not None:
+            # Record what the preset shows before any nested pass applies removals.
+            panels.capture_layout()
         if hasattr(self, "heatmap_color_controls"):
             self.heatmap_color_controls.sync()
         self.row_avg.setVisible(show_avg)
@@ -9228,6 +9369,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.bout_shared_card.setVisible(show_heat and not self.plot_dur.isHidden())
         self.dashboard_side.setVisible(not self.bout_shared_card.isHidden() or
                                        (show_avg and (not self.plot_metrics.isHidden() or not self.plot_global.isHidden())))
+        if panels is not None:
+            # Removed/changed panels override the preset; neighbors take the space.
+            panels.apply()
         self._refresh_results_minimum_heights()
 
     def _refresh_results_minimum_heights(self) -> None:
@@ -9337,11 +9481,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # Show file selector only in Individual mode
         is_individual = self.tab_visual_mode.currentIndex() == 0
         self.combo_individual_file.setVisible(is_individual)
+        if hasattr(self, "recording_groups"):
+            self._refresh_individual_file_icons()
 
     def _on_visual_mode_changed(self, index: int) -> None:
         is_individual = index == 0
         self.combo_individual_file.setVisible(is_individual)
         self._rerender_visual_from_cache()
+        if hasattr(self, "lbl_group_view"):
+            self._update_group_view_hint()
         # Mirror to the Temporal Modeling scope: Individual -> Active file, Group -> Per-file batch.
         try:
             section = getattr(self, "section_temporal", None)
@@ -9446,6 +9594,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 labels = list(self._group_trial_labels)
                 if mat is not None and tvec is not None:
                     self._last_psth_display_level = "trials"
+                    mat, labels = self._apply_group_view(mat, labels, "trials")
                     self._last_display_labels = labels
                     self._render_heatmap(mat, tvec, labels=labels)
                     self._render_avg(mat, tvec)
@@ -9455,15 +9604,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     self.lbl_plot_file.setText(f"Group trials: {mat.shape[0]} trial(s)")
             elif self._group_mat is not None and self._group_tvec is not None:
                 self._last_psth_display_level = "animals"
-                self._last_display_labels = list(self._group_labels)
-                self._render_heatmap(self._group_mat, self._group_tvec, labels=self._group_labels)
-                self._render_avg(self._group_mat, self._group_tvec)
-                self._render_metrics(self._group_mat, self._group_tvec)
-                self._last_mat = self._group_mat
+                mat, labels = self._apply_group_view(self._group_mat, list(self._group_labels), "animals")
+                self._last_display_labels = list(labels)
+                self._render_heatmap(mat, self._group_tvec, labels=labels)
+                self._render_avg(mat, self._group_tvec)
+                self._render_metrics(mat, self._group_tvec)
+                self._last_mat = mat
                 self._last_tvec = self._group_tvec
-                self.lbl_plot_file.setText(f"Group: {len(self._group_labels)} animal(s)")
+                self.lbl_plot_file.setText(f"Group: {len(labels)} animal(s)")
         else:
             # Individual view
+            self._group_display = None
             sel_id = self.combo_individual_file.currentText().strip()
             if not sel_id and self._all_file_ids:
                 sel_id = self._all_file_ids[0]
@@ -9806,6 +9957,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 set_plot_has_data(plot, False)
                 plot.setToolTip(str(exc))
                 self.statusUpdate.emit(f"Behavior panel: {exc}", 6000)
+        panels = getattr(self, "dashboard_panels", None)
+        if panels is not None:
+            panels.render_substitutes(("behavior",))
 
     def _psth_behavior_summary_recordings(self) -> List[Dict[str, object]]:
         """Snapshot accepted event rows and observed intervals without touching data.
@@ -9826,10 +9980,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         alignment = self.combo_dio_align.currentText() if doric else self.combo_behavior_align.currentText()
         offset_aligned = getattr(self, "_psth_behavior_offset_aligned", alignment.endswith("offset"))
         recordings = []
+        grouped_scope = self.tab_visual_mode.currentIndex() != 0
         for proc in self._processed:
             file_id = self._file_id_for_proc(proc)
             event_rows = by_file.get(file_id, [])
-            if not event_rows:
+            if not event_rows or (grouped_scope and not self._group_view_keeps(file_id)):
                 continue
             t = np.asarray(self._proc_time(proc), float)
             finite_time = t[np.isfinite(t)]
@@ -11959,8 +12114,287 @@ class PostProcessingPanel(QtWidgets.QWidget):
             f"Rendered occupancy {len(occ_maps)} map(s), activity {len(act_maps)} map(s), velocity {len(vel_maps)} map(s), bins={bins_x}x{bins_y}{time_txt}{skip_txt}."
         )
 
+    # ------------------------------------------------------------------
+    # Recording groups: attribution, list outlines and group view
+    # ------------------------------------------------------------------
+    def _loaded_file_ids(self) -> List[str]:
+        return [self._file_id_for_proc(proc) for proc in self._processed]
+
+    def _loaded_group_count(self, group_id: Optional[str]) -> int:
+        return len(self.recording_groups.members(group_id, self._loaded_file_ids()))
+
+    def _proc_for_list_item(self, item: Optional[QtWidgets.QListWidgetItem]) -> Optional[ProcessedTrial]:
+        proc_id = item.data(QtCore.Qt.ItemDataRole.UserRole) if item is not None else None
+        return next((proc for proc in self._processed if id(proc) == proc_id), None)
+
+    def _recording_item_group(self, index: QtCore.QModelIndex) -> Optional[Tuple[str, str]]:
+        """(color, name) drawn as the outline of a recording row."""
+        proc_id = index.data(QtCore.Qt.ItemDataRole.UserRole)
+        for proc in self._processed:
+            if id(proc) == proc_id:
+                group = self.recording_groups.group_of(self._file_id_for_proc(proc))
+                return (group["color"], group["name"]) if group else None
+        return None
+
+    def _behavior_recording_map(self) -> Dict[str, str]:
+        """Behavior stem -> file id of the recording it is matched to (cached)."""
+        cache = getattr(self, "_behavior_group_cache", None)
+        if cache is None:
+            cache = {}
+            for proc in self._processed:
+                try:
+                    source = self._match_behavior_source(proc)
+                except Exception:
+                    source = None
+                if source is None:
+                    continue
+                for key, value in self._behavior_sources.items():
+                    if value is source:
+                        cache[key] = self._file_id_for_proc(proc)
+            self._behavior_group_cache = cache
+        return cache
+
+    def _behavior_item_group(self, index: QtCore.QModelIndex) -> Optional[Tuple[str, str]]:
+        file_id = self._behavior_recording_map().get(index.data(QtCore.Qt.ItemDataRole.UserRole))
+        group = self.recording_groups.group_of(file_id) if file_id else None
+        return (group["color"], group["name"]) if group else None
+
+    def _selected_recording_file_ids(self) -> List[str]:
+        """Selected recordings; selected behaviors stand for their matched recordings."""
+        ids: List[str] = []
+        for item in self.list_preprocessed.selectedItems():
+            proc = self._proc_for_list_item(item)
+            if proc is not None:
+                ids.append(self._file_id_for_proc(proc))
+        if not ids:
+            mapping = self._behavior_recording_map()
+            for item in self.list_behaviors.selectedItems():
+                file_id = mapping.get(item.data(QtCore.Qt.ItemDataRole.UserRole))
+                if file_id and file_id not in ids:
+                    ids.append(file_id)
+        return ids
+
+    def _assign_selected_recordings_to_group(self, group_id: Optional[str]) -> None:
+        ids = self._selected_recording_file_ids()
+        if not ids:
+            self.statusUpdate.emit("Select one or more recordings first, then choose a group.", 5000)
+            return
+        self.recording_groups.assign(ids, group_id or None)
+        group = self.recording_groups.group(group_id) if group_id else None
+        if group is not None:
+            self.statusUpdate.emit(f"{len(ids)} recording(s) attributed to {group['name']}.", 4000)
+        else:
+            self.statusUpdate.emit(f"{len(ids)} recording(s) removed from their group.", 4000)
+
+    def _new_group_from_selection(self) -> None:
+        self.group_chip_bar.create_group_interactive()
+
+    def _show_recording_list_menu(self, file_list: QtWidgets.QListWidget, pos: QtCore.QPoint) -> None:
+        menu = QtWidgets.QMenu(file_list)
+        build_assign_menu(menu, self.recording_groups,
+                          lambda group_id: self._assign_selected_recordings_to_group(group_id),
+                          self._new_group_from_selection)
+        menu.addSeparator()
+        if file_list is self.list_preprocessed:
+            menu.addAction("Remove selected recordings", self._remove_selected_preprocessed)
+        else:
+            menu.addAction("Remove selected behaviors", self._remove_selected_behaviors)
+        menu.addSeparator()
+        detached = self.recordings_section.is_detached()
+        menu.addAction("Dock list back" if detached else "Open list in window", self.recordings_section.toggle)
+        menu.exec(file_list.viewport().mapToGlobal(pos))
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        """Right-click must not toggle multi-selection; it targets the row instead."""
+        for file_list in (getattr(self, "list_preprocessed", None), getattr(self, "list_behaviors", None)):
+            if file_list is None or watched is not file_list.viewport():
+                continue
+            kind = event.type()
+            if kind in (QtCore.QEvent.Type.MouseButtonPress, QtCore.QEvent.Type.MouseButtonRelease,
+                        QtCore.QEvent.Type.MouseButtonDblClick) and \
+                    event.button() == QtCore.Qt.MouseButton.RightButton:
+                if kind == QtCore.QEvent.Type.MouseButtonPress:
+                    item = file_list.itemAt(event.position().toPoint())
+                    if item is not None and not item.isSelected():
+                        file_list.clearSelection()
+                        item.setSelected(True)
+                return True
+        return super().eventFilter(watched, event)
+
+    def _open_group_manager(self) -> None:
+        self.recordings_section.detach()
+
+    def _on_recording_groups_changed(self) -> None:
+        for file_list in (self.list_preprocessed, self.list_behaviors):
+            file_list.viewport().update()
+        self._refresh_group_display_combo()
+        self._update_group_view_hint()
+        self._refresh_individual_file_icons()
+        if self._is_restoring_settings:
+            return
+        if getattr(self, "cb_group_view", None) is not None and self.cb_group_view.isChecked():
+            self._rerender_visual_from_cache()
+        self._queue_settings_save()
+
+    def _refresh_group_display_combo(self) -> None:
+        combo = getattr(self, "combo_group_display", None)
+        if combo is None:
+            return
+        current = combo.currentData()
+        with QtCore.QSignalBlocker(combo):
+            combo.clear()
+            combo.addItem("All groups", "all")
+            combo.addItem("Pooled", "pooled")
+            for group in self.recording_groups.groups():
+                combo.addItem(color_dot_icon(group["color"]), f"Only {group['name']}", f"only:{group['id']}")
+            index = combo.findData(current)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _update_group_view_hint(self, *_args: object) -> None:
+        label = getattr(self, "lbl_group_view", None)
+        if label is None:
+            return
+        groups = self.recording_groups.groups()
+        file_ids = self._loaded_file_ids()
+        if not groups:
+            label.setText("No groups yet. Use Manage groups... (or Setup) to create groups and attribute recordings.")
+            return
+        assigned = sum(1 for file_id in file_ids if self.recording_groups.group_id_of(file_id))
+        parts = ", ".join(f"{group['name']} {self._loaded_group_count(group['id'])}" for group in groups)
+        text = f"{assigned} of {len(file_ids)} loaded recording(s) grouped: {parts}."
+        if self.cb_group_view.isChecked() and self.tab_visual_mode.currentIndex() != 1:
+            text += " Switch the toolbar scope to Group to see group panels."
+        label.setText(text)
+
+    def _refresh_individual_file_icons(self) -> None:
+        combo = getattr(self, "combo_individual_file", None)
+        if combo is None:
+            return
+        for index in range(combo.count()):
+            group = self.recording_groups.group_of(combo.itemText(index))
+            combo.setItemIcon(index, color_dot_icon(group["color"]) if group else QtGui.QIcon())
+
+    def _group_view_state(self) -> Tuple[str, Optional[str]]:
+        """('off'|'pooled'|'all'|'only', group id). Active only in the Group scope."""
+        checkbox = getattr(self, "cb_group_view", None)
+        if checkbox is None or not checkbox.isChecked() or self.tab_visual_mode.currentIndex() != 1:
+            return "off", None
+        data = str(self.combo_group_display.currentData() or "all")
+        if data.startswith("only:"):
+            group_id = data[5:]
+            return ("only", group_id) if self.recording_groups.group(group_id) else ("off", None)
+        if data == "pooled":
+            return "pooled", None
+        return ("all", None) if len(self.recording_groups) else ("off", None)
+
+    def _group_view_keeps(self, file_id: str) -> bool:
+        mode, group_id = self._group_view_state()
+        return mode != "only" or self.recording_groups.group_id_of(file_id) == group_id
+
+    def _apply_group_view(self, mat: Optional[np.ndarray], labels: List[str], level: str):
+        """Select or reorder displayed rows by group (no value is modified)."""
+        self._group_display = None
+        mode, group_id = self._group_view_state()
+        if mode not in ("all", "only") or mat is None:
+            return mat, labels
+        display = build_group_display(mat, labels, mode, self.recording_groups.groups(),
+                                      self.recording_groups.group_id_of, only_group=group_id, level=level)
+        if display is None:
+            return mat, labels
+        self._group_display = display
+        if mode == "only" and display.matrix.shape[0] == 0:
+            name = (self.recording_groups.group(group_id) or {}).get("name", "this group")
+            self.statusUpdate.emit(f"No analyzed recording belongs to {name}.", 5000)
+        return display.matrix, list(display.labels)
+
+    def _active_group_display(self, mat: Optional[np.ndarray]):
+        display = getattr(self, "_group_display", None)
+        if display is None or mat is None:
+            return None
+        return display if display.matches(mat) else None
+
+    def _group_row_colors(self, mat: Optional[np.ndarray]) -> Optional[List[str]]:
+        display = self._active_group_display(mat)
+        return list(display.row_colors) if display is not None and display.mode == "all" else None
+
+    def _group_color_for_file(self, file_id: str) -> str:
+        group = self.recording_groups.group_of(file_id)
+        return group["color"] if group else UNGROUPED_COLOR
+
+    def _global_point_colors(self, key: str) -> Optional[List[str]]:
+        """Group colors for the finite global values, in plotting order."""
+        if self._group_view_state()[0] != "all":
+            return None
+        info = getattr(self, "_last_global_results", None) or {}
+        colors = []
+        for file_id, row in zip(info.get("file_ids", []), info.get("results", [])):
+            value = row.get(key, np.nan)
+            if value is not None and np.isfinite(value):
+                colors.append(self._group_color_for_file(file_id))
+        return colors
+
+    def _on_group_view_changed(self, *_args: object) -> None:
+        if self._is_restoring_settings:
+            return
+        if self.cb_group_view.isChecked() and self.tab_visual_mode.currentIndex() != 1 and len(self._processed) > 1:
+            self.tab_visual_mode.setCurrentIndex(1)   # re-renders through the scope change
+        else:
+            self._rerender_visual_from_cache()
+        self._update_group_view_hint()
+        self._queue_settings_save()
+
+    # ------------------------------------------------------------------
+    # Dashboard panels (remove / change / restore)
+    # ------------------------------------------------------------------
+    def _current_palette(self) -> Dict[str, object]:
+        return POSTPROCESSING_PRESETS.get(self._style.get("postprocessing_preset", "Midnight"),
+                                          POSTPROCESSING_PRESETS["Midnight"])
+
+    def _prepare_substitute_plot(self, widget: pg.PlotWidget) -> None:
+        _opt_plot(widget)
+        palette = self._current_palette()
+        style_plot(widget, palette)
+        if hasattr(widget, "set_colors"):
+            widget.set_colors(palette)
+        widget.setMinimumSize(120, 120)
+
+    def _render_substitute(self, widget: pg.PlotWidget, family: str, code: str) -> None:
+        """Draw one 'Change to' panel from the same cached analysis results."""
+        palette = self._current_palette()
+        if family == "behavior":
+            summary = self._current_psth_behavior_summary(code)
+            render_behavior_summary(widget, summary, palette)
+            set_plot_has_data(widget, bool(summary["has_data"]))
+        elif family == "metric":
+            result = (getattr(self, "_last_metric_panels", None) or {}).get(code)
+            colors = self._group_row_colors(self._last_mat) if self._last_mat is not None else None
+            widget.show_result(result, row_colors=colors)
+            summary = result["summary"] if result else None
+            set_plot_has_data(widget, bool(summary and (summary["pre_n"] or summary["post_n"])))
+        elif family == "global":
+            info = getattr(self, "_last_global_results", None) or {}
+            rows = info.get("results", [])
+            values = np.asarray([row.get(code, np.nan) for row in rows], float)
+            colors = None
+            if self._group_view_state()[0] == "all":
+                colors = [self._group_color_for_file(fid) for fid in info.get("file_ids", [])]
+            ok = draw_global_metric(widget, code, values, bool(info.get("grouped", False)), palette, colors)
+            set_plot_has_data(widget, ok)
+
+    def _on_dashboard_panels_changed(self) -> None:
+        panels = self.dashboard_panels
+        families = {spec.split(":", 1)[0] for spec in panels.substitutes.values()}
+        if "metric" in families and self._last_mat is not None and self._last_tvec is not None:
+            self._render_metrics(self._last_mat, self._last_tvec)
+        if "global" in families and getattr(self, "_last_global_results", None) is None:
+            self._render_global_metrics()
+        panels.render_substitutes()
+        self._refresh_results_minimum_heights()
+        self._queue_view_settings_save()
+
     def _update_file_lists(self) -> None:
         """Update the preprocessed files and behaviors lists with numbered entries."""
+        self._behavior_group_cache = None
         self.list_preprocessed.clear()
         for i, proc in enumerate(self._processed, 1):
             filename = os.path.splitext(os.path.basename(proc.path))[0]
@@ -11976,6 +12410,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             item.setData(QtCore.Qt.ItemDataRole.UserRole, stem)
             self.list_behaviors.addItem(item)
         self._refresh_signal_file_combo()
+        if hasattr(self, "group_chip_bar"):
+            self.group_chip_bar.rebuild()
+            self._update_group_view_hint()
 
     def _sync_processed_order_from_list(self) -> None:
         new_order: List[ProcessedTrial] = []
@@ -15089,6 +15526,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 mat_display = mat_events
                 display_labels = [f"Trial {j + 1}" for j in range(mat_events.shape[0])]
 
+            if visual_mode == 1 and group_mode and hasattr(self, "_apply_group_view"):
+                mat_display, display_labels = self._apply_group_view(mat_display, list(display_labels), display_level)
+            else:
+                self._group_display = None
             self._last_display_labels = list(display_labels)
             self._last_psth_display_level = display_level
             self._render_heatmap(mat_display, tvec, labels=display_labels)
@@ -15182,6 +15623,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             finally:
                 self._suppress_heatmap_level_store = False
             self.heat_zero_line.setVisible(False)
+            if hasattr(self, "heat_group_bands"):
+                self.heat_group_bands.clear()
             self.plot_heat.setXRange(0.0, 1.0, padding=0)
             self.plot_heat.setYRange(0.0, 1.0, padding=0)
             self.plot_heat.setLabel("left", "Trials")
@@ -15248,12 +15691,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
         has_labels = bool(labels and len(labels) == n_rows)
         show_names = bool(has_labels and (is_animal_level or n_rows <= 12))
         ticks = self._build_heatmap_y_ticks(labels if has_labels else None, n_rows, show_names)
-        y_axis.setTicks([ticks])
         try:
             y_axis.setStyle(tickTextOffset=6, autoExpandTextSpace=False)
             y_axis.setWidth(76)
         except Exception:
             pass
+        group_display = self._active_group_display(mat)
+        if group_display is not None and group_display.mode == "all" and hasattr(self, "heat_group_bands"):
+            # Group blocks: one labeled tick per group and a colored strip
+            # beside (not over) the data, separated by thin surface lines.
+            ticks = block_ticks(group_display.blocks, display_level)
+            self.heat_group_bands.set_blocks(group_display.blocks)
+        elif hasattr(self, "heat_group_bands"):
+            self.heat_group_bands.clear()
+        y_axis.setTicks([ticks])
         label_kind = "Animals" if is_animal_level else "Trials"
         self.plot_heat.setLabel("left", f"{label_kind} (n={n_rows})")
         if n_rows > 12:
@@ -15284,13 +15735,73 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_dur.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot_dur.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
 
+    def _clear_group_avg_items(self) -> None:
+        """Remove per-group PSTH overlays and the group legend."""
+        for item in getattr(self, "_group_avg_items", []):
+            try:
+                self.plot_avg.removeItem(item)
+            except Exception:
+                pass
+        self._group_avg_items = []
+        legend = getattr(self, "psth_group_legend", None)
+        if legend is not None:
+            legend.clear()
+            legend.hide()
+
+    def _restore_default_avg_style(self) -> None:
+        """Undo a one-group tint: pooled curves use the plot theme colors."""
+        self.curve_avg.setPen(pg.mkPen(self._style_color_tuple("avg", (90, 190, 255)), width=2.0))
+        self.sem_band.setBrush(pg.mkBrush(*self._style_color_tuple("sem_fill", (188, 230, 178, 96))))
+        self.sem_band.setVisible(True)
+
+    def _render_group_avg(self, display, tvec: np.ndarray) -> None:
+        """One mean +/- SEM per group, colored by group, with an n legend."""
+        self.curve_avg.setData([], [])
+        self.curve_sem_hi.setData([], [])
+        self.curve_sem_lo.setData([], [])
+        # An emptied FillBetweenItem can keep its last path; hide the pooled band.
+        self.sem_band.setVisible(False)
+        legend = self.psth_group_legend
+        level = str(getattr(self, "_last_psth_display_level", "animals") or "animals")
+        palette = POSTPROCESSING_PRESETS.get(self._style.get("postprocessing_preset", "Midnight"),
+                                            POSTPROCESSING_PRESETS["Midnight"])
+        legend.setLabelTextColor(QtGui.QColor(str(palette["text"])))
+        for block, avg, sem, _counts in block_summaries(display):
+            color = QtGui.QColor(block.color)
+            band = QtGui.QColor(color)
+            band.setAlpha(60)
+            sem_safe = np.where(np.isfinite(sem), sem, 0.0)
+            high = self.plot_avg.plot(tvec, avg + sem_safe, pen=None, connect="finite")
+            low = self.plot_avg.plot(tvec, avg - sem_safe, pen=None, connect="finite")
+            fill = pg.FillBetweenItem(high, low, brush=pg.mkBrush(band))
+            fill.setZValue(-1)
+            self.plot_avg.addItem(fill)
+            curve = self.plot_avg.plot(tvec, avg, pen=pg.mkPen(color, width=1.8), connect="finite")
+            curve.setZValue(2)
+            legend.addItem(curve, legend_label(block, level))
+            self._group_avg_items.extend([high, low, fill, curve])
+        legend.setVisible(bool(self._group_avg_items))
+        self.plot_avg.setTitle("PSTH: groups mean \u00b1 SEM")
+
     def _render_avg(self, mat: np.ndarray, tvec: np.ndarray) -> None:
         ready = bool(mat.size and tvec.size and np.any(np.isfinite(mat)))
         set_plot_has_data(self.plot_avg, ready)
+        self._clear_group_avg_items()
+        self._restore_default_avg_style()
         if not ready:
             self.curve_avg.setData([], [])
             self.curve_sem_hi.setData([], [])
             self.curve_sem_lo.setData([], [])
+            return
+
+        group_display = self._active_group_display(mat)
+        if group_display is not None and group_display.mode == "all":
+            self.plot_avg.setLabel("left", self._psth_units())
+            self.plot_avg.setLabel("bottom", "Time from alignment (s)")
+            self.plot_avg.setToolTip("One mean +/- SEM per recording group. SEM uses the sample SD across "
+                                     "the rows of each group (recordings, or trials when trial rows are kept).")
+            self._render_group_avg(group_display, tvec)
+            self.plot_avg.setXRange(float(tvec[0]), float(tvec[-1]), padding=0)
             return
 
         avg, sem, counts = mean_sem(mat)
@@ -15307,6 +15818,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_avg.setTitle("PSTH: animals \u00b1 SEM")
         else:
             self.plot_avg.setTitle("PSTH: mean \u00b1 SEM")
+        if group_display is not None and group_display.mode == "only" and group_display.blocks:
+            # One group only: the same pooled statistics, drawn in its color.
+            block = group_display.blocks[0]
+            color = QtGui.QColor(block.color)
+            band = QtGui.QColor(color)
+            band.setAlpha(60)
+            self.curve_avg.setPen(pg.mkPen(color, width=2.0))
+            self.sem_band.setBrush(pg.mkBrush(band))
+            self.plot_avg.setTitle(f"PSTH: {block.name} mean \u00b1 SEM")
 
     @staticmethod
     def _finite_mean_sem(values: np.ndarray) -> Tuple[float, float, int]:
@@ -15366,21 +15886,38 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if mat.size and tvec.size and self.cb_metrics.isChecked():
             grouped = self.tab_sources.currentIndex() == 1
             file_rows = grouped and self._last_psth_display_level == "animals"
+            # Every displayed comparison (selected panels plus panels changed to
+            # a metric) belongs to one Holm family.
             self._last_metric_panels = summarize_metrics(
-                mat, tvec, self._selected_metric_ids(),
+                mat, tvec, self._metric_family_ids(),
                 (float(self.spin_metric_pre0.value()), float(self.spin_metric_pre1.value())),
                 (float(self.spin_metric_post0.value()), float(self.spin_metric_post1.value())),
                 self._psth_units(), independent_units=(not grouped or file_rows),
                 row_unit="files" if file_rows else "trials",
             )
+            row_colors = self._group_row_colors(mat)
             for index, (key, result) in enumerate(self._last_metric_panels.items()):
                 plot = self.plot_metrics if index == 0 else self._extra_metric_plots[key]
-                plot.show_result(result)
+                plot.show_result(result, row_colors=row_colors)
                 summary = result["summary"]
                 set_plot_has_data(plot, bool(summary["pre_n"] or summary["post_n"]))
             if self._last_metric_panels:
                 self._last_metrics = next(iter(self._last_metric_panels.values()))["summary"]
         self._sync_metric_panel_layout()
+        panels = getattr(self, "dashboard_panels", None)
+        if panels is not None:
+            panels.render_substitutes(("metric",))
+
+    def _metric_family_ids(self) -> List[str]:
+        """Selected metric panels followed by metrics shown through Change to."""
+        keys = list(self._selected_metric_ids())
+        panels = getattr(self, "dashboard_panels", None)
+        if panels is not None:
+            for spec in panels.substitutes.values():
+                family, code = spec.split(":", 1)
+                if family == "metric" and code not in keys:
+                    keys.append(code)
+        return keys
 
     def _sync_metric_panel_layout(self) -> None:
         """Keep the primary comparison beside PSTH, with optional extras three per row."""
@@ -15408,6 +15945,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         height = 220 * ((len(visible) + 2) // 3)
         self.metric_panels_widget.setMinimumHeight(height)
         self.row_avg.setMinimumHeight(220 + (height if show and visible else 0))
+        panels = getattr(self, "dashboard_panels", None)
+        if panels is not None:
+            panels.note_layout("comparison", show)
+            panels.apply()
 
     def _compute_global_metrics_for_trace(
         self,
@@ -15456,7 +15997,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         recordings = list(self._processed)
         if not grouped:
             recordings = [proc for proc in recordings if self._file_id_for_proc(proc) == selected] if selected else recordings[:1]
+        else:
+            recordings = [proc for proc in recordings if self._group_view_keeps(self._file_id_for_proc(proc))]
         results = []
+        result_ids = []
         for proc in recordings:
             if proc.output is None or proc.time is None:
                 continue
@@ -15467,6 +16011,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 continue
             if result is not None:
                 results.append(result)
+                result_ids.append(self._file_id_for_proc(proc))
+        # Cached so panels changed to a global metric reuse the same values.
+        self._last_global_results = {"results": results, "file_ids": result_ids, "grouped": grouped}
+        panels = getattr(self, "dashboard_panels", None)
+        if panels is not None:
+            panels.render_substitutes(("global",))
         if not results:
             return
         # Preserve the legacy flat export fields and add every new summary.
@@ -15485,11 +16035,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         mean, sem, n = self._finite_mean_sem(values)
         median = float(np.median(values))
         set_plot_has_data(self.plot_global, True)
+        point_colors = self._global_point_colors(key)
+        brushes = ([pg.mkBrush(color) for color in point_colors] if point_colors is not None
+                   else pg.mkBrush(palette["accent"]))
         self.global_scatter_amp.setData(self._jittered_x(0., n, half_width=.12), values,
-                                       symbol="o", symbolSize=5, symbolBrush=pg.mkBrush(palette["accent"]),
+                                       symbol="o", symbolSize=5, symbolBrush=brushes,
                                        symbolPen=None)
         self.global_scatter_amp.show()
-        self.global_median.setPen(pg.mkPen(palette["accent"], width=2))
+        # Group-colored points get a neutral median so it is not read as a group.
+        self.global_median.setPen(pg.mkPen(palette["text"] if point_colors is not None else palette["accent"], width=2))
         self.global_median.setData([-.20, .20], [median, median])
         if grouped and n > 1:
             self.global_scatter_freq.setData([.28], [mean], symbol="d", symbolSize=7,
@@ -15669,8 +16223,34 @@ class PostProcessingPanel(QtWidgets.QWidget):
             f"background: transparent; color: {palette['text']}; "
             "border: none; padding: 0px; font-size: 12px;"
         )
+        self._apply_figure_theme(palette)
         if hasattr(self, "combo_psth_behavior_metric"):
             self._refresh_psth_duration_view()
+
+    def _apply_figure_theme(self, palette: Dict[str, object]) -> None:
+        """Seamless figure surface, group decorations and substitute plots."""
+        if hasattr(self, "_results_scroll"):
+            self._results_scroll.setStyleSheet(seamless_figure_qss(palette))
+        if hasattr(self, "psth_time_handle"):
+            self.psth_time_handle.accent = QtGui.QColor(str(palette["accent"]))
+        if hasattr(self, "heat_group_bands"):
+            self.heat_group_bands.set_separator_color(str(palette["surface"]))
+            self.heat_group_bands.ensure_axis_offset()
+        if hasattr(self, "psth_group_legend"):
+            self.psth_group_legend.setLabelTextColor(QtGui.QColor(str(palette["text"])))
+            for _sample, label in self.psth_group_legend.items:
+                label.setText(label.text)   # LabelItem re-renders with the new color
+        if hasattr(self, "recording_groups"):
+            surface = QtGui.QColor(str(palette["surface"]))
+            self.recording_groups.light_theme = surface.lightnessF() > 0.6
+        panels = getattr(self, "dashboard_panels", None)
+        if panels is not None:
+            for key, widget in panels._widgets.items():
+                if ":" in key:
+                    style_plot(widget, palette)
+                    if hasattr(widget, "set_colors"):
+                        widget.set_colors(palette)
+            panels.render_substitutes()
 
     def _on_heatmap_levels_changed(self, *, save: bool = True) -> None:
         if self._is_restoring_settings or self._suppress_heatmap_level_store:
@@ -17298,6 +17878,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "spatial_invert_y": self.cb_spatial_invert_y.isChecked(),
             "plot_splitters": self.plot_splitter_preferences.snapshot(),
             "heatmap_scale_editor": self.btn_edit_scale.isChecked(),
+            "recording_groups": self.recording_groups.to_state(),
+            "group_view": {"enabled": self.cb_group_view.isChecked(),
+                           "display": str(self.combo_group_display.currentData() or "all")},
+            "dashboard_panels": self.dashboard_panels.state(),
             "style": dict(self._style),
         }
 
@@ -17548,6 +18132,26 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_edit_scale.setChecked(bool(data.get("heatmap_scale_editor", False)))
         if "behavior_comparison" in data:
             self.behavior_zone_panel.restore_settings(data["behavior_comparison"])
+        self._apply_group_and_panel_settings(data)
+
+    def _apply_group_and_panel_settings(self, data: Dict[str, object]) -> None:
+        """Restore groups, group view and dashboard panels (absent keys keep state)."""
+        try:
+            if "recording_groups" in data:
+                self.recording_groups.from_state(data.get("recording_groups"))
+                self._refresh_group_display_combo()
+            view = data.get("group_view")
+            if isinstance(view, dict):
+                with QtCore.QSignalBlocker(self.cb_group_view), QtCore.QSignalBlocker(self.combo_group_display):
+                    self.cb_group_view.setChecked(bool(view.get("enabled", False)))
+                    index = self.combo_group_display.findData(str(view.get("display", "all")))
+                    self.combo_group_display.setCurrentIndex(max(0, index))
+            if "dashboard_panels" in data:
+                self.dashboard_panels.set_state(data.get("dashboard_panels"))
+            self._update_group_view_hint()
+            self._refresh_individual_file_icons()
+        except Exception:
+            _LOG.exception("Could not restore recording groups or dashboard panels")
 
     def _save_settings(self) -> None:
         try:
@@ -17865,39 +18469,31 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return image
 
     def _write_widget_pdf(self, widget: QtWidgets.QWidget, path: str) -> bool:
+        """Write an editable vector PDF (one path per curve, real text).
+
+        The matplotlib translation keeps curves, fills and colors editable in
+        Illustrator/Inkscape. Should an unusual widget defeat it, the previous
+        Qt painter export is used so a PDF is still produced.
+        """
         if widget is None:
             return False
-        size = widget.size()
-        if not size.isValid() or size.width() <= 0 or size.height() <= 0:
-            size = widget.sizeHint()
-        if not size.isValid() or size.width() <= 0 or size.height() <= 0:
-            size = QtCore.QSize(1280, 720)
-        writer = QtGui.QPdfWriter(path)
-        writer.setResolution(300)
-        width_px = float(size.width())
-        height_px = float(size.height())
-        width_pt = max(1.0, width_px * 72.0 / 96.0)
-        height_pt = max(1.0, height_px * 72.0 / 96.0)
-        writer.setPageSize(QtGui.QPageSize(QtCore.QSizeF(width_pt, height_pt), QtGui.QPageSize.Unit.Point))
-        writer.setPageMargins(QtCore.QMarginsF(0.0, 0.0, 0.0, 0.0))
-        painter = QtGui.QPainter(writer)
         try:
-            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-            painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
-            # The page size above uses 96-DPI widget pixels, whereas the PDF
-            # painter uses 300-DPI device pixels. Fill the intended page rather
-            # than shrinking every plot to roughly one third of its width.
-            painter.scale(writer.resolution() / 96.0, writer.resolution() / 96.0)
-            QtWidgets.QWidget.render(
-                widget,
-                painter,
-                QtCore.QPoint(),
-                QtGui.QRegion(),
-                QtWidgets.QWidget.RenderFlag.DrawChildren,
-            )
-        finally:
-            painter.end()
-        return True
+            if write_vector_figure(widget, path):
+                return True
+        except Exception:
+            _LOG.exception("Vector PDF export failed; using the Qt painter fallback")
+        return _write_widget_pdf_qt(widget, path)
+
+    @staticmethod
+    def _write_widget_svg(widget: QtWidgets.QWidget, path: str) -> bool:
+        """Write the same editable figure as SVG (text stays <text>)."""
+        if widget is None:
+            return False
+        try:
+            return write_vector_figure(widget, path)
+        except Exception:
+            _LOG.exception("Vector SVG export failed")
+            return False
 
     def _export_widget_png_pdf(self, widget: QtWidgets.QWidget, base_path: str, transparent: bool = True) -> Tuple[bool, Optional[str], Optional[str]]:
         from heatmap_color_controls import plot_export_view
@@ -17909,6 +18505,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             pdf_path = f"{base_path}.pdf"
             ok_png = bool(image.save(png_path, "PNG"))
             ok_pdf = self._write_widget_pdf(widget, pdf_path)
+            # SVG is a companion of the editable PDF; it never blocks PNG/PDF.
+            PostProcessingPanel._write_widget_svg(widget, f"{base_path}.svg")
             return (ok_png and ok_pdf), (png_path if ok_png else None), (pdf_path if ok_pdf else None)
 
     def _export_results(self) -> None:
@@ -18090,6 +18688,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         hf.create_dataset("average", data=avg)
                         hf.create_dataset("sem", data=sem)
                         hf.create_dataset("n", data=counts)
+                group_display = (self._active_group_display(self._last_mat)
+                                 if hasattr(self, "_active_group_display") else None)
+                if group_display is not None and group_display.mode == "all" and do_csv:
+                    self._export_group_avg_csv(f"{avg_base}_groups.csv", group_display, np.asarray(self._last_tvec, float))
                 self._write_export_parameter_file(avg_base, self._collect_psth_parameter_sections(include_heatmap=False))
                 _finish_export_step("Exported average PSTH")
 
@@ -18196,6 +18798,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 _require_output_files(os.path.join(out_dir, f"{prefix}_publication_figure"), ["png", "pdf"])
                 _finish_export_step("Exported publication figure")
 
+            if getattr(self, "recording_groups", None) is not None and len(self.recording_groups) and do_csv:
+                self._export_recording_groups_csv(os.path.join(out_dir, f"{prefix}_recording_groups.csv"))
             _write_manifest("complete")
         except Exception as exc:
             _LOG.exception("Postprocessing export failed")
@@ -18210,6 +18814,35 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.exportProgress.emit(progress_total, progress_total, "Export complete")
         self.statusUpdate.emit(f"Export complete: {prefix} in {out_dir}", 5000)
 
+    def _export_group_avg_csv(self, path: str, display, tvec: np.ndarray) -> None:
+        """Per-group mean, SEM and contributing n for every time bin."""
+        import csv
+        summaries = block_summaries(display)
+        with open(path, "w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            header = ["time"]
+            for block, *_ in summaries:
+                name = re.sub(r"\s+", "_", block.name)
+                header += [f"{name}_mean", f"{name}_sem", f"{name}_n"]
+            writer.writerow(header)
+            for index, t in enumerate(tvec):
+                row = [f"{t:.6f}"]
+                for _block, mean, sem, counts in summaries:
+                    row += [f"{mean[index]:.9g}", f"{sem[index]:.9g}", int(counts[index])]
+                writer.writerow(row)
+
+    def _export_recording_groups_csv(self, path: str) -> None:
+        """file_id, group and color for every loaded recording (provenance)."""
+        import csv
+        with open(path, "w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(["file_id", "group", "group_color", "source_path"])
+            for proc in self._processed:
+                file_id = self._file_id_for_proc(proc)
+                group = self.recording_groups.group_of(file_id)
+                writer.writerow([file_id, group["name"] if group else "", group["color"] if group else "",
+                                 str(proc.path or "")])
+
     def _export_widget_selective(self, widget: QtWidgets.QWidget, base_path: str,
                                   do_png: bool, do_pdf: bool) -> None:
         from heatmap_color_controls import plot_export_view
@@ -18220,6 +18853,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     image.save(f"{base_path}.png", "PNG")
             if do_pdf:
                 self._write_widget_pdf(widget, f"{base_path}.pdf")
+                self._write_widget_svg(widget, f"{base_path}.svg")
 
     def _get_all_behavior_names(self) -> List[str]:
         names: List[str] = []
@@ -18536,7 +19170,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             default_path = os.path.join(start_dir, f"{prefix}_{suffix}.png")
             path, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
-                "Export image (PNG + PDF)",
+                "Export image (PNG + editable PDF/SVG)",
                 default_path,
                 "PNG image (*.png);;All files (*.*)",
             )
@@ -18590,7 +19224,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 f"Exported {ok_count}/{len(export_targets)} panel(s).\nFailed: {', '.join(failed)}",
             )
         else:
-            self.statusUpdate.emit(f"Exported {ok_count} panel image set(s) (PNG + PDF).", 5000)
+            self.statusUpdate.emit(f"Exported {ok_count} panel image set(s) (PNG + editable PDF + SVG).", 5000)
 
     def _export_spatial_figure(self) -> None:
         if self._last_spatial_occupancy_map is None or self._last_spatial_extent is None:
@@ -18604,7 +19238,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         default_path = os.path.join(start_dir, f"{prefix}_spatial_figure.png")
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Export spatial figure (PNG + PDF)",
+            "Export spatial figure (PNG + editable PDF/SVG)",
             default_path,
             "PNG image (*.png);;All files (*.*)",
         )
@@ -19216,7 +19850,9 @@ class ExportDialog(QtWidgets.QDialog):
         fmt_row = QtWidgets.QHBoxLayout()
         self.cb_png = QtWidgets.QCheckBox("PNG")
         self.cb_png.setChecked(True)
-        self.cb_pdf = QtWidgets.QCheckBox("PDF")
+        self.cb_pdf = QtWidgets.QCheckBox("PDF + SVG (editable)")
+        self.cb_pdf.setToolTip("Vector figure: one path per curve, real text and plain colors, "
+                               "editable in Illustrator and Inkscape. Heatmaps stay images.")
         self.cb_pdf.setChecked(True)
         fmt_row.addWidget(self.cb_png)
         fmt_row.addWidget(self.cb_pdf)
@@ -19308,6 +19944,10 @@ class ExportImageDialog(QtWidgets.QDialog):
         self.cb_all.setChecked(True)
         for cb in (self.cb_all, self.cb_trace, self.cb_heat, self.cb_avg, self.cb_signal, self.cb_behavior, self.cb_spatial):
             layout.addWidget(cb)
+        note = QtWidgets.QLabel("Each panel is written as PNG, editable vector PDF and SVG.")
+        note.setProperty("class", "hint")
+        note.setWordWrap(True)
+        layout.addWidget(note)
         self._set_individual_enabled(self.cb_all.isChecked())
 
         row = QtWidgets.QHBoxLayout()

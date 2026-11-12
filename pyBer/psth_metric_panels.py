@@ -83,6 +83,8 @@ class MetricPanel(pg.PlotWidget):
         """Respect the active plot palette without confusing summary encodings."""
         colors = [QtGui.QColor(palette["accent"]), QtGui.QColor("#D28A64")]
         text = palette["text"]
+        self._point_colors = colors
+        self._text_color = QtGui.QColor(text)
         for index, color in enumerate(colors):
             self.points[index].setSymbolBrush(pg.mkBrush(color))
             self.points[index].setSymbolPen(pg.mkPen(None))
@@ -94,10 +96,19 @@ class MetricPanel(pg.PlotWidget):
         faint.setAlpha(65)
         self.pairs.setPen(pg.mkPen(faint, width=0.7))
         self.note.setColor(text)
+        if getattr(self, "result", None) is not None and getattr(self, "_row_colors", None) is not None:
+            # A theme change must not drop the per-recording group tint.
+            self.show_result(self.result, row_colors=self._row_colors)
 
-    def show_result(self, result):
-        """Display paired native reductions and complete finite-row summaries."""
+    def show_result(self, result, row_colors=None):
+        """Display paired native reductions and complete finite-row summaries.
+
+        ``row_colors`` (one color per matrix row) tints the points by recording
+        group; medians then use the neutral text color so they are not read as
+        a group. Statistics are unchanged.
+        """
         self.result = result
+        self._row_colors = row_colors
         self._data_bounds = None
         self.pairs.setData([], [])
         for item in self.points + self.medians + self.means:
@@ -118,9 +129,17 @@ class MetricPanel(pg.PlotWidget):
             yp.extend([pre[index], post[index], np.nan])
         self.pairs.setData(xp, yp, connect="finite")
         bounds = []
+        tinted = row_colors is not None and len(row_colors) == len(pre)
         for index, (name, values) in enumerate((("pre", pre), ("post", post))):
             valid = np.isfinite(values)
-            self.points[index].setData(index + jitter[valid], values[valid])
+            if tinted:
+                brushes = [pg.mkBrush(color) for color, keep in zip(row_colors, valid) if keep]
+                self.points[index].setData(index + jitter[valid], values[valid], symbolBrush=brushes)
+                self.medians[index].setPen(pg.mkPen(self._text_color, width=2.5))
+            else:
+                self.points[index].setData(index + jitter[valid], values[valid],
+                                           symbolBrush=pg.mkBrush(self._point_colors[index]))
+                self.medians[index].setPen(pg.mkPen(self._point_colors[index], width=2.5))
             bounds.extend(values[valid])
             median, mean, sem = summary[name + "_median"], summary[name], summary[name + "_sem"]
             if np.isfinite(median):
