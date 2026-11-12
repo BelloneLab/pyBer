@@ -38,13 +38,20 @@ recordings list, the behaviors list and a row of group chips.
 - Right-click a list for: add files, remove selected, move up / down / to top /
   to bottom, auto match rows by name, open the containing folder, group
   attribution, and open/dock the window.
-- Pairing: an explicit pairing (multi-animal files) wins, then a behavior file
-  named like the recording, then the **same line** (recording 1 with behavior 1).
-  Both lists keep identical row heights and scroll together so lines face each
-  other. A behavior row that is not used by the recording on its own line is
-  flagged (`pairs with #3`, `unpaired`), and a recording without behavior shows
-  `no behavior`. A behavior file named after one recording is no longer reused
-  for a second recording through the line-wise fallback.
+- Pairing is line-wise: a newly added behavior file is paired automatically
+  with the first recording line that has no behavior yet, without asking. Only
+  when every recording already has a behavior file does pyBer ask which
+  recording to use. Multi-animal tables still ask which animal to read, but not
+  which fiber. MAMIR zone and behavior files of the same animal from the same
+  export folder join the same line.
+- Reordering (drag, Move up/down, Auto match rows by name) re-pairs by line:
+  recording 1 with behavior 1, and so on. Right-click a behavior and use
+  **Pair with recording** to pin a specific pairing.
+- The behaviors list shows behavior file names. Both lists keep identical row
+  heights and scroll together so lines face each other. A behavior row not used
+  by the recording on its own line is flagged (`pairs with #3`, `unpaired`), and
+  a recording without behavior shows `no behavior`. A behavior file named after
+  one recording is never reused for a second recording.
 
 Groups are stored per recording file id (the processed file name), so they
 survive reordering, reloading, project save/load and undo/redo.

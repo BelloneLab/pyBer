@@ -113,9 +113,11 @@ EthoVision cleaning retains main's existing numeric interpolation default,
 including missing tracking samples; the original workbook is never rewritten.
 
 Choose the animal that carries the fiber. For MAMIR bout files, you may restrict
-events to one partner. Explicitly pair each imported file or workbook sheet with
-its fiber recording. The source files are read only and imports are embedded
-when a pyBer postprocessing project is saved.
+events to one partner. Each imported file or workbook sheet is paired with the
+first recording line that has no behavior yet (line-wise, no prompt); drag rows,
+use Move up/down, or right-click **Pair with recording** to change it. The source
+files are read only and imports are embedded when a pyBer postprocessing project
+is saved.
 
 In Behavior mode, tick one or more names and compare the processed signal
 before, during, and after complete bouts. **Individual** uses the toolbar's
@@ -133,8 +135,9 @@ labels; the PSTH alignment and event filters control the PSTH plots.
 The comparison's group plot shows SEM across contributing animal/file means
 when at least two contribute. Its N is computed separately for each behavior;
 missing events or unusable signal never become zero-valued animal responses.
-Explicit source pairings survive recording reorder/removal. Duplicate recording
-names are rejected to prevent double counting. As in main's animal-level file
+Pairings survive recording removal; reordering a list re-pairs by line
+(recording 1 with behavior 1). Duplicate recording names are rejected to prevent
+double counting. As in main's animal-level file
 workflow, use one intended animal-level recording per independent animal;
 repeated sessions are not automatically combined by mouse ID.
 
@@ -217,9 +220,10 @@ animal/arena stream to use before interpreting its clock. Choices include mouse
 and condition labels where available. Two, four, or more IDs are supported;
 separate videos/streams with reused IDs remain separate choices.
 
-Load the processed fiber recordings first, then add the behavior file, choose
-the ID, and confirm its fiber recording. Add the same CSV again to select another
-ID for another fiber. Both the Behavior/Zone add button and the Setup importer
+Load the processed fiber recordings first, then add the behavior file and choose
+the ID. It is paired with the first recording line without behavior. Add the same
+CSV again to select another ID for the next fiber line, or reorder the lists to
+change which line each animal faces. Both the Behavior/Zone add button and the Setup importer
 support selection. Existing workbook sheet/arena selection remains available.
 
 Selection only filters rows in memory. No source file, timestamp, behavior value

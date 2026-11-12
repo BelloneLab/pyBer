@@ -89,7 +89,8 @@ class IdentityImportGuiTests(unittest.TestCase):
         self.panel.receive_current_processed(procs)
         return procs
 
-    def test_new_importer_selects_fourth_id_and_pairs_only_its_fiber(self):
+    def test_new_importer_selects_fourth_id_and_pairs_next_free_line(self):
+        """Only the animal is asked; the fiber is the first recording line without behavior."""
         panel = self.panel
         procs = self.fibers()
         with tempfile.TemporaryDirectory() as folder:
@@ -98,10 +99,10 @@ class IdentityImportGuiTests(unittest.TestCase):
             original = path.read_bytes()
             with patch.object(QtWidgets.QInputDialog, 'getItem', side_effect=lambda *args: (args[3][3], True)) as pick:
                 panel._load_behavior_zone_files('behavior', [str(path)])
-            self.assertEqual(pick.call_count, 2)
-            source = panel._match_behavior_source(procs[3])
+            self.assertEqual(pick.call_count, 1)
+            source = panel._match_behavior_source(procs[0])
             self.assertEqual(source['import_report']['identity_selection']['Animal ID'], '4')
-            for proc in procs[:3]:
+            for proc in procs[1:]:
                 self.assertIsNone(panel._match_behavior_source(proc))
             np.testing.assert_equal(source['time'], table(1)['Trial time (s)'])
             np.testing.assert_equal(source['behaviors']['IZ'], table().query('`Animal ID` == 4')['IZ'])
@@ -109,16 +110,44 @@ class IdentityImportGuiTests(unittest.TestCase):
             project = str(Path(folder) / 'test.h5')
             panel._save_project_h5(project)
             restored = panel._load_project_h5(project)
-            saved_source = restored['behavior_sources']['fiber-4']
+            saved_source = restored['behavior_sources']['fiber-1']
             self.assertEqual(saved_source['import_report']['identity_selection'],
                              source['import_report']['identity_selection'])
-            self.assertEqual(saved_source['import_report']['paired_path'], procs[3].path)
+            self.assertEqual(saved_source['import_report']['paired_path'], procs[0].path)
             np.testing.assert_equal(saved_source['time'], source['time'])
             np.testing.assert_equal(saved_source['behaviors']['IZ'], source['behaviors']['IZ'])
             panel._behavior_sources = restored['behavior_sources']
-            self.assertIsNotNone(panel._match_behavior_source(procs[3]))
-            self.assertIsNone(panel._match_behavior_source(procs[0]))
+            self.assertIsNotNone(panel._match_behavior_source(procs[0]))
+            self.assertIsNone(panel._match_behavior_source(procs[3]))
             self.assertEqual(path.read_bytes(), original)
+
+    def test_line_order_drives_pairing_and_full_lists_still_ask(self):
+        panel = self.panel
+        procs = self.fibers()[:2]
+        panel._processed = procs
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'animals.csv'
+            table().to_csv(path, index=False)
+            for index in (0, 1):
+                with patch.object(QtWidgets.QInputDialog, 'getItem',
+                                  side_effect=lambda *args, i=index: (args[3][i], True)) as pick:
+                    panel._load_behavior_zone_files('behavior', [str(path)])
+                self.assertEqual(pick.call_count, 1)          # animal only
+            first, second = (panel._match_behavior_source(proc) for proc in procs)
+            self.assertEqual(first['import_report']['identity_selection']['Animal ID'], '1')
+            self.assertEqual(second['import_report']['identity_selection']['Animal ID'], '2')
+            # Dragging the behaviors re-pairs them by line.
+            panel.list_behaviors.insertItem(0, panel.list_behaviors.takeItem(1))
+            panel._sync_behavior_order_from_list()
+            self.assertIs(panel._match_behavior_source(procs[0]), second)
+            self.assertIs(panel._match_behavior_source(procs[1]), first)
+            # Every line is taken: only then is the fiber asked.
+            with patch.object(QtWidgets.QInputDialog, 'getItem',
+                              side_effect=lambda *args: (args[3][0], True)) as pick, \
+                    patch.object(QtWidgets.QMessageBox, 'warning'):   # same labels on that line
+                panel._load_behavior_zone_files('behavior', [str(path)])
+            self.assertEqual(pick.call_count, 2)
+            self.assertIn('Every recording already has a behavior file', pick.call_args_list[1].args[2])
 
     def test_setup_importer_and_group_use_selected_recordings_only(self):
         panel = self.panel
@@ -129,9 +158,10 @@ class IdentityImportGuiTests(unittest.TestCase):
             for index in (0, 2):
                 with patch.object(QtWidgets.QInputDialog, 'getItem', side_effect=lambda *args: (args[3][index], True)):
                     panel._load_behavior_paths([str(path)], replace=False)
+            # Two animals fill the first two recording lines, one each.
             self.assertIsNotNone(panel._match_behavior_source(procs[0]))
-            self.assertIsNotNone(panel._match_behavior_source(procs[2]))
-            self.assertIsNone(panel._match_behavior_source(procs[1]))
+            self.assertIsNotNone(panel._match_behavior_source(procs[1]))
+            self.assertIsNone(panel._match_behavior_source(procs[2]))
             self.assertIsNone(panel._match_behavior_source(procs[3]))
             panel._set_event_category('behavior')
             panel.tab_visual_mode.setCurrentIndex(1)

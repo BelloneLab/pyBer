@@ -51,6 +51,7 @@ from heatmap_display import color_name as heatmap_color_name, color_map as heatm
 from baseline_advisor import BaselineRecording
 from baseline_suggestions import BaselineSuggestionConfig
 from baseline_suggestions_widget import BaselineSuggestionsWidget
+from subsection_nav import VerticalSubsections
 from behavior_summary import summarize_behavior, export_behavior_summary
 from behavior_summary_plot import render_behavior_summary
 from signal_events import preprocess_trace, estimate_noise, detect_peaks, observed_intervals, continuous_segments
@@ -2419,19 +2420,27 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_group_view.toggled.connect(self._on_group_view_changed)
         self.combo_group_display.currentIndexChanged.connect(self._on_group_view_changed)
 
-        # Container for all subsections (replaces old grp_opt)
-        grp_opt = QtWidgets.QWidget()
-        _psth_vbox = QtWidgets.QVBoxLayout(grp_opt)
-        _psth_vbox.setContentsMargins(0, 0, 0, 0)
-        _psth_vbox.setSpacing(4)
-        _psth_vbox.addWidget(grp_align_psth)
-        _psth_vbox.addWidget(grp_window)
-        _psth_vbox.addWidget(grp_groups)
-        _psth_vbox.addWidget(grp_behavior_panel)
-        _psth_vbox.addWidget(grp_filt)
-        _psth_vbox.addWidget(grp_include)
-        _psth_vbox.addWidget(grp_met)
-        _psth_vbox.addWidget(grp_global)
+        # Subsections are shown one at a time through a vertical rail so the
+        # PSTH panel stays short instead of stacking eight cards (grp_opt).
+        grp_opt = VerticalSubsections()
+        self.psth_subsections = grp_opt
+        for _title, _page, _tip in (
+            ("Alignment", grp_align_psth, "Event / zone to align on and alignment edge"),
+            ("Window", grp_window, "Trial window, baseline, resampling, smoothing and normalization"),
+            ("Groups", grp_groups, "Recording groups shown in the heatmap and average PSTH"),
+            ("Behavior", grp_behavior_panel, "Behavior summary plots under the PSTH"),
+            ("Filters", grp_filt, "Event index, grouping and duration filters"),
+            ("Inclusion", grp_include, "Minimum events per animal for group analysis"),
+            ("Metrics", grp_met, "Pre/post PSTH metric windows"),
+            ("Global", grp_global, "Whole-recording signal metrics"),
+        ):
+            grp_opt.addSection(_title, _page, _tip)
+        try:
+            grp_opt.setCurrentIndex(int(self._settings.value("postprocessing/psth_subsection", 0)))
+        except (TypeError, ValueError):
+            pass
+        grp_opt.currentChanged.connect(
+            lambda index: self._settings.setValue("postprocessing/psth_subsection", int(index)))
 
         self.btn_compute = QtWidgets.QPushButton("Postprocessing (compute PSTH)")
         self.btn_compute.setProperty("class", "compactPrimarySmall")
@@ -6467,11 +6476,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     if not self._processed:
                         raise ValueError("Load the processed fiber recording first, then select its animal ID.")
                     names = [f"{i + 1}. {proc.path or 'Recording'}" for i, proc in enumerate(self._processed)]
-                    index = 0
-                    if len(names) > 1:
+                    index = self._auto_pair_row()
+                    if index is None:
                         chosen, ok = QtWidgets.QInputDialog.getItem(
-                            self, "Pair behavior with fiber", f"{report['subject']}: select its fiber recording",
-                            names, 0, False)
+                            self, "Pair behavior with fiber",
+                            f"Every recording already has a behavior file.\n"
+                            f"{report['subject']}: select its fiber recording", names, 0, False)
                         if not ok:
                             continue
                         index = names.index(chosen)
@@ -11084,11 +11094,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             names = [f"{index + 1}. {proc.path or 'Recording'}"
                      for index, proc in enumerate(self._processed)]
             if target_index is None:
-                if len(names) == 1:
-                    target_index = 0
-                else:
+                # Line-wise automatic pairing: the first recording line without a
+                # behavior. Only when every line is taken is the user asked.
+                target_index = self._auto_pair_row()
+                if target_index is None:
                     chosen, ok = QtWidgets.QInputDialog.getItem(
                         self, "Pair behavior with fiber",
+                        f"Every recording already has a behavior file.\n"
                         f"{os.path.basename(path)}: select its fiber recording", names, 0, False)
                     if not ok:
                         return None
@@ -11218,11 +11230,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if self._processed:
                     names = [f"{index + 1}. {proc.path or 'Recording'}"
                              for index, proc in enumerate(self._processed)]
-                    if len(names) == 1:
-                        target_index = 0
-                    else:
+                    target_index = self._mamir_pair_row(path, identity)
+                    if target_index is None:
+                        target_index = self._auto_pair_row()
+                    if target_index is None:
                         chosen, ok = QtWidgets.QInputDialog.getItem(
                             self, "Pair MAMIR with fiber",
+                            f"Every recording already has a behavior file.\n"
                             f"MAMIR animal {identity} in {os.path.basename(path)}:\n"
                             "select its fiber recording",
                             names, 0, False)
@@ -12265,6 +12279,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         match.setEnabled(bool(self._processed) and bool(self._behavior_sources))
         folder = menu.addAction("Open containing folder", lambda lst=file_list: self._open_list_file_folder(lst))
         folder.setEnabled(len(rows) == 1)
+        if not processed:
+            pair = menu.addMenu("Pair with recording")
+            key = file_list.item(rows[0]).data(QtCore.Qt.ItemDataRole.UserRole) if len(rows) == 1 else None
+            for row, proc in enumerate(self._processed):
+                name = _strip_ain_suffix(os.path.splitext(os.path.basename(str(proc.path or "")))[0])
+                pair.addAction(f"{row + 1}. {name}", lambda k=key, r=row: self._pair_behavior_with_row(k, r))
+            pair.setEnabled(key is not None and bool(self._processed))
         menu.addSeparator()
         build_assign_menu(menu, self.recording_groups,
                           lambda group_id: self._assign_selected_recordings_to_group(group_id),
@@ -12598,10 +12619,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.list_preprocessed.addItem(item)
 
         self.list_behaviors.clear()
-        for i, (stem, _) in enumerate(self._behavior_sources.items(), 1):
-            stem_clean = _strip_ain_suffix(stem)
-            item = QtWidgets.QListWidgetItem(f"{i}. {stem_clean}")
+        for i, (stem, source) in enumerate(self._behavior_sources.items(), 1):
+            source_path = str((source or {}).get("source_path", "") or "")
+            shown = os.path.splitext(os.path.basename(source_path))[0] if source_path else _strip_ain_suffix(stem)
+            item = QtWidgets.QListWidgetItem(f"{i}. {shown}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, stem)
+            item.setToolTip(source_path or stem)
             self.list_behaviors.addItem(item)
         if hasattr(self, "lbl_processed_list"):
             self.lbl_processed_list.setText(f"Processed recordings ({len(self._processed)})")
@@ -12610,6 +12633,82 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if hasattr(self, "group_chip_bar"):
             self.group_chip_bar.rebuild()
             self._update_group_view_hint()
+
+    def _behavior_source_rows(self) -> Dict[str, int]:
+        """Recording line used by each behavior source (explicit, name or line)."""
+        rows: Dict[str, int] = {}
+        stems = [os.path.splitext(os.path.basename(str(proc.path or "")))[0] for proc in self._processed]
+        clean = [_strip_ain_suffix(stem) for stem in stems]
+        for line, (key, source) in enumerate(self._behavior_sources.items()):
+            report = source.get("import_report") or {}
+            if isinstance(report, dict) and report.get("paired_path"):
+                index = report.get("paired_index")
+                if isinstance(index, int) and 0 <= index < len(self._processed) and \
+                        str(self._processed[index].path) == str(report["paired_path"]):
+                    rows[key] = index
+                else:
+                    match = next((i for i, proc in enumerate(self._processed)
+                                  if str(proc.path) == str(report["paired_path"])), None)
+                    if match is not None:
+                        rows[key] = match
+                continue
+            if key in stems:
+                rows[key] = stems.index(key)
+            elif _strip_ain_suffix(key) in clean:
+                rows[key] = clean.index(_strip_ain_suffix(key))
+            elif line < len(self._processed):
+                rows[key] = line
+        return rows
+
+    def _auto_pair_row(self) -> Optional[int]:
+        """First recording line without a behavior; a single recording is always line 1."""
+        if not self._processed:
+            return None
+        if len(self._processed) == 1:
+            return 0
+        used = set(self._behavior_source_rows().values())
+        return next((row for row in range(len(self._processed)) if row not in used), None)
+
+    def _mamir_pair_row(self, path: str, identity: object) -> Optional[int]:
+        """Same MAMIR animal from the same export folder keeps its recording line."""
+        # Same folder only: sibling sessions often reuse animal IDs (1, 2, ...).
+        folder = os.path.dirname(os.path.realpath(str(path)))
+        rows = self._behavior_source_rows()
+        for key, source in self._behavior_sources.items():
+            report = source.get("import_report") or {}
+            source_path = str(source.get("source_path", "") or "")
+            if not isinstance(report, dict) or not source_path:
+                continue
+            same_export = os.path.dirname(os.path.realpath(source_path)) == folder
+            imports = [report] + [item for item in report.get("mamir_imports", []) if isinstance(item, dict)]
+            if same_export and any(item.get("format") == "mamir" and str(item.get("identity")) == str(identity)
+                                   for item in imports):
+                return rows.get(key)
+        return None
+
+    def _repair_pairings_by_line(self) -> bool:
+        """After a manual reorder, explicit pairings follow the lines (row i <-> row i)."""
+        changed = False
+        for line, source in enumerate(self._behavior_sources.values()):
+            report = source.get("import_report") or {}
+            if not isinstance(report, dict) or not report.get("paired_path") or line >= len(self._processed):
+                continue
+            path = str(self._processed[line].path)
+            if report.get("paired_index") != line or str(report.get("paired_path")) != path:
+                report.update(paired_index=line, paired_path=path)
+                changed = True
+        return changed
+
+    def _pair_behavior_with_row(self, key: str, row: int) -> None:
+        """Explicit pairing chosen from the behaviors context menu."""
+        source = self._behavior_sources.get(key)
+        if source is None or not 0 <= row < len(self._processed):
+            return
+        report = source.setdefault("import_report", {})
+        report.update(paired_index=row, paired_path=str(self._processed[row].path))
+        self._project_dirty = True
+        self._update_file_lists()
+        self._schedule_psth()
 
     def _sync_processed_order_from_list(self) -> None:
         new_order: List[ProcessedTrial] = []
@@ -12622,9 +12721,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 new_order.append(proc)
         if new_order and len(new_order) == len(self._processed):
             self._processed = new_order
+            self._repair_pairings_by_line()
             self._update_file_lists()
             self._compute_spatial_heatmap()
             self._update_status_strip()
+            if self._behavior_sources:
+                self._schedule_psth()   # pairing follows the new line order
 
     def _sync_behavior_order_from_list(self) -> None:
         keys: List[str] = []
@@ -12635,9 +12737,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 keys.append(key)
         if keys and len(keys) == len(self._behavior_sources):
             self._behavior_sources = {k: self._behavior_sources[k] for k in keys}
+            self._repair_pairings_by_line()
             self._update_file_lists()
             self._compute_spatial_heatmap()
             self._update_status_strip()
+            if self._processed:
+                self._schedule_psth()   # pairing follows the new line order
 
     def _move_selected_up(self) -> None:
         """Move selected items up in the list."""
@@ -12738,9 +12843,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 new_behavior_order.append((stem, data))
 
         self._behavior_sources = dict(new_behavior_order)
+        self._repair_pairings_by_line()
         self._update_file_lists()
         self._compute_spatial_heatmap()
         self._update_status_strip()
+        self._schedule_psth()
 
     def _remove_selected_preprocessed(self) -> None:
         selected = self.list_preprocessed.selectedItems()
