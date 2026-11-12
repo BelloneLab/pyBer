@@ -64,6 +64,10 @@ between the heatmap and the average PSTH keeps both time axes aligned;
 double-click it to restore equal heights. Sizes are saved with preferences and
 projects.
 
+Heatmap colors (contrast mode, auto scale, exact limits, palette, histogram
+editor) are in the right-click menu of the heatmap color bar; there is no color
+row above the heatmap.
+
 Right-click any plot to get the panel actions above the usual plot menu:
 
 - **Remove this panel**: the neighboring panel takes the space.

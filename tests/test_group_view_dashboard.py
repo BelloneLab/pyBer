@@ -156,12 +156,11 @@ class GroupViewDashboardTests(unittest.TestCase):
         self.assertTrue(substitute.property("hasPlotData"))
         panels.set_spec("heatmap", "global:median")
         self.app.processEvents()
-        self.assertTrue(panel.heatmap_color_controls.isHidden())
         self.assertTrue(panel.psth_scale_container.isHidden())
         panels.restore_original("heatmap")
         self.app.processEvents()
         self.assertIs(panels.displayed("heatmap"), panel.plot_heat)
-        self.assertFalse(panel.heatmap_color_controls.isHidden())
+        self.assertFalse(panel.psth_scale_container.isHidden())
         # Right-click menu gains panel actions on top of pyqtgraph's own.
         menu = panel.plot_avg.getPlotItem().getViewBox().menu
         menu.aboutToShow.emit()

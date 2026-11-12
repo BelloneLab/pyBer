@@ -4203,7 +4203,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.heat_colorbar_widget.setFixedWidth(78)
         self.heat_colorbar = pg.ColorBarItem(values=(0, 1), colorMap=pg.colormap.get("viridis"),
                                             width=14, interactive=True, rounding=.001, colorMapMenu=False)
-        self.heat_colorbar_widget.setToolTip("Drag the color handles to adjust contrast. Use Adjust for exact values or Auto to reset. Display only.")
         self.heat_colorbar.sigLevelsChanged.connect(self._on_heatmap_colorbar_changed)
         self.heat_colorbar.sigLevelsChangeFinished.connect(
             lambda *_: self._on_heatmap_colorbar_changed(finished=True))
@@ -4469,9 +4468,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.psth_time_handle.refresh()
         self.psth_scale_container = scales
         self.psth_shared_card = create_plot_card(self.heat_figure, "")
-        from heatmap_color_controls import HeatmapColorControls
-        self.heatmap_color_controls = HeatmapColorControls(self)
-        self.psth_shared_card.layout().insertWidget(2, self.heatmap_color_controls)
+        # Heatmap colors are adjusted from a right-click menu on the color bar
+        # (no editor row above the heatmap).
+        from heatmap_color_controls import HeatmapColorMenu
+        self.heatmap_color_menu = HeatmapColorMenu(self)
         self.bout_shared_card = create_plot_card(self.bout_figure, "")
         for card in (self.psth_shared_card, self.bout_shared_card):
             card.title_label.hide()
@@ -9358,8 +9358,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if panels is not None:
             # Record what the preset shows before any nested pass applies removals.
             panels.capture_layout()
-        if hasattr(self, "heatmap_color_controls"):
-            self.heatmap_color_controls.sync()
+        if hasattr(self, "heatmap_color_menu"):
+            self.heatmap_color_menu.sync()
         self.row_avg.setVisible(show_avg)
         self.row_signal.setVisible(show_signal)
         self.row_behavior.setVisible(show_behavior)
@@ -9379,9 +9379,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             # All panels must keep a legible plotting area. Extra rows scroll
             # vertically instead of compressing titles and axes into one another.
             show_heat, show_avg = not self.plot_heat.isHidden(), not self.plot_avg.isHidden()
-            controls = self.heatmap_color_controls
-            editor_height = controls.sizeHint().height() + 6 if not controls.isHidden() else 0
-            heat_height = (440 if show_heat and show_avg else 220) + editor_height
+            heat_height = 440 if show_heat and show_avg else 220
             minima = ((self.trace_card, 240), (self.row_heat, heat_height), (self.row_signal, 220), (self.row_behavior, 360))
             visible = [(widget, height) for widget, height in minima if not widget.isHidden()]
             for widget, height in minima:
@@ -10063,8 +10061,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         detailed = self.btn_edit_scale.isChecked()
         self.heat_lut.setVisible(ready and detailed)
         self.heat_colorbar_widget.setVisible(ready and not detailed)
-        if hasattr(self, "heatmap_color_controls"):
-            self.heatmap_color_controls.sync()
+        if hasattr(self, "heatmap_color_menu"):
+            self.heatmap_color_menu.sync()
 
     def _set_plot_preset(self, name: str) -> None:
         """Apply a coordinated plot palette and keep custom styling available."""
@@ -15714,7 +15712,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             )
         else:
             self.plot_heat.setToolTip("")
-        self.heatmap_color_controls.sync()
+        self.heatmap_color_menu.sync()
 
     def _render_duration_hist(self, durations: np.ndarray) -> None:
         self.plot_dur.clear()
@@ -16288,7 +16286,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self.heat_colorbar.rounding = max((hi - lo) / 1000., 1e-15)
         finally:
             self._suppress_heatmap_level_store = previous
-        self.heatmap_color_controls.sync()
+        self.heatmap_color_menu.sync()
         if save:
             self._queue_settings_save()
         return True
@@ -16304,7 +16302,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.img.setLookupTable(cmap.getLookupTable(nPts=256, alpha=True))
         finally:
             self._suppress_heatmap_level_store = previous
-        self.heatmap_color_controls.sync()
+        self.heatmap_color_menu.sync()
         self._queue_settings_save()
 
     def _open_style_dialog(self) -> None:

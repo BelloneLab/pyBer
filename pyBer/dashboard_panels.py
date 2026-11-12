@@ -472,18 +472,14 @@ class DashboardPanels(QtCore.QObject):
             handle = getattr(p, "psth_time_handle", None)
             if handle is not None:
                 handle.refresh()
-            controls = getattr(p, "heatmap_color_controls", None)
-            if controls is not None and not (heat_native and not p.plot_heat.isHidden()):
-                # Hide only: showing is owned by the controls' own sync(), which
-                # also respects temporary export views.
-                controls.setVisible(False)
         finally:
             self._applying = False
 
     def _sync_heat_controls(self) -> None:
-        controls = getattr(self.panel, "heatmap_color_controls", None)
-        if controls is not None:
-            controls.sync()
+        """Refresh the color-bar menu summary after structural changes."""
+        menu = getattr(self.panel, "heatmap_color_menu", None)
+        if menu is not None:
+            menu.sync()
 
     # -- substitutes ---------------------------------------------------------
     def _substitute_widget(self, slot: str, family: str) -> QtWidgets.QWidget:

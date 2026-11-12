@@ -278,9 +278,10 @@ The View layout menu provides focused views. **Fit plots** restores useful
 bounds after zooming. Event labels become more detailed as you zoom in;
 offset-aligned shading ends at the alignment marker.
 
-**Contrast** offers full range, robust 2nd-98th percentiles, or a range symmetric
-about zero. These settings change appearance only. **Edit scale** reveals the
-detailed histogram and manual limits; manual limits take priority over presets.
+Right-click the heatmap color bar for **Contrast** (full range, robust 2nd-98th
+percentiles, or a range symmetric about zero), **Auto scale**, **Set exact
+limits...**, **Palette** and the **Histogram editor**. These settings change
+appearance only; manual limits take priority over presets.
 
 The summary above the plots identifies the alignment, valid rows, exclusions,
 and analysis window. Window, baseline, filter, and normalization edits recompute

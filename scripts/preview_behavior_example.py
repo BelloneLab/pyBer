@@ -24,7 +24,7 @@ def run() -> int:
     parser.add_argument("--width", type=int, default=1900, help="Example window width")
     parser.add_argument("--height", type=int, default=1120, help="Example window height")
     parser.add_argument("--group", action="store_true", help="Open the existing Group view instead of Individual")
-    parser.add_argument("--heatmap-colors", action="store_true", help="Show the display-only heatmap color controls")
+    parser.add_argument("--heatmap-colors", action="store_true", help="Open the display-only histogram color editor (other color options: right-click the color bar)")
     args = parser.parse_args()
     if args.smoke:
         os.environ["QT_QPA_PLATFORM"] = "offscreen"

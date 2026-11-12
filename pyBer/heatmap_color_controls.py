@@ -1,148 +1,225 @@
-"""Compact controls for display-only PSTH color adjustments."""
+"""Right-click color menu for the PSTH heatmap scale (display only).
+
+The heatmap color settings used to occupy a row above the plot. They now live
+in a context menu on the color bar (and on the histogram editor, so the menu
+stays reachable in both scale views):
+
+* the current limits ("Auto: -2.6 to 2.7 · units"), as a read-only header;
+* **Contrast**: Full range, Robust (2-98%), Symmetric about zero;
+* **Auto scale**: release fixed limits;
+* **Set exact limits...**: a small dialog with validated Min / Max;
+* **Palette**: PSTH heatmap palette only;
+* **Histogram editor**: switch the color bar for the draggable histogram.
+
+Every action reuses the panel's existing controls and methods, so saved
+settings, projects, undo and exports keep working unchanged. Nothing here
+modifies PSTH rows: limits saturate colors, never data.
+"""
 from contextlib import contextmanager
-from PySide6 import QtCore, QtWidgets
+from typing import Callable, Optional, Tuple
+
+from PySide6 import QtCore, QtGui, QtWidgets
+
 from heatmap_display import color_name
+
+# Palette choices offered in the menu: (label, colormap name).
+PALETTES = (("Viridis", "viridis"), ("Cividis", "cividis"), ("Blue-white-red", "CET-D1"),
+            ("Plasma", "plasma"), ("Inferno", "inferno"), ("Magma", "magma"), ("Turbo", "turbo"))
+COLORBAR_TOOLTIP = ("Drag the handles to adjust contrast. Right-click for contrast mode, auto scale, "
+                    "exact limits, palette and the histogram editor. Display only.")
 
 
 @contextmanager
 def plot_export_view(panel, widget):
-    """Keep interactive color controls out of plot images and restore the view."""
-    controls = getattr(panel, "heatmap_color_controls", None)
-    if controls is None or widget is None or not widget.isAncestorOf(controls):
+    """Exports always show the compact color bar, never the histogram editor."""
+    scales = getattr(panel, "psth_scale_container", None)
+    if scales is None or widget is None or not (widget is scales or widget.isAncestorOf(scales)):
         yield
         return
-    widgets = (controls, panel.heat_lut, panel.heat_colorbar_widget)
+    widgets = (panel.heat_lut, panel.heat_colorbar_widget)
     hidden = [item.isHidden() for item in widgets]
     try:
-        controls.hide()
         if panel.plot_heat.property("hasPlotData"):
             panel.heat_lut.hide()
             panel.heat_colorbar_widget.show()
-        panel.psth_scale_container.layout().activate()
-        panel.psth_shared_card.layout().activate()
+        scales.layout().activate()
         panel.heat_figure.layout().activate()
         yield
     finally:
         for item, was_hidden in zip(widgets, hidden):
             item.setVisible(not was_hidden)
-        panel.psth_scale_container.layout().activate()
-        panel.psth_shared_card.layout().activate()
+        scales.layout().activate()
         panel.heat_figure.layout().activate()
 
 
 class DisplayLimitSpinBox(QtWidgets.QDoubleSpinBox):
+    """Shows limits with full precision instead of a fixed decimal count."""
+
     def textFromValue(self, value):
         return f"{value:.12g}"
 
 
-class HeatmapColorControls(QtWidgets.QWidget):
-    def __init__(self, panel):
-        super().__init__(panel)
+class HeatmapLimitsDialog(QtWidgets.QDialog):
+    """Exact display limits; stays open on invalid input (Min must be < Max)."""
+
+    def __init__(self, panel, parent=None) -> None:
+        super().__init__(parent)
         self.panel = panel
+        self.setWindowTitle("Heatmap color limits")
+        self.setModal(True)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(2, 0, 2, 2)
-        layout.setSpacing(3)
-        row = QtWidgets.QHBoxLayout()
-        row.setSpacing(4)
-        row.addWidget(QtWidgets.QLabel("Colors"))
-        self.mode = QtWidgets.QComboBox()
-        self.mode.addItems([panel.combo_heat_scale.itemText(i)
-                            for i in range(panel.combo_heat_scale.count())])
-        self.mode.setMinimumWidth(75)
-        self.mode.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-        self.mode.setToolTip(panel.combo_heat_scale.toolTip())
-        self.mode.activated.connect(panel.combo_heat_scale.setCurrentIndex)
-        panel.combo_heat_scale.currentIndexChanged.connect(self.sync)
-        row.addWidget(self.mode, 1)
-        self.auto = QtWidgets.QPushButton("Auto")
-        self.auto.setToolTip("Release fixed limits and fit the selected contrast mode to the displayed heatmap.")
-        self.auto.clicked.connect(panel.btn_auto_heat_scale.click)
-        row.addWidget(self.auto)
-        self.adjust = QtWidgets.QPushButton("Adjust")
-        self.adjust.setCheckable(True)
-        self.adjust.setToolTip("Show spatial-style color cursors, palette and exact display limits.")
-        self.adjust.toggled.connect(panel.btn_edit_scale.setChecked)
-        panel.btn_edit_scale.toggled.connect(self.sync)
-        row.addWidget(self.adjust)
-        for button in (self.auto, self.adjust):
-            button.setStyleSheet("padding: 3px 7px; min-height: 20px;")
-        layout.addLayout(row)
-        self.summary = QtWidgets.QLabel()
-        self.summary.setMinimumWidth(0)
-        self.summary.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-        layout.addWidget(self.summary)
-        self.details = QtWidgets.QWidget()
-        details = QtWidgets.QFormLayout(self.details)
-        details.setContentsMargins(0, 0, 0, 0)
-        details.setSpacing(3)
-        self.palette = QtWidgets.QComboBox()
-        for label, name in (("Viridis", "viridis"), ("Cividis", "cividis"),
-                            ("Blue–white–red", "CET-D1"), ("Plasma", "plasma"),
-                            ("Inferno", "inferno"), ("Magma", "magma"), ("Turbo", "turbo")):
-            self.palette.addItem(label, name)
-        self.palette.setToolTip("PSTH heatmap only. Blue–white–red with symmetric limits places white at zero.")
-        self.palette.activated.connect(lambda _index: panel._set_heatmap_palette(self.palette.currentData()))
-        details.addRow("Palette", self.palette)
-        limits = QtWidgets.QHBoxLayout()
-        limits.setSpacing(4)
+        form = QtWidgets.QFormLayout()
         self.minimum, self.maximum = DisplayLimitSpinBox(), DisplayLimitSpinBox()
-        for name, spin in (("Min", self.minimum), ("Max", self.maximum)):
+        low, high = current_levels(panel)
+        for name, spin, value in (("Min", self.minimum, low), ("Max", self.maximum, high)):
             spin.setRange(-1e12, 1e12)
             spin.setDecimals(15)
-            spin.setKeyboardTracking(False)
-            spin.setMinimumWidth(65)
-            spin.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+            spin.setValue(value)
+            spin.setSingleStep(max((high - low) / 100.0, 1e-9))
+            spin.setMinimumWidth(140)
             spin.setAccessibleName("Heatmap color " + name.lower())
             spin.setToolTip("Display limit in the current heatmap units; does not change signal values.")
-            spin.editingFinished.connect(self._apply_limits)
-            limits.addWidget(QtWidgets.QLabel(name))
-            limits.addWidget(spin, 1)
-        details.addRow(limits)
+            form.addRow(name, spin)
+        layout.addLayout(form)
+        note = QtWidgets.QLabel(f"Units: {panel._psth_units()}. Values beyond the limits saturate in color only.")
+        note.setProperty("class", "hint")
+        note.setWordWrap(True)
+        layout.addWidget(note)
         self.error = QtWidgets.QLabel("Min must be lower than Max.")
         self.error.setStyleSheet("color: #d97706;")
         self.error.hide()
-        details.addRow(self.error)
-        layout.addWidget(self.details)
-        self.details.hide()
-        self.hide()
+        layout.addWidget(self.error)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok
+                                             | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.apply)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
-    def _apply_limits(self):
-        accepted = self.panel._set_heatmap_display_levels(self.minimum.value(), self.maximum.value())
+    def apply(self) -> bool:
+        accepted = bool(self.panel._set_heatmap_display_levels(self.minimum.value(), self.maximum.value()))
         self.error.setVisible(not accepted)
+        if accepted:
+            self.accept()
+        return accepted
 
-    def sync(self, *_args):
+
+def current_levels(panel) -> Tuple[float, float]:
+    levels = panel.img.getLevels()
+    if levels is None or len(levels) != 2:
+        return 0.0, 1.0
+    return float(levels[0]), float(levels[1])
+
+
+class HeatmapColorMenu(QtCore.QObject):
+    """Context menu attached to the heatmap color bar and histogram editor."""
+
+    def __init__(self, panel) -> None:
+        super().__init__(panel)
+        self.panel = panel
+        # Replaceable in tests: show a menu at a global position.
+        self.exec_menu: Callable[[QtWidgets.QMenu, QtCore.QPoint], object] = (
+            lambda menu, pos: menu.exec(pos))
+        self.last_menu: Optional[QtWidgets.QMenu] = None
+        for view in (panel.heat_colorbar_widget, panel.heat_lut):
+            view.viewport().installEventFilter(self)
+            view.setToolTip(COLORBAR_TOOLTIP)
+
+    # -- information ---------------------------------------------------------
+    def summary_text(self) -> str:
+        panel = self.panel
+        if not panel.plot_heat.property("hasPlotData"):
+            return "No heatmap"
+        low, high = current_levels(panel)
+        fixed = bool(panel._style.get("heatmap_levels_manual", False))
+        return f"{'Fixed' if fixed else 'Auto'}: {low:.4g} to {high:.4g} · {panel._psth_units()}"
+
+    def sync(self, *_args) -> None:
+        """Keep the color bar tooltip describing the current limits."""
+        text = self.summary_text()
+        tooltip = f"{text}\n{COLORBAR_TOOLTIP}"
+        for view in (self.panel.heat_colorbar_widget, self.panel.heat_lut):
+            view.setToolTip(tooltip)
+
+    # -- menu ----------------------------------------------------------------
+    def build_menu(self, parent: Optional[QtWidgets.QWidget] = None) -> QtWidgets.QMenu:
         panel = self.panel
         ready = bool(panel.plot_heat.property("hasPlotData"))
-        # A heatmap swapped out of the dashboard ("Change to") keeps no editor.
-        card = getattr(panel, "psth_shared_card", None)
-        placed = card is None or panel.plot_heat.isVisibleTo(card)
-        self.setVisible(ready and not panel.plot_heat.isHidden() and placed)
-        self.setEnabled(ready)
-        with QtCore.QSignalBlocker(self.mode), QtCore.QSignalBlocker(self.adjust):
-            self.mode.setCurrentIndex(panel.combo_heat_scale.currentIndex())
-            self.adjust.setChecked(panel.btn_edit_scale.isChecked())
-        self.details.setVisible(self.adjust.isChecked())
-        panel._refresh_results_minimum_heights()
-        name = color_name(panel._style)
-        index = self.palette.findData(name)
-        if index < 0:
-            self.palette.addItem(name, name)
-            index = self.palette.count() - 1
-        with QtCore.QSignalBlocker(self.palette):
-            self.palette.setCurrentIndex(index)
-        if not ready:
-            return
-        levels = panel.img.getLevels()
-        if levels is None or len(levels) != 2:
-            return
-        low, high = map(float, levels)
-        for spin, value in ((self.minimum, low), (self.maximum, high)):
-            with QtCore.QSignalBlocker(spin):
-                spin.setValue(value)
-                spin.setSingleStep(max((high - low) / 100., 1e-9))
-        fixed = bool(panel._style.get("heatmap_levels_manual", False))
-        text = f"{'Fixed' if fixed else 'Auto'}: {low:.4g} to {high:.4g} · {panel._psth_units()}"
-        self.summary.setText(text)
-        self.summary.setToolTip(text + "\nDisplay only: values beyond the limits saturate in color, not in the data. "
-                                "Fixed limits persist across behavior and recording changes; changing normalization resets them.")
-        self.error.hide()
+        menu = QtWidgets.QMenu(parent or panel)
+        header = menu.addAction(self.summary_text())
+        header.setEnabled(False)
+        menu.addSeparator()
+
+        contrast = menu.addMenu("Contrast")
+        contrast.setToolTipsVisible(True)
+        group = QtGui.QActionGroup(contrast)
+        group.setExclusive(True)
+        combo = panel.combo_heat_scale
+        for index in range(combo.count()):
+            action = contrast.addAction(combo.itemText(index))
+            action.setCheckable(True)
+            action.setChecked(index == combo.currentIndex())
+            action.setToolTip("Selecting a mode resets fixed limits; data are unchanged.")
+            group.addAction(action)
+            action.triggered.connect(lambda _=False, i=index: combo.setCurrentIndex(i))
+        contrast.setEnabled(ready)
+
+        auto = menu.addAction("Auto scale")
+        auto.setToolTip("Release fixed limits and fit the selected contrast mode to the displayed heatmap.")
+        auto.triggered.connect(panel.btn_auto_heat_scale.click)
+        auto.setEnabled(ready)
+        limits = menu.addAction("Set exact limits...")
+        limits.triggered.connect(self.open_limits_dialog)
+        limits.setEnabled(ready)
+
+        palette_menu = menu.addMenu("Palette")
+        palettes = QtGui.QActionGroup(palette_menu)
+        palettes.setExclusive(True)
+        current = color_name(panel._style)
+        names = [name for _label, name in PALETTES]
+        entries = list(PALETTES) + ([(current, current)] if current not in names else [])
+        for label, name in entries:
+            action = palette_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            action.setData(name)
+            palettes.addAction(action)
+            action.triggered.connect(lambda _=False, n=name: panel._set_heatmap_palette(n))
+
+        menu.addSeparator()
+        editor = menu.addAction("Histogram editor")
+        editor.setCheckable(True)
+        editor.setChecked(panel.btn_edit_scale.isChecked())
+        editor.setToolTip("Replace the color bar by a histogram with draggable limits.")
+        editor.toggled.connect(panel.btn_edit_scale.setChecked)
+        editor.setEnabled(ready)
+        self.last_menu = menu
+        return menu
+
+    def popup(self, global_pos: QtCore.QPoint) -> None:
+        menu = self.build_menu()
+        self.exec_menu(menu, global_pos)
+
+    def open_limits_dialog(self) -> int:
+        dialog = HeatmapLimitsDialog(self.panel, self.panel)
+        return dialog.exec()
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() == QtCore.QEvent.Type.ContextMenu:
+            self.popup(event.globalPos())
+            return True
+        return False
+
+
+def find_action(menu: QtWidgets.QMenu, *path: str) -> Optional[QtGui.QAction]:
+    """Return the action reached by following menu texts (helper for tests and scripts)."""
+    current = menu
+    for depth, text in enumerate(path):
+        match = next((action for action in current.actions() if action.text() == text), None)
+        if match is None:
+            return None
+        if depth == len(path) - 1:
+            return match
+        current = match.menu()
+        if current is None:
+            return None
+    return None

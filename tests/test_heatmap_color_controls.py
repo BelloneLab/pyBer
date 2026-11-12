@@ -1,13 +1,14 @@
-"""Heatmap color adjustments change rendering, never the underlying analysis."""
+"""Heatmap color adjustments (color-bar right-click menu) change rendering, never the analysis."""
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import numpy as np
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 import test_postprocessing_empty_state as fixture
 from heatmap_display import color_limits, color_map, matplotlib_color_map
+from heatmap_color_controls import HeatmapLimitsDialog, find_action
 
 
 class HeatmapColorTests(unittest.TestCase):
@@ -26,8 +27,15 @@ class HeatmapColorTests(unittest.TestCase):
         np.testing.assert_allclose(panel.img.getLevels(), expected)
         np.testing.assert_allclose(panel.heat_lut.item.getLevels(), expected)
         np.testing.assert_allclose(panel.heat_colorbar.values, expected)
-        controls = panel.heatmap_color_controls
-        np.testing.assert_allclose([controls.minimum.value(), controls.maximum.value()], expected, atol=1e-9)
+
+    def menu(self):
+        return self.panel.heatmap_color_menu.build_menu()
+
+    def trigger(self, *path):
+        action = find_action(self.menu(), *path)
+        self.assertIsNotNone(action, path)
+        action.trigger()
+        return action
 
     def test_colorbar_drag_and_histogram_keep_all_scales_linked(self):
         panel = self.panel
@@ -46,54 +54,50 @@ class HeatmapColorTests(unittest.TestCase):
             compute.assert_not_called()
         np.testing.assert_array_equal(panel._last_mat, original)
 
-    def test_exact_limits_validation_and_auto_do_not_change_analysis(self):
+    def test_exact_limits_dialog_validation_and_auto_do_not_change_analysis(self):
         panel = self.panel
         self.render([[1, 2, 3], [4, 5, 100]])
         original = panel._last_mat.copy()
         baseline = panel.spin_b0.value(), panel.spin_b1.value()
-        controls = panel.heatmap_color_controls
-        collapsed_height = panel.row_heat.minimumHeight()
-        controls.adjust.click()
-        self.assertFalse(panel.heat_lut.isHidden())
-        self.assertGreater(panel.row_heat.minimumHeight(), collapsed_height)
         with patch.object(panel, '_compute_psth') as compute:
-            controls.minimum.setValue(1.5)
-            controls.maximum.setValue(5)
-            controls.maximum.editingFinished.emit()
+            dialog = HeatmapLimitsDialog(panel)
+            self.assertEqual((dialog.minimum.value(), dialog.maximum.value()), (1, 100))
+            dialog.minimum.setValue(1.5)
+            dialog.maximum.setValue(5)
+            self.assertTrue(dialog.apply())
             self.assert_levels((1.5, 5))
-            self.assertIn('Fixed', controls.summary.text())
-            controls.minimum.setValue(7)
-            controls.minimum.editingFinished.emit()
-            self.assertFalse(controls.error.isHidden())
+            self.assertTrue(find_action(self.menu(), 'Fixed: 1.5 to 5 · ' + panel._psth_units()) is not None)
+            invalid = HeatmapLimitsDialog(panel)
+            invalid.minimum.setValue(7)
+            self.assertFalse(invalid.apply())
+            self.assertFalse(invalid.error.isHidden())
             np.testing.assert_allclose(panel.img.getLevels(), (1.5, 5))
             self.assertFalse(panel._set_heatmap_display_levels(float('nan'), 10))
             self.assertFalse(panel._set_heatmap_display_levels(10, 10))
             panel._psth_pending = False
-            controls.auto.click()
+            self.trigger('Auto scale')
             self.assert_levels((1, 100))
-            self.assertIn('Auto', controls.summary.text())
+            self.assertTrue(self.menu().actions()[0].text().startswith('Auto:'))
             compute.assert_not_called()
         np.testing.assert_array_equal(panel._last_mat, original)
         self.assertEqual((panel.spin_b0.value(), panel.spin_b1.value()), baseline)
 
-    def test_color_controls_work_in_both_modes_and_follow_view_menu(self):
+    def test_contrast_menu_works_in_both_modes_and_follows_view_menu(self):
         panel = self.panel
         self.render(np.arange(100).reshape(10, 10))
-        controls = panel.heatmap_color_controls
         for category in ('zone', 'behavior'):
             panel._set_event_category(category)
-            self.assertFalse(controls.isHidden())
-            controls.mode.setCurrentIndex(1)
-            controls.mode.activated.emit(1)
+            self.assertFalse(panel.heat_colorbar_widget.isHidden())
+            self.trigger('Contrast', panel.combo_heat_scale.itemText(1))
             self.assertEqual(panel.combo_heat_scale.currentIndex(), 1)
             self.assert_levels(np.percentile(np.arange(100), [2, 98]))
             panel.combo_heat_scale.setCurrentIndex(2)
-            self.assertEqual(controls.mode.currentIndex(), 2)
+            self.assertTrue(find_action(self.menu(), 'Contrast', panel.combo_heat_scale.itemText(2)).isChecked())
             self.assert_levels((-99, 99))
         panel.combo_view_layout.setCurrentText('Trace focus')
-        self.assertTrue(controls.isHidden())
+        self.assertTrue(panel.psth_scale_container.isHidden())
         panel.combo_view_layout.setCurrentText('Standard')
-        self.assertFalse(controls.isHidden())
+        self.assertFalse(panel.psth_scale_container.isHidden())
 
     def test_psth_palette_and_limits_do_not_bleed_into_spatial_maps(self):
         panel = self.panel
@@ -106,7 +110,7 @@ class HeatmapColorTests(unittest.TestCase):
         spatial_lut = panel.spatial_lut_activity.item.gradient.getLookupTable(256).copy()
         self.render([[-2, 0, 2]])
         panel._set_heatmap_display_levels(-1, 1)
-        panel._set_heatmap_palette('CET-D1')
+        self.trigger('Palette', 'Blue-white-red')
         spatial()
         np.testing.assert_array_equal(panel.img_spatial_activity.getLevels(), spatial_levels)
         np.testing.assert_array_equal(panel.spatial_lut_activity.item.gradient.getLookupTable(256), spatial_lut)
@@ -118,13 +122,16 @@ class HeatmapColorTests(unittest.TestCase):
         panel = self.panel
         self.render([[-2, 0, 2]])
         panel._set_heatmap_display_levels(-.5, 1.5)
-        panel._set_heatmap_palette('CET-D1')
-        panel.heatmap_color_controls.adjust.click()
+        self.trigger('Palette', 'Blue-white-red')
+        self.trigger('Histogram editor')
+        self.assertTrue(panel.btn_edit_scale.isChecked())
+        self.assertFalse(panel.heat_lut.isHidden())
         with tempfile.TemporaryDirectory() as folder:
             path = str(Path(folder) / 'colors.h5')
             panel._save_project_h5(path)
             settings = panel._load_project_h5(path)['settings']
         panel._style.pop('psth_heatmap_cmap')
+        panel.btn_edit_scale.setChecked(False)
         panel._clear_heatmap_manual_limits()
         panel._is_restoring_settings = True
         try:
@@ -133,54 +140,55 @@ class HeatmapColorTests(unittest.TestCase):
             panel._is_restoring_settings = False
         self.render([[-20, 0, 20]])
         self.assert_levels((-.5, 1.5))
-        self.assertEqual(panel.heatmap_color_controls.palette.currentData(), 'CET-D1')
-        self.assertTrue(panel.heatmap_color_controls.adjust.isChecked())
+        self.assertTrue(find_action(self.menu(), 'Palette', 'Blue-white-red').isChecked())
+        self.assertTrue(find_action(self.menu(), 'Histogram editor').isChecked())
         panel._set_plot_preset('Paper')
-        self.assertEqual(panel.heatmap_color_controls.palette.currentData(), 'CET-D1')
+        self.assertTrue(find_action(self.menu(), 'Palette', 'Blue-white-red').isChecked())
         self.assert_levels((-.5, 1.5))
         np.testing.assert_array_equal(panel.img.lut / 255.,
                                       matplotlib_color_map(panel._style)(np.linspace(0, 1, 256)))
 
-    def test_compact_controls_fit_and_empty_plots_hide_editor(self):
-        controls = self.panel.heatmap_color_controls
-        self.assertTrue(controls.isHidden())
+    def test_no_editor_row_and_right_click_opens_menu_on_both_scales(self):
+        panel = self.panel
+        layout = panel.psth_shared_card.layout()
+        children = [layout.itemAt(i).widget() for i in range(layout.count())]
+        self.assertNotIn('HeatmapColorControls', [type(w).__name__ for w in children])
+        self.assertIn(panel.heat_figure, children)
+        self.assertTrue(all(not action.isEnabled() for action in self.menu().actions()
+                            if action.text() in ('Contrast', 'Auto scale', 'Set exact limits...')))
         self.render([[1, 2, 3]])
-        controls.adjust.click()
-        controls.setParent(None)
-        try:
-            controls.resize(330, 160)
-            controls.show()
-            self.app.processEvents()
-            for widget in (controls.mode, controls.auto, controls.adjust, controls.palette,
-                           controls.minimum, controls.maximum):
-                right = widget.mapTo(controls, QtCore.QPoint(widget.width(), 0)).x()
-                self.assertLessEqual(right, controls.width())
-        finally:
-            controls.setParent(self.panel)
-        self.render([[np.nan, np.nan, np.nan]])
-        self.assertTrue(controls.isHidden())
+        shown = []
+        panel.heatmap_color_menu.exec_menu = lambda menu, pos: shown.append([a.text() for a in menu.actions()])
+        for view in (panel.heat_colorbar_widget, panel.heat_lut):
+            point = QtCore.QPoint(5, 5)
+            event = QtGui.QContextMenuEvent(QtGui.QContextMenuEvent.Reason.Mouse, point,
+                                            view.viewport().mapToGlobal(point))
+            QtWidgets.QApplication.sendEvent(view.viewport(), event)
+        self.assertEqual(len(shown), 2)
+        self.assertIn('Contrast', shown[0])
+        self.assertIn('Set exact limits...', shown[0])
+        self.assertIn('Histogram editor', shown[0])
+        self.assertIn('Auto: 1 to 3', panel.heat_colorbar_widget.toolTip())
 
-    def test_plot_export_hides_editor_and_restores_it_even_on_failure(self):
+    def test_plot_export_shows_color_bar_and_restores_editor_even_on_failure(self):
         from heatmap_color_controls import plot_export_view
         panel = self.panel
         self.render([[-2, 0, 2]])
-        panel.heatmap_color_controls.adjust.click()
+        panel.btn_edit_scale.setChecked(True)
         panel._set_heatmap_display_levels(-1, 1)
         original = panel._last_mat.copy()
         def check_view():
-            self.assertTrue(panel.heatmap_color_controls.isHidden())
             self.assertTrue(panel.heat_lut.isHidden())
             self.assertFalse(panel.heat_colorbar_widget.isHidden())
             self.assert_levels((-1, 1))
         with tempfile.TemporaryDirectory() as folder:
             with patch.object(panel, '_write_widget_pdf', side_effect=lambda *_: check_view()):
                 panel._export_widget_selective(panel.psth_shared_card, str(Path(folder) / 'plot'), False, True)
-        self.assertFalse(panel.heatmap_color_controls.isHidden())
+        self.assertFalse(panel.heat_lut.isHidden())
         with self.assertRaisesRegex(RuntimeError, 'export failure'):
             with plot_export_view(panel, panel.psth_shared_card):
                 check_view()
                 raise RuntimeError('export failure')
-        self.assertFalse(panel.heatmap_color_controls.isHidden())
         self.assertFalse(panel.heat_lut.isHidden())
         self.assertTrue(panel.heat_colorbar_widget.isHidden())
         np.testing.assert_array_equal(panel._last_mat, original)

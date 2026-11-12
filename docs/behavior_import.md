@@ -237,18 +237,22 @@ behavior trial numbers, and habituation and test are separate recordings.
 
 ## Adjusting heatmap colors
 
-The **Colors** controls above the PSTH heatmap work in both Zone and Behavior,
-for Individual and Group views. The original automatic modes are unchanged:
+Right-click the heatmap color bar to adjust colors. The menu works in both Zone
+and Behavior, for Individual and Group views, and its first line shows the current
+limits (for example `Auto: -2.6 to 2.7 · Baseline z-score`). The **Contrast**
+modes are unchanged:
 
 - Full range uses the finite displayed minimum and maximum.
 - Robust contrast uses the 2nd and 98th percentiles to reduce the visual effect
   of extreme values. Values outside these limits saturate in color; no data is removed.
 - Symmetric limits put zero in the middle of the color scale.
 
-Drag the compact color-bar handles, or click **Adjust** for spatial-style
-histogram cursors, exact **Min / Max** inputs and palette selection. Blue–white–red
-with symmetric limits is useful for showing positive and negative signals.
-**Auto** releases fixed limits and reapplies the selected automatic mode.
+Drag the compact color-bar handles, or use the right-click menu: **Set exact
+limits...** for exact Min / Max values, **Palette** for the color map and
+**Histogram editor** for spatial-style histogram cursors (right-click the histogram
+to switch back). Blue-white-red with symmetric limits is useful for showing positive
+and negative signals. **Auto scale** releases fixed limits and reapplies the
+selected automatic mode.
 
 Adjustments are display-only: they do not change event selection, baseline,
 normalization, signal values or statistics. Fixed limits persist when switching
@@ -287,7 +291,7 @@ The example includes two recordings for Individual and Group comparisons and
 uses temporary preferences without changing source files or normal settings.
 Add `--zone-workbook /path/arenas.xlsx` to load arena sheets for Zone testing too.
 Do not interpret unrelated behavior and zone files as the same experiment.
-Add `--heatmap-colors` to open the heatmap color editor in the example.
+Add `--heatmap-colors` to open the histogram color editor in the example.
 
 ## Figure export
 
