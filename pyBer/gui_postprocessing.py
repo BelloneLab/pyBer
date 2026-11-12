@@ -1789,6 +1789,39 @@ class PostProcessingPanel(QtWidgets.QWidget):
         QtCore.QTimer.singleShot(0, self, self._reset_history_snapshot)
         QtCore.QTimer.singleShot(0, self, self._mark_project_clean)
 
+    def _make_subsections(self, settings_key: str, entries) -> VerticalSubsections:
+        """Build a vertical subsection rail from ``(title, page, tooltip)`` entries.
+
+        ``page`` may be a QGroupBox card (used as is) or a ``Subsection`` frame,
+        which is wrapped in a card with its title hidden (the rail names it) and
+        its one-line hint kept. The selected subsection is remembered under
+        ``postprocessing/<settings_key>``.
+        """
+        nav = VerticalSubsections()
+        for title, page, tip in entries:
+            if isinstance(page, _PyberSubsection):
+                title_label = getattr(page, "_title", None)
+                if title_label is not None:
+                    title_label.hide()
+                # The rail takes ~40 px; let label/field rows that no longer fit
+                # side by side wrap (label above field) instead of clipping.
+                for form in page.findChildren(QtWidgets.QFormLayout):
+                    form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+                card = QtWidgets.QGroupBox()
+                card_layout = QtWidgets.QVBoxLayout(card)
+                card_layout.setContentsMargins(0, 0, 0, 0)
+                card_layout.addWidget(page)
+                card_layout.addStretch(1)  # keep short pages top-aligned
+                page = card
+            nav.addSection(title, page, tip)
+        key = f"postprocessing/{settings_key}"
+        try:
+            nav.setCurrentIndex(int(self._settings.value(key, 0)))
+        except (TypeError, ValueError):
+            pass
+        nav.currentChanged.connect(lambda index: self._settings.setValue(key, int(index)))
+        return nav
+
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -2422,9 +2455,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         # Subsections are shown one at a time through a vertical rail so the
         # PSTH panel stays short instead of stacking eight cards (grp_opt).
-        grp_opt = VerticalSubsections()
-        self.psth_subsections = grp_opt
-        for _title, _page, _tip in (
+        grp_opt = self._make_subsections("psth_subsection", (
             ("Alignment", grp_align_psth, "Event / zone to align on and alignment edge"),
             ("Window", grp_window, "Trial window, baseline, resampling, smoothing and normalization"),
             ("Groups", grp_groups, "Recording groups shown in the heatmap and average PSTH"),
@@ -2433,14 +2464,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             ("Inclusion", grp_include, "Minimum events per animal for group analysis"),
             ("Metrics", grp_met, "Pre/post PSTH metric windows"),
             ("Global", grp_global, "Whole-recording signal metrics"),
-        ):
-            grp_opt.addSection(_title, _page, _tip)
-        try:
-            grp_opt.setCurrentIndex(int(self._settings.value("postprocessing/psth_subsection", 0)))
-        except (TypeError, ValueError):
-            pass
-        grp_opt.currentChanged.connect(
-            lambda index: self._settings.setValue("postprocessing/psth_subsection", int(index)))
+        ))
+        self.psth_subsections = grp_opt
 
         self.btn_compute = QtWidgets.QPushButton("Postprocessing (compute PSTH)")
         self.btn_compute.setProperty("class", "compactPrimarySmall")
@@ -2736,17 +2761,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fs_out.addRow(self.cb_peak_noise_overlay)
         sub_sig_output.add_layout(fs_out)
 
-        # Stack subsections inside the group box.
-        grp_signal_layout = QtWidgets.QVBoxLayout()
-        grp_signal_layout.setContentsMargins(0, 0, 0, 0)
-        grp_signal_layout.setSpacing(4)
-        for sub in (sub_sig_source, sub_sig_detect, sub_sig_baseline, sub_sig_output):
-            grp_signal_layout.addWidget(sub)
-        # Detach the now-empty f_signal layout and install the new one.
-        _old_sig_layout = grp_signal.layout()
-        if _old_sig_layout is not None:
-            QtWidgets.QWidget().setLayout(_old_sig_layout)
-        grp_signal.setLayout(grp_signal_layout)
+        # Show one subsection at a time through a vertical rail (was a stack
+        # of four subsections inside grp_signal, which is now unused).
+        self.signal_subsections = self._make_subsections("signal_subsection", (
+            ("Source", sub_sig_source, "Trace and scope for peak detection"),
+            ("Detection", sub_sig_detect, "Threshold, prominence, distance and smoothing"),
+            ("Baseline", sub_sig_baseline, "Noise floor and normalization reference"),
+            ("Output", sub_sig_output, "Rate bin, AUC window and trace overlays"),
+        ))
 
         # Footer: primary Detect + ghost Export, status banner above.
         self.signal_status = _PyberInlineStatus("", "info")
@@ -3133,19 +3155,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _add_row(f5, "Mode", self.combo_spatial_activity_mode)
         sub_act.add_layout(f5)
 
-        # Stack subsections inside the existing group box.
-        grp_spatial_layout = QtWidgets.QVBoxLayout()
-        grp_spatial_layout.setContentsMargins(0, 0, 0, 0)
-        grp_spatial_layout.setSpacing(4)
-        for sub in (sub_traj, sub_occ, sub_clip, sub_time, sub_act):
-            grp_spatial_layout.addWidget(sub)
-
-        # Replace the existing group box's layout (was f_spatial / QFormLayout).
-        # We drop f_spatial entirely; it was assigned but is no longer attached.
-        old_layout = grp_spatial.layout()
-        if old_layout is not None:
-            QtWidgets.QWidget().setLayout(old_layout)  # detach safely
-        grp_spatial.setLayout(grp_spatial_layout)
+        # Show one subsection at a time through a vertical rail (was a stack
+        # of five subsections inside grp_spatial, which is now unused).
+        self.spatial_subsections = self._make_subsections("spatial_subsection", (
+            ("Trajectory", sub_traj, "X / Y position columns"),
+            ("Occupancy", sub_occ, "Bin grid, map value, smoothing and axes"),
+            ("Range", sub_clip, "Percentile clipping of the color range"),
+            ("Time", sub_time, "Restrict samples to a time window"),
+            ("Activity", sub_act, "Normalization of per-bin signal values"),
+        ))
 
         # Inline status banner + footer with the primary Compute action.
         self.spatial_status = _PyberInlineStatus("", "info")
@@ -3887,7 +3905,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         signal_layout = QtWidgets.QVBoxLayout(self.section_signal)
         signal_layout.setContentsMargins(6, 6, 6, 6)
         signal_layout.setSpacing(8)
-        signal_layout.addWidget(grp_signal)
+        signal_layout.addWidget(self.signal_subsections)
         signal_layout.addWidget(self.signal_status)
         signal_layout.addWidget(self.tbl_signal_metrics, 1)
         signal_layout.addWidget(self.tbl_signal_files)
@@ -3921,7 +3939,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         spatial_layout = QtWidgets.QVBoxLayout(self.section_spatial)
         spatial_layout.setContentsMargins(6, 6, 6, 6)
         spatial_layout.setSpacing(8)
-        spatial_layout.addWidget(grp_spatial)
+        spatial_layout.addWidget(self.spatial_subsections)
         spatial_layout.addWidget(self.spatial_status)
         spatial_layout.addStretch(1)
         spatial_layout.addWidget(self.spatial_footer)
