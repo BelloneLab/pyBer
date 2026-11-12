@@ -186,33 +186,6 @@ QFrame[class="subsectionRail"] {
     border: 1px solid #232a3d;
     border-radius: 12px;
 }
-QPushButton[class="subsectionTab"] {
-    background: transparent;
-    border: 0;
-    border-left: 3px solid transparent;
-    border-radius: 7px;
-    color: #a9b3c9;
-    font-size: 9.2pt;
-    font-weight: 600;
-    text-align: left;
-    padding: 7px 8px 7px 9px;
-    min-height: 18px;
-}
-QPushButton[class="subsectionTab"]:hover,
-QPushButton[class="subsectionTab"]:pressed {
-    background: #1d2333;
-    border: 0;
-    border-left: 3px solid transparent;
-    color: #edf0f8;
-}
-QPushButton[class="subsectionTab"]:checked,
-QPushButton[class="subsectionTab"]:checked:hover {
-    background: #372f66;
-    border: 0;
-    border-left: 3px solid #7c5cff;
-    color: #f7f9fd;
-    font-weight: 700;
-}
 /* Cards hosted as subsection pages: the rail names them, so no title strip. */
 QGroupBox[subsectionPage="true"] {
     margin-top: 0px;
@@ -1300,16 +1273,6 @@ _LIGHT_OVERRIDES = r"""
 QMainWindow, QDialog, QWidget {
     background: #f2f4f9;
     color: #1b2434;
-}
-
-/* Subsection rail: hover must differ from the rail surface. */
-QPushButton[class="subsectionTab"]:hover {
-    background: #dde3f0;
-    color: #141b28;
-}
-QPushButton[class="subsectionTab"]:checked {
-    background: #e2dbf8;
-    color: #141b28;
 }
 
 /* Tabs: dark text on hover / selected, accent underline */
