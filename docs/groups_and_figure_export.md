@@ -28,6 +28,24 @@ recordings list, the behaviors list and a row of group chips.
   the group name. Behavior files matched to a grouped recording show the same
   outline. The toolbar recording picker shows a colored dot.
 
+### Managing the lists
+
+- **+** above a list adds files (several can be selected at once); added
+  recordings are appended, not replaced. **x** above a list removes the
+  selected rows; the **x** at the end of a row removes that row only. Files on
+  disk are never touched.
+- Drag a row by its grip (the six dots on the left) to change the order.
+- Right-click a list for: add files, remove selected, move up / down / to top /
+  to bottom, auto match rows by name, open the containing folder, group
+  attribution, and open/dock the window.
+- Pairing: an explicit pairing (multi-animal files) wins, then a behavior file
+  named like the recording, then the **same line** (recording 1 with behavior 1).
+  Both lists keep identical row heights and scroll together so lines face each
+  other. A behavior row that is not used by the recording on its own line is
+  flagged (`pairs with #3`, `unpaired`), and a recording without behavior shows
+  `no behavior`. A behavior file named after one recording is no longer reused
+  for a second recording through the line-wise fallback.
+
 Groups are stored per recording file id (the processed file name), so they
 survive reordering, reloading, project save/load and undo/redo.
 

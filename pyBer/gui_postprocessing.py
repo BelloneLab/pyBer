@@ -39,8 +39,8 @@ from aligned_time_axes import AlignedTimeAxes
 from postprocessing_view_controls import split_plot_layout, PlotSplitterPreferences, create_view_menu, compact_results_toolbar
 from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_metrics
 from vector_figure_export import write_vector_figure
-from recording_groups import (RecordingGroups, GroupChipBar, GroupOutlineDelegate, DetachableSection,
-                              build_assign_menu, color_dot_icon, UNGROUPED_COLOR)
+from recording_groups import (RecordingGroups, GroupChipBar, FileRowDelegate, DetachableSection,
+                              build_assign_menu, color_dot_icon, UNGROUPED_COLOR, GRIP_W)
 from psth_groups import HeatmapGroupBands, build_group_display, block_summaries, block_ticks, legend_label
 from dashboard_panels import DashboardPanels, GridRowHandle, HANDLE_PX, seamless_figure_qss, draw_global_metric
 from file_drop import install_file_drop, expand_paths
@@ -1954,19 +1954,58 @@ class PostProcessingPanel(QtWidgets.QWidget):
         order_layout.addWidget(self.btn_auto_match)
         order_layout.addStretch(1)
 
-        files_layout = QtWidgets.QHBoxLayout()
-        files_layout.addWidget(QtWidgets.QLabel("Preprocessed Files:"))
-        files_layout.addWidget(QtWidgets.QLabel("Behaviors:"))
+        # Legacy buttons stay as hidden action holders; each list now has a
+        # compact header (+ add files, x remove selected), per-row drag grip
+        # and remove cross, and a right-click menu.
+        for b in (self.btn_move_up, self.btn_move_down, self.btn_auto_match, self.btn_remove_pre, self.btn_remove_beh):
+            b.setParent(self)
+            b.hide()
+        files_layout = QtWidgets.QHBoxLayout()   # kept for layout compatibility (empty)
+
+        def _list_header(title: str, add_tip: str, remove_tip: str):
+            row = QtWidgets.QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
+            label = QtWidgets.QLabel(title)
+            row.addWidget(label, 1)
+            add = QtWidgets.QToolButton()
+            add.setText("+")
+            add.setToolTip(add_tip)
+            remove = QtWidgets.QToolButton()
+            remove.setText("\u00d7")
+            remove.setToolTip(remove_tip)
+            for button in (add, remove):
+                button.setFixedSize(28, 24)
+                button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+                button.setStyleSheet("QToolButton { font-size: 15px; font-weight: 600; padding: 0px; }")
+                row.addWidget(button)
+            return row, label, add, remove
+
+        pre_header, self.lbl_processed_list, self.btn_add_processed, self.btn_remove_processed_list = _list_header(
+            "Processed recordings", "Add processed files (CSV/H5); several can be selected",
+            "Remove the selected recordings from the list (files on disk are untouched)")
+        beh_header, self.lbl_behavior_list, self.btn_add_behaviors, self.btn_remove_behavior_list = _list_header(
+            "Behaviors", "Add behavior files (CSV/XLSX); several can be selected",
+            "Remove the selected behavior files from the list (files on disk are untouched)")
+        self.btn_add_processed.clicked.connect(self._add_processed_files)
+        self.btn_add_behaviors.clicked.connect(self._load_behavior_files)
+        self.btn_remove_processed_list.clicked.connect(self._remove_selected_preprocessed)
+        self.btn_remove_behavior_list.clicked.connect(self._remove_selected_behaviors)
+        self.lbl_list_pairing = QtWidgets.QLabel(
+            "Rows are paired line by line: recording 1 with behavior 1, and so on. "
+            "Drag the grip to reorder.")
+        self.lbl_list_pairing.setProperty("class", "hint")
+        self.lbl_list_pairing.setWordWrap(True)
 
         lists_layout = QtWidgets.QHBoxLayout()
         pre_col = QtWidgets.QVBoxLayout()
+        pre_col.addLayout(pre_header)
         pre_col.addWidget(self.list_preprocessed)
-        pre_col.addWidget(self.btn_remove_pre)
         beh_col = QtWidgets.QVBoxLayout()
+        beh_col.addLayout(beh_header)
         beh_col.addWidget(self.list_behaviors)
-        beh_col.addWidget(self.btn_remove_beh)
-        pre_col.setStretch(0, 1)
-        beh_col.setStretch(0, 1)
+        pre_col.setStretch(1, 1)
+        beh_col.setStretch(1, 1)
         lists_layout.addLayout(pre_col)
         lists_layout.addLayout(beh_col)
 
@@ -1986,21 +2025,35 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.recording_groups = RecordingGroups(self)
         self.group_chip_bar = GroupChipBar(self.recording_groups, self._loaded_group_count, self)
         self.group_chip_bar.assignRequested.connect(self._assign_selected_recordings_to_group)
-        self.list_preprocessed.setItemDelegate(GroupOutlineDelegate(self._recording_item_group, self.list_preprocessed))
-        self.list_behaviors.setItemDelegate(GroupOutlineDelegate(self._behavior_item_group, self.list_behaviors))
+        self._processed_row_delegate = FileRowDelegate(self._recording_item_group, self.list_preprocessed,
+                                                       note_resolver=self._recording_item_note)
+        self._behavior_row_delegate = FileRowDelegate(self._behavior_item_group, self.list_behaviors,
+                                                      note_resolver=self._behavior_item_note)
+        self._processed_row_delegate.removeRequested.connect(lambda row: self._remove_preprocessed_rows([row]))
+        self._behavior_row_delegate.removeRequested.connect(lambda row: self._remove_behavior_rows([row]))
+        self.list_preprocessed.setItemDelegate(self._processed_row_delegate)
+        self.list_behaviors.setItemDelegate(self._behavior_row_delegate)
         for file_list in (self.list_preprocessed, self.list_behaviors):
             file_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
             file_list.customContextMenuRequested.connect(
                 lambda pos, lst=file_list: self._show_recording_list_menu(lst, pos))
             file_list.viewport().installEventFilter(self)
+            file_list.setMouseTracking(True)
+            file_list.setUniformItemSizes(True)
+            file_list.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
+        # Line-wise pairing: both lists scroll together so row i faces row i.
+        self._syncing_list_scroll = False
+        for source, target in ((self.list_preprocessed, self.list_behaviors),
+                               (self.list_behaviors, self.list_preprocessed)):
+            source.verticalScrollBar().valueChanged.connect(
+                lambda value, t=target: self._sync_list_scroll(t, value))
         recordings_content = QtWidgets.QWidget()
         recordings_layout = QtWidgets.QVBoxLayout(recordings_content)
         recordings_layout.setContentsMargins(0, 0, 0, 0)
         recordings_layout.setSpacing(6)
         recordings_layout.addWidget(self.group_chip_bar)
-        recordings_layout.addLayout(files_layout)
         recordings_layout.addLayout(lists_layout, 1)
-        recordings_layout.addLayout(order_layout)
+        recordings_layout.addWidget(self.lbl_list_pairing)
         self.recordings_section = DetachableSection(recordings_content, "Recordings and groups",
                                                     settings=self._settings)
         self.recordings_section.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
@@ -12188,19 +12241,154 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.group_chip_bar.create_group_interactive()
 
     def _show_recording_list_menu(self, file_list: QtWidgets.QListWidget, pos: QtCore.QPoint) -> None:
+        menu = self._build_recording_list_menu(file_list)
+        menu.exec(file_list.viewport().mapToGlobal(pos))
+
+    def _build_recording_list_menu(self, file_list: QtWidgets.QListWidget) -> QtWidgets.QMenu:
+        """Add, remove, reorder, open folder, match by name and group attribution."""
+        processed = file_list is self.list_preprocessed
+        rows = sorted(file_list.row(item) for item in file_list.selectedItems())
+        count = file_list.count()
         menu = QtWidgets.QMenu(file_list)
+        menu.addAction("Add processed files..." if processed else "Add behavior files...",
+                       self._add_processed_files if processed else self._load_behavior_files)
+        remove = menu.addAction(f"Remove selected ({len(rows)})" if rows else "Remove selected",
+                                self._remove_selected_preprocessed if processed else self._remove_selected_behaviors)
+        remove.setEnabled(bool(rows))
+        menu.addSeparator()
+        for label, mode in (("Move up", "up"), ("Move down", "down"),
+                            ("Move to top", "top"), ("Move to bottom", "bottom")):
+            action = menu.addAction(label, lambda m=mode, lst=file_list: self._move_list_rows(lst, m))
+            action.setEnabled(bool(rows) and count > 1)
+        match = menu.addAction("Auto match rows by name", self._auto_match_files)
+        match.setToolTip("Reorder both lists so each recording faces the behavior file of the same name.")
+        match.setEnabled(bool(self._processed) and bool(self._behavior_sources))
+        folder = menu.addAction("Open containing folder", lambda lst=file_list: self._open_list_file_folder(lst))
+        folder.setEnabled(len(rows) == 1)
+        menu.addSeparator()
         build_assign_menu(menu, self.recording_groups,
                           lambda group_id: self._assign_selected_recordings_to_group(group_id),
                           self._new_group_from_selection)
         menu.addSeparator()
-        if file_list is self.list_preprocessed:
-            menu.addAction("Remove selected recordings", self._remove_selected_preprocessed)
-        else:
-            menu.addAction("Remove selected behaviors", self._remove_selected_behaviors)
-        menu.addSeparator()
         detached = self.recordings_section.is_detached()
         menu.addAction("Dock list back" if detached else "Open list in window", self.recordings_section.toggle)
-        menu.exec(file_list.viewport().mapToGlobal(pos))
+        return menu
+
+    def _add_processed_files(self) -> None:
+        """Append processed recordings (several files at once) without replacing the list."""
+        start_dir = self._settings.value("postprocess_last_dir", os.getcwd(), type=str)
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Add processed files", start_dir, "Processed files (*.csv *.h5 *.hdf5)")
+        if not paths:
+            return
+        if len(paths) > 1 or self._processed:
+            self.tab_sources.setCurrentIndex(1)   # several recordings: Group source
+        self._load_processed_paths(paths, replace=False)
+        try:
+            self._settings.setValue("postprocess_last_dir", os.path.dirname(paths[0]))
+        except Exception:
+            pass
+
+    def _move_list_rows(self, file_list: QtWidgets.QListWidget, mode: str) -> None:
+        """Move the selected rows of one list; pairing follows the new line order."""
+        rows = sorted(file_list.row(item) for item in file_list.selectedItems())
+        count = file_list.count()
+        if not rows or count < 2:
+            return
+        order = list(range(count))
+        selected = [order[row] for row in rows]
+        rest = [index for index in order if index not in selected]
+        if mode == "top":
+            order = selected + rest
+        elif mode == "bottom":
+            order = rest + selected
+        else:
+            step = -1 if mode == "up" else 1
+            order = list(order)
+            sequence = rows if step < 0 else list(reversed(rows))
+            for row in sequence:
+                position = order.index(row)
+                target = position + step
+                if 0 <= target < count and order[target] not in selected:
+                    order[position], order[target] = order[target], order[position]
+        items = [file_list.takeItem(0) for _ in range(count)]
+        for index in order:
+            file_list.addItem(items[index])
+        for index, original in enumerate(order):
+            file_list.item(index).setSelected(original in selected)
+        if file_list is self.list_preprocessed:
+            self._sync_processed_order_from_list()
+        else:
+            self._sync_behavior_order_from_list()
+        for index, original in enumerate(order):
+            if index < file_list.count():
+                file_list.item(index).setSelected(original in selected)
+
+    def _open_list_file_folder(self, file_list: QtWidgets.QListWidget) -> None:
+        items = file_list.selectedItems()
+        if len(items) != 1:
+            return
+        if file_list is self.list_preprocessed:
+            proc = self._proc_for_list_item(items[0])
+            path = str(getattr(proc, "path", "") or "") if proc is not None else ""
+        else:
+            info = self._behavior_sources.get(items[0].data(QtCore.Qt.ItemDataRole.UserRole)) or {}
+            path = str(info.get("source_path", "") or "")
+        folder = os.path.dirname(path)
+        if folder and os.path.isdir(folder):
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder))
+        else:
+            self.statusUpdate.emit("The source folder of this file is not available.", 5000)
+
+    def _sync_list_scroll(self, target: QtWidgets.QListWidget, value: int) -> None:
+        """Keep row i of both lists side by side (line-wise pairing)."""
+        if self._syncing_list_scroll:
+            return
+        self._syncing_list_scroll = True
+        try:
+            target.verticalScrollBar().setValue(value)
+        finally:
+            self._syncing_list_scroll = False
+
+    def _pairing_rows(self) -> Dict[str, List[int]]:
+        """Behavior key -> processed rows actually paired with it (cached)."""
+        cache = getattr(self, "_pairing_cache", None)
+        if cache is None:
+            cache = {}
+            for row, proc in enumerate(self._processed):
+                try:
+                    source = self._match_behavior_source(proc)
+                except Exception:
+                    source = None
+                if source is None:
+                    continue
+                for key, value in self._behavior_sources.items():
+                    if value is source:
+                        cache.setdefault(key, []).append(row)
+                        break
+            self._pairing_cache = cache
+        return cache
+
+    def _behavior_item_note(self, index: QtCore.QModelIndex) -> Optional[Tuple[str, str]]:
+        """Flag behavior rows that do not pair with the recording on the same line."""
+        if not self._processed:
+            return None
+        rows = self._pairing_rows().get(index.data(QtCore.Qt.ItemDataRole.UserRole), [])
+        if rows == [index.row()]:
+            return None
+        if not rows:
+            return ("unpaired", "#8a94a6")
+        return ("pairs with " + ", ".join(f"#{row + 1}" for row in rows[:3]) +
+                ("..." if len(rows) > 3 else ""), "#d9a441")
+
+    def _recording_item_note(self, index: QtCore.QModelIndex) -> Optional[Tuple[str, str]]:
+        """Flag recordings without a behavior when behaviors are loaded."""
+        if not self._behavior_sources:
+            return None
+        row = index.row()
+        if any(row in rows for rows in self._pairing_rows().values()):
+            return None
+        return ("no behavior", "#8a94a6")
 
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
         """Right-click must not toggle multi-selection; it targets the row instead."""
@@ -12208,6 +12396,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if file_list is None or watched is not file_list.viewport():
                 continue
             kind = event.type()
+            if kind == QtCore.QEvent.Type.MouseMove and not event.buttons():
+                # An open hand over the grip tells that rows can be dragged.
+                on_grip = event.position().x() <= GRIP_W and file_list.itemAt(event.position().toPoint()) is not None
+                if on_grip:
+                    watched.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+                else:
+                    watched.unsetCursor()
             if kind in (QtCore.QEvent.Type.MouseButtonPress, QtCore.QEvent.Type.MouseButtonRelease,
                         QtCore.QEvent.Type.MouseButtonDblClick) and \
                     event.button() == QtCore.Qt.MouseButton.RightButton:
@@ -12393,6 +12588,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _update_file_lists(self) -> None:
         """Update the preprocessed files and behaviors lists with numbered entries."""
         self._behavior_group_cache = None
+        self._pairing_cache = None
         self.list_preprocessed.clear()
         for i, proc in enumerate(self._processed, 1):
             filename = os.path.splitext(os.path.basename(proc.path))[0]
@@ -12407,6 +12603,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             item = QtWidgets.QListWidgetItem(f"{i}. {stem_clean}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, stem)
             self.list_behaviors.addItem(item)
+        if hasattr(self, "lbl_processed_list"):
+            self.lbl_processed_list.setText(f"Processed recordings ({len(self._processed)})")
+            self.lbl_behavior_list.setText(f"Behaviors ({len(self._behavior_sources)})")
         self._refresh_signal_file_combo()
         if hasattr(self, "group_chip_bar"):
             self.group_chip_bar.rebuild()
@@ -12547,7 +12746,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         selected = self.list_preprocessed.selectedItems()
         if not selected:
             return
-        rows = sorted({self.list_preprocessed.row(item) for item in selected}, reverse=True)
+        self._remove_preprocessed_rows([self.list_preprocessed.row(item) for item in selected])
+
+    def _remove_preprocessed_rows(self, rows: List[int]) -> None:
+        """Remove recordings from the session (files on disk are untouched)."""
+        rows = sorted({int(row) for row in rows if 0 <= int(row) < len(self._processed)}, reverse=True)
+        if not rows:
+            return
         for row in rows:
             if 0 <= row < len(self._processed):
                 del self._processed[row]
@@ -12598,8 +12803,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         selected = self.list_behaviors.selectedItems()
         if not selected:
             return
+        self._remove_behavior_rows([self.list_behaviors.row(item) for item in selected])
+
+    def _remove_behavior_rows(self, rows: List[int]) -> None:
+        """Remove behavior sources from the session (files on disk are untouched)."""
         keys = list(self._behavior_sources.keys())
-        rows = sorted({self.list_behaviors.row(item) for item in selected}, reverse=True)
+        rows = sorted({int(row) for row in rows if 0 <= int(row) < len(keys)}, reverse=True)
+        if not rows:
+            return
         for row in rows:
             if 0 <= row < len(keys):
                 key = keys[row]
@@ -12678,7 +12889,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 keys = list(self._behavior_sources.keys())
                 if 0 <= idx < len(keys):
                     candidate = self._behavior_sources.get(keys[idx])
-                    if candidate is not None and not is_mamir(candidate) and not paired_elsewhere(candidate):
+
+                    def named_for_other(key: str) -> bool:
+                        # A file named after another recording belongs to it;
+                        # the line-wise fallback must not reuse it here too.
+                        clean = _strip_ain_suffix(key)
+                        for other in self._processed:
+                            if other is proc:
+                                continue
+                            other_stem = os.path.splitext(os.path.basename(other.path))[0]
+                            if key == other_stem or clean == _strip_ain_suffix(other_stem):
+                                return True
+                        return False
+
+                    if (candidate is not None and not is_mamir(candidate) and not paired_elsewhere(candidate)
+                            and not named_for_other(keys[idx])):
                         info = candidate
         if info is None:
             generic = [source for source in self._behavior_sources.values()

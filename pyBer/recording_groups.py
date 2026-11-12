@@ -28,6 +28,9 @@ UNGROUPED_COLOR = "#8a94a6"
 UNGROUPED_LABEL = "Ungrouped"
 OUTLINE_WIDTH = 1.6     # px, recording outline in the file list
 TAG_DOT = 8             # px, colored dot drawn beside the group name
+ROW_HEIGHT = 28         # px, identical in both lists so rows stay line-aligned
+GRIP_W = 18             # px, drag grip at the left of each row
+CLOSE_W = 24            # px, remove cross at the right of each row
 
 
 def default_group_name(index: int) -> str:
@@ -221,64 +224,131 @@ def color_dot_icon(color: str, size: int = 12) -> QtGui.QIcon:
     return QtGui.QIcon(pixmap)
 
 
-class GroupOutlineDelegate(QtWidgets.QStyledItemDelegate):
-    """Draw the normal list row, then the group outline and a compact tag.
+class FileRowDelegate(QtWidgets.QStyledItemDelegate):
+    """One file row: drag grip, name, pairing note, group outline/tag, remove cross.
 
-    ``resolver(index)`` returns ``(color, name)`` or None. The row text is
-    elided so the tag never overprints the recording name.
+    * ``resolver(index)`` -> ``(color, name)`` of the row's group, or None.
+    * ``note_resolver(index)`` -> ``(text, color)`` shown before the tag, or None
+      (used to flag rows whose behavior pairing is not the same line).
+    * Clicking the cross emits ``removeRequested(row)``; the click never
+      toggles the selection.
+    Rows have a fixed height so the two lists stay line-aligned.
     """
 
+    removeRequested = QtCore.Signal(int)
+
     def __init__(self, resolver: Callable[[QtCore.QModelIndex], Optional[Tuple[str, str]]],
-                 parent: Optional[QtCore.QObject] = None) -> None:
+                 parent: Optional[QtCore.QObject] = None,
+                 note_resolver: Optional[Callable[[QtCore.QModelIndex], Optional[Tuple[str, str]]]] = None) -> None:
         super().__init__(parent)
         self.resolver = resolver
+        self.note_resolver = note_resolver
+
+    # -- geometry ----------------------------------------------------------------
+    @staticmethod
+    def close_rect(rect: QtCore.QRect) -> QtCore.QRectF:
+        r = QtCore.QRectF(rect)
+        return QtCore.QRectF(r.right() - CLOSE_W + 1, r.top(), CLOSE_W - 2, r.height())
+
+    @staticmethod
+    def grip_rect(rect: QtCore.QRect) -> QtCore.QRectF:
+        r = QtCore.QRectF(rect)
+        return QtCore.QRectF(r.left(), r.top(), GRIP_W, r.height())
 
     def sizeHint(self, option, index):
         size = super().sizeHint(option, index)
-        return QtCore.QSize(size.width(), max(size.height(), 26))
+        return QtCore.QSize(size.width() + GRIP_W + CLOSE_W, ROW_HEIGHT)
 
+    # -- interaction ---------------------------------------------------------------
+    def editorEvent(self, event, model, option, index):
+        kind = event.type()
+        if kind in (QtCore.QEvent.Type.MouseButtonPress, QtCore.QEvent.Type.MouseButtonRelease,
+                    QtCore.QEvent.Type.MouseButtonDblClick):
+            if event.button() == QtCore.Qt.MouseButton.LeftButton and \
+                    self.close_rect(option.rect).contains(event.position()):
+                if kind == QtCore.QEvent.Type.MouseButtonRelease:
+                    self.removeRequested.emit(index.row())
+                return True
+        return super().editorEvent(event, model, option, index)
+
+    # -- painting ------------------------------------------------------------------
     def paint(self, painter: QtGui.QPainter, option, index) -> None:
         info = self.resolver(index)
+        note = self.note_resolver(index) if self.note_resolver is not None else None
         opt = QtWidgets.QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         widget = option.widget
         style = widget.style() if widget is not None else QtWidgets.QApplication.style()
-        tag_width = 0
+        metrics = QtGui.QFontMetrics(opt.font)
+        tag_width = note_width = 0
+        tag_name = note_text = ""
         if info is not None:
-            metrics = QtGui.QFontMetrics(opt.font)
-            name = metrics.elidedText(info[1], QtCore.Qt.TextElideMode.ElideRight, 110)
-            tag_width = metrics.horizontalAdvance(name) + TAG_DOT + 18
-            text_width = max(20, opt.rect.width() - tag_width - 16)
-            opt.text = metrics.elidedText(opt.text, QtCore.Qt.TextElideMode.ElideMiddle, text_width)
-        style.drawControl(QtWidgets.QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
-        if info is None:
-            return
-        color = QtGui.QColor(info[0])
+            tag_name = metrics.elidedText(info[1], QtCore.Qt.TextElideMode.ElideRight, 110)
+            tag_width = metrics.horizontalAdvance(tag_name) + TAG_DOT + 14
+        if note is not None:
+            note_text = metrics.elidedText(note[0], QtCore.Qt.TextElideMode.ElideRight, 130)
+            note_width = metrics.horizontalAdvance(note_text) + 10
+        # Background (hover/selection) across the whole row, grip included.
+        style.drawPrimitive(QtWidgets.QStyle.PrimitiveElement.PE_PanelItemViewItem, opt, painter, widget)
+        text_opt = QtWidgets.QStyleOptionViewItem(opt)
+        text_opt.rect = opt.rect.adjusted(GRIP_W, 0, -(CLOSE_W + tag_width + note_width), 0)
+        text_opt.text = metrics.elidedText(opt.text, QtCore.Qt.TextElideMode.ElideMiddle,
+                                           max(20, text_opt.rect.width() - 8))
+        style.drawControl(QtWidgets.QStyle.ControlElement.CE_ItemViewItem, text_opt, painter, widget)
+        selected = bool(opt.state & QtWidgets.QStyle.StateFlag.State_Selected)
+        hovered = bool(opt.state & QtWidgets.QStyle.StateFlag.State_MouseOver)
+        role = QtGui.QPalette.ColorRole.HighlightedText if selected else QtGui.QPalette.ColorRole.Text
+        ink = QtGui.QColor(opt.palette.color(role))
+        rect = QtCore.QRectF(opt.rect)
         painter.save()
         try:
             painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-            pen = QtGui.QPen(color, OUTLINE_WIDTH)
-            painter.setPen(pen)
-            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-            inset = OUTLINE_WIDTH / 2.0 + 1.0
-            painter.drawRoundedRect(QtCore.QRectF(opt.rect).adjusted(inset, inset, -inset, -inset), 5, 5)
-            # Tag: colored dot + name in the row's own text color.
-            rect = QtCore.QRectF(opt.rect)
-            dot_x = rect.right() - tag_width + 6
-            dot = QtCore.QRectF(dot_x, rect.center().y() - TAG_DOT / 2, TAG_DOT, TAG_DOT)
+            # Drag grip: two columns of three dots.
+            grip = QtGui.QColor(ink)
+            grip.setAlpha(150 if hovered or selected else 85)
             painter.setPen(QtCore.Qt.PenStyle.NoPen)
-            painter.setBrush(color)
-            painter.drawEllipse(dot)
-            selected = bool(opt.state & QtWidgets.QStyle.StateFlag.State_Selected)
-            role = QtGui.QPalette.ColorRole.HighlightedText if selected else QtGui.QPalette.ColorRole.Text
-            painter.setPen(opt.palette.color(role))
+            painter.setBrush(grip)
+            cx, cy = rect.left() + GRIP_W / 2.0, rect.center().y()
+            for dx in (-2.5, 2.5):
+                for dy in (-4.5, 0.0, 4.5):
+                    painter.drawEllipse(QtCore.QPointF(cx + dx, cy + dy), 1.3, 1.3)
+            if info is not None:
+                color = QtGui.QColor(info[0])
+                painter.setPen(QtGui.QPen(color, OUTLINE_WIDTH))
+                painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                inset = OUTLINE_WIDTH / 2.0 + 1.0
+                painter.drawRoundedRect(rect.adjusted(inset, inset, -inset, -inset), 5, 5)
             painter.setFont(opt.font)
-            metrics = QtGui.QFontMetrics(opt.font)
-            name = metrics.elidedText(info[1], QtCore.Qt.TextElideMode.ElideRight, 110)
-            painter.drawText(QtCore.QRectF(dot.right() + 5, rect.top(), tag_width, rect.height()),
-                             int(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft), name)
+            x = rect.right() - CLOSE_W - tag_width - note_width
+            if note is not None:
+                painter.setPen(QtGui.QColor(note[1]))
+                painter.drawText(QtCore.QRectF(x + 4, rect.top(), note_width, rect.height()),
+                                 int(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft),
+                                 note_text)
+                x += note_width
+            if info is not None:
+                dot = QtCore.QRectF(x + 4, rect.center().y() - TAG_DOT / 2, TAG_DOT, TAG_DOT)
+                painter.setPen(QtCore.Qt.PenStyle.NoPen)
+                painter.setBrush(QtGui.QColor(info[0]))
+                painter.drawEllipse(dot)
+                painter.setPen(ink)
+                painter.drawText(QtCore.QRectF(dot.right() + 5, rect.top(), tag_width, rect.height()),
+                                 int(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft),
+                                 tag_name)
+            # Remove cross: quiet until the row is hovered or selected.
+            cross = QtGui.QColor(ink)
+            cross.setAlpha(230 if hovered else 140 if selected else 70)
+            box = self.close_rect(opt.rect)
+            c = box.center()
+            painter.setPen(QtGui.QPen(cross, 1.4, QtCore.Qt.PenStyle.SolidLine, QtCore.Qt.PenCapStyle.RoundCap))
+            painter.drawLine(QtCore.QPointF(c.x() - 3.5, c.y() - 3.5), QtCore.QPointF(c.x() + 3.5, c.y() + 3.5))
+            painter.drawLine(QtCore.QPointF(c.x() - 3.5, c.y() + 3.5), QtCore.QPointF(c.x() + 3.5, c.y() - 3.5))
         finally:
             painter.restore()
+
+
+# Backward-compatible name.
+GroupOutlineDelegate = FileRowDelegate
 
 
 # ---------------------------------------------------------------------------
