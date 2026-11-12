@@ -154,7 +154,9 @@ class BehaviorGroupTests(unittest.TestCase):
             row = pd.read_csv(path).iloc[0]
             self.assertEqual(row["scope"], "group")
             self.assertEqual((row["recordings"], row["events"]), (2, 4))
-            self.assertEqual((row["during"], row["during_sem"]), (5., 3.))
+            # SEM is a float reduction; BLAS/numpy builds differ in the last ulp.
+            self.assertAlmostEqual(row["during"], 5., places=12)
+            self.assertAlmostEqual(row["during_sem"], 3., places=12)
             self.assertEqual(row["before_window_s"], view.before.value())
             self.assertEqual(row["signal_units"], "dFF")
             self.assertEqual(json.loads(row["recording_ids"]), ["mouse_a", "mouse_b"])
