@@ -241,7 +241,7 @@ Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neuropho
 ## What changed in v0.57.2
 
 - Fix: postprocessing drawers opened after a wider one (e.g. Setup) kept a stale width, so right-hand fields (PSTH, Events, Spatial) were cut off, most visibly at 100% display scaling.
-- Fix: the paired Pre/Post and Start/End fields no longer spill past their card edge.
+- Fix: the paired Pre/Post and Start/End fields no longer spill past their card edge; small (1024 px) windows wrap labels instead of clipping fields.
 - Every build now audits the packaged app itself: it opens every settings drawer and fails if any numeric value is hidden or clipped. Releases publish automatically when the version changes ([how](docs/releasing.md)).
 - See [release notes](docs/releases/v0.57.2.md).
 

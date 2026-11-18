@@ -28,7 +28,7 @@ from analysis_core import (
     SMART_ARTIFACT_MODE,
 )
 from sensor_registry import SENSOR_UNKNOWN
-from numeric_controls import with_slider
+from numeric_controls import with_slider, allow_form_wrapping
 from file_drop import install_file_drop
 
 
@@ -849,31 +849,32 @@ class ArtifactPanel(QtWidgets.QDialog):
             ed.setDecimals(3)
             ed.setRange(-1e9, 1e9)
             ed.setKeyboardTracking(False)
-            ed.setMinimumWidth(96)
+            ed.setMinimumWidth(72)
             ed.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
 
         self.btn_add = QtWidgets.QPushButton("Add")
         self.btn_update = QtWidgets.QPushButton("Update selected")
         self.btn_del = QtWidgets.QPushButton("Delete selected")
         self.btn_clear = QtWidgets.QPushButton("Clear manual")
+        self.btn_close = QtWidgets.QPushButton("Close")
 
         addrow.addWidget(QtWidgets.QLabel("Start:"))
-        addrow.addWidget(self.ed_start)
+        addrow.addWidget(self.ed_start, 1)
         addrow.addWidget(QtWidgets.QLabel("End:"))
-        addrow.addWidget(self.ed_end)
-        addrow.addStretch(1)
-        addrow.addWidget(self.btn_add)
+        addrow.addWidget(self.ed_end, 1)
         manual_layout.addLayout(addrow)
 
-        btnrow = QtWidgets.QHBoxLayout()
-        btnrow.addWidget(self.btn_update)
-        btnrow.addWidget(self.btn_del)
-        btnrow.addWidget(self.btn_clear)
-        btnrow.addStretch(1)
-
-        self.btn_close = QtWidgets.QPushButton("Close")
-        btnrow.addWidget(self.btn_close)
-        manual_layout.addLayout(btnrow)
+        # Two buttons per row: the panel lives in a narrow drawer, and one row
+        # of five buttons forced it wider than the screen on small laptops,
+        # clipping the threshold fields above.
+        btngrid = QtWidgets.QGridLayout()
+        btngrid.setHorizontalSpacing(6)
+        btngrid.setVerticalSpacing(6)
+        for index, button in enumerate((self.btn_add, self.btn_update, self.btn_del,
+                                        self.btn_clear, self.btn_close)):
+            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+            btngrid.addWidget(button, index // 2, index % 2)
+        manual_layout.addLayout(btngrid)
         layout.addWidget(manual_group, 1)
 
         self.btn_add.clicked.connect(self._on_add)
@@ -1811,6 +1812,9 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self._config_state_importer: Optional[Callable[[Dict[str, object]], None]] = None
         self._sensor_id = SENSOR_UNKNOWN
         self._build_ui()
+        # Narrow drawers (small laptop screens) wrap label above field instead
+        # of clipping the numeric fields on the right.
+        allow_form_wrapping(self)
         self._wire()
 
     def _build_help_texts(self) -> Dict[str, str]:

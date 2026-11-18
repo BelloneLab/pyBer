@@ -447,6 +447,17 @@ def wrap_form_spinbox(spin: QtWidgets.QAbstractSpinBox) -> bool:
     return True
 
 
+def allow_form_wrapping(root: QtWidgets.QWidget) -> None:
+    """Let every form under ``root`` put a label above its field when needed.
+
+    With Qt's default (never wrap), a narrow drawer clips the right-hand
+    field instead. Wrapping only happens when label and field do not fit side
+    by side, so wide windows keep the usual two-column layout.
+    """
+    for form in root.findChildren(QtWidgets.QFormLayout):
+        form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+
+
 def add_sliders_to_forms(root: QtWidgets.QWidget) -> int:
     """Pair every standalone numeric form field under ``root`` with a slider."""
     return sum(wrap_form_spinbox(spin) for spin in root.findChildren(QtWidgets.QAbstractSpinBox))

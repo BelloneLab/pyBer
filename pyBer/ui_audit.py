@@ -95,8 +95,21 @@ def audit_spinboxes(root: QtWidgets.QWidget, where: str) -> List[Dict[str, objec
     return failures
 
 
-def run_ui_audit(window: QtWidgets.QMainWindow, out_dir: str) -> List[Dict[str, object]]:
-    """Open every drawer/subsection of ``window``, audit it and save evidence."""
+# Window sizes audited: a desktop monitor and a small laptop (1366x768 at
+# 125% scaling, or GitHub's 1024x768 build machine). Fields must stay visible
+# at both, since users resize and drawers get narrow.
+AUDIT_SIZES = ((1500, 950), (1024, 700))
+
+
+def _close_overlays(window: QtWidgets.QWidget) -> None:
+    """Hide the first-run tutorial so it cannot cover the audited drawers."""
+    for child in window.findChildren(QtWidgets.QWidget):
+        if type(child).__name__ == "TutorialOverlay" and child.isVisible():
+            child.hide()
+
+
+def run_ui_audit(window: QtWidgets.QMainWindow, out_dir: str, sizes=AUDIT_SIZES) -> List[Dict[str, object]]:
+    """Open every drawer/subsection of ``window`` at each size, audit, save evidence."""
     app = QtWidgets.QApplication.instance()
     os.makedirs(out_dir, exist_ok=True)
     failures: List[Dict[str, object]] = []
@@ -104,41 +117,46 @@ def run_ui_audit(window: QtWidgets.QMainWindow, out_dir: str) -> List[Dict[str, 
 
     def check(name: str) -> None:
         _settle(app)
+        _close_overlays(window)
         found = audit_spinboxes(window, name)
         count = sum(1 for s in window.findChildren(QtWidgets.QAbstractSpinBox) if s.isVisible())
-        visited.append({"view": name, "visible_numeric_fields": count, "failures": len(found)})
+        visited.append({"view": name, "visible_numeric_fields": count, "failures": len(found),
+                        "window": [window.width(), window.height()]})
         failures.extend(found)
         window.grab().save(os.path.join(out_dir, f"{name}.png"))
 
-    window.resize(1500, 950)
     window.show()
-    _settle(app, 30)
+    for width, height in sizes:
+        window.resize(width, height)
+        _settle(app, 30)
+        _close_overlays(window)
+        tag = f"{window.width()}x{window.height()}"
 
-    # Preprocessing drawers.
-    if hasattr(window, "tabs"):
-        window.tabs.setCurrentIndex(0)
-    for key, button in getattr(window, "_section_buttons", {}).items():
-        if not button.isChecked():
-            button.click()
-        check(f"pre_{key}")
+        # Preprocessing drawers.
+        if hasattr(window, "tabs"):
+            window.tabs.setCurrentIndex(0)
+        for key, button in getattr(window, "_section_buttons", {}).items():
+            if not button.isChecked():
+                button.click()
+            check(f"{tag}_pre_{key}")
 
-    # Postprocessing drawers, including every vertical subsection.
-    post = getattr(window, "post_tab", None)
-    if post is not None and hasattr(window, "tabs"):
-        window.tabs.setCurrentIndex(window.tabs.indexOf(post))
-        _settle(app, 20)
-        for key, button in getattr(post, "_section_buttons", {}).items():
-            if key == "sync":
-                continue  # opens a separate window
-            button.setChecked(True)
-            _settle(app)
-            nav = getattr(post, f"{key}_subsections", None)
-            if nav is None:
-                check(f"post_{key}")
-                continue
-            for index in range(nav.count()):
-                nav.setCurrentIndex(index)
-                check(f"post_{key}_{nav.sectionTitle(index).lower()}")
+        # Postprocessing drawers, including every vertical subsection.
+        post = getattr(window, "post_tab", None)
+        if post is not None and hasattr(window, "tabs"):
+            window.tabs.setCurrentIndex(window.tabs.indexOf(post))
+            _settle(app, 20)
+            for key, button in getattr(post, "_section_buttons", {}).items():
+                if key == "sync":
+                    continue  # opens a separate window
+                button.setChecked(True)
+                _settle(app)
+                nav = getattr(post, f"{key}_subsections", None)
+                if nav is None:
+                    check(f"{tag}_post_{key}")
+                    continue
+                for index in range(nav.count()):
+                    nav.setCurrentIndex(index)
+                    check(f"{tag}_post_{key}_{nav.sectionTitle(index).lower()}")
 
     report = {
         "qt_version": QtCore.qVersion(),

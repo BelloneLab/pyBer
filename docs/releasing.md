@@ -30,8 +30,8 @@ tag by hand still works, but it must match `version.py`.
 
 The UI audit runs inside the frozen executable (`PYBER_UI_AUDIT=<folder>`), so
 it tests the Qt version that is actually shipped. It opens every preprocessing
-and postprocessing drawer and subsection and checks every visible numeric
-field. Its screenshots and `ui_audit.json` are attached to each run as the
+and postprocessing drawer and subsection, at 1500x950 and at a small-laptop
+1024x700, and checks every visible numeric field. Its screenshots and `ui_audit.json` are attached to each run as the
 `ui-audit` artifact. It exists because v0.57 shipped with Qt 6.11.3, which hid
 every parameter value while all unit tests passed on the developer's Qt.
 
