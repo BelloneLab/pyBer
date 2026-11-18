@@ -41,6 +41,35 @@ def _event_local_pos(event: QtCore.QEvent) -> QtCore.QPoint:
             return QtCore.QPoint()
 
 
+# Editor inset matching the app stylesheet (1 px border + 8 px padding).
+_EDITOR_INSET_X = 9
+_MIN_EDITOR_HEIGHT = 18
+
+
+def ensure_editor_visible(spin: QtWidgets.QAbstractSpinBox) -> bool:
+    """Re-place a spin box's text editor when the Qt style collapsed it.
+
+    Qt 6.11.3 lays out the editor of a style-sheeted spin box without arrow
+    buttons as a 1 px wide strip, so the value is invisible although it is
+    still stored and editable. When that happens the editor gets the full
+    inner box (minus border and padding, vertically centred). Healthy layouts
+    are left untouched. Returns True when a correction was applied.
+    """
+    if not _is_alive(spin):
+        return False
+    editor = spin.lineEdit()
+    if editor is None or not _is_alive(editor):
+        return False
+    rect = spin.rect()
+    inner_width = rect.width() - 2 * _EDITOR_INSET_X
+    if inner_width <= 0 or editor.width() >= inner_width // 2:
+        return False
+    height = min(rect.height() - 2, max(_MIN_EDITOR_HEIGHT, editor.sizeHint().height()))
+    top = max(0, (rect.height() - height) // 2)
+    editor.setGeometry(_EDITOR_INSET_X, top, inner_width, height)
+    return True
+
+
 class SpinBoxScrubber(QtCore.QObject):
     """Keep numeric fields editable, with optional Alt-drag adjustment.
 
@@ -50,6 +79,11 @@ class SpinBoxScrubber(QtCore.QObject):
     """
 
     _CONFIGURED_PROP = "_pyber_spin_scrubber_configured"
+    _SLIDER_PROP = "_pyber_slider_checked"
+    _GEOMETRY_EVENTS = (
+        QtCore.QEvent.Type.Show, QtCore.QEvent.Type.Resize,
+        QtCore.QEvent.Type.StyleChange, QtCore.QEvent.Type.FontChange,
+    )
 
     def __init__(self, parent: Optional[QtCore.QObject] = None) -> None:
         super().__init__(parent)
@@ -86,6 +120,14 @@ class SpinBoxScrubber(QtCore.QObject):
         spin = self._spinbox_for_object(obj)
         if spin is None:
             return False
+        if obj is spin and etype in self._GEOMETRY_EVENTS:
+            # Run after Qt has placed the editor for this event.
+            QtCore.QTimer.singleShot(0, lambda s=spin: ensure_editor_visible(s))
+        if obj is spin and etype == QtCore.QEvent.Type.Show and not spin.property(self._SLIDER_PROP):
+            # Every standalone numeric setting gets a slider the first time it
+            # is shown, wherever it lives (drawers, dialogs built later).
+            spin.setProperty(self._SLIDER_PROP, True)
+            QtCore.QTimer.singleShot(0, lambda s=spin: wrap_form_spinbox(s))
         if etype in (
             QtCore.QEvent.Type.MouseButtonPress,
             QtCore.QEvent.Type.Wheel,
@@ -326,6 +368,12 @@ class NumericSlider(QtWidgets.QWidget):
             QtCore.QEvent.Type.ReadOnlyChange,
         ):
             self._sync_from_spin()
+        # Code that hides/shows the numeric field (conditional settings rows)
+        # must hide/show the whole slider row with it.
+        if obj is self.spin and event.type() == QtCore.QEvent.Type.HideToParent:
+            self.setVisible(False)
+        elif obj is self.spin and event.type() == QtCore.QEvent.Type.ShowToParent:
+            self.setVisible(True)
         if obj is self.slider and event.type() == QtCore.QEvent.Type.Wheel and not self.slider.hasFocus():
             event.ignore()
             return True
@@ -335,6 +383,73 @@ class NumericSlider(QtWidgets.QWidget):
 def with_slider(spin, *, logarithmic: bool = False) -> NumericSlider:
     """Use in a settings layout while retaining the original spin-box attribute."""
     return NumericSlider(spin, logarithmic=logarithmic)
+
+
+def _wants_log_scale(spin: QtWidgets.QAbstractSpinBox) -> bool:
+    """Log mapping when the range spans more than two decades above its floor.
+
+    A linear thumb over e.g. 0-1e6 would make every useful value sit in the
+    first pixel; log1p mapping keeps small values reachable and still includes 0.
+    """
+    low, high = spin.minimum(), spin.maximum()
+    if low < 0 or high <= low:
+        return False
+    step = 10 ** (-spin.decimals()) if isinstance(spin, QtWidgets.QDoubleSpinBox) else 1
+    return (high - low) / max(abs(low), step, 1e-12) > 100 and (high - low) > 100 * step
+
+
+NO_SLIDER_PROP = "_pyber_no_slider"
+
+
+def _form_slot(spin: QtWidgets.QAbstractSpinBox):
+    """Return ``(form, row)`` when ``spin`` is directly the field of a form row."""
+    parent = spin.parentWidget()
+    if parent is None or isinstance(parent, NumericSlider):
+        return None
+    forms = parent.findChildren(QtWidgets.QFormLayout)
+    if isinstance(parent.layout(), QtWidgets.QFormLayout):
+        forms.insert(0, parent.layout())
+    for form in forms:
+        if form.indexOf(spin) < 0:
+            continue
+        row, role = form.getWidgetPosition(spin)
+        if row >= 0 and role == QtWidgets.QFormLayout.ItemRole.FieldRole:
+            return form, row
+    return None
+
+
+def wrap_form_spinbox(spin: QtWidgets.QAbstractSpinBox) -> bool:
+    """Pair a standalone form-row spin box with a slider; True when converted.
+
+    Only rows whose *field* is the bare spin box are converted, so paired rows
+    (Start/End, Pre/Post) and custom composite rows keep their layout. The spin
+    box object, its signals and attribute names are unchanged, so existing
+    wiring keeps working. Set the ``_pyber_no_slider`` property to opt out.
+    """
+    if not _is_alive(spin) or isinstance(spin, QtWidgets.QDateTimeEdit):
+        return False
+    if spin.isReadOnly() or bool(spin.property(NO_SLIDER_PROP)):
+        return False
+    if spin.minimum() < 0 and spin.maximum() - spin.minimum() >= 1e5:
+        # Effectively unbounded signed fields (e.g. exact colour limits): a
+        # thumb position would carry no meaning, keep the typed field only.
+        return False
+    slot = _form_slot(spin)
+    if slot is None:
+        return False
+    form, row = slot
+    explicitly_hidden = spin.isHidden()
+    form.removeWidget(spin)
+    wrapper = NumericSlider(spin, logarithmic=_wants_log_scale(spin))
+    form.setWidget(row, QtWidgets.QFormLayout.ItemRole.FieldRole, wrapper)
+    spin.setVisible(not explicitly_hidden)
+    wrapper.setVisible(not explicitly_hidden)
+    return True
+
+
+def add_sliders_to_forms(root: QtWidgets.QWidget) -> int:
+    """Pair every standalone numeric form field under ``root`` with a slider."""
+    return sum(wrap_form_spinbox(spin) for spin in root.findChildren(QtWidgets.QAbstractSpinBox))
 
 
 def install_spinbox_scrubbers(app: QtWidgets.QApplication) -> SpinBoxScrubber:

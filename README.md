@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.57"><img src="https://img.shields.io/badge/release-v0.57-7c4dff" alt="v0.57 release"></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.57.1"><img src="https://img.shields.io/badge/release-v0.57.1-7c4dff" alt="v0.57.1 release"></a>
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-41cd52?logo=qt&logoColor=white" alt="PySide6 and pyqtgraph">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white" alt="Windows">
@@ -18,9 +18,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.57/pyBer-windows.exe"><strong>Download the Windows GUI (exe)</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.57.1/pyBer-windows.exe"><strong>Download the Windows GUI (exe)</strong></a>
   &nbsp;|&nbsp;
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.57/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.57.1/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
   &nbsp;|&nbsp;
   <a href="docs/index.md"><strong>Read the full guide</strong></a>
 </p>
@@ -236,7 +236,14 @@ The flagged table collects processing failures, excessive artifact load, poor fi
 | Processed data | Self-describing CSV with `.pyber.json` sidecar and HDF5 with embedded metadata. |
 | Reports | Preprocessing PNG, strict QC report images, batch summaries, flagged-recording tables, analysis CSVs, model tables, and publication figure exports. |
 
-Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.57 builds target Windows; source execution on other platforms is not part of the tested release path.
+Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.57.1 builds target Windows; source execution on other platforms is not part of the tested release path.
+
+## What changed in v0.57.1
+
+- Fix: parameter values were invisible in every numeric field of the v0.57 Windows build (Qt 6.11.3 layout bug). Values show again everywhere and can be typed exactly.
+- Every single-value numeric setting now has a slider next to its field; typed values keep full precision.
+- Fix: the Behavior drawer no longer overflows sideways; footer buttons stack when the drawer is narrow.
+- See [release notes](docs/releases/v0.57.1.md).
 
 ## What changed in v0.57
 

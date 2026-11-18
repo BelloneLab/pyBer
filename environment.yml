@@ -39,7 +39,9 @@ dependencies:
   - opencv>=4.13
 
   # GUI
-  - pyside6>=6.6
+  # Pinned: Qt 6.11.3 hides the text of style-sheeted spin boxes (values looked
+  # empty in v0.57). 6.11.2 is the version every release check ran on.
+  - pyside6=6.11.2
   - pyqtgraph>=0.13
   - matplotlib>=3.8
 

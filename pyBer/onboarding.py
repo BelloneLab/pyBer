@@ -1151,9 +1151,40 @@ class FooterActions(QtWidgets.QFrame):
         self._status.hide()
         lay.addWidget(self._status, 1)
 
-        self._right = QtWidgets.QHBoxLayout()
+        # Buttons sit in one row when they fit, otherwise they stack (see
+        # resizeEvent) so a narrow drawer never has to scroll sideways.
+        self._right = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.Direction.LeftToRight)
         self._right.setSpacing(6)
         lay.addLayout(self._right)
+
+    def _buttons(self) -> list:
+        """Visible action widgets in the right-hand group."""
+        items = (self._right.itemAt(i).widget() for i in range(self._right.count()))
+        return [w for w in items if w is not None and not w.isHidden()]
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        """Narrowest useful width: the widest single button (stacked layout)."""
+        hint = super().minimumSizeHint()
+        buttons = self._buttons()
+        if not buttons:
+            return hint
+        m = self.layout().contentsMargins()
+        width = max(b.minimumSizeHint().width() for b in buttons) + m.left() + m.right()
+        return QtCore.QSize(width, hint.height())
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        """Stack the buttons vertically when one row does not fit."""
+        buttons = self._buttons()
+        if buttons:
+            m = self.layout().contentsMargins()
+            row = sum(b.sizeHint().width() for b in buttons) + self._right.spacing() * (len(buttons) - 1)
+            fits = event.size().width() >= row + m.left() + m.right()
+            direction = (QtWidgets.QBoxLayout.Direction.LeftToRight if fits
+                         else QtWidgets.QBoxLayout.Direction.TopToBottom)
+            if self._right.direction() != direction:
+                self._right.setDirection(direction)
+                self.updateGeometry()
+        super().resizeEvent(event)
 
     def set_status(self, text: str) -> None:
         status_text = str(text or "")
