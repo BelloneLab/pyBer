@@ -17,6 +17,7 @@ from PySide6 import QtWidgets
 from numeric_controls import (NumericSlider, ensure_editor_visible, wrap_form_spinbox,
                               add_sliders_to_forms, NO_SLIDER_PROP)
 from onboarding import FooterActions
+from ui_audit import audit_spinboxes
 from styles import app_qss
 
 
@@ -117,6 +118,22 @@ class NumericFieldVisibilityTest(unittest.TestCase):
         host.resize(900, 200); self.app.processEvents()
         self.assertEqual(footer._right.direction(), QtWidgets.QBoxLayout.Direction.LeftToRight)
         host.close()
+
+    def test_audit_flags_hidden_values_and_passes_healthy_fields(self):
+        """The release gate must fail on the exact v0.57 symptom."""
+        page = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(page)
+        spin = QtWidgets.QDoubleSpinBox(); spin.setValue(8.742)
+        form.addRow("MAD threshold", spin)
+        page.resize(300, 80); page.show(); self.app.processEvents()
+        ensure_editor_visible(spin)
+        self.assertEqual(audit_spinboxes(page, "healthy"), [])
+        spin.lineEdit().setGeometry(0, 6, 1, 22)  # Qt 6.11.3 collapse
+        failures = audit_spinboxes(page, "collapsed")
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["problem"], "collapsed editor")
+        self.assertEqual(failures[0]["text"], spin.text())
+        page.close()
 
 
 if __name__ == "__main__":

@@ -594,3 +594,6 @@ dist\pyBer\pyBer.exe
 
 When building with FLMM support, make sure `fastFMM` is installed before running
 PyInstaller.
+
+Releases are built, checked and published automatically on push; see
+[Releasing pyBer](releasing.md).

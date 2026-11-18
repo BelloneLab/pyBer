@@ -2225,7 +2225,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             g.addWidget(la, 0, 0); g.addWidget(w_a, 0, 1)
             g.addWidget(lb, 0, 2); g.addWidget(w_b, 0, 3)
             g.setColumnStretch(1, 1); g.setColumnStretch(3, 1)
-            w = QtWidgets.QWidget(); w.setLayout(g); return w
+            w = QtWidgets.QWidget(); w.setLayout(g)
+            # The fields shrink freely (Ignored policy), so the row's size hint
+            # is smaller than what its labels + fields really need. Declare the
+            # true minimum so the form wraps or widens instead of letting the
+            # right-hand field spill past the card edge at 100% scaling.
+            w.setMinimumWidth(g.minimumSize().width())
+            return w
 
         win_widget = _dual_row("Pre:", self.spin_pre, "Post:", self.spin_post)
         base_widget = _dual_row("Start:", self.spin_b0, "End:", self.spin_b1)
@@ -5520,7 +5526,27 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 dock.raiseDock()
             except Exception:
                 pass
+            self._fit_dock_to_drawer(dock)
+            QtCore.QTimer.singleShot(0, lambda d=dock: self._fit_dock_to_drawer(d))
         self._last_opened_section = key
+
+    @staticmethod
+    def _fit_dock_to_drawer(dock) -> None:
+        """Give a newly raised drawer page exactly the drawer's width.
+
+        The dock-area tab stack only resizes its *current* page, so a page
+        raised later can keep a stale, wider geometry (e.g. after Setup was
+        open). Its right-hand fields were then drawn outside the drawer and
+        clipped. Snap the page to its container whenever it is raised.
+        """
+        try:
+            parent = dock.parentWidget()
+            if isinstance(parent, QtWidgets.QStackedWidget) and parent.currentWidget() is dock:
+                rect = parent.contentsRect()
+                if dock.geometry() != rect:
+                    dock.setGeometry(rect)
+        except RuntimeError:
+            pass  # dock deleted while the deferred call was queued
 
     def _on_dockarea_dock_closed(self, key: str) -> None:
         self._set_section_button_checked(key, False)

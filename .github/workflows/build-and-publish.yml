@@ -1,5 +1,10 @@
 name: Build and Publish
 
+# Every push to main: tests, Windows executables, and a check of the packaged
+# UI itself (PYBER_UI_AUDIT). When pyBer/version.py names a version that has no
+# GitHub release yet, the same run publishes it. To release: bump the version,
+# add docs/releases/<tag>.md, push. No manual tag is needed (pushing one still
+# works and must match version.py).
 on:
   push:
     branches: [main, master, Pyber_v0.15]
@@ -11,8 +16,11 @@ on:
 permissions:
   contents: write
 
-env:
-  RELEASE_VERSION: v0.57.1
+# A newer push to the same branch supersedes an unfinished build of it.
+# Tag builds are never cancelled.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build-windows:
@@ -25,6 +33,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache conda packages
+        uses: actions/cache@v4
+        with:
+          path: ~/conda_pkgs_dir
+          key: conda-pkgs-${{ runner.os }}-${{ hashFiles('environment.yml') }}
 
       - name: Set up Conda environment
         uses: conda-incubator/setup-miniconda@v3
@@ -42,6 +56,7 @@ jobs:
           python -m pip --version
           python -m PyInstaller --version
           python -c "import os, sys; print('CONDA_PREFIX=', os.environ.get('CONDA_PREFIX')); print('PYTHON=', sys.executable)"
+          python -c "import PySide6, PySide6.QtCore as c; print('PySide6', PySide6.__version__, 'Qt', c.qVersion())"
 
       - name: Ensure icon asset
         run: |
@@ -99,6 +114,30 @@ jobs:
           ./dist/pyBer.exe
           ./dist/pyBer-cli.exe --version
 
+      # The release gate that would have stopped v0.57: the packaged app (with
+      # the Qt it actually bundles) opens every settings drawer and fails if a
+      # numeric value is hidden or clipped.
+      - name: Audit packaged UI
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $env:PYBER_UI_AUDIT = Join-Path $PWD "ui-audit"
+          $p = Start-Process -FilePath "dist\pyBer.exe" -Wait -PassThru
+          $report = Join-Path $env:PYBER_UI_AUDIT "ui_audit.json"
+          if (-not (Test-Path $report)) { Write-Error "The packaged app wrote no UI audit report"; exit 1 }
+          $r = Get-Content $report -Raw | ConvertFrom-Json
+          Write-Host "Qt $($r.qt_version): $($r.numeric_fields_checked) numeric fields in $($r.views.Count) views, $($r.failures.Count) failures"
+          foreach ($f in $r.failures) { Write-Host "::error::$($f.where) $($f.field) '$($f.text)': $($f.problem)" }
+          exit $p.ExitCode
+
+      - name: Upload UI audit screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-audit
+          path: ui-audit
+          if-no-files-found: ignore
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -113,22 +152,51 @@ jobs:
     if: |
       needs.build-windows.result == 'success' && (
         github.event_name == 'workflow_dispatch' ||
-        (
-          github.event_name == 'push' &&
-          startsWith(github.ref, 'refs/tags/')
-        )
+        (github.event_name == 'push' && (
+          startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'))
       )
     runs-on: ubuntu-latest
+    # Main and tag runs of one commit publish one after the other; the second
+    # finds the release already there and skips.
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Decide release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          tag="$(python3 scripts/release_tag.py)"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match pyBer/version.py ($tag)"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ ! -f "docs/releases/$tag.md" ]]; then
+            echo "::error::New version $tag has no release notes: add docs/releases/$tag.md"
+            exit 1
+          fi
+          echo "Publishing new release $tag"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
       - name: Download Windows Artifact
+        if: steps.tag.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
           name: pyber-windows-exe
           path: ./publish
 
       - name: Normalize Release Asset Name
+        if: steps.tag.outputs.publish == 'true'
         run: |
           set -euo pipefail
           gui_path="$(find ./publish -type f -name 'pyBer.exe' | head -n 1 || true)"
@@ -143,16 +211,26 @@ jobs:
           (cd publish && sha256sum pyBer-windows.exe pyBer-cli-windows.exe > SHA256SUMS.txt)
 
       - name: Create Release
+        if: steps.tag.outputs.publish == 'true'
         uses: ncipollo/release-action@v1
         with:
           artifacts: "./publish/pyBer-windows.exe,./publish/pyBer-cli-windows.exe,./publish/SHA256SUMS.txt"
-          bodyFile: docs/releases/${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || env.RELEASE_VERSION }}.md
+          bodyFile: docs/releases/${{ steps.tag.outputs.tag }}.md
           token: ${{ secrets.GITHUB_TOKEN }}
           generateReleaseNotes: true
           allowUpdates: true
           removeArtifacts: true
           replacesArtifacts: true
-          tag: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || env.RELEASE_VERSION }}
-          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || env.RELEASE_VERSION }}
+          tag: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
           commit: ${{ github.sha }}
           prerelease: false
+
+      - name: Verify published assets
+        if: steps.tag.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          mkdir verify
+          gh release download "${{ steps.tag.outputs.tag }}" -D verify
+          (cd verify && sha256sum -c ../publish/SHA256SUMS.txt)
+          echo "Published assets match the tested build."

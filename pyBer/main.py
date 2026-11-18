@@ -9086,6 +9086,25 @@ def main() -> None:
     w = MainWindow()
     spinbox_scrubber.scan(w)
 
+    audit_dir = str(os.environ.get("PYBER_UI_AUDIT", "")).strip()
+    if audit_dir:
+        # Release gate: audit the real UI of this (possibly frozen) build and
+        # exit non-zero when any numeric value is hidden or clipped.
+        from ui_audit import run_ui_audit
+        status = 1
+        try:
+            failures = run_ui_audit(w, audit_dir)
+            with open(os.path.join(audit_dir, "ui_audit.json"), encoding="utf-8") as stream:
+                checked = json.load(stream).get("numeric_fields_checked", 0)
+            status = 1 if failures or checked == 0 else 0
+        finally:
+            try:
+                w.close()
+            except Exception:
+                pass
+            app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        sys.exit(status)
+
     if smoke_test:
         try:
             w.show()
