@@ -36,7 +36,8 @@ from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
 from numeric_controls import DurationSpinBox, with_slider
 from adaptive_density import KEEP_ROW_PROPERTY, install_adaptive_density
-from psth_metrics import METRICS, metric_id, summarize_metrics, draw_metric_matplotlib, export_selected_metrics
+from psth_metrics import (METRICS, metric_id, summarize_metrics, draw_metric_matplotlib,
+                          export_selected_metrics, write_group_comparisons)
 from psth_metric_panels import MetricPanel, MetricGrid
 from aligned_time_axes import AlignedTimeAxes
 from postprocessing_view_controls import split_plot_layout, PlotSplitterPreferences, create_view_menu, compact_results_toolbar
@@ -44,7 +45,9 @@ from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_m
 from vector_figure_export import write_vector_figure
 from recording_groups import (RecordingGroups, GroupChipBar, FileRowDelegate, DetachableSection,
                               build_assign_menu, color_dot_icon, UNGROUPED_COLOR, GRIP_W, ROW_HEIGHT)
-from psth_groups import HeatmapGroupBands, build_group_display, block_summaries, block_ticks, legend_label
+from psth_groups import (HeatmapGroupBands, build_group_display, block_summaries, block_ticks, legend_label,
+                         row_file_id, draw_group_comparison)
+from group_stats import compare_groups, per_file_means, stats_label, comparison_rows
 from dashboard_panels import DashboardPanels, GridRowHandle, HANDLE_PX, seamless_figure_qss, draw_global_metric
 from file_drop import install_file_drop, expand_paths
 from behavior_import import (infer_table, read_behavior_csv, detect_time_column, detect_onset_table,
@@ -9830,6 +9833,27 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._schedule_psth()
             self._queue_settings_save()
 
+    def _open_event_list(self) -> None:
+        """Non-modal list of every behavior event (timing, duration) with hide/remove."""
+        from event_list_dialog import EventListWindow
+        window = getattr(self, "_event_list_window", None)
+        if window is None:
+            window = EventListWindow(self)
+            self._event_list_window = window
+        window.reload()
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _on_event_exclusions_changed(self) -> None:
+        """Re-run everything that consumes events after a hide/remove/restore."""
+        if not self._autosave_restoring:
+            self._project_dirty = True
+        self._schedule_psth()
+        if self.behavior_zone_panel is not None:
+            self.behavior_zone_panel._queue_comparison()
+        self._update_status_strip()
+
     def _behavior_kinds_label(self) -> str:
         """Describe how loaded sources were actually parsed (auto-detection may differ per file)."""
         kinds = {
@@ -13207,6 +13231,29 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 colors.append(self._group_color_for_file(file_id))
         return colors
 
+    def _global_group_comparison(self, key: str):
+        """Per-group values of one global metric (one per recording) + between-group test."""
+        if self._group_view_state()[0] != "all":
+            return None
+        info = getattr(self, "_last_global_results", None) or {}
+        by_group: Dict[Optional[str], List[Tuple[str, float]]] = {}
+        for file_id, row in zip(info.get("file_ids", []), info.get("results", [])):
+            by_group.setdefault(self.recording_groups.group_id_of(file_id), []).append(
+                (file_id, float(row.get(key, np.nan))))
+        groups = []
+        for group in self.recording_groups.groups() + [None]:
+            gid = group["id"] if group else None
+            members = by_group.get(gid, [])
+            if not members:
+                continue
+            groups.append({"name": group["name"] if group else "Ungrouped",
+                           "color": group["color"] if group else UNGROUPED_COLOR,
+                           "values": [value for _, value in members], "ids": [fid for fid, _ in members],
+                           "tested": gid is not None})
+        if sum(1 for group in groups if group["tested"]) < 2:
+            return None
+        return compare_groups(groups)
+
     def _on_group_view_changed(self, *_args: object) -> None:
         if self._is_restoring_settings:
             return
@@ -13252,6 +13299,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
             colors = None
             if self._group_view_state()[0] == "all":
                 colors = [self._group_color_for_file(fid) for fid in info.get("file_ids", [])]
+            comparison = self._global_group_comparison(code)
+            if comparison is not None and code in GLOBAL_SIGNAL_METRICS:
+                widget.clear()
+                draw_group_comparison(widget, comparison, str(palette["text"]))
+                widget.setTitle(f"{GLOBAL_SIGNAL_METRICS[code]['label']} · {stats_label(comparison)}",
+                                color=palette["text"], size="10pt")
+                widget.setLabel("left", GLOBAL_SIGNAL_METRICS[code]["unit"])
+                set_plot_has_data(widget, True)
+                return
             ok = draw_global_metric(widget, code, values, bool(info.get("grouped", False)), palette, colors)
             set_plot_has_data(widget, ok)
 
@@ -14595,7 +14651,40 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.sync_status.set(f"Exported aligned time files for {count} recording(s).", "ok")
         self.statusUpdate.emit(f"Aligned time export complete: {out_dir}", 5000)
 
+    @staticmethod
+    def _event_exclusions(info: Dict[str, Any]) -> Dict[Tuple[str, float], str]:
+        """(label, onset rounded to 1 us) -> 'hidden' | 'removed', stored in the source's import report."""
+        report = (info or {}).get("import_report") or {}
+        entries = report.get("event_exclusions") if isinstance(report, dict) else None
+        out: Dict[Tuple[str, float], str] = {}
+        for entry in entries or []:
+            try:
+                out[(str(entry[0]), round(float(entry[1]), 6))] = str(entry[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+        return out
+
+    def _set_event_exclusion(self, info: Dict[str, Any], label: str, onset: float, state: Optional[str]) -> None:
+        """Hide/remove one event (state) or restore it (None); data arrays are never modified."""
+        report = info.setdefault("import_report", {})
+        excluded = self._event_exclusions(info)
+        key = (str(label), round(float(onset), 6))
+        if state is None:
+            excluded.pop(key, None)
+        else:
+            excluded[key] = state
+        report["event_exclusions"] = [[name, onset_s, value] for (name, onset_s), value in excluded.items()]
+
     def _extract_behavior_events(self, info: Dict[str, Any], behavior_name: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Events of one label without those hidden/removed in the event list."""
+        on, off, dur = self._extract_behavior_events_raw(info, behavior_name)
+        excluded = self._event_exclusions(info)
+        if not excluded or not on.size:
+            return on, off, dur
+        keep = np.asarray([(str(behavior_name), round(float(t), 6)) not in excluded for t in on], bool)
+        return on[keep], off[keep], dur[keep]
+
+    def _extract_behavior_events_raw(self, info: Dict[str, Any], behavior_name: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         event_behaviors = info.get("event_behaviors") or {}
         if behavior_name in event_behaviors:
             event_info = event_behaviors.get(behavior_name) or {}
@@ -17066,6 +17155,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 row_unit="files" if file_rows else "trials",
             )
             row_colors = self._group_row_colors(mat)
+            self._attach_metric_group_comparisons(mat, self._last_metric_panels)
             for index, (key, result) in enumerate(self._last_metric_panels.items()):
                 plot = self.plot_metrics if index == 0 else self._extra_metric_plots[key]
                 plot.show_result(result, row_colors=row_colors)
@@ -17077,6 +17167,43 @@ class PostProcessingPanel(QtWidgets.QWidget):
         panels = getattr(self, "dashboard_panels", None)
         if panels is not None:
             panels.render_substitutes(("metric",))
+
+    def _group_blocks_for_rows(self, mat: Optional[np.ndarray]):
+        """(file ids per row, blocks) when 'All groups' is displayed with 2+ real groups."""
+        display = self._active_group_display(mat)
+        if display is None or display.mode != "all":
+            return None
+        if sum(1 for block in display.blocks if block.group_id is not None) < 2:
+            return None
+        return [row_file_id(label) for label in display.labels], display.blocks
+
+    def _attach_metric_group_comparisons(self, mat: np.ndarray, results: Dict[str, Dict]) -> None:
+        """Per-group Post - Pre per animal + between-group test, stored on each metric result.
+
+        Trial rows are averaged per recording first, so n is the number of animals.
+        """
+        layout = self._group_blocks_for_rows(mat)
+        for result in results.values():
+            result.pop("group_comparison", None)
+            result.pop("group_rows", None)
+        if layout is None:
+            return
+        file_ids, blocks = layout
+        for key, result in results.items():
+            pre = np.asarray(result["pre_values"], float)
+            post = np.asarray(result["post_values"], float)
+            groups, rows = [], []
+            for block in blocks:
+                ids = file_ids[block.start:block.stop]
+                order, pre_f = per_file_means(pre[block.start:block.stop], ids)
+                _, post_f = per_file_means(post[block.start:block.stop], ids)
+                delta = post_f - pre_f
+                groups.append({"name": block.name, "color": block.color, "values": delta, "ids": order,
+                               "tested": block.group_id is not None})
+                rows.extend({"metric_id": key, "file_id": fid, "group": block.name, "pre": a, "post": b,
+                             "post_minus_pre": b - a} for fid, a, b in zip(order, pre_f, post_f))
+            result["group_comparison"] = compare_groups(groups)
+            result["group_rows"] = rows
 
     def _metric_family_ids(self) -> List[str]:
         """Selected metric panels followed by metrics shown through Change to."""
@@ -17155,6 +17282,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not hasattr(self, "global_median"):
             self.global_median = self.plot_global.plot(pen=pg.mkPen(palette["accent"], width=2))
         self.global_median.setData([], [])
+        for item in getattr(self, "_global_group_items", []):
+            self.plot_global.removeItem(item)
+        self._global_group_items = []
+        self._last_global_group_stats = {}
         self._last_global_metrics = None
         set_plot_has_data(self.plot_global, False)
         self.lbl_global_metrics.setText("No observed signal in this range.")
@@ -17206,6 +17337,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
         mean, sem, n = self._finite_mean_sem(values)
         median = float(np.median(values))
         set_plot_has_data(self.plot_global, True)
+        # Between-group statistics for every global metric (exported), one drawn.
+        self._last_global_group_stats = {name: comparison for name in results[0]
+                                         if (comparison := self._global_group_comparison(name)) is not None}
+        comparison = self._last_global_group_stats.get(key)
+        if comparison is not None:
+            self._global_group_items = draw_group_comparison(self.plot_global, comparison, str(palette["text"]))
+            self.plot_global.setToolTip(info["description"] + " Each point is one recording. "
+                                        "Colored line: group median. Diamond: mean ± SEM. " + comparison["note"])
+            self.lbl_global_metrics.setText(f"{info['label']}: {stats_label(comparison)}")
+            self.lbl_global_metrics.setToolTip(self.plot_global.toolTip())
+            return
         point_colors = self._global_point_colors(key)
         brushes = ([pg.mkBrush(color) for color in point_colors] if point_colors is not None
                    else pg.mkBrush(palette["accent"]))
@@ -19976,6 +20118,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 import csv
                 met_base = os.path.join(out_dir, f"{prefix}_metrics")
                 export_selected_metrics(getattr(self, "_last_metric_panels", {}), met_base, do_csv, do_h5)
+                global_stats = getattr(self, "_last_global_group_stats", {}) or {}
+                if do_csv and global_stats:
+                    info = getattr(self, "_last_global_results", None) or {}
+                    rows = [{"global_metric": name, "file_id": fid,
+                             "group": (self.recording_groups.group(self.recording_groups.group_id_of(fid))
+                                       or {"name": "Ungrouped"})["name"], "value": row.get(name, np.nan)}
+                            for name in global_stats
+                            for fid, row in zip(info.get("file_ids", []), info.get("results", []))]
+                    write_group_comparisons(global_stats, met_base + "_global", id_field="global_metric",
+                                            quantity="value per recording", rows=rows)
                 if do_csv:
                     with open(f"{met_base}.csv", "w", newline="") as f:
                         w = csv.writer(f)

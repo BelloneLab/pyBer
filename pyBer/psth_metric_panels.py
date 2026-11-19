@@ -49,6 +49,7 @@ class MetricPanel(pg.PlotWidget):
         self.getAxis("bottom").setTicks([[(0, "Pre"), (1, "Post")]])
         self.result = None
         self._data_bounds = None
+        self._group_items = []
         self.set_colors({"text": "#CED8E6", "accent": "#4D93BD"})
         self.getViewBox().sigResized.connect(self._fit_note)
         self.getViewBox().sigXRangeChanged.connect(self._fit_note)
@@ -96,7 +97,8 @@ class MetricPanel(pg.PlotWidget):
         faint.setAlpha(65)
         self.pairs.setPen(pg.mkPen(faint, width=0.7))
         self.note.setColor(text)
-        if getattr(self, "result", None) is not None and getattr(self, "_row_colors", None) is not None:
+        if getattr(self, "result", None) is not None and (
+                getattr(self, "_row_colors", None) is not None or "group_comparison" in self.result):
             # A theme change must not drop the per-recording group tint.
             self.show_result(self.result, row_colors=self._row_colors)
 
@@ -116,8 +118,16 @@ class MetricPanel(pg.PlotWidget):
         for item in self.errors:
             item.setData(x=np.array([]), y=np.array([]), top=np.array([]), bottom=np.array([]))
         self.note.hide()
+        for item in self._group_items:
+            self.removeItem(item)
+        self._group_items = []
+        self.getAxis("bottom").setTicks([[(0, "Pre"), (1, "Post")]])
+        self.setXRange(-0.4, 1.5, padding=0)
         if result is None:
             self.setYRange(0, 1, padding=0)
+            return
+        if result.get("group_comparison"):
+            self._show_groups(result)
             return
         summary = result["summary"]
         pre, post = result["pre_values"], result["post_values"]
@@ -163,5 +173,29 @@ class MetricPanel(pg.PlotWidget):
             test = f"Holm p={pvalue:.3g}" if np.isfinite(pvalue) else "Descriptive only"
             self.note.setText(f"{test} · n={summary['paired_n']}\nMedian line | Mean ± SEM")
             self.note.setPos(0.55, high + span * 0.40)
+            self.note.show()
+            self._fit_note()
+
+    def _show_groups(self, result):
+        """Group view: one column per group of per-animal Post - Pre values + between-group test."""
+        from group_stats import stats_label
+        from psth_groups import draw_group_comparison
+        summary, comparison = result["summary"], result["group_comparison"]
+        self._group_items = draw_group_comparison(self, comparison, self._text_color.name())
+        self.setTitle(f"{summary['metric']}: Post − Pre")
+        self.setLabel("left", summary["units"])
+        self.setToolTip("Each point is one animal (trials averaged per recording): Post − Pre. "
+                        "Colored line: group median. Diamond: mean ± SEM. " + comparison["note"] +
+                        (" " + comparison["normality"] if comparison["normality"] else "") +
+                        (" " + comparison["variance"] if comparison["variance"] else ""))
+        values = [v for g in comparison["groups"] for v in np.asarray(g["values"], float) if np.isfinite(v)]
+        if values:
+            low, high = min(values), max(values)
+            means = [(g["mean"], g["sem"]) for g in comparison["groups"] if np.isfinite(g["mean"])]
+            for mean, sem in means:
+                sem = sem if np.isfinite(sem) else 0.0
+                low, high = min(low, mean - sem), max(high, mean + sem)
+            self._data_bounds = (low, high)
+            self.note.setText(stats_label(comparison) + "\nanimals · median line | mean ± SEM")
             self.note.show()
             self._fit_note()

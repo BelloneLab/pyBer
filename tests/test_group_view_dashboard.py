@@ -225,5 +225,62 @@ class GroupViewDashboardTests(unittest.TestCase):
         self.assertEqual([lst.row(item) for item in lst.selectedItems()], [2])   # not toggled off
 
 
+class GroupMetricStatsTests(unittest.TestCase):
+    """PSTH and global metrics are summarized and tested per group in 'All groups'."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    setUp = fixture.PostprocessingEmptyStateTests.setUp
+    tearDown = fixture.PostprocessingEmptyStateTests.tearDown
+    load = GroupViewDashboardTests.load
+
+    def test_metric_and_global_group_comparisons_and_exports(self):
+        self.load()
+        panel = self.panel
+        panel.cb_group_view.setChecked(True)
+        self.app.processEvents()
+        panel._compute_psth_impl()
+        self.app.processEvents()
+        result = next(iter(panel._last_metric_panels.values()))
+        comparison = result["group_comparison"]
+        self.assertEqual([g["name"] for g in comparison["groups"]], ["WT", "Het"])
+        self.assertEqual([g["n"] for g in comparison["groups"]], [N_PER_GROUP, N_PER_GROUP])
+        wt, het = comparison["groups"]
+        self.assertGreater(wt["mean"], 0)       # WT rises after the event
+        self.assertLess(het["mean"], 0)         # Het falls
+        self.assertIn(comparison["test"], {"Welch t-test", "Mann-Whitney U"})
+        self.assertTrue(np.isfinite(comparison["p"]))
+        self.assertIn("Post − Pre", panel.plot_metrics.getPlotItem().titleLabel.text)
+        global_stats = panel._last_global_group_stats
+        self.assertTrue(global_stats)
+        for item in next(iter(global_stats.values()))["groups"]:
+            self.assertEqual(item["n"], N_PER_GROUP)
+        with tempfile.TemporaryDirectory() as directory:
+            from psth_metrics import export_selected_metrics
+            base = str(Path(directory) / "m")
+            export_selected_metrics(panel._last_metric_panels, base, True, False)
+            rows = list(csv.DictReader(open(base + "_groups.csv", encoding="utf-8-sig")))
+            self.assertEqual({row["group"] for row in rows}, {"WT", "Het"})
+            animals = list(csv.DictReader(open(base + "_group_rows.csv", encoding="utf-8-sig")))
+            self.assertEqual(len({row["file_id"] for row in animals}), 2 * N_PER_GROUP)
+        panel.combo_group_display.setCurrentIndex(panel.combo_group_display.findData("pooled"))
+        self.app.processEvents()
+        panel._compute_psth_impl()
+        self.assertNotIn("group_comparison", next(iter(panel._last_metric_panels.values())))
+
+    def test_group_panels_screenshot(self):
+        """Visual check: metric and global panels drawn per group."""
+        self.load()
+        panel = self.panel
+        panel.cb_group_view.setChecked(True)
+        self.app.processEvents()
+        panel._compute_psth_impl()
+        self.app.processEvents()
+        out = Path(__file__).resolve().parents[1] / "_test" / "group_metrics"
+        out.mkdir(parents=True, exist_ok=True)
+        panel.grab().save(str(out / "group_metrics_panels.png"))
+
+
 if __name__ == "__main__":
     unittest.main()

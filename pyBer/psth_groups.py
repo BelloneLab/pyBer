@@ -231,3 +231,46 @@ def block_ticks(blocks: Sequence[GroupBlock], level: str, max_chars: int = 9) ->
         name = block.name if len(block.name) <= max_chars else block.name[:max_chars - 1] + "."
         ticks.append((center, name))
     return ticks
+
+
+def draw_group_comparison(plot: pg.PlotWidget, comparison: Dict[str, object], text_color: str,
+                          jitter_width: float = 0.14) -> List[pg.GraphicsObject]:
+    """One column per group: animal points (group color), median line and mean +/- SEM.
+
+    Returns the created items so callers can remove them before the next draw.
+    The y range is fitted to the data; the x axis is labelled with group and n.
+    """
+    items: List[pg.GraphicsObject] = []
+    ticks = []
+    bounds: List[float] = []
+    for index, group in enumerate(comparison.get("groups", [])):
+        values = np.asarray(group["values"], float)
+        values = values[np.isfinite(values)]
+        ticks.append((float(index), f"{group['name']}\nn={group['n']}"))
+        if not values.size:
+            continue
+        x = index + (np.linspace(-jitter_width, jitter_width, values.size) if values.size > 1 else np.zeros(1))
+        scatter = pg.ScatterPlotItem(x=x, y=values, size=6, pen=None, brush=pg.mkBrush(group["color"]))
+        median = pg.PlotDataItem([index - 0.24, index + 0.24], [group["median"]] * 2,
+                                 pen=pg.mkPen(group["color"], width=2.5))
+        items.extend([scatter, median])
+        bounds.extend(values.tolist())
+        if np.isfinite(group["mean"]):
+            sem = group["sem"] if np.isfinite(group["sem"]) else 0.0
+            mean = pg.ScatterPlotItem(x=[index + 0.32], y=[group["mean"]], size=8, symbol="d",
+                                      pen=None, brush=pg.mkBrush(text_color))
+            error = pg.ErrorBarItem(x=np.array([index + 0.32]), y=np.array([group["mean"]]),
+                                    top=np.array([sem]), bottom=np.array([sem]), beam=0.1,
+                                    pen=pg.mkPen(text_color, width=1))
+            items.extend([mean, error])
+            bounds.extend([group["mean"] - sem, group["mean"] + sem])
+    for item in items:
+        plot.addItem(item)
+    plot.getAxis("bottom").setTicks([ticks])
+    count = max(1, len(ticks))
+    plot.setXRange(-0.6, count - 0.4, padding=0)
+    if bounds:
+        low, high = min(bounds), max(bounds)
+        span = high - low or max(abs(high) * 0.1, 1.0)
+        plot.setYRange(low - span * 0.08, high + span * 0.45, padding=0)
+    return items

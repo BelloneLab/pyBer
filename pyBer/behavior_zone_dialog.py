@@ -445,8 +445,15 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self.combine_button = QtWidgets.QPushButton("Combine…")
         self.combine_button.setToolTip("Combine checked labels into one OR event; keep the originals.")
         self.combine_button.clicked.connect(panel._open_combine_events)
+        # Small "+" opens the list of every event (timing, duration) with hide/remove.
+        self.event_list_button = QtWidgets.QToolButton()
+        self.event_list_button.setText("+")
+        self.event_list_button.setAccessibleName("Event list")
+        self.event_list_button.setToolTip("List all events with onset, offset and duration; "
+                                          "right-click to hide or remove events.")
+        self.event_list_button.clicked.connect(panel._open_event_list)
         for widget in (self.add_file_button, search, self.select_visible_button,
-                       self.clear_selection_button, self.combine_button):
+                       self.clear_selection_button, self.combine_button, self.event_list_button):
             selection_row.addWidget(widget)
 
         # Internal mirrors use the existing Individual / Group and file pickers.
@@ -987,7 +994,7 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         # Filter and selection tools are only useful once behaviors exist.
         has_behaviors = self.selectors["behavior"].count() > 0
         for widget in (self.searches["behavior"], self.select_visible_button,
-                       self.clear_selection_button, self.combine_button):
+                       self.clear_selection_button, self.combine_button, self.event_list_button):
             widget.setVisible(has_behaviors)
         self._selection_group.adjustSize()
         self._refold_toolbar()

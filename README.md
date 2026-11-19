@@ -129,7 +129,7 @@ The modeling workbench consumes the current processed recordings, behavior varia
 ## Groups, seamless figure and editable export
 
 - Create recording groups (label + color), attribute recordings by clicking a group chip or by right-click, and open the recordings list in its own window for long lists.
-- PSTH **Groups** view: all groups overlaid (one mean +/- SEM per group with `n` legend and a grouped heatmap), one group only, or pooled.
+- PSTH **Groups** view: all groups overlaid (one mean +/- SEM per group with `n` legend and a grouped heatmap), one group only, or pooled. In **All groups**, PSTH metrics (Post − Pre per animal) and global metrics are shown per group with a between-group test (Welch t / Mann-Whitney, ANOVA / Kruskal-Wallis with Holm), exported as CSV.
 - The results area reads as one figure; dividers stay draggable. Right-click a plot to remove it or change it to another analysis.
 - Image export writes PNG plus editable vector PDF and SVG (one path per curve, real text, plain colors).
 - Details: [groups and figure export guide](docs/groups_and_figure_export.md).

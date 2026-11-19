@@ -135,6 +135,9 @@ def summarize_metrics(matrix, time, selected, pre_window, post_window, signal_un
 def draw_metric_matplotlib(axis, result, title=None):
     """Render export panels with the same numerical summaries as the live view."""
     summary = result["summary"]
+    if result.get("group_comparison"):
+        _draw_groups_matplotlib(axis, summary, result["group_comparison"], title)
+        return
     pre, post = result["pre_values"], result["post_values"]
     pairs = np.isfinite(pre) & np.isfinite(post)
     positions = np.linspace(-0.12, 0.12, len(pre))
@@ -163,6 +166,33 @@ def draw_metric_matplotlib(axis, result, title=None):
     axis.spines[["top", "right"]].set_visible(False)
 
 
+def _draw_groups_matplotlib(axis, summary, comparison, title=None):
+    """Publication panel of the group view: Post - Pre per animal, one column per group."""
+    from group_stats import stats_label
+    names = []
+    for index, group in enumerate(comparison["groups"]):
+        values = np.asarray(group["values"], float)
+        values = values[np.isfinite(values)]
+        names.append(f"{group['name']}\nn={group['n']}")
+        x = index + (np.linspace(-0.14, 0.14, values.size) if values.size > 1 else np.zeros(values.size))
+        axis.scatter(x, values, s=12, color=group["color"], alpha=0.8, edgecolors="none", zorder=2)
+        if np.isfinite(group["median"]):
+            axis.plot([index - 0.24, index + 0.24], [group["median"]] * 2, color=group["color"],
+                      linewidth=2.2, zorder=4)
+        if np.isfinite(group["mean"]):
+            axis.errorbar(index + 0.32, group["mean"], yerr=group["sem"] if np.isfinite(group["sem"]) else None,
+                          fmt="D", ms=3, color="#526371", capsize=2, linewidth=0.9, zorder=5)
+    axis.set_title(title or f"{summary['metric']}: Post − Pre", fontsize=10, fontweight="bold", pad=30)
+    axis.text(0.5, 1.015, f"{stats_label(comparison)}\nanimals · line: median · diamond: mean ± SEM",
+              transform=axis.transAxes, ha="center", va="bottom", fontsize=6.5, color="#546274", clip_on=False)
+    axis.axhline(0, color="#A7B1BD", linewidth=0.6, zorder=0)
+    axis.set_xticks(range(len(names)), names)
+    axis.set_xlim(-0.6, len(names) - 0.4)
+    axis.margins(y=0.28)
+    axis.set_ylabel(summary["units"], fontsize=8)
+    axis.spines[["top", "right"]].set_visible(False)
+
+
 def export_selected_metrics(results, prefix, write_csv=True, write_h5=True):
     """Export complete metric summaries and per-row values without truncating labels."""
     import csv
@@ -184,6 +214,11 @@ def export_selected_metrics(results, prefix, write_csv=True, write_h5=True):
                 summary = result["summary"]
                 for row, (pre, post) in enumerate(zip(result["pre_values"], result["post_values"]), 1):
                     writer.writerow([key, row, summary["row_unit"], summary["units"], pre, post, post - pre])
+    if write_csv:
+        write_group_comparisons({key: result["group_comparison"] for key, result in results.items()
+                                 if result.get("group_comparison")},
+                                base, id_field="metric_id", quantity="post_minus_pre",
+                                rows=[row for result in results.values() for row in result.get("group_rows", [])])
     if write_h5:
         with h5py.File(base + "_selected.h5", "w") as file:
             for key, result in results.items():
@@ -193,3 +228,30 @@ def export_selected_metrics(results, prefix, write_csv=True, write_h5=True):
                                          dtype=h5py.string_dtype("utf-8") if isinstance(value, str) else None)
                 group.create_dataset("pre_values", data=result["pre_values"])
                 group.create_dataset("post_values", data=result["post_values"])
+
+
+def write_group_comparisons(comparisons, base, id_field, quantity, rows=None):
+    """Between-group CSVs: per-group summary + test, Holm pairwise, per-animal values."""
+    import csv
+    from group_stats import comparison_rows
+    if not comparisons:
+        return
+    summary = [row for key, comparison in comparisons.items()
+               for row in comparison_rows(comparison, **{id_field: key, "quantity": quantity,
+                                                         "unit_of_analysis": "animal / recording"})]
+    with open(base + "_groups.csv", "w", newline="", encoding="utf-8-sig") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(summary[0]))
+        writer.writeheader()
+        writer.writerows(summary)
+    pairwise = [{id_field: key, **pair} for key, comparison in comparisons.items()
+                for pair in comparison.get("pairwise", [])]
+    if pairwise:
+        with open(base + "_group_pairwise.csv", "w", newline="", encoding="utf-8-sig") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(pairwise[0]))
+            writer.writeheader()
+            writer.writerows(pairwise)
+    if rows:
+        with open(base + "_group_rows.csv", "w", newline="", encoding="utf-8-sig") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)

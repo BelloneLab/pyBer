@@ -74,8 +74,36 @@ in Group view**, n counts trials and the legend says so (`n=57 trials, 6 rec.`);
 treat trial-level SEM as descriptive, because trials of one animal are not
 independent. Recordings without a group appear as **Ungrouped** (grey) in the
 All groups view, so nothing is dropped silently. Pre/post p-values remain the
-pooled paired tests of the displayed rows; a between-group test is not
-computed.
+pooled paired tests of the displayed rows; between-group tests are
+described in "Metrics by group" below.
+
+### Metrics by group (All groups)
+
+With **Show: All groups** and at least two groups, the PSTH metric panels and
+the global metric panel switch to a per-group layout: one column per group,
+one point per animal, the group median as a colored line and mean ± SEM as a
+diamond, with the between-group test written above the points.
+
+- **Unit of analysis = animal / recording.** Trial rows (Keep trial rows) are
+  first averaged per recording, so n is always the number of animals.
+- **PSTH metrics** compare **Post − Pre** per animal (the selected metric in the
+  post window minus the pre window). **Global metrics** compare one value per
+  recording.
+- **Test choice** (reported in the panel tooltip and the CSV):
+  - 2 groups: Welch t-test if every group passes Shapiro-Wilk (p > 0.05),
+    otherwise Mann-Whitney U. Effect size: Hedges g or rank-biserial r.
+  - 3+ groups: one-way ANOVA if all groups are normal and Levene does not reject
+    equal variances, otherwise Kruskal-Wallis (eta² or epsilon²), with pairwise
+    Welch t / Mann-Whitney tests corrected by Holm.
+  - A group with fewer than 3 animals gives a descriptive result only.
+- **Ungrouped** recordings are shown but never tested.
+- Exports: `<prefix>_metrics_selected_groups.csv` (n, mean, SEM, median, SD per
+  group and the test), `_group_pairwise.csv` (3+ groups) and `_group_rows.csv`
+  (per-animal pre, post and post − pre); the same files with `_metrics_global`
+  for global metrics. **Pooled** and **Only <group>** keep the original display.
+
+With few animals per group the tests have little power; report effect sizes
+and confidence in the per-animal values, not only p.
 
 Exports add `<prefix>_avg_psth_groups.csv` (time, mean, SEM and n per group)
 when All groups is shown, and `<prefix>_recording_groups.csv` (file id, group,
