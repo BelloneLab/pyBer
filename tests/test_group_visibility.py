@@ -37,7 +37,7 @@ class GroupsMenuTests(dashboard.GroupViewDashboardTests):
         self.app.processEvents()
         original = panel._group_mat.copy()
         self.assertFalse(panel.btn_group_view.isHidden())
-        self.assertEqual(panel.btn_group_view.text(), "Groups")
+        self.assertEqual(panel.btn_group_view.text(), "Hide/show groups")
         actions = self._menu_actions()
         self.assertEqual([name for name in actions][:3], ["WT", "Het", "Ungrouped"])
         self.assertTrue(actions["WT"].isChecked() and actions["Het"].isChecked())
@@ -51,7 +51,7 @@ class GroupsMenuTests(dashboard.GroupViewDashboardTests):
         self.assertEqual(np.asarray(panel.img.image).T.shape[0], N)
         legend = [label.text for _sample, label in panel.psth_group_legend.items]
         self.assertEqual(legend, [f"WT (n={N})"])
-        self.assertEqual(panel.btn_group_view.text(), "Groups 2/3")
+        self.assertEqual(panel.btn_group_view.text(), "Hide/show groups (2/3)")
         self.assertFalse(panel._group_view_keeps("het0"))
         self.assertTrue(panel._group_view_keeps("wt0"))
         np.testing.assert_array_equal(panel._group_mat, original)   # data untouched
@@ -66,6 +66,43 @@ class GroupsMenuTests(dashboard.GroupViewDashboardTests):
         self.assertEqual(panel._hidden_groups(), set())
         self.assertEqual([b.name for b in panel._group_display.blocks], ["WT", "Het"])
         self.assertEqual(panel._last_mat.shape[0], 2 * N)
+
+    def test_chip_eye_toggles_visibility_and_chip_body_still_assigns(self):
+        from PySide6 import QtCore, QtTest
+        from recording_groups import GroupChip
+        self.load()
+        panel = self.panel
+        panel.cb_group_view.setChecked(True)
+        panel._section_buttons["setup"].setChecked(True)
+        for _ in range(10):
+            self.app.processEvents()
+        chips = {chip.text().split("  ")[0]: chip for chip in panel.group_chip_bar.findChildren(GroupChip)
+                 if not chip.isHidden()}
+        self.assertEqual(sorted(chips), ["Het", "WT"])          # Ungroup / New group have no eye
+        het = chips["Het"]
+        self.assertTrue(het.is_group_shown())
+        self.assertLess(het.eye_rect().right(), het.width())
+        self.assertGreater(het.eye_rect().left(), het.width() // 2)
+
+        assigned = []
+        panel.group_chip_bar.assignRequested.connect(assigned.append)
+        QtTest.QTest.mouseClick(het, QtCore.Qt.MouseButton.LeftButton, pos=het.eye_rect().center())
+        self.app.processEvents()
+        self.assertEqual(assigned, [])                           # the eye does not assign
+        self.assertEqual(panel._hidden_groups(), {self.het})
+        self.assertFalse(het.is_group_shown())
+        self.assertEqual([b.name for b in panel._group_display.blocks], ["WT"])
+        self.assertEqual(panel.btn_group_view.text(), "Hide/show groups (2/3)")
+
+        QtTest.QTest.mouseClick(het, QtCore.Qt.MouseButton.LeftButton, pos=het.eye_rect().center())
+        self.app.processEvents()
+        self.assertEqual(panel._hidden_groups(), set())
+        self.assertEqual([b.name for b in panel._group_display.blocks], ["WT", "Het"])
+
+        QtTest.QTest.mouseClick(het, QtCore.Qt.MouseButton.LeftButton, pos=QtCore.QPoint(12, het.height() // 2))
+        self.app.processEvents()
+        self.assertEqual(assigned, [self.het])                   # the chip body still assigns
+        self.assertEqual(panel._hidden_groups(), set())
 
     def test_hidden_group_leaves_the_pooled_view_and_is_forgotten_when_deleted(self):
         self.load()

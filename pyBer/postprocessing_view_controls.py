@@ -205,7 +205,9 @@ def compact_results_toolbar(panel):
         """Keep the caption and visibility in step with the groups and the scope."""
         total = len(group_entries())
         shown = total - len(panel._hidden_groups())
-        panel.btn_group_view.setText("Groups" if shown == total else f"Groups {shown}/{total}")
+        panel.btn_group_view.setText(
+            "Hide/show groups" if shown == total else f"Hide/show groups ({shown}/{total})")
+        panel.group_chip_bar.refresh_eyes()
         panel.btn_group_view.setVisible(panel.tab_visual_mode.currentIndex() == 1)
 
     panel.menu_group_view.aboutToShow.connect(rebuild_group_menu)

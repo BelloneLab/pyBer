@@ -105,7 +105,7 @@ class MissingDataGuiTests(unittest.TestCase):
         self.assertTrue(panel.btn_group_view.isHidden())
         panel.tab_visual_mode.setCurrentIndex(1)
         self.assertFalse(panel.btn_group_view.isHidden())
-        self.assertEqual(panel.btn_group_view.text(), "Groups")
+        self.assertEqual(panel.btn_group_view.text(), "Hide/show groups")
 
 
 if __name__ == "__main__":

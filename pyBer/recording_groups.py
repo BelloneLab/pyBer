@@ -420,20 +420,116 @@ class FlowLayout(QtWidgets.QLayout):
         return y + line_height - rect.y() + margins.bottom()
 
 
+# Eye on a group chip: size of the glyph, gap to the chip edge, click margin
+# around the glyph (pixels), and its opacity when the group is hidden.
+EYE_SIZE = 14
+EYE_RIGHT_MARGIN = 7
+EYE_HIT_MARGIN = 4
+EYE_HIDDEN_OPACITY = 0.32
+
+
+class GroupChip(QtWidgets.QToolButton):
+    """A group chip with a small eye at its right end.
+
+    Clicking the chip keeps its main job (attribute the selected recordings to
+    the group). Clicking the eye only toggles whether the group is shown in
+    the group visuals: bright eye = shown, dim struck-through eye = hidden.
+    """
+
+    eyeClicked = QtCore.Signal()
+
+    def __init__(self, shown_provider: Callable[[], bool], parent=None) -> None:
+        super().__init__(parent)
+        self._shown_provider = shown_provider
+        self._eye_pressed = False
+        self.setMouseTracking(True)
+
+    def is_group_shown(self) -> bool:
+        try:
+            return bool(self._shown_provider())
+        except Exception:
+            return True
+
+    def eye_rect(self) -> QtCore.QRect:
+        """Where the eye is drawn."""
+        top = (self.height() - EYE_SIZE) // 2
+        return QtCore.QRect(self.width() - EYE_RIGHT_MARGIN - EYE_SIZE, top, EYE_SIZE, EYE_SIZE)
+
+    def _eye_hit(self, pos: QtCore.QPoint) -> bool:
+        margin = EYE_HIT_MARGIN
+        return self.eye_rect().adjusted(-margin, -margin, margin, margin).contains(pos)
+
+    # The eye takes its own clicks; everything else is the normal button.
+    def mousePressEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._eye_hit(event.position().toPoint()):
+            self._eye_pressed = True
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._eye_pressed:
+            self._eye_pressed = False
+            event.accept()
+            if self._eye_hit(event.position().toPoint()):
+                self.eyeClicked.emit()
+                self.update()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        over_eye = self._eye_hit(event.position().toPoint())
+        shown = self.is_group_shown()
+        QtWidgets.QToolTip.showText(
+            event.globalPosition().toPoint(),
+            ("Shown in the group visuals. Click the eye to hide this group."
+             if shown else "Hidden from the group visuals. Click the eye to show this group.")
+            if over_eye else self.toolTip(), self)
+        super().mouseMoveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        shown = self.is_group_shown()
+        rect = QtCore.QRectF(self.eye_rect())
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        color = QtGui.QColor(self.palette().color(QtGui.QPalette.ColorRole.ButtonText))
+        painter.setOpacity(1.0 if shown else EYE_HIDDEN_OPACITY)
+        painter.setPen(QtGui.QPen(color, 1.3))
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        # Almond outline: two arcs meeting at the left and right corners.
+        cx, cy, half_w, half_h = rect.center().x(), rect.center().y(), rect.width() / 2.0, rect.height() * 0.30
+        outline = QtGui.QPainterPath(QtCore.QPointF(cx - half_w, cy))
+        outline.quadTo(QtCore.QPointF(cx, cy - 2 * half_h), QtCore.QPointF(cx + half_w, cy))
+        outline.quadTo(QtCore.QPointF(cx, cy + 2 * half_h), QtCore.QPointF(cx - half_w, cy))
+        painter.drawPath(outline)
+        painter.setBrush(color)
+        painter.drawEllipse(QtCore.QPointF(cx, cy), rect.width() * 0.15, rect.width() * 0.15)
+        if not shown:   # a slash as well: the state is not carried by brightness alone
+            painter.drawLine(QtCore.QPointF(rect.left() + 2, rect.bottom() - 2),
+                             QtCore.QPointF(rect.right() - 2, rect.top() + 2))
+        painter.end()
+
+
 class GroupChipBar(QtWidgets.QWidget):
     """Clickable group chips: a click attributes the selected recordings.
 
     Right-click a chip to rename it, change its color, reorder or delete it.
+    The eye at the right of a chip shows or hides that group in the visuals.
     """
 
     assignRequested = QtCore.Signal(str)   # group id, '' = remove from group
+    visibilityToggleRequested = QtCore.Signal(str)   # group id whose eye was clicked
     statusMessage = QtCore.Signal(str)
 
     def __init__(self, model: RecordingGroups, count_provider: Callable[[Optional[str]], int],
-                 parent: Optional[QtWidgets.QWidget] = None) -> None:
+                 parent: Optional[QtWidgets.QWidget] = None,
+                 shown_provider: Optional[Callable[[str], bool]] = None) -> None:
         super().__init__(parent)
         self.model = model
         self.count_provider = count_provider
+        # Tells whether a group is currently shown; None = no eye on the chips.
+        self.shown_provider = shown_provider
         self.setObjectName("groupChipBar")
         self._layout = FlowLayout(self, spacing=6)
         self._buttons: List[QtWidgets.QAbstractButton] = []
@@ -442,8 +538,19 @@ class GroupChipBar(QtWidgets.QWidget):
         model.changed.connect(self.rebuild)
         self.rebuild()
 
-    def _chip(self, text: str, color: Optional[str], tooltip: str) -> QtWidgets.QToolButton:
-        button = QtWidgets.QToolButton(self)
+    def refresh_eyes(self) -> None:
+        """Repaint the eyes after the shown / hidden state changed elsewhere."""
+        for button in self._buttons:
+            button.update()
+
+    def _chip(self, text: str, color: Optional[str], tooltip: str,
+              group_id: Optional[str] = None) -> QtWidgets.QToolButton:
+        with_eye = group_id is not None and self.shown_provider is not None
+        if with_eye:
+            button = GroupChip(lambda gid=group_id: self.shown_provider(gid), self)
+            button.eyeClicked.connect(lambda gid=group_id: self.visibilityToggleRequested.emit(gid))
+        else:
+            button = QtWidgets.QToolButton(self)
         button.setText(text)
         button.setToolTip(tooltip)
         button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
@@ -452,9 +559,11 @@ class GroupChipBar(QtWidgets.QWidget):
         if color:
             button.setIcon(color_dot_icon(color))
             button.setIconSize(QtCore.QSize(10, 10))
+            # Chips with an eye keep room for it at their right end.
+            right = EYE_SIZE + EYE_RIGHT_MARGIN + 6 if with_eye else 9
             button.setStyleSheet(
-                "QToolButton { border: 1px solid %s; border-radius: 11px; padding: 2px 9px 2px 6px; }"
-                "QToolButton:hover { background: %s; }" % (color, QtGui.QColor(color).name() + "33"))
+                "QToolButton { border: 1px solid %s; border-radius: 11px; padding: 2px %dpx 2px 6px; }"
+                "QToolButton:hover { background: %s; }" % (color, right, QtGui.QColor(color).name() + "33"))
         else:
             button.setStyleSheet("QToolButton { border-radius: 11px; padding: 2px 9px; }")
         button.setFixedHeight(24)
@@ -471,7 +580,7 @@ class GroupChipBar(QtWidgets.QWidget):
             count = self.count_provider(group["id"])
             chip = self._chip(f"{group['name']}  {count}", group["color"],
                               f"Attribute selected recordings to {group['name']} ({count} assigned).\n"
-                              "Right-click for rename, color, order and delete.")
+                              "Right-click for rename, color, order and delete.", group_id=group["id"])
             chip.clicked.connect(lambda _=False, gid=group["id"]: self.assignRequested.emit(gid))
             chip.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
             chip.customContextMenuRequested.connect(

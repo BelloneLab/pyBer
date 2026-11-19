@@ -2208,8 +2208,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # Recording lists, group chips and ordering live in one detachable
         # section: the same widgets move to a window for long lists.
         self.recording_groups = RecordingGroups(self)
-        self.group_chip_bar = GroupChipBar(self.recording_groups, self._loaded_group_count, self)
+        self.group_chip_bar = GroupChipBar(self.recording_groups, self._loaded_group_count, self,
+                                           shown_provider=lambda gid: gid not in self._hidden_groups())
         self.group_chip_bar.assignRequested.connect(self._assign_selected_recordings_to_group)
+        # The eye on a chip shows / hides that group; the chip itself still assigns.
+        self.group_chip_bar.visibilityToggleRequested.connect(
+            lambda gid: self.set_group_hidden(gid, gid not in self._hidden_groups()))
         self._processed_row_delegate = FileRowDelegate(self._recording_item_group, self.list_preprocessed,
                                                        note_resolver=self._recording_item_note)
         self._behavior_row_delegate = FileRowDelegate(self._behavior_item_group, self.list_behaviors,
@@ -13215,6 +13219,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         else:
             current.discard(key)
         self._hidden_group_ids = current
+        self._refresh_group_visibility_controls()
         if self._is_restoring_settings:
             return
         if not self.cb_group_view.isChecked():
@@ -13223,8 +13228,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._on_group_view_changed()
         self._queue_settings_save()
 
+    def _refresh_group_visibility_controls(self) -> None:
+        """Bring the toolbar caption and the chip eyes in step with the hidden groups."""
+        reflect = getattr(self, "_reflect_group_view", None)
+        if reflect is not None:
+            reflect()
+        elif hasattr(self, "group_chip_bar"):
+            self.group_chip_bar.refresh_eyes()
+
     def show_all_groups(self) -> None:
         self._hidden_group_ids = set()
+        self._refresh_group_visibility_controls()
         if not self._is_restoring_settings:
             self._on_group_view_changed()
             self._queue_settings_save()
@@ -19595,6 +19609,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     index = self.combo_group_display.findData(str(view.get("display", "all")))
                     self.combo_group_display.setCurrentIndex(max(0, index))
                 self._hidden_group_ids = {str(value) for value in (view.get("hidden") or [])}
+                self._refresh_group_visibility_controls()
             if "dashboard_panels" in data:
                 self.dashboard_panels.set_state(data.get("dashboard_panels"))
             self._update_group_view_hint()
