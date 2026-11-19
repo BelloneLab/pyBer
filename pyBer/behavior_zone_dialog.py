@@ -187,6 +187,31 @@ class BehaviorPsthBar(QtWidgets.QWidget):
 
 
 _EXPANDED_ROLE = QtCore.Qt.ItemDataRole.UserRole + 7
+# Comparison table: the Events cell opens that row's single-event list.
+_EVENTS_COLUMN = _COLUMNS.index("Events")
+_EXPANDABLE_ROLE = QtCore.Qt.ItemDataRole.UserRole + 8
+_EVENTS_GLYPH_WIDTH = 20      # room kept at the right of the count for the + / - glyph
+
+
+class EventsCellDelegate(QtWidgets.QStyledItemDelegate):
+    """Events count followed by a small "+" ("-" while its list is open)."""
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        return QtCore.QSize(size.width() + _EVENTS_GLYPH_WIDTH, size.height())
+
+    def paint(self, painter, option, index) -> None:
+        super().paint(painter, option, index)
+        if not index.data(_EXPANDABLE_ROLE):
+            return
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setPen(QtGui.QPen(option.palette.color(QtGui.QPalette.ColorRole.Text), 1.6))
+        center = QtCore.QPoint(option.rect.right() - _EVENTS_GLYPH_WIDTH // 2, option.rect.center().y())
+        painter.drawLine(center.x() - 4, center.y(), center.x() + 4, center.y())
+        if not index.data(_EXPANDED_ROLE):
+            painter.drawLine(center.x(), center.y() - 4, center.x(), center.y() + 4)
+        painter.restore()
 
 
 def _plus_rect(chip: QtCore.QRect) -> QtCore.QRect:
@@ -612,6 +637,12 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setDefaultSectionSize(24)
+        # Events cell: "+" opens the row's single-event list inside the table.
+        self.table.setItemDelegateForColumn(_EVENTS_COLUMN, EventsCellDelegate(self.table))
+        self.table.cellClicked.connect(self._table_cell_clicked)
+        self._table_row_keys: list = []          # (file id or "", label) per table row; None = list row
+        self._table_events_open = None           # key of the row whose event list is open
+        self._table_events_show_removed = False
         self.results_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self.results_splitter.setChildrenCollapsible(False)
         self.results_splitter.setHandleWidth(8)
@@ -920,7 +951,9 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self._last_export_context = {}
         self.export_button.setEnabled(False)
         if hasattr(self, "table"):
+            self.table.clearSpans()
             self.table.setRowCount(0)
+            self._table_row_keys = []
             self.response.clear()
             self._clear_legend()
 
@@ -1053,6 +1086,55 @@ class BehaviorZonePanel(QtWidgets.QWidget):
             self.status.setText("Choose the fiber-associated arena in Setup to load its data.")
         self._queue_comparison()
 
+    # -- single events inside the comparison table ---------------------------
+    def _source_for_file(self, file_id: str):
+        """Behavior source paired with a recording ('' = all recordings)."""
+        if not file_id:
+            return None
+        for proc in self.panel._processed:
+            if (Path(proc.path).stem if proc.path else "recording") == file_id:
+                return self.panel._match_behavior_source(proc)
+        return None
+
+    def _insert_table_event_list(self, key) -> None:
+        """Add, under the last table row, a full-width row holding that row's events."""
+        from event_list_dialog import EventListPanel
+        file_id, label = key
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self._table_row_keys.append(None)
+        events = EventListPanel(self.panel, self.table)
+        events.show_removed.setChecked(self._table_events_show_removed)
+        events.show_removed.toggled.connect(
+            lambda checked: setattr(self, "_table_events_show_removed", bool(checked)))
+        # Closing rebuilds the table, so let the click finish first.
+        events.closed.connect(lambda: QtCore.QTimer.singleShot(0, lambda: self._toggle_table_event_list(key)))
+        events.set_label(label, only_source=self._source_for_file(file_id))
+        self.table.setSpan(row, 0, 1, self.table.columnCount())
+        self.table.setCellWidget(row, 0, events)
+
+        def fit() -> None:
+            try:
+                self.table.setRowHeight(row, events.sizeHint().height() + 6)
+            except RuntimeError:
+                pass  # the table was rebuilt meanwhile
+        events.sizeChanged.connect(fit)
+        fit()
+        self.table_event_list = events
+
+    def _table_cell_clicked(self, row: int, column: int) -> None:
+        if column != _EVENTS_COLUMN or not 0 <= row < len(self._table_row_keys):
+            return
+        key = self._table_row_keys[row]
+        if key is not None:
+            self._toggle_table_event_list(key)
+
+    def _toggle_table_event_list(self, key) -> None:
+        """Open the event list under a table row; the same row (or its close) shuts it."""
+        self._table_events_open = None if key == self._table_events_open else key
+        if self._last_rows or self._last_group_rows:
+            self._show_results(self._last_rows, self._last_group_rows)
+
     def _toggle_event_list(self, label: str) -> None:
         """Open the chip's event list under the chips; same chip (or close) hides it."""
         listing = self.selectors["behavior"]
@@ -1181,15 +1263,31 @@ class BehaviorZonePanel(QtWidgets.QWidget):
     def _show_results(self, rows: list[dict[str, object]], group: list[dict[str, object]]) -> None:
         show_group = self.scope.currentIndex() == 1
         displayed = group if show_group else rows
-        self.table.setRowCount(len(displayed))
-        for index, row in enumerate(displayed):
+        self.table.clearSpans()
+        self.table.setRowCount(0)
+        self._table_row_keys = []
+        open_key = self._table_events_open
+        keys = [("" if show_group else str(row["file_id"]), str(row["label"])) for row in displayed]
+        if displayed and open_key not in keys:
+            open_key = self._table_events_open = None
+        for row, key in zip(displayed, keys):
+            index = self.table.rowCount()
+            self.table.insertRow(index)
+            self._table_row_keys.append(key)
             values = (("Group" if show_group else row["file_id"]), row["label"],
                       row.get("recordings", 1), row["events"], row.get("rejected", ""),
                       row["before"], row["during"], row["after"],
                       row["during_minus_before"], row["after_minus_before"])
             for column, value in enumerate(values):
                 text = f"{value:.4g}" if isinstance(value, float) and np.isfinite(value) else str(value)
-                self.table.setItem(index, column, QtWidgets.QTableWidgetItem(text))
+                item = QtWidgets.QTableWidgetItem(text)
+                if column == _EVENTS_COLUMN:
+                    item.setData(_EXPANDABLE_ROLE, True)
+                    item.setData(_EXPANDED_ROLE, key == open_key)
+                    item.setToolTip("Click to list this row's single events: hide, remove or restore them.")
+                self.table.setItem(index, column, item)
+            if key == open_key:
+                self._insert_table_event_list(key)
         self.response.clear()
         self.response.setTitle("Group: mean ± SEM across animals/files" if show_group
                                else "Mean fiber signal per behavior")

@@ -1,6 +1,8 @@
 """Inline list of one behavior's events, with hide / remove / restore.
 
-Opened by the small "+" inside a behavior chip of the Events panel. Rows:
+Opened by the small "+" inside a behavior chip of the Events panel, or by the
+"+" in an Events cell of the comparison table (then limited to that row's
+recording in Individual scope). Rows:
 recording, event number, onset, offset, duration (seconds, as loaded) and
 status. Right-click hides selected events from plots and metrics, removes them
 from the list, or restores them. Nothing in the loaded arrays or source files
@@ -37,11 +39,14 @@ class EventListPanel(QtWidgets.QFrame):
     """Compact table of the events of one behavior across loaded recordings."""
 
     closed = QtCore.Signal()
+    sizeChanged = QtCore.Signal()    # the row count, hence the height, changed
 
     def __init__(self, panel, parent=None):
         super().__init__(parent)
         self.panel = panel
         self.label = ""
+        # When set, only the events of this behavior source (one recording).
+        self.only_source = None
         self.setObjectName("eventListPanel")
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 2, 0, 2)
@@ -83,13 +88,17 @@ class EventListPanel(QtWidgets.QFrame):
         root.addWidget(self.table)
 
     # -- data ---------------------------------------------------------------
-    def set_label(self, label: str) -> None:
+    def set_label(self, label: str, only_source=None) -> None:
+        """Show ``label``'s events, for every recording or for one behavior source."""
         self.label = str(label)
+        self.only_source = only_source
         self.reload()
 
     def _events(self) -> List[Tuple[str, int, float, float, float, Optional[str]]]:
         rows = []
         for key, info in (self.panel._behavior_sources or {}).items():
+            if self.only_source is not None and info is not self.only_source:
+                continue
             if self.label not in (info.get("behaviors") or {}) and \
                     self.label not in (info.get("event_behaviors") or {}):
                 continue
@@ -141,6 +150,7 @@ class EventListPanel(QtWidgets.QFrame):
         row_h = self.table.verticalHeader().defaultSectionSize()
         shown = max(1, min(MAX_VISIBLE_ROWS, len(visible)))
         self.table.setFixedHeight(self.table.horizontalHeader().height() + shown * row_h + 2 * self.table.frameWidth() + 2)
+        self.sizeChanged.emit()
 
     # -- actions ------------------------------------------------------------
     def _selected_keys(self) -> List[Tuple[str, float]]:
@@ -160,6 +170,8 @@ class EventListPanel(QtWidgets.QFrame):
 
     def _restore_all(self) -> None:
         for info in (self.panel._behavior_sources or {}).values():
+            if self.only_source is not None and info is not self.only_source:
+                continue
             report = info.get("import_report")
             if isinstance(report, dict) and report.get("event_exclusions"):
                 report["event_exclusions"] = [entry for entry in report["event_exclusions"]

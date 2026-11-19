@@ -4448,6 +4448,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._plot_view_controls.setParent(self)
 
         self.plot_trace = pg.PlotWidget(title="Trace preview")
+        # Group scope: recording shown in the trace preview ("" = the first one).
+        # Chosen from the plot's right-click menu when several are loaded.
+        self._group_trace_preview_id = ""
+        try:
+            self.plot_trace.getPlotItem().getViewBox().menu.aboutToShow.connect(self._inject_trace_preview_menu)
+        except Exception:
+            _LOG.exception("Could not extend the trace preview menu")
         self.plot_heat = pg.PlotWidget(title="Heatmap")
         self.plot_dur = pg.PlotWidget(title="Event duration")
         self.plot_bout_second = pg.PlotWidget(title="Inter-bout intervals")
@@ -15133,6 +15140,53 @@ class PostProcessingPanel(QtWidgets.QWidget):
         except Exception:
             pass
 
+    # -- which recording the trace preview shows in Group scope ---------------
+    def _group_trace_preview_proc(self):
+        """Recording previewed in Group scope: the chosen one, else the first."""
+        wanted = getattr(self, "_group_trace_preview_id", "")
+        for proc in self._processed:
+            if wanted and self._file_id_for_proc(proc) == wanted:
+                return proc
+        return self._processed[0] if self._processed else None
+
+    def set_group_trace_preview(self, file_id: str) -> None:
+        self._group_trace_preview_id = str(file_id or "")
+        self._update_trace_preview()
+
+    def _trace_preview_title(self, proc, n_events: int = 0) -> str:
+        """Title naming the recording whenever Group scope could show another one."""
+        title = "Trace preview"
+        group_scope = hasattr(self, "tab_visual_mode") and self.tab_visual_mode.currentIndex() == 1
+        if proc is not None and group_scope and len(self._processed) > 1:
+            title += f" · {escape(self._file_id_for_proc(proc))}"
+        return f"{title} ({n_events} events)" if n_events else title
+
+    def _inject_trace_preview_menu(self) -> None:
+        """Right-click menu of the trace preview: 'Preview recording' in Group scope."""
+        menu = self.plot_trace.getPlotItem().getViewBox().menu
+        previous = getattr(menu, "_pyber_trace_preview_action", None)
+        if previous is not None:
+            menu.removeAction(previous)
+            menu._pyber_trace_preview_action = None
+        if self.tab_visual_mode.currentIndex() != 1 or len(self._processed) < 2:
+            return
+        choices = QtWidgets.QMenu("Preview recording", menu)
+        current = self._group_trace_preview_proc()
+        for proc in self._processed:
+            file_id = self._file_id_for_proc(proc)
+            group = self.recording_groups.group_of(file_id)
+            action = choices.addAction(color_dot_icon(group["color"]) if group else QtGui.QIcon(), file_id)
+            action.setCheckable(True)
+            action.setChecked(proc is current)
+            action.triggered.connect(lambda _=False, fid=file_id: self.set_group_trace_preview(fid))
+        # Above the plot's own entries, below the dashboard's panel entries.
+        panel_actions = set(getattr(menu, "_pyber_panel_actions", []) or [])
+        before = next((action for action in menu.actions() if action not in panel_actions), None)
+        entry = choices.menuAction()
+        menu.insertAction(before, entry)
+        menu._pyber_trace_preview_action = entry
+        menu._pyber_trace_preview_menu = choices
+
     def _update_trace_preview(self) -> None:
         suggestions = getattr(self, "baseline_suggestions", None)
         if suggestions is not None:
@@ -15152,6 +15206,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     if fid == sel_id:
                         proc = p
                         break
+        else:
+            # Group scope: the recording chosen in the right-click menu.
+            proc = self._group_trace_preview_proc()
         selected_signal = getattr(self, "_signal_preview_proc", None)
         if selected_signal is not None and any(item is selected_signal for item in self._processed):
             proc = selected_signal
@@ -15218,11 +15275,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._trace_preview_durations = dur
             self._trace_preview_y_bounds = (float(min_y), float(max_y))
             self._render_visible_event_annotations()
-            self.plot_trace.setTitle(f"Trace preview ({int(ev.size)} events)")
+            self.plot_trace.setTitle(self._trace_preview_title(proc, int(ev.size)))
         else:
             self._trace_preview_events = np.array([], float)
             self._trace_preview_durations = np.array([], float)
-            self.plot_trace.setTitle("Trace preview")
+            self.plot_trace.setTitle(self._trace_preview_title(proc))
         self._refresh_signal_overlay()
 
         if fit_trace:
