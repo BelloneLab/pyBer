@@ -81,6 +81,14 @@ def _bootstrap_windows_conda_runtime() -> None:
 
 _bootstrap_windows_conda_runtime()
 
+# Animated startup splash: the frozen executable re-enters itself with this
+# flag to run the tiny animation process (see splash_screen.py). It must be
+# handled before anything heavy is imported, and never opens the application.
+if __name__ == "__main__" and "--pyber-splash" in sys.argv[1:]:
+    from splash_helper import main as _splash_helper_main
+
+    sys.exit(_splash_helper_main(sys.argv[1:]))
+
 
 def _crash_log_path() -> str:
     base = os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or os.path.expanduser("~")

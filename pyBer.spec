@@ -98,6 +98,8 @@ a = Analysis(
         'PySide6.QtOpenGL',
         # Release gate (PYBER_UI_AUDIT) imports the UI self-audit lazily.
         'ui_audit',
+        # Animated startup splash: the executable re-enters itself (--pyber-splash).
+        'splash_helper',
         # Editable figure export selects these writers dynamically.
         'matplotlib.backends.backend_agg',
         'matplotlib.backends.backend_pdf',
