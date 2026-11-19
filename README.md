@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.58.1"><img src="https://img.shields.io/badge/release-v0.58.1-7c4dff" alt="v0.58.1 release"></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.59"><img src="https://img.shields.io/badge/release-v0.59-7c4dff" alt="v0.59 release"></a>
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-41cd52?logo=qt&logoColor=white" alt="PySide6 and pyqtgraph">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white" alt="Windows">
@@ -18,9 +18,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.58.1/pyBer-windows.exe"><strong>Download the Windows GUI (exe)</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.59/pyBer-windows.exe"><strong>Download the Windows GUI (exe)</strong></a>
   &nbsp;|&nbsp;
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.58.1/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.59/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
   &nbsp;|&nbsp;
   <a href="docs/index.md"><strong>Read the full guide</strong></a>
 </p>
@@ -236,7 +236,7 @@ The flagged table collects processing failures, excessive artifact load, poor fi
 | Processed data | Self-describing CSV with `.pyber.json` sidecar and HDF5 with embedded metadata. |
 | Reports | Preprocessing PNG, strict QC report images, batch summaries, flagged-recording tables, analysis CSVs, model tables, and publication figure exports. |
 
-Brutally honest limitation: pyBer does not read TDT tanks (`.tev`, `.tsq`, `.sev`) natively. Convert those acquisitions to a supported CSV or HDF5 layout first. Neurophotometrics files written without a header row (stock Bonsai `CsvWriter`, no `LedState`/`Flags` column) cannot be demultiplexed automatically, because nothing in the file says which row belongs to which LED. The packaged v0.58.1 builds target Windows; source execution on other platforms is not part of the tested release path.
+Brutally honest limitation: pyBer does not read TDT tanks (`.tev`, `.tsq`, `.sev`) natively. Convert those acquisitions to a supported CSV or HDF5 layout first. Neurophotometrics files written without a header row (stock Bonsai `CsvWriter`, no `LedState`/`Flags` column) cannot be demultiplexed automatically, because nothing in the file says which row belongs to which LED. The packaged v0.59 builds target Windows; source execution on other platforms is not part of the tested release path.
 
 ### Neurophotometrics CSV
 
@@ -249,6 +249,14 @@ Open the photometry CSV, or a whole folder, in Preprocessing (or pass it to `pyB
 - **Triggers and events.** `Input0/1`, `Output0/1` and `Stimulation` columns that change state, and any changing TTL bit of `Flags` / `LedState` (for example legacy `Flags` 273/274 = bit 8), become triggers. Header-less event files in the same folder (`*_stimuli.csv`, `ttls.csv`, `*_ts0.csv`) are matched to the clock whose span contains their times, mapped through a least-squares fit between clocks, and attached: named events become one trigger per name, numeric codes one trigger per code, and `True`/`False` pairs one on/off state. Instantaneous events are drawn as 0.1 s pulses; their onsets are exact to one frame, their width is not a duration.
 
 Checked against six real NPM recordings from GuPPy's test data: every signal sample equals its raw frame value, a legacy `Flags` TTL bit and the session's `True`/`False` event file give identical onsets, and the documented ~161.4 s stimulus of one session lands at 161.43 s.
+
+## What changed in v0.59
+
+- Load Neurophotometrics (FP3001/FP3002) CSV recordings in preprocessing.
+- Event-time tables (one column per behavior, no durations) load directly; align on onsets or offsets.
+- One **Events** button opens the behavior panel; list, hide, remove or restore single events.
+- Group scope: per-animal Post minus Pre metrics per group with between-group tests and CSV exports; hide groups with the eye on each chip.
+- Heatmaps fill display gaps, the color scale has no frame, and preprocessing exports only the processed output by default. See the [release notes](docs/releases/v0.59.md).
 
 ## What changed in v0.58.1
 

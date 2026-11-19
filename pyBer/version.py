@@ -1,3 +1,3 @@
 """pyBer release version."""
 
-__version__ = "0.58.1"
+__version__ = "0.59.0"
