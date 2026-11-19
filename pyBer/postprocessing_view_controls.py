@@ -3,6 +3,45 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from recording_groups import UNGROUPED_COLOR, UNGROUPED_LABEL, color_dot_icon
 
+# Drawer toggle: chevron size, its distance from the button's right edge, and
+# the room kept for it beside the caption (pixels).
+DRAWER_CHEVRON_HALF_WIDTH = 4
+DRAWER_CHEVRON_RIGHT_MARGIN = 14
+DRAWER_CHEVRON_RESERVED = 26
+
+
+class DrawerToggleButton(QtWidgets.QPushButton):
+    """A toggle that opens a drawer below it, marked by a chevron.
+
+    The chevron points down while the drawer is closed (it will open downward)
+    and up while it is open (it will fold back). The caption stays centered in
+    the remaining width.
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self.setCheckable(True)
+        self.setStyleSheet(f"padding-right: {DRAWER_CHEVRON_RESERVED}px;")
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        color = self.palette().color(QtGui.QPalette.ColorRole.ButtonText)
+        if not self.isEnabled():
+            color.setAlphaF(0.4)
+        pen = QtGui.QPen(color, 1.7)
+        pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        half = DRAWER_CHEVRON_HALF_WIDTH
+        cx = self.width() - DRAWER_CHEVRON_RIGHT_MARGIN
+        cy = self.height() / 2.0
+        tip = half / 2.0 if not self.isChecked() else -half / 2.0   # down when closed, up when open
+        painter.drawPolyline([QtCore.QPointF(cx - half, cy - tip), QtCore.QPointF(cx, cy + tip),
+                              QtCore.QPointF(cx + half, cy - tip)])
+        painter.end()
+
 
 def split_plot_layout(host, orientation):
     """Replace fixed spacing with a draggable divider, retaining plot ownership."""

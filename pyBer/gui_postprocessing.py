@@ -41,7 +41,8 @@ from psth_metrics import (METRICS, metric_id, summarize_metrics, draw_metric_mat
                           export_selected_metrics, write_group_comparisons)
 from psth_metric_panels import MetricPanel, MetricGrid
 from aligned_time_axes import AlignedTimeAxes
-from postprocessing_view_controls import split_plot_layout, PlotSplitterPreferences, create_view_menu, compact_results_toolbar
+from postprocessing_view_controls import (split_plot_layout, PlotSplitterPreferences, create_view_menu,
+                                          compact_results_toolbar, DrawerToggleButton)
 from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_metrics
 from vector_figure_export import write_vector_figure
 from recording_groups import (RecordingGroups, GroupChipBar, FileRowDelegate, DetachableSection,
@@ -4901,13 +4902,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # The Zone/Behavior mode is internal state only; the toolbar shows one
         # "Events" toggle that opens or closes the behavior panel like a drawer.
         self.combo_event_kind.setVisible(False)
-        self.btn_events_drawer = QtWidgets.QPushButton("Events")
-        self.btn_events_drawer.setCheckable(True)
+        # The chevron on the button says it opens a drawer: down = closed, up = open.
+        self.btn_events_drawer = DrawerToggleButton("Events")
         self.btn_events_drawer.setFixedHeight(32)
         self.btn_events_drawer.setAccessibleName("Events drawer")
         self.btn_events_drawer.setToolTip(
-            "Show or hide the events panel: loaded behaviors, before/after comparison "
-            "and the PSTH/heatmap bar.")
+            "Open or close the events drawer below: loaded behaviors, before/after "
+            "comparison and the PSTH/heatmap bar.")
         self.btn_events_drawer.toggled.connect(
             lambda checked: self._set_event_category("behavior" if checked else "zone"))
         tb_layout.insertWidget(tb_layout.indexOf(self.combo_toolbar_scope), self.btn_events_drawer)
