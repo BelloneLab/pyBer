@@ -11971,6 +11971,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not self._behavior_sources:
             self.combo_behavior_from.clear()
             self.combo_behavior_to.clear()
+            # Removing the last behavior must also empty the Setup list and labels.
+            self._update_file_lists()
+            self.lbl_beh.setText("(none)")
+            self.lbl_beh.setToolTip("")
+            self._update_align_ui()
             self._refresh_spatial_columns()
             self._compute_spatial_heatmap()
             self._update_data_availability()
