@@ -442,6 +442,8 @@ class ProcessedTrial:
     fs_actual: float = np.nan
     fs_target: float = np.nan
     fs_used: float = np.nan
+    injection_seconds: Optional[float] = None
+    injection_clock: str = "recording"
 
 
 @dataclass

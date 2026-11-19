@@ -143,6 +143,11 @@ class BehaviorPsthBar(QtWidgets.QWidget):
         self.summary.setText(
             f"Showing {name} only · zero = behavior {edge} · rows = {rows} · color = {units}. "
             "Real seconds, not stretched bouts. Pre/Post here are separate from Before/During/After above.")
+        if panel.combo_align.currentText() == "Injection":
+            self.summary.setText("Injection-aligned PSTH. Zero is the injection time for each recording.")
+            for plot in (panel.plot_heat, panel.plot_avg):
+                plot.setLabel("bottom", "Seconds from injection")
+            return
         if panel.combo_align.currentIndex() == 0:
             self.summary.setText("PSTH source is a Doric channel. Choose Behavior in Setup to plot these scored behaviors.")
             return
@@ -763,6 +768,8 @@ class BehaviorZonePanel(QtWidgets.QWidget):
                    f"colors = {panel.combo_psth_normalization.currentText()}.")
         if panel.combo_align.currentIndex() == 0:
             heatmap = "PSTH / heatmap uses the selected Doric channel, not these behavior checkboxes."
+        if panel.combo_align.currentText() == "Injection":
+            heatmap = "PSTH / heatmap: zero = injection."
         shift = (f" Comparison-only shift: {self.offset.value():+g} s; heatmap is NOT shifted."
                  if self.offset.value() else "")
         self.timing_help.setText(

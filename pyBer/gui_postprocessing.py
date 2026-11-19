@@ -40,7 +40,7 @@ from postprocessing_view_controls import split_plot_layout, PlotSplitterPreferen
 from global_signal_metrics import GLOBAL_SIGNAL_METRICS, compute_global_signal_metrics
 from vector_figure_export import write_vector_figure
 from recording_groups import (RecordingGroups, GroupChipBar, FileRowDelegate, DetachableSection,
-                              build_assign_menu, color_dot_icon, UNGROUPED_COLOR, GRIP_W)
+                              build_assign_menu, color_dot_icon, UNGROUPED_COLOR, GRIP_W, ROW_HEIGHT)
 from psth_groups import HeatmapGroupBands, build_group_display, block_summaries, block_ticks, legend_label
 from dashboard_panels import DashboardPanels, GridRowHandle, HANDLE_PX, seamless_figure_qss, draw_global_metric
 from file_drop import install_file_drop, expand_paths
@@ -48,6 +48,7 @@ from behavior_import import (infer_table, read_behavior_csv, detect_time_column,
                              select_identity_rows, BehaviorImportCancelled)
 from mamir_import import inspect_mamir, load_mamir
 from heatmap_display import color_name as heatmap_color_name, color_map as heatmap_color_map, color_limits as heatmap_color_limits, matplotlib_color_map
+from injection_time import before_injection, injection_times, period_summary
 from baseline_advisor import BaselineRecording
 from baseline_suggestions import BaselineSuggestionConfig
 from baseline_suggestions_widget import BaselineSuggestionsWidget
@@ -1881,7 +1882,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fal.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
 
         self.combo_align = QtWidgets.QComboBox()
-        self.combo_align.addItems(["Analog/Digital channel (from Doric)", "Behavior (CSV/XLSX)"])
+        self.combo_align.addItems(["Analog/Digital channel (from Doric)", "Behavior (CSV/XLSX)", "Injection"])
         self.combo_align.setCurrentIndex(1)
         _compact_combo(self.combo_align, min_chars=6)
 
@@ -2041,9 +2042,40 @@ class PostProcessingPanel(QtWidgets.QWidget):
         pre_col.setStretch(1, 1)
         beh_col.setStretch(1, 1)
         lists_layout.addLayout(pre_col)
+        self.cb_injection = QtWidgets.QCheckBox("Injection time")
+        self.list_injection = QtWidgets.QListWidget()
+        self.list_injection.setFixedWidth(145)
+        self.list_injection.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list_injection.hide()
+        self.list_injection.itemClicked.connect(self._edit_injection)
+        injection_edit = QtGui.QShortcut(QtCore.Qt.Key.Key_Return, self.list_injection)
+        injection_edit.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)
+        injection_edit.activated.connect(lambda: self._edit_injection(self.list_injection.currentItem()))
+        self.cb_injection.setToolTip("Enter one optional time per recording. A behavior file is optional.")
+        self.cb_injection.toggled.connect(self.list_injection.setVisible)
+        injection_col = QtWidgets.QVBoxLayout()
+        injection_label = QtWidgets.QLabel("Injection time")
+        injection_label.setFixedHeight(24)
+        injection_label.hide()
+        self.cb_injection.toggled.connect(injection_label.setVisible)
+        injection_col.addWidget(injection_label)
+        injection_col.addWidget(self.list_injection)
+        injection_col.setStretch(1, 1)
+        lists_layout.addLayout(injection_col)
         lists_layout.addLayout(beh_col)
+        self.list_preprocessed.verticalScrollBar().valueChanged.connect(self.list_injection.verticalScrollBar().setValue)
+        self.list_injection.verticalScrollBar().valueChanged.connect(self.list_preprocessed.verticalScrollBar().setValue)
+        self.combo_injection_period = QtWidgets.QComboBox()
+        self.combo_injection_period.addItems(["All events", "Before injection", "After injection"])
+        self.combo_injection_period.currentIndexChanged.connect(self._schedule_psth)
+        self.injection_compare = QtWidgets.QPushButton("Compare before and after")
+        self.injection_compare.clicked.connect(self._compare_injection_periods)
+        self.cb_injection.toggled.connect(self._update_injection_controls)
+        self.cb_injection.toggled.connect(self._schedule_psth)
 
         fal.addRow("Align source", self.combo_align)
+        fal.addRow(self.combo_injection_period)
+        fal.addRow(self.injection_compare)
         fal.addRow(self.lbl_dio_channel, self.combo_dio)
         fal.addRow(self.lbl_dio_polarity, self.combo_dio_polarity)
         fal.addRow(self.lbl_dio_align, self.combo_dio_align)
@@ -2086,6 +2118,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         recordings_layout.setContentsMargins(0, 0, 0, 0)
         recordings_layout.setSpacing(6)
         recordings_layout.addWidget(self.group_chip_bar)
+        recordings_layout.addWidget(self.cb_injection)
         recordings_layout.addLayout(lists_layout, 1)
         recordings_layout.addWidget(self.lbl_list_pairing)
         self.recordings_section = DetachableSection(recordings_content, "Recordings and groups",
@@ -9274,7 +9307,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
             w.setEnabled(use_dio)
             w.setVisible(use_dio)
 
-        use_beh = not use_dio
+        injection = self.combo_align.currentText() == "Injection"
+        if injection:
+            self.cb_injection.setChecked(True)
+        self._update_injection_controls()
+        self.cb_filter_events.setEnabled(not injection)
+        self._update_event_filter_enabled()
+        self.cb_exclude_low_event_animals.setEnabled(not injection)
+        self.spin_min_events_per_animal.setEnabled(not injection and self.cb_exclude_low_event_animals.isChecked())
+        use_beh = not use_dio and not injection
         self.lbl_behavior_file_type.setEnabled(use_beh)
         self.lbl_behavior_file_type.setVisible(use_beh)
         self.combo_behavior_file_type.setEnabled(use_beh)
@@ -9319,6 +9360,115 @@ class PostProcessingPanel(QtWidgets.QWidget):
         ):
             w.setVisible(is_transition)
             w.setEnabled(is_transition)
+
+    def _update_injection_controls(self):
+        behavior = self.combo_align.currentText().startswith("Behavior")
+        show = behavior and self.cb_injection.isChecked()
+        self.combo_injection_period.setVisible(show)
+        self.injection_compare.setVisible(show)
+        self.cb_injection.setEnabled(self.combo_align.currentText() != "Injection")
+
+    def _edit_injection(self, item):
+        row = self.list_injection.row(item)
+        if not 0 <= row < len(self._processed):
+            return
+        proc = self._processed[row]
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Injection – " + self._file_id_for_proc(proc))
+        layout = QtWidgets.QFormLayout(dialog)
+        clock = QtWidgets.QComboBox()
+        clock.addItem("None", "none")
+        clock.addItem("Elapsed from first recording sample", "recording")
+        clock.addItem("Video time (synchronized camera clock)", "video")
+        clock.setCurrentIndex(clock.findData(proc.injection_clock) if proc.injection_seconds is not None else 0)
+        layout.addRow("Time source", clock)
+        time = QtWidgets.QLineEdit()
+        time.setMaxLength(18)
+        time.setToolTip("For recording time, zero is the first loaded sample. For video, enter the time on the synchronized camera clock.")
+        time.setPlaceholderText("hours:minutes:seconds")
+        time.setText(self._injection_time_text(proc.injection_seconds or 0))
+        layout.addRow("HH:MM:SS", time)
+        time.setEnabled(clock.currentIndex() != 0)
+        clock.currentIndexChanged.connect(lambda index: time.setEnabled(index != 0))
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok |
+                                              QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        layout.addRow(buttons)
+        def accept():
+            match = re.fullmatch(r"(\d+):([0-5]\d):([0-5]\d(?:\.\d{1,3})?)", time.text().strip())
+            if clock.currentIndex() and not match:
+                QtWidgets.QMessageBox.warning(dialog, "Injection time", "Enter hours:minutes:seconds, for example 00:12:30.")
+                return
+            proc.injection_seconds = (3600 * int(match[1]) + 60 * int(match[2]) + float(match[3])
+                                      if clock.currentIndex() else None)
+            proc.injection_clock = clock.currentData() if clock.currentIndex() else "recording"
+            dialog.accept()
+        buttons.accepted.connect(accept)
+        buttons.rejected.connect(dialog.reject)
+        if dialog.exec():
+            self._project_dirty = True
+            self._refresh_injection_rows()
+            self._schedule_psth()
+        dialog.deleteLater()
+
+    @staticmethod
+    def _injection_time_text(seconds):
+        hours, rem = divmod(round(seconds * 1000), 3600000)
+        minutes, rem = divmod(rem, 60000)
+        return f"{hours:02}:{minutes:02}:{rem // 1000:02}" + (f".{rem % 1000:03}" if rem % 1000 else "")
+
+    def _refresh_injection_rows(self):
+        self.list_injection.clear()
+        for proc in self._processed:
+            seconds = getattr(proc, "injection_seconds", None)
+            label = self._injection_time_text(seconds) if seconds is not None else "None"
+            issue = injection_times(proc)[2] if seconds is not None else ""
+            item = QtWidgets.QListWidgetItem(label + (" ⚠" if issue else ""))
+            item.setSizeHint(QtCore.QSize(120, ROW_HEIGHT))
+            item.setToolTip(issue or "Click to enter or clear this recording’s injection time.")
+            self.list_injection.addItem(item)
+        self.list_injection.verticalScrollBar().setValue(self.list_preprocessed.verticalScrollBar().value())
+
+    def _injection_on_axis(self, proc):
+        raw, camera, _ = injection_times(proc)
+        if self.cb_sync_use_aligned.isChecked() and getattr(proc, "sync_aligned_time", None) is not None:
+            if np.shape(proc.sync_aligned_time) == np.shape(proc.time) and np.any(np.isfinite(proc.sync_aligned_time)):
+                return camera
+        return raw
+
+    def _compare_injection_periods(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Behavior before and after injection")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        table = QtWidgets.QTableWidget(0, 6)
+        table.setHorizontalHeaderLabels(["Recording", "Period", "Onsets", "Observed (s)", "Onsets/min", "Time in behavior (s)"])
+        layout.addWidget(table)
+        for proc in self._processed:
+            injection = self._injection_on_axis(proc)
+            source = self._match_behavior_source(proc)
+            if injection is None or not source:
+                continue
+            selected = [self.combo_behavior_name.currentText()]
+            if self.combo_behavior_align.currentText().startswith("Transition"):
+                selected = [self.combo_behavior_from.currentText(), self.combo_behavior_to.currentText()]
+            available = set(source.get("behaviors") or {}) | set(source.get("event_behaviors") or {})
+            if not all(name in available for name in selected):
+                continue
+            events, durations = self._behavior_events_for_period(proc)
+            onsets = self._behavior_onsets(events, durations)
+            intervals = observed_intervals(self._proc_time(proc), proc.output)
+            for period in period_summary(onsets, durations, intervals, injection):
+                row = table.rowCount()
+                table.insertRow(row)
+                for col, value in enumerate((self._file_id_for_proc(proc), *period)):
+                    text = "—" if value is None else format(value, ".4g") if isinstance(value, float) else str(value)
+                    table.setItem(row, col, QtWidgets.QTableWidgetItem(text))
+        if not table.rowCount():
+            layout.addWidget(QtWidgets.QLabel("No paired recordings with a usable injection time and behavior."))
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.resizeColumnsToContents()
+        dialog.resize(700, 340)
+        dialog.exec()
+        dialog.deleteLater()
 
     def _behavior_sources_need_generated_time(self) -> bool:
         for info in self._behavior_sources.values():
@@ -9892,7 +10042,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             fs_txt = "-"
             output_label = "-"
         align_src = self.combo_align.currentText()
-        if _is_doric_channel_align(align_src):
+        if align_src == "Injection":
+            align_detail, align_mode = "one time per recording", ""
+        elif _is_doric_channel_align(align_src):
             align_detail = self.combo_dio.currentText().strip() or "(none)"
             align_mode = self.combo_dio_align.currentText()
         else:
@@ -9985,7 +10137,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     if extra:
                         exclusions = np.vstack([exclusions, *extra])
             exclusions = exclusions[np.all(np.isfinite(exclusions), axis=1)]
-            events, _ = self._filter_events(raw_events, raw_durations)
+            events = raw_events if self.combo_align.currentText() == "Injection" else self._filter_events(raw_events, raw_durations)[0]
             recordings.append(BaselineRecording(
                 label=self._file_id_for_proc(proc), time=np.asarray(self._proc_time(proc), float).copy(),
                 signal=np.asarray(proc.output, float).copy(), events=events.copy(),
@@ -10191,13 +10343,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_heat.setYRange(0, self._last_mat.shape[0], padding=0)
 
     def _update_event_filter_enabled(self) -> None:
-        enabled = self.cb_filter_events.isChecked()
+        enabled = self.cb_filter_events.isChecked() and self.combo_align.currentText() != "Injection"
         for w in (self.spin_event_start, self.spin_event_end, self.spin_group_window, self.spin_dur_min, self.spin_dur_max):
             w.setEnabled(enabled)
         self._queue_settings_save()
 
     def _update_psth_inclusion_controls(self, *_args: object) -> None:
-        enabled = self._psth_exclude_low_event_animals_enabled()
+        enabled = self.combo_align.currentText() != "Injection" and self._psth_exclude_low_event_animals_enabled()
         self.spin_min_events_per_animal.setEnabled(enabled)
         self._queue_settings_save()
 
@@ -10525,6 +10677,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     "fs_used": float(getattr(proc, "fs_used", np.nan)),
                     "n_time": int(time.size),
                     "n_output": int(output.size),
+                    "injection_seconds": getattr(proc, "injection_seconds", None),
+                    "injection_clock": getattr(proc, "injection_clock", "recording"),
                     "sync_n": int(sync_time.size),
                     "sync_start": float(sync_time[0]) if sync_time.size else None,
                     "sync_end": float(sync_time[-1]) if sync_time.size else None,
@@ -12655,6 +12809,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._behavior_group_cache = None
         self._pairing_cache = None
         self.list_preprocessed.clear()
+        self._refresh_injection_rows()
         for i, proc in enumerate(self._processed, 1):
             filename = os.path.splitext(os.path.basename(proc.path))[0]
             filename_clean = _strip_ain_suffix(filename)
@@ -12769,7 +12924,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._update_file_lists()
             self._compute_spatial_heatmap()
             self._update_status_strip()
-            if self._behavior_sources:
+            if self._behavior_sources or self.combo_align.currentText() == "Injection":
                 self._schedule_psth()   # pairing follows the new line order
 
     def _sync_behavior_order_from_list(self) -> None:
@@ -13763,6 +13918,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         report["sync_tool"] = str(_SYNC_TOOL_ROOT)
         report["created_utc"] = datetime.now(timezone.utc).isoformat()
         proc.sync_report = report
+        self._refresh_injection_rows()
         self._sync_results_by_file[self._file_id_for_proc(proc)] = report
         comparison = getattr(self, "behavior_zone_panel", None)
         if comparison is not None:
@@ -13998,6 +14154,49 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 return off, dur
             return on, dur
 
+        if align == "Injection":
+            time = self._injection_on_axis(proc)
+            if time is None:
+                return np.array([], float), np.array([], float)
+            return np.array([time]), np.array([np.nan])
+
+        period = self.combo_injection_period.currentIndex() if self.cb_injection.isChecked() else 0
+        if not period:
+            return self._behavior_events(proc)
+        injection = self._injection_on_axis(proc)
+        if injection is None:
+            return np.array([], float), np.array([], float)
+        events, durations = self._behavior_events_for_period(proc)
+        onsets = self._behavior_onsets(events, durations)
+        before = before_injection(onsets, injection)
+        keep = before if period == 1 else np.isfinite(onsets) & ~before
+        return events[keep], durations[keep]
+
+    def _behavior_onsets(self, events, durations):
+        if self.combo_behavior_align.currentText().endswith("offset"):
+            return events - np.where(np.isfinite(durations), durations, 0.)
+        return events
+
+    def _behavior_events_for_period(self, proc):
+        events, durations = self._behavior_events(proc)
+        # Behavior events use camera timestamps. Convert both bout edges when
+        # plotting on an unsynchronized photometry axis, accounting for drift.
+        if proc.sync_aligned_time is None or not np.size(proc.sync_aligned_time) or self.cb_sync_use_aligned.isChecked():
+            return events, durations
+        camera = np.asarray(proc.sync_aligned_time, float)
+        fiber = np.asarray(proc.time, float)
+        if camera.shape != fiber.shape:
+            return np.array([], float), np.array([], float)
+        valid = np.isfinite(camera) & np.isfinite(fiber)
+        camera, fiber = camera[valid], fiber[valid]
+        if camera.size < 2 or not np.all(np.diff(camera) > 0) or not np.all(np.diff(fiber) > 0):
+            return np.array([], float), np.array([], float)
+        def convert(values):
+            return np.interp(values, camera, fiber, left=np.nan, right=np.nan)
+        onsets = self._behavior_onsets(events, durations)
+        return convert(events), convert(onsets + durations) - convert(onsets)
+
+    def _behavior_events(self, proc):
         # Behavior binary columns
         info = self._match_behavior_source(proc)
         if not info:
@@ -14310,7 +14509,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._trace_preview_durations = np.array([], float)
 
         ev, dur = self._get_events_for_proc(proc)
-        ev, dur = self._filter_events(ev, dur)
+        if self.combo_align.currentText() != "Injection":
+            ev, dur = self._filter_events(ev, dur)
         if ev.size:
             dur = np.asarray(dur, float) if dur is not None else np.array([], float)
             if dur.size != ev.size:
@@ -15730,16 +15930,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
             event_rows: List[Dict[str, object]] = []
             total_events = 0
             tvec = None
-            min_events = self._psth_min_events_per_animal()
+            injection_alignment = self.combo_align.currentText() == "Injection"
+            min_events = 1 if injection_alignment else self._psth_min_events_per_animal()
             exclude_low_events = bool(group_mode and self._psth_exclude_low_event_animals_enabled())
             excluded_files: Dict[str, Dict[str, object]] = {}
 
             align_combo = self.combo_dio_align if _is_doric_channel_align(self.combo_align.currentText()) else self.combo_behavior_align
-            self._psth_behavior_offset_aligned = align_combo.currentText().endswith("offset")
+            self._psth_behavior_offset_aligned = not injection_alignment and align_combo.currentText().endswith("offset")
 
             for proc in self._processed:
                 ev, dur = self._get_events_for_proc(proc)
-                ev, dur = self._filter_events(ev, dur)
+                if not injection_alignment:
+                    ev, dur = self._filter_events(ev, dur)
                 file_id = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
                 if ev.size == 0:
                     if exclude_low_events:
@@ -17072,6 +17274,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             for idx, proc in enumerate(self._processed):
                 entry = processed_group.create_group(f"item_{idx:04d}")
                 entry.attrs["path"] = str(getattr(proc, "path", "") or "")
+                if proc.injection_seconds is not None:
+                    entry.attrs["injection_seconds"] = proc.injection_seconds
+                    entry.attrs["injection_clock"] = proc.injection_clock
                 entry.attrs["channel_id"] = str(getattr(proc, "channel_id", "") or "")
                 entry.attrs["dio_name"] = str(getattr(proc, "dio_name", "") or "")
                 entry.attrs["output_label"] = str(getattr(proc, "output_label", "") or "")
@@ -17372,6 +17577,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         baseline_ref=_aligned(self._read_h5_numeric(entry, "baseline_ref"), fill_nan=False)
                         if "baseline_ref" in entry
                         else None,
+                        injection_seconds=float(entry.attrs["injection_seconds"]) if "injection_seconds" in entry.attrs else None,
+                        injection_clock=self._h5_text(entry.attrs.get("injection_clock", "recording"), "recording"),
                         output=output_arr,
                         output_label=self._h5_text(entry.attrs.get("output_label", "output"), "output"),
                         output_context=self._h5_text(entry.attrs.get("output_context", ""), ""),
@@ -18143,6 +18350,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _collect_settings(self) -> Dict[str, object]:
         return {
             "event_kind": self._event_category(),
+            "show_injection": self.cb_injection.isChecked(),
+            "injection_period": self.combo_injection_period.currentText(),
             "behavior_comparison": self.behavior_zone_panel.settings_state(),
             "align": self.combo_align.currentText(),
             "dio_channel": self.combo_dio.currentText(),
@@ -18279,6 +18488,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 combo.setCurrentIndex(idx)
 
         self._set_event_category(str(data.get("event_kind", "zone")))
+        self.cb_injection.setChecked(bool(data.get("show_injection", False)) or data.get("align") == "Injection")
+        _set_combo(self.combo_injection_period, data.get("injection_period", "All events"))
         _set_combo(self.combo_align, data.get("align"))
         _set_combo(self.combo_dio, data.get("dio_channel"))
         _set_combo(self.combo_dio_polarity, data.get("dio_polarity"))
@@ -18627,6 +18838,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         writes both analyses to identical paths.
         """
         align_source = self.combo_align.currentText()
+        if align_source == "Injection":
+            return "injection"
         if _is_doric_channel_align(align_source):
             channel = self.combo_dio.currentText().strip()
             cleaned = re.sub(r"\s+", "_", channel)
@@ -18704,6 +18917,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         elif align_text.startswith("Behavior"):
             align_items.extend(
                 [
+                    ("injection_period", data.get("injection_period", "All events") if data.get("show_injection") else "All events"),
                     ("behavior_file_type", data.get("behavior_file_type", "")),
                     ("behavior", data.get("behavior", "")),
                     ("behavior_align", data.get("behavior_align", "")),
@@ -18722,14 +18936,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
             ("resample_hz", data.get("resample", 0.0)),
             ("gaussian_smooth_sigma_s", data.get("smooth", 0.0)),
             ("normalization", data.get("psth_normalization", "Baseline z-score")),
-            ("event_filters_enabled", data.get("filter_enabled", False)),
+            ("event_filters_enabled", align_text != "Injection" and data.get("filter_enabled", False)),
             ("event_index_start", data.get("event_start", 0)),
             ("event_index_end", data.get("event_end", 0)),
             ("group_events_within_s", data.get("group_window_s", 0.0)),
             ("event_duration_min_s", data.get("dur_min", 0.0)),
             ("event_duration_max_s", data.get("dur_max", 0.0)),
             ("exclude_animals_below_min_events", data.get("psth_exclude_low_event_animals", False)),
-            ("min_events_per_animal", data.get("psth_min_events_per_animal", 1)),
+            ("min_events_per_animal", 1 if align_text == "Injection" else data.get("psth_min_events_per_animal", 1)),
             ("group_view_keeps_trial_rows", data.get("psth_group_keep_trials", False)),
             ("excluded_animals_or_files", len(getattr(self, "_psth_excluded_files", {}) or {})),
             ("metrics_enabled", data.get("metrics_enabled", False)),
@@ -18982,6 +19196,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 "matrix_shape": list(np.asarray(self._last_mat).shape),
                 "excluded_files": getattr(self, "_psth_excluded_files", {}),
                 "settings": self._collect_settings(),
+                "injections": [
+                    {"file": proc.path, "clock": proc.injection_clock, "entered_seconds": proc.injection_seconds,
+                     "photometry_seconds": raw, "camera_seconds": camera, "status": issue or "ok"}
+                    for proc in self._processed if hasattr(proc, "injection_seconds")
+                    for raw, camera, issue in [injection_times(proc)]
+                ],
                 "choices": choices,
                 "outputs": output_names,
                 "error": error or None,
@@ -19311,7 +19531,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.statusUpdate.emit(f"Publication figure requires matplotlib and scipy: {e}", 5000)
             return
 
-        behaviors = self._get_all_behavior_names()
+        align = getattr(self, "combo_align", None)
+        period = getattr(self, "combo_injection_period", None)
+        current_result = align is not None and (
+            align.currentText() == "Injection" or
+            (align.currentText().startswith("Behavior") and self.cb_injection.isChecked() and period.currentIndex() > 0)
+        )
+        if current_result:
+            label = ("Injection" if align.currentText() == "Injection" else
+                     f"{self._behavior_suffix()} – {period.currentText()}")
+            behaviors = [label]
+        else:
+            behaviors = self._get_all_behavior_names()
         if not behaviors:
             self.statusUpdate.emit("No behaviors found for publication figure.", 5000)
             return
@@ -19364,7 +19595,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         cmap = matplotlib_color_map(self._style)
 
         for row_i, beh_name in enumerate(behaviors):
-            mat, tvec, labels = self._compute_psth_for_behavior(beh_name)
+            if current_result:
+                mat, tvec, labels = self._last_mat, self._last_tvec, self._last_display_labels
+            else:
+                mat, tvec, labels = self._compute_psth_for_behavior(beh_name)
             col = 0
 
             if mat is None or tvec is None or mat.size == 0:
@@ -20243,10 +20477,10 @@ class ExportDialog(QtWidgets.QDialog):
         # --- Publication figure ---
         grp_pub = QtWidgets.QGroupBox("Publication figure")
         pub_layout = QtWidgets.QVBoxLayout(grp_pub)
-        self.cb_pub_figure = QtWidgets.QCheckBox("Multi-panel figure (all behaviors)")
+        self.cb_pub_figure = QtWidgets.QCheckBox("Multi-panel publication figure")
         self.cb_pub_figure.setChecked(False)
         self.cb_pub_figure.setToolTip(
-            "Export a publication-ready figure with one row per behavior:\n"
+            "Export the active injection analysis or a figure with one row per behavior:\n"
             "heatmap | average PSTH | pre/post metrics with exact paired sign-test p-value"
         )
         pub_layout.addWidget(self.cb_pub_figure)
