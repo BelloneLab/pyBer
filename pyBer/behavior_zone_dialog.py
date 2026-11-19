@@ -619,7 +619,14 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self._selection_touched = True
         self.panel._queue_settings_save()
         if item is not None and item.checkState() == QtCore.Qt.CheckState.Checked:
-            self.panel.combo_behavior_name.setCurrentText(item.text())
+            name = item.text()  # the list may be rebuilt below
+            # Checking a behavior means "show its PSTH": leave Event-marker
+            # alignment, which otherwise keeps the PSTH empty without markers.
+            if self.panel.combo_align.currentText() == "Event marker":
+                self.panel.combo_align.setCurrentText("Behavior (CSV/XLSX)")
+            self.panel.combo_behavior_name.setCurrentText(name)
+            self._queue_comparison()
+            return
         elif item is not None and item.text() == self.panel.combo_behavior_name.currentText():
             remaining = self._selected_labels()
             if remaining:
