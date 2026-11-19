@@ -1,6 +1,6 @@
 # Automatic PSTH baseline suggestions
 
-**Postprocessing > PSTH > Window & baseline** offers up to three scored windows in a compact dropdown menu
+**Postprocessing > PSTH > Signal & baseline** offers up to three scored windows in a compact dropdown menu
 directly below the baseline inputs. Loading a signal, choosing events, changing
 the pre-event duration or switching recording scope refreshes them automatically.
 Open the menu and select a choice to apply it. There is no separate dialog or Estimate step.

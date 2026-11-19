@@ -219,7 +219,10 @@ def find_action(menu: QtWidgets.QMenu, *path: str) -> Optional[QtGui.QAction]:
             return None
         if depth == len(path) - 1:
             return match
-        current = match.menu()
+        # Resolve the parent-owned submenu. Some PySide versions return a
+        # temporary wrapper from QAction.menu() and invalidate its actions.
+        children = current.findChildren(QtWidgets.QMenu, options=QtCore.Qt.FindChildOption.FindDirectChildrenOnly)
+        current = next((submenu for submenu in children if submenu.menuAction() == match), None)
         if current is None:
             return None
     return None

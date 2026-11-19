@@ -24,7 +24,7 @@ class RecordingOutputTests(unittest.TestCase):
 
     def picker(self, row):
         listing = self.panel.list_outputs
-        return listing.itemWidget(listing.item(row))
+        return listing.itemWidget(listing.item(row)).findChild(QtWidgets.QComboBox)
 
     def test_primary_switch_psth_export_project_and_source_hashes(self):
         p = self.panel

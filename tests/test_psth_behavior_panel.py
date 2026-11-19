@@ -175,6 +175,9 @@ class BehaviorPanelTests(unittest.TestCase):
             row["duration_sec"] = np.nan
         p._refresh_psth_duration_view()
         self.assertFalse(p.plot_dur.property("hasPlotData"))
+        p._behavior_sources["mouse1"] = {"kind": "timestamp_columns"}
+        p._refresh_psth_duration_view()
+        self.assertTrue(p.plot_dur.property("hasPlotData"))
         p.combo_psth_behavior_metric.setCurrentIndex(1)
         self.assertTrue(p.plot_dur.property("hasPlotData"))
 

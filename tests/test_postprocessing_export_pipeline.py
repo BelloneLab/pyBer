@@ -56,6 +56,7 @@ def _panel():
     """Create an existing successful result and the settings that produced it."""
     panel = SimpleNamespace(
         _processed=[SimpleNamespace(path="mouse_01.csv", output=np.arange(100.0))],
+        combo_psth_input=_Control("saved"),
         tab_sources=_Control(0),
         tab_visual_mode=_Control(0),
         combo_individual_file=_Control("mouse_01"),
@@ -114,7 +115,7 @@ def _panel():
           "_current_psth_behavior_summary", "_psth_behavior_summary_recordings",
           "_clear_psth_result_view", "_clear_psth_cache", "_stack_psth_trial_rows", "_behavior_suffix",
           "_alignment_export_suffix", "_is_group_export_context", "_group_export_prefix",
-          "_default_export_prefix", "_psth_normalization")
+          "_default_export_prefix", "_psth_normalization", "_psth_input")
     return panel
 
 

@@ -21,6 +21,7 @@ import h5py
 
 from analysis_core import (
     ProcessedTrial,
+    output_family,
     ExportSelection,
     coerce_time_value,
     read_processed_sidecar,
@@ -1675,6 +1676,36 @@ def _compute_psth_matrix(
     )
 
 
+def psth_formula_text(choice, labels, normalization, start, end):
+    """Describe the input and per-event normalization before smoothing or averaging."""
+    families = {output_family(label) for label in labels}
+    family = next(iter(families)) if len(families) == 1 else choice
+    if family == "dFF":
+        name = "saved dFF"
+        definition = ("X is the saved dFF trace. Standard dFF = (F − F₀) / F₀. "
+                      "F₀ is the estimated fluorescence baseline. Motion-corrected variants use "
+                      "the correction selected during preprocessing.")
+    elif family == "z-score":
+        name = "saved z-score"
+        definition = ("X is the saved z-score trace. For standard PyBer output, "
+                      "Z(dFF) = (dFF − recording median of dFF) / recording SD of dFF. "
+                      "Imported traces retain the normalization used in their source file.")
+        if "zscore (subtractions)" in labels:
+            definition += " The subtractions variant uses Z(signal dFF) − Z(reference dFF) when a reference is available."
+    else:
+        name = "saved input"
+        definition = "X is the saved input selected for each recording."
+    if normalization == "none":
+        return definition + "\nNormalization: Y = X. Event alignment retains the input units."
+    baseline = (f"\nB contains finite {name} samples from {start:g} to {end:g} seconds "
+                "relative to each event (0 s).")
+    if normalization == "subtract":
+        return definition + baseline + "\nNormalization: Y = X − mean(B). The result stays in the input units."
+    return (definition + baseline + "\nNormalization: Y = (X − mean(B)) / SD(B). "
+            "+2 means two baseline standard deviations above the event-baseline mean. "
+            "SD is the population standard deviation. At least five finite baseline samples "
+            "and baseline SD above 10⁻¹² are required.")
+
 
 class PostProcessingPanel(QtWidgets.QWidget):
     # bridge signals to main
@@ -2101,19 +2132,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         pre_col.setStretch(1, 1)
         beh_col.setStretch(1, 1)
         lists_layout.addLayout(pre_col)
-        self.list_outputs = QtWidgets.QListWidget()
-        self.list_outputs.setMinimumWidth(85)
-        self.list_outputs.setMaximumWidth(145)
-        self.list_outputs.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        output_column = QtWidgets.QVBoxLayout()
-        output_header = QtWidgets.QLabel("Input signal")
-        output_header.setFixedHeight(24)
-        output_header.setToolTip("Choose the saved preprocessing output used for each recording.")
-        output_column.addWidget(output_header)
-        output_column.addWidget(self.list_outputs, 1)
-        lists_layout.addLayout(output_column)
-        self.list_preprocessed.verticalScrollBar().valueChanged.connect(self.list_outputs.verticalScrollBar().setValue)
-        self.list_outputs.verticalScrollBar().valueChanged.connect(self.list_preprocessed.verticalScrollBar().setValue)
         self.cb_injection = QtWidgets.QCheckBox("Event marker")
         self.list_injection = QtWidgets.QListWidget()
         self.list_injection.setFixedWidth(145)
@@ -2251,11 +2269,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_b1 = DurationSpinBox(-1e9, 0, 0)
         self.spin_resample = QtWidgets.QDoubleSpinBox(); self.spin_resample.setRange(0.01, 1000); self.spin_resample.setValue(50); self.spin_resample.setDecimals(2)
         self.spin_smooth = QtWidgets.QDoubleSpinBox(); self.spin_smooth.setRange(0, 5); self.spin_smooth.setValue(0.0); self.spin_smooth.setDecimals(2)
+        self.combo_psth_input = QtWidgets.QComboBox()
+        self.combo_psth_input.addItem("As saved in each file", "saved")
+        self.combo_psth_input.addItem("dFF", "dFF")
+        self.combo_psth_input.addItem("Whole-recording z-score", "z-score")
         self.combo_psth_normalization = QtWidgets.QComboBox()
-        self.combo_psth_normalization.addItem("Baseline z-score", "zscore")
-        self.combo_psth_normalization.addItem("Subtract baseline", "subtract")
-        self.combo_psth_normalization.addItem("Original processed units", "none")
-        self.combo_psth_normalization.setToolTip("Z-score divides by baseline SD. Flat or insufficient baselines are unavailable. Subtract keeps the source units; original leaves the processed signal unchanged.")
+        self.combo_psth_normalization.addItem("Z-score relative to event baseline", "zscore")
+        self.combo_psth_normalization.addItem("Subtract baseline average", "subtract")
+        self.combo_psth_normalization.addItem("Show as saved", "none")
+        for picker in (self.combo_psth_input, self.combo_psth_normalization):
+            _compact_combo(picker)
+
 
         self.cb_filter_events = QtWidgets.QCheckBox("Enable event filters")
         self.cb_filter_events.setChecked(True)
@@ -2421,7 +2445,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # =======================================================
         # Section 1 - Window & Baseline
         # =======================================================
-        grp_window = QtWidgets.QGroupBox("Window && baseline")
+        grp_window = QtWidgets.QGroupBox("Signal && baseline")
         grp_window.setStyleSheet(_psth_section_qss)
         fw = QtWidgets.QFormLayout(grp_window)
         fw.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -2430,12 +2454,43 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for label, unit in (("Seconds", "s"), ("Minutes", "min"), ("Hours", "h")):
             self.combo_window_unit.addItem(label, unit)
         self.combo_window_unit.currentIndexChanged.connect(self._set_psth_window_unit)
+        fw.addRow("Saved signal for all recordings", self.combo_psth_input)
+        self.lbl_psth_availability = QtWidgets.QLabel()
+        self.lbl_psth_availability.setWordWrap(True)
+        self.lbl_psth_availability.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        fw.addRow(self.lbl_psth_availability)
+        self.cb_psth_available_only = QtWidgets.QCheckBox("Use available recordings only")
+        fw.addRow(self.cb_psth_available_only)
+        fw.addRow("How should it be plotted?", self.combo_psth_normalization)
+        self._psth_window_form = fw
+        self._psth_baseline_row = base_widget
         fw.addRow("Time unit", self.combo_window_unit)
-        fw.addRow("Window", win_widget)
+        fw.addRow("Event baseline", base_widget)
+        self.btn_psth_formula = QtWidgets.QToolButton()
+        self.btn_psth_formula.setText("Show formula and meaning")
+        self.btn_psth_formula.setCheckable(True)
+        fw.addRow(self.btn_psth_formula)
+        self.lbl_psth_formula = QtWidgets.QLabel()
+        self.lbl_psth_formula.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.lbl_psth_formula.setWordWrap(True)
+        fw.addRow(self.lbl_psth_formula)
+        self.lbl_psth_formula.hide()
+        self.btn_psth_formula.toggled.connect(self.lbl_psth_formula.setVisible)
+        self.btn_psth_advanced = QtWidgets.QToolButton()
+        self.btn_psth_advanced.setText("Advanced options")
+        self.btn_psth_advanced.setCheckable(True)
+        fw.addRow(self.btn_psth_advanced)
+        self.cb_psth_subtract = QtWidgets.QCheckBox("Subtract the baseline average only")
+        self.cb_psth_subtract.toggled.connect(self._toggle_psth_subtraction)
+        fw.addRow(self.cb_psth_subtract)
+        self.list_outputs = QtWidgets.QListWidget()
+        self.list_outputs.setToolTip("Individual saved selections and preprocessing variants")
+        fw.addRow(self.list_outputs)
+        self.btn_psth_advanced.toggled.connect(self._refresh_psth_signal_settings)
+        fw.addRow("Plot window", win_widget)
         self.btn_available_window = QtWidgets.QPushButton("Use available recording time")
         self.btn_available_window.clicked.connect(self._use_available_window)
         fw.addRow(self.btn_available_window)
-        fw.addRow("Baseline", base_widget)
         self.baseline_suggestions = BaselineSuggestionsWidget(
             snapshot=self._baseline_advisor_recordings,
             config=lambda: BaselineSuggestionConfig(pre_window_s=float(self.spin_pre.value())),
@@ -2450,7 +2505,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_psth_bin_count()
         fw.addRow(self.lbl_psth_bins)
         fw.addRow("Smooth sigma (s)", with_slider(self.spin_smooth, logarithmic=True))
-        fw.addRow("Normalization", self.combo_psth_normalization)
+
 
         # These controls redraw the cached accepted events without rerunning PSTH.
         grp_behavior_panel = QtWidgets.QGroupBox("Behavior panel")
@@ -2626,7 +2681,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # PSTH panel stays short instead of stacking eight cards (grp_opt).
         grp_opt = self._make_subsections("psth_subsection", (
             ("Alignment", grp_align_psth, "Event / zone to align on and alignment edge"),
-            ("Window", grp_window, "Trial window, baseline, resampling, smoothing and normalization"),
+            ("Signal & baseline", grp_window, "Saved signal, plotting method, trial window and baseline"),
             ("Groups", grp_groups, "Recording groups shown in the heatmap and average PSTH"),
             ("Behavior", grp_behavior_panel, "Behavior summary plots under the PSTH"),
             ("Filters", grp_filt, "Event index, grouping and duration filters"),
@@ -4722,6 +4777,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.psth_time_handle.refresh()
         self.psth_scale_container = scales
         self.psth_shared_card = create_plot_card(self.heat_figure, "")
+        self.lbl_psth_plot_summary = QtWidgets.QLabel()
+        self.lbl_psth_plot_summary.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.lbl_psth_plot_summary.setWordWrap(True)
+        self.psth_shared_card.layout().insertWidget(0, self.lbl_psth_plot_summary)
         # Heatmap colors are adjusted from a right-click menu on the color bar
         # (no editor row above the heatmap).
         from heatmap_color_controls import HeatmapColorMenu
@@ -5151,7 +5210,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         ):
             w.currentIndexChanged.connect(self._schedule_psth)
         self.spin_transition_gap.valueChanged.connect(self._schedule_psth)
+        self.combo_psth_input.currentIndexChanged.connect(self._on_group_signal_changed)
+        self.cb_psth_available_only.toggled.connect(self._on_group_signal_changed)
         self.combo_psth_normalization.currentIndexChanged.connect(self._on_psth_normalization_changed)
+        for control in (self.spin_b0, self.spin_b1):
+            control.valueChanged.connect(self._refresh_psth_signal_settings)
+        self._refresh_psth_signal_settings()
         for w in (
             self.spin_pre,
             self.spin_post,
@@ -10238,7 +10302,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             fs_actual = float(proc0.fs_actual) if np.isfinite(proc0.fs_actual) else np.nan
             fs_used = float(proc0.fs_used) if np.isfinite(proc0.fs_used) else np.nan
             fs_txt = f"{fs_actual:.3g}->{fs_used:.3g}" if np.isfinite(fs_actual) and np.isfinite(fs_used) else "-"
-            output_label = proc0.output_label or "output"
+            output_label = self._psth_input(proc0)[0] or "Selected signal unavailable"
         else:
             self.lbl_plot_file.setText("File: (none)")
             fs_txt = "-"
@@ -10307,6 +10371,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         self.spin_metric_pre0, self.spin_metric_pre1,
                         self.spin_metric_post0, self.spin_metric_post1):
             control.set_unit(unit)
+        self._refresh_psth_signal_settings()
         self._queue_settings_save()
 
     def _update_psth_bin_count(self):
@@ -10325,7 +10390,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if group and not self._group_view_keeps(self._file_id_for_proc(proc)):
                 continue
             times = np.asarray(self._proc_time(proc), float)
-            observed = times[np.isfinite(times) & np.isfinite(proc.output)]
+            _, signal = self._psth_input(proc)
+            if signal is None:
+                continue
+            observed = times[np.isfinite(times) & np.isfinite(signal)]
             if observed.size < 2:
                 continue
             events, durations = self._get_events_for_proc(proc)
@@ -10364,6 +10432,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         offset_aligned = alignment.endswith("offset")
         recordings: List[BaselineRecording] = []
         for proc in processed:
+            _, signal = self._psth_input(proc)
+            if signal is None:
+                continue
             raw_events, raw_durations = self._get_events_for_proc(proc)
             raw_events = np.asarray(raw_events, float).reshape(-1)
             raw_durations = np.asarray(raw_durations, float).reshape(-1)
@@ -10387,13 +10458,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             events = raw_events if self.combo_align.currentText() == "Event marker" else self._filter_events(raw_events, raw_durations)[0]
             recordings.append(BaselineRecording(
                 label=self._file_id_for_proc(proc), time=np.asarray(self._proc_time(proc), float).copy(),
-                signal=np.asarray(proc.output, float).copy(), events=events.copy(),
+                signal=np.asarray(signal, float).copy(), events=events.copy(),
                 exclusion_intervals=exclusions.copy(),
             ))
         labels = ", ".join(recording.label for recording in recordings[:3])
         if len(recordings) > 3:
             labels += f", and {len(recordings) - 3} others"
-        mode = "Group: every loaded recording" if group else "Individual: selected recording"
+        mode = "Group: recordings with the selected signal" if group else "Individual: selected recording"
         scope = f"{mode} ({len(recordings)}). {labels}\nAll unfiltered selected-source bouts are checked for overlap."
         if group:
             scope += " One shared relative window is checked in every file, including files excluded from the displayed PSTH."
@@ -10430,6 +10501,71 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._psth_timer.start()
         self._update_status_strip()
 
+    def _psth_input(self, proc):
+        """Resolve a saved trace without changing the recording or inventing samples."""
+        current = getattr(proc, "output_label", "") or "Processed output"
+        choice = self.combo_psth_input.currentData()
+        if choice == "saved" or output_family(current) == choice:
+            return current, proc.output
+        matches = [(name, values) for name, values in proc.outputs.items()
+                   if output_family(name) == choice]
+        if len(matches) == 1:
+            return matches[0]
+        return None, None
+
+    def _toggle_psth_subtraction(self, checked):
+        code = "subtract" if checked else "none"
+        self.combo_psth_normalization.setCurrentIndex(self.combo_psth_normalization.findData(code))
+
+    def _on_group_signal_changed(self):
+        if self.sender() is self.combo_psth_input and not self._is_restoring_settings:
+            with QtCore.QSignalBlocker(self.cb_psth_available_only):
+                self.cb_psth_available_only.setChecked(False)
+        self._on_psth_normalization_changed()
+        self._queue_settings_save()
+
+    def _refresh_psth_signal_settings(self, *_args):
+        if not hasattr(self, "baseline_suggestions"):
+            return
+        norm = self._psth_normalization()
+        choice = self.combo_psth_input.currentData()
+        resolved = [(proc, self._psth_input(proc)[0]) for proc in self._processed]
+        labels = {label for _, label in resolved if label}
+        missing = [os.path.basename(proc.path) or "Recording" for proc, label in resolved if not label]
+        status = ""
+        if missing:
+            status = (f"Available for {len(resolved) - len(missing)} of {len(resolved)} recordings. "
+                      f"Missing or ambiguous: {', '.join(missing)}. "
+                      "To choose individual variants, open Advanced options and select As saved in each file.")
+        elif self._processed:
+            status = "Selected input: " + ", ".join(sorted(labels))
+        self.lbl_psth_availability.setText(status)
+        self.lbl_psth_availability.setVisible(bool(status))
+        self.cb_psth_available_only.setVisible(bool(missing) and len(missing) < len(resolved))
+        self._psth_window_form.setRowVisible(self._psth_baseline_row, norm != "none")
+        self.baseline_suggestions.setVisible(norm != "none")
+        advanced = self.btn_psth_advanced.isChecked()
+        saved_index = self.combo_psth_input.findData("saved")
+        saved_text = "As saved in each file"
+        if choice == "saved" and labels and not advanced:
+            families = {output_family(label) for label in labels}
+            if families == {"dFF"}:
+                saved_text = "dFF (as saved)"
+            elif families == {"z-score"}:
+                saved_text = "Whole-recording z-score (as saved)"
+            elif len(labels) > 1:
+                saved_text = "Mixed saved inputs"
+        self.combo_psth_input.setItemText(saved_index, saved_text)
+        self.combo_psth_input.view().setRowHidden(saved_index, not advanced)
+        self.cb_psth_subtract.setVisible(advanced)
+        self.list_outputs.setVisible(advanced and choice == "saved" and bool(resolved))
+        with QtCore.QSignalBlocker(self.cb_psth_subtract):
+            self.cb_psth_subtract.setChecked(norm == "subtract")
+        self.combo_psth_normalization.view().setRowHidden(
+            self.combo_psth_normalization.findData("subtract"), norm != "subtract")
+        self.lbl_psth_formula.setText(psth_formula_text(choice, labels, norm,
+                                                        self.spin_b0.value(), self.spin_b1.value()))
+
     def _psth_normalization(self) -> str:
         """Return the persisted normalization code, including legacy projects."""
         combo = getattr(self, "combo_psth_normalization", None)
@@ -10443,7 +10579,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if proc is not None and self.tab_visual_mode.currentIndex() == 0:
             selected = self.combo_individual_file.currentText().strip()
             proc = next((p for p in self._processed if self._file_id_for_proc(p) == selected), proc)
-        label = (proc.output_label or "Processed units") if proc is not None else "Processed units"
+        if self.tab_visual_mode.currentIndex() == 1 and self.combo_psth_input.currentData() != "saved":
+            label = self.combo_psth_input.currentText()
+        else:
+            label = self._psth_input(proc)[0] if proc is not None else None
+        label = label or "Processed units"
         return f"{label} (baseline subtracted)" if self._psth_normalization() == "subtract" else label
 
     def _refresh_psth_duration_view(self) -> None:
@@ -10453,7 +10593,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         recordings = self._psth_behavior_summary_recordings()
         # Time-only events (no durations): duration-based charts would stay
         # empty, so show event rate and total count over time instead.
-        time_only = bool(recordings) and not any(
+        time_only = bool(recordings) and self._has_time_only_events() and not any(
             np.any(np.isfinite(np.asarray(rec["offsets"], float))) for rec in recordings)
         needs_duration = {"duration", "ibi", "cumulative", "occupancy", "duration_time"}
         chosen = {self.combo_psth_behavior_metric.currentData(), self.combo_psth_behavior_metric_second.currentData()}
@@ -10510,9 +10650,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
             known = np.isfinite(duration) & (duration > 0)
             onsets = events - np.where(known, duration, 0) if offset_aligned else events.copy()
             offsets = np.where(known, events if offset_aligned else events + duration, np.nan)
+            _, signal = self._psth_input(proc)
+            if signal is None:
+                continue
             recordings.append({"file_id": file_id, "start": float(finite_time[0]),
                                "end": float(finite_time[-1]), "onsets": onsets, "offsets": offsets,
-                               "observed_intervals": observed_intervals(t, np.asarray(proc.output, float))})
+                               "observed_intervals": observed_intervals(t, np.asarray(signal, float))})
         return recordings
 
     def _current_psth_behavior_summary(self, metric=None) -> Dict[str, object]:
@@ -10557,6 +10700,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _on_psth_normalization_changed(self, *_args: object) -> None:
         """Recompute with a fresh color scale when the signal units change."""
+        self._refresh_psth_signal_settings()
         if self._is_restoring_settings:
             return
         self._clear_heatmap_manual_limits()
@@ -11369,7 +11513,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
             behavior and not self.behavior_psth_bar.collapse_button.isChecked())
         self.behavior_psth_bar.setVisible(behavior)
         if behavior:
-            self.behavior_zone_panel.sync_workspace()
             self.behavior_psth_bar.update_summary()
         else:
             self.plot_heat.setTitle("Heatmap")
@@ -13120,7 +13263,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._processed = list(self._processed)
         self._processed[index] = selected
         self.list_preprocessed.item(index).setData(QtCore.Qt.ItemDataRole.UserRole, id(selected))
-        self.list_outputs.itemWidget(item).setToolTip(label)
+        self._refresh_psth_signal_settings()
+        self._clear_heatmap_manual_limits()
         self._project_dirty = True
         self._cancel_signal_preview()
         self.last_signal_events = None
@@ -13156,9 +13300,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
             picker.setEnabled(picker.count() > 1)
             picker.setAccessibleName(f"Input signal for {filename_clean}")
             picker.setToolTip(f"{filename_clean}: {active}")
-            self.list_outputs.setItemWidget(output_item, picker)
+            row = QtWidgets.QWidget()
+            layout = QtWidgets.QHBoxLayout(row)
+            layout.setContentsMargins(2, 0, 2, 0)
+            layout.addWidget(QtWidgets.QLabel(filename_clean))
+            layout.addWidget(picker, 1)
+            self.list_outputs.setItemWidget(output_item, row)
             picker.currentTextChanged.connect(lambda label, item=output_item: self._select_recording_output(item, label))
 
+        self._refresh_psth_signal_settings()
         self.list_behaviors.clear()
         for i, (stem, source) in enumerate(self._behavior_sources.items(), 1):
             source_path = str((source or {}).get("source_path", "") or "")
@@ -14825,7 +14975,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if selected_signal is not None and any(item is selected_signal for item in self._processed):
             proc = selected_signal
         t = self._proc_time(proc)
-        y = proc.output if proc.output is not None else np.full_like(t, np.nan)
+        _, y = self._psth_input(proc)
+        if y is None:
+            self._clear_trace_preview()
+            return
 
         ready = t.size == np.asarray(y).size and bool(np.any(np.isfinite(t) & np.isfinite(y)))
         set_plot_has_data(self.plot_trace, ready)
@@ -14836,7 +14989,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # Fit a newly displayed recording, but retain manual zoom when only
         # event annotations or analysis controls change for the same trace.
         previous_source = getattr(self, "_trace_preview_source", None)
-        source = (proc, proc.time, proc.output)
+        source = (proc, proc.time, y)
         fit_trace = previous_source is None or any(
             current is not previous for current, previous in zip(source, previous_source)
         )
@@ -16271,8 +16424,18 @@ class PostProcessingPanel(QtWidgets.QWidget):
             identifiers = [os.path.splitext(os.path.basename(p.path))[0] if p.path else "import" for p in self._processed]
             if len(set(identifiers)) != len(identifiers):
                 raise ValueError("Recording names must be unique. Rename same-named processed files before combining them.")
+            inputs = [(proc, *self._psth_input(proc)) for proc in self._processed]
+            unavailable = [self._file_id_for_proc(proc) for proc, _, values in inputs if values is None]
+            if unavailable and not self.cb_psth_available_only.isChecked():
+                self._sync_temporal_modeling_context()
+                self._last_global_results = None
+                set_plot_has_data(self.plot_global, False)
+                self.statusUpdate.emit(self.lbl_psth_availability.text(), 7000)
+                return
             if group_mode and self._psth_normalization() != "zscore":
-                units = {str(getattr(p, "output_label", "")) for p in self._processed}
+                units = {label for _, label, values in inputs if values is not None}
+                if self.combo_psth_input.currentData() != "saved":
+                    units = {output_family(label) for label in units}
                 if len(units) > 1:
                     raise ValueError("Group recordings use different output units. Select baseline z-score or load matching outputs.")
             animal_rows: List[np.ndarray] = []
@@ -16292,12 +16455,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
             injection_alignment = self.combo_align.currentText() == "Event marker"
             min_events = 1 if injection_alignment else self._psth_min_events_per_animal()
             exclude_low_events = bool(group_mode and self._psth_exclude_low_event_animals_enabled())
-            excluded_files: Dict[str, Dict[str, object]] = {}
+            excluded_files = {fid: {"reason": "Selected signal missing or ambiguous"} for fid in unavailable}
 
             align_combo = self.combo_dio_align if _is_doric_channel_align(self.combo_align.currentText()) else self.combo_behavior_align
             self._psth_behavior_offset_aligned = not injection_alignment and align_combo.currentText().endswith("offset")
 
-            for proc in self._processed:
+            for proc, _, signal in inputs:
+                if signal is None:
+                    continue
                 ev, dur = self._get_events_for_proc(proc)
                 if not injection_alignment:
                     ev, dur = self._filter_events(ev, dur)
@@ -16320,7 +16485,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     dur_row = np.asarray(dur, float)
                 requested_events += ev.size
                 check_psth_size(psth_bin_count(window, res_hz), requested_events)
-                tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, ev, window, baseline, res_hz, smooth_sigma_s=smooth,
+                tvec, mat = _compute_psth_matrix(self._proc_time(proc), signal, ev, window, baseline, res_hz, smooth_sigma_s=smooth,
                                                normalization=self._psth_normalization())
                 # Invalid baselines produce missing rows, which must not count
                 # toward the minimum number of usable events per animal.
@@ -16744,6 +16909,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _render_avg(self, mat: np.ndarray, tvec: np.ndarray) -> None:
         ready = bool(mat.size and tvec.size and np.any(np.isfinite(mat)))
+        self.lbl_psth_plot_summary.setVisible(ready)
+        if ready:
+            group = self.tab_sources.currentIndex() == 1 and self.tab_visual_mode.currentIndex() == 1
+            if group:
+                files = [p for p in self._processed if self._file_id_for_proc(p) in self._group_labels
+                         and self._group_view_keeps(self._file_id_for_proc(p))]
+            else:
+                selected = self.combo_individual_file.currentText()
+                files = [p for p in self._processed if self._file_id_for_proc(p) == selected] or self._processed[:1]
+            labels = {label for p in files if (label := self._psth_input(p)[0])}
+            source = ", ".join(sorted(labels)) or "Saved input"
+            method = self.combo_psth_normalization.currentText()
+            if self._psth_normalization() != "none":
+                method += f" ({self.spin_b0.value():g} to {self.spin_b1.value():g} s relative to event)"
+            self.lbl_psth_plot_summary.setText(f"{source} · {method}")
         self._coverage_counts = None
         if (ready and self.tab_sources.currentIndex() == 1 and self.tab_visual_mode.currentIndex() == 1
                 and self._group_mat is not None and np.array_equal(self._group_tvec, tvec)):
@@ -16972,10 +17152,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         results = []
         result_ids = []
         for proc in recordings:
-            if proc.output is None or proc.time is None:
+            _, signal = self._psth_input(proc)
+            if signal is None or proc.time is None:
                 continue
             try:
-                result = self._compute_global_metrics_for_trace(self._proc_time(proc), proc.output, start_s, end_s)
+                result = self._compute_global_metrics_for_trace(self._proc_time(proc), signal, start_s, end_s)
             except ValueError as exc:
                 self.lbl_global_metrics.setToolTip(str(exc))
                 continue
@@ -18792,7 +18973,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "baseline_end": float(self.spin_b1.value()),
             "resample": float(self.spin_resample.value()),
             "smooth": float(self.spin_smooth.value()),
-            "psth_normalization": self.combo_psth_normalization.currentText(),
+            "psth_signal_source": self.combo_psth_input.currentData(),
+            "psth_available_only": self.cb_psth_available_only.isChecked(),
+            "psth_normalization": {"none": "Original processed units", "subtract": "Subtract baseline",
+                                   "zscore": "Baseline z-score"}[self._psth_normalization()],
             "psth_behavior_metric": self.combo_psth_behavior_metric.currentData(),
             "psth_behavior_metric_second": self.combo_psth_behavior_metric_second.currentData(),
             "global_metric": self.combo_global_metric.currentData(),
@@ -19006,7 +19190,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _set_combo_data(self.combo_global_metric, data.get("global_metric", "amp"))
         _set_combo_data(self.combo_psth_behavior_metric_second, data.get("psth_behavior_metric_second", "ibi"))
         _set_combo(self.combo_view_layout, data.get("view_layout"))
-        _set_combo(self.combo_psth_normalization, data.get("psth_normalization", "Baseline z-score"))
+        _set_combo_data(self.combo_psth_input, data.get("psth_signal_source", "saved"))
+        self.cb_psth_available_only.setChecked(bool(data.get("psth_available_only", False)))
+        old_label = data.get("psth_normalization", "Baseline z-score")
+        _set_combo_data(self.combo_psth_normalization, {
+            "Baseline z-score": "zscore", "Original processed units": "none",
+            "Subtract baseline": "subtract",
+        }.get(old_label, old_label))
+        self._refresh_psth_signal_settings()
         with QtCore.QSignalBlocker(self.combo_psth_behavior_metric), QtCore.QSignalBlocker(self.spin_psth_behavior_bin), QtCore.QSignalBlocker(self.cb_psth_behavior_auto_bins):
             _set_combo_data(self.combo_psth_behavior_metric, data.get("psth_behavior_metric", "duration"))
             self.spin_psth_behavior_bin.setValue(float(data.get("psth_behavior_bin_s", 30.0)))
@@ -19355,6 +19546,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             ("baseline_end_s", data.get("baseline_end", 0.0)),
             ("resample_hz", data.get("resample", 0.0)),
             ("gaussian_smooth_sigma_s", data.get("smooth", 0.0)),
+            ("signal_source", data.get("psth_signal_source", "saved")),
             ("normalization", data.get("psth_normalization", "Baseline z-score")),
             ("event_filters_enabled", align_text != "Injection" and data.get("filter_enabled", False)),
             ("event_index_start", data.get("event_start", 0)),
@@ -19612,7 +19804,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 "selected_file": selected_file if individual_scope else None,
                 "display_level": str(getattr(self, "_last_psth_display_level", "trials")),
                 "source_files": [str(proc.path or "") for proc in self._processed],
-                "input_signals": [{"file": str(proc.path or ""), "output_label": getattr(proc, "output_label", "")}
+                "input_signals": [{"file": str(proc.path or ""), "output_label": self._psth_input(proc)[0]}
                                   for proc in self._processed],
                 "event_count": int(export_events.size),
                 "matrix_shape": list(np.asarray(self._last_mat).shape),
@@ -19915,6 +20107,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for proc in self._processed:
             if not is_group and selected and self._file_id_for_proc(proc) != selected:
                 continue
+            _, signal = self._psth_input(proc)
+            if signal is None:
+                if not self.cb_psth_available_only.isChecked():
+                    return None, None, []
+                continue
             info = self._match_behavior_source(proc)
             if not info:
                 continue
@@ -19932,7 +20129,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 continue
             requested_events += events.size
             check_psth_size(psth_bin_count(window, res_hz), requested_events)
-            tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, events, window, baseline, res_hz, smooth_sigma_s=smooth,
+            tvec, mat = _compute_psth_matrix(self._proc_time(proc), signal, events, window, baseline, res_hz, smooth_sigma_s=smooth,
                                            normalization=self._psth_normalization())
             mat = mat[np.any(np.isfinite(mat), axis=1)]
             if exclude_low_events and mat.shape[0] < min_events:

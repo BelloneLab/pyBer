@@ -582,9 +582,9 @@ def output_label_type(label: str) -> str:
     """Short output label type. Kept for backward compatibility with old readers;
     new code should prefer output_family()."""
     lab = (label or "").strip().lower()
-    if "zscore" in lab or "z-score" in lab or "z score" in lab:
+    if any(token in lab for token in ("zscore", "z-score", "z score", "z_score")):
         return "z-score"
-    if "dff" in lab:
+    if any(token in lab for token in ("dff", "df/f", "δf/f")):
         return "dFF"
     if "raw signal" in lab or lab.startswith("raw"):
         return "raw_signal"
@@ -599,11 +599,11 @@ def output_family(label: str) -> str:
     if info:
         return info[0]
     lab = (label or "").strip().lower()
-    if "zscore" in lab or "z-score" in lab or "z score" in lab:
+    if any(token in lab for token in ("zscore", "z-score", "z score", "z_score")):
         return "z-score"
     if "prominence" in lab:
         return "prominence"
-    if "dff" in lab:
+    if any(token in lab for token in ("dff", "df/f", "δf/f")):
         return "dFF"
     if "raw signal" in lab or "signal" in lab or lab.startswith("raw"):
         return "signal_465"
@@ -623,9 +623,11 @@ def output_variant_key(label: str) -> str:
 
 def output_units(label: str) -> str:
     """Interpretive units string for an output family."""
+    if label in _OUTPUT_MODE_INFO and output_family(label) == "z-score":
+        return "z-score (median/SD)"
     return {
         "dFF": "dF/F",
-        "z-score": "z-score (median/MAD)",
+        "z-score": "z-score",
         "prominence": "prominence-normalized",
         "signal_465": "a.u. (processed 465)",
     }.get(output_family(label), "a.u.")
@@ -975,6 +977,9 @@ def _looks_like_trigger_col(name: str) -> bool:
     )
 
 
+_KNOWN_OUTPUT_NAMES = {name.casefold() for name in OUTPUT_MODES}
+
+
 def _saved_output_columns(names, roles, metadata):
     """Map stored output columns to display labels, including older exports without metadata."""
     descriptions = (metadata or {}).get("outputs", {})
@@ -985,7 +990,8 @@ def _saved_output_columns(names, roles, metadata):
         role = roles.get(name)
         legacy_name = re.fullmatch(r"(?:dff|df/f|δf/f|z[-_ ]?score|prominence|signal_465)(?:__.+)?",
                                    name, re.IGNORECASE)
-        if role == "output" or (not role and (name in descriptions or legacy_name)):
+        recognized = name in descriptions or name.strip().casefold() in _KNOWN_OUTPUT_NAMES or legacy_name
+        if role == "output" or (not role and recognized):
             description = descriptions.get(name) or {}
             label = description.get("label") if isinstance(description, dict) else None
             columns[name] = str(label or name)

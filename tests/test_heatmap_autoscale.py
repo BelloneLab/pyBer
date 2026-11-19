@@ -34,9 +34,9 @@ class HeatmapAutoscaleTests(unittest.TestCase):
         """The screenshot's old z-score range must not clip original/subtracted units."""
         panel = self.panel
         for normalization, matrix in (
-            ('Original processed units', [[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]]),
-            ('Subtract baseline', [[-0.02, 0, 0.03], [0.01, -0.01, 0.02]]),
-            ('Baseline z-score', [[-3, 0, 4], [2, -1, 6]]),
+            ('Show as saved', [[0.01, 0.02, 0.03], [0.04, 0.05, 0.06]]),
+            ('Subtract baseline average', [[-0.02, 0, 0.03], [0.01, -0.01, 0.02]]),
+            ('Z-score relative to event baseline', [[-3, 0, 4], [2, -1, 6]]),
         ):
             self.render([[-15, -5, 0], [-10, -3, 1]])
             self.manual(-15, 0)

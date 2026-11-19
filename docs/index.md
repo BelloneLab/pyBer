@@ -289,10 +289,16 @@ after a short pause. Empty or failed computations clear the previous results.
 
 ### Numerical and export conventions
 
-- **Baseline z-score** subtracts the event baseline mean and divides by its SD.
-  A flat baseline or fewer than five finite baseline samples makes a trial
-  unavailable. **Subtract baseline** preserves source units, and **Original
-  processed units** performs no additional normalization.
+- In **PSTH Settings → Signal & baseline**, choose the saved signal for all
+  recordings (dFF or whole-recording z-score), then choose **Show as saved** or
+  **Z-score relative to event baseline**. The latter uses the mean and population
+  SD of the selected signal in each event's baseline window. A flat baseline
+  or fewer than five finite baseline samples makes that trial unavailable.
+- **Show formula and meaning** explains the active choices inside Settings.
+  **Advanced options** includes baseline subtraction and individual saved
+  selections for projects with mixed inputs or multiple preprocessing variants.
+  Missing inputs are listed. **Use available recordings only** explicitly
+  limits the PSTH to files containing the selected signal.
 - Missing samples and gaps longer than three median source sample intervals
   stay missing. No constant values are extrapolated beyond recording coverage.
   Smoothing operates separately within observed segments.
