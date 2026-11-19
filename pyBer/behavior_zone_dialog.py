@@ -924,7 +924,7 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self._show_results(rows, self._last_group_rows)
         included = sum(int(row["events"]) for row in rows)
         contributors = {row['file_id'] for row in rows if int(row["events"]) > 0}
-        message = f"{included} complete bouts across {len(contributors)} contributing animal/file(s)."
+        message = f"{included} events across {len(contributors)} contributing animal/file(s)."
         if self.scope.currentIndex() == 1:
             message += " Group: each animal/file weighted once, as in main pyBer; N is per behavior."
         if self.panel.cb_sync_use_aligned.isChecked() and "original" in clocks.values():

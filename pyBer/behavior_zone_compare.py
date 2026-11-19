@@ -55,9 +55,16 @@ def compare_recording(file_id: str, time: np.ndarray, signal: np.ndarray,
             raise ValueError(f"{label}: onset and offset counts differ.")
         accepted = []
         for onset, offset in zip(starts, stops):
-            if not np.isfinite(onset + offset) or offset <= onset:
+            if not np.isfinite(onset):
                 continue
             before = _window_mean(time, signal, onset - pre_s, onset, typical_step)
+            if not np.isfinite(offset) or offset <= onset:
+                # Onset-only event (time in s): Before/After around the onset,
+                # During undefined (no duration).
+                after = _window_mean(time, signal, onset, onset + post_s, typical_step)
+                if np.isfinite(before) and np.isfinite(after):
+                    accepted.append((before, np.nan, after))
+                continue
             during = _window_mean(time, signal, onset, offset, typical_step)
             after = _window_mean(time, signal, offset, offset + post_s, typical_step)
             if np.all(np.isfinite([before, during, after])):
@@ -68,7 +75,10 @@ def compare_recording(file_id: str, time: np.ndarray, signal: np.ndarray,
                          "during": np.nan, "after": np.nan,
                          "during_minus_before": np.nan, "after_minus_before": np.nan})
             continue
-        means = np.asarray(accepted, float).mean(axis=0)
+        values = np.asarray(accepted, float)
+        during = values[:, 1][np.isfinite(values[:, 1])]
+        means = [float(values[:, 0].mean()), float(during.mean()) if during.size else np.nan,
+                 float(values[:, 2].mean())]
         rows.append({"file_id": file_id, "label": label,
                      "events": len(accepted), "rejected": int(starts.size - len(accepted)),
                      "before": float(means[0]), "during": float(means[1]),
@@ -91,8 +101,9 @@ def group_recordings(rows: Iterable[Mapping[str, object]]) -> list[dict[str, obj
     output = []
     metrics = ("before", "during", "after", "during_minus_before", "after_minus_before")
     for label, candidates in by_label.items():
+        # During is undefined for onset-only events; Before/After still count.
         valid = [row for row in candidates if int(row["events"]) > 0
-                 and all(np.isfinite(float(row[metric])) for metric in metrics)]
+                 and all(np.isfinite(float(row[metric])) for metric in ("before", "after"))]
         result: dict[str, object] = {"label": label, "recordings": len(valid),
                                      "recordings_available": len(candidates),
                                      "recordings_excluded": len(candidates) - len(valid),
@@ -101,6 +112,7 @@ def group_recordings(rows: Iterable[Mapping[str, object]]) -> list[dict[str, obj
                                      "rejected": sum(int(row.get("rejected", 0)) for row in candidates)}
         for metric in metrics:
             values = np.asarray([float(row[metric]) for row in valid], float)
+            values = values[np.isfinite(values)]
             result[metric] = float(np.mean(values)) if values.size else np.nan
             result[metric + "_sem"] = (float(np.std(values, ddof=1) / np.sqrt(values.size))
                                         if values.size > 1 else np.nan)

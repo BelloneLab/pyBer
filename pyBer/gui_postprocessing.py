@@ -2393,6 +2393,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_combine_events.clicked.connect(self._open_combine_events)
         combined_row.addWidget(self.btn_combine_events)
         fa_psth.addRow(self.lbl_behavior_name, combined_row)
+        # Files with only time columns (no 0/1 states): the user says whether the
+        # listed times (seconds) are onsets or offsets. Shown only for such files.
+        self.lbl_event_times_are = QtWidgets.QLabel("Times in file are")
+        self.combo_event_times_are = QtWidgets.QComboBox()
+        self.combo_event_times_are.addItems(["Onsets", "Offsets"])
+        self.combo_event_times_are.setToolTip(
+            "For behavior files that only list times (s) per behavior column.\n"
+            "Onsets: time zero = behavior start. Offsets: time zero = behavior end.")
+        _compact_combo(self.combo_event_times_are, min_chars=6)
+        self.combo_event_times_are.currentIndexChanged.connect(self._on_event_times_are_changed)
+        fa_psth.addRow(self.lbl_event_times_are, self.combo_event_times_are)
         fa_psth.addRow(self.lbl_behavior_align, self.combo_behavior_align)
         fa_psth.addRow(self.lbl_trans_from, self.combo_behavior_from)
         fa_psth.addRow(self.lbl_trans_to, self.combo_behavior_to)
@@ -9458,6 +9469,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.grp_behavior_time.setEnabled(show_time_panel)
         self.grp_behavior_time.setVisible(show_time_panel)
 
+        show_times_are = bool(use_beh and self._has_time_only_events())
+        self.lbl_event_times_are.setVisible(show_times_are)
+        self.combo_event_times_are.setVisible(show_times_are)
+
         # Behavior align combo + transition settings
         self.lbl_behavior_align.setEnabled(use_beh)
         self.lbl_behavior_align.setVisible(use_beh)
@@ -9698,6 +9713,26 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._compute_spatial_heatmap()
         self._update_behavior_time_panel()
         self._update_status_strip()
+
+    def _has_time_only_events(self) -> bool:
+        """True when a loaded behavior source lists bare times (no 0/1 states)."""
+        for info in (self._behavior_sources or {}).values():
+            if str((info or {}).get("kind", "")) == _BEHAVIOR_PARSE_TIMESTAMPS:
+                return True
+            for event in ((info or {}).get("event_behaviors") or {}).values():
+                if isinstance(event, dict) and event.get("source") == "onset table":
+                    return True
+        return False
+
+    def _on_event_times_are_changed(self, *_args) -> None:
+        """Bare times are a single edge: align on that edge (onset or offset)."""
+        target = "Align to offset" if self.combo_event_times_are.currentIndex() == 1 else "Align to onset"
+        if not self.combo_behavior_align.currentText().startswith("Transition"):
+            self.combo_behavior_align.setCurrentText(target)
+        if not self._is_restoring_settings:
+            self._project_dirty = True
+            self._schedule_psth()
+            self._queue_settings_save()
 
     def _behavior_kinds_label(self) -> str:
         """Describe how loaded sources were actually parsed (auto-detection may differ per file)."""
@@ -18524,6 +18559,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "behavior_time_fps": 30.0,
             "behavior": self.combo_behavior_name.currentText(),
             "behavior_align": self.combo_behavior_align.currentText(),
+            "event_times_are": self.combo_event_times_are.currentText(),
             "behavior_from": self.combo_behavior_from.currentText(),
             "behavior_to": self.combo_behavior_to.currentText(),
             "transition_gap": 1.0,
@@ -18698,6 +18734,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "behavior_clock": self.combo_behavior_clock.currentText(),
             "behavior": self.combo_behavior_name.currentText(),
             "behavior_align": self.combo_behavior_align.currentText(),
+            "event_times_are": self.combo_event_times_are.currentText(),
             "behavior_from": self.combo_behavior_from.currentText(),
             "behavior_to": self.combo_behavior_to.currentText(),
             "transition_gap": float(self.spin_transition_gap.value()),
@@ -18858,6 +18895,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if "behavior_time_fps" in data:
             self.spin_behavior_fps.setValue(float(data["behavior_time_fps"]))
         _set_combo(self.combo_behavior_name, data.get("behavior"))
+        _set_combo(self.combo_event_times_are, data.get("event_times_are"))
         _set_combo(self.combo_behavior_align, data.get("behavior_align"))
         _set_combo(self.combo_behavior_from, data.get("behavior_from"))
         _set_combo(self.combo_behavior_to, data.get("behavior_to"))
