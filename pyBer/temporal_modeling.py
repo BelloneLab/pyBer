@@ -3834,6 +3834,12 @@ class TemporalModelingWidget(QtWidgets.QWidget):
                 behavior_names.add(clean)
                 if kind != _BEHAVIOR_PARSE_TIMESTAMPS:
                     state_names.add(clean)
+            # Event lists (MAMIR bouts, onset columns merged beside states) are
+            # onset regressors only; they have no sampled state trace.
+            for name in (info.get("event_behaviors") or {}).keys():
+                clean = str(name).strip()
+                if clean:
+                    behavior_names.add(clean)
             trajectory = info.get("trajectory") or {}
             for name in trajectory.keys():
                 clean = str(name).strip()
@@ -3942,6 +3948,11 @@ class TemporalModelingWidget(QtWidgets.QWidget):
 
     @staticmethod
     def _behavior_onsets(info: Dict[str, Any], name: str) -> np.ndarray:
+        events = info.get("event_behaviors") or {}
+        if name in events:
+            event = events[name]
+            on = np.asarray(event.get("on", []) if isinstance(event, dict) else event, float).reshape(-1)
+            return np.sort(np.unique(on[np.isfinite(on)]))
         behaviors = info.get("behaviors") or {}
         if name not in behaviors:
             return np.array([], float)

@@ -45,7 +45,7 @@ from recording_groups import (RecordingGroups, GroupChipBar, FileRowDelegate, De
 from psth_groups import HeatmapGroupBands, build_group_display, block_summaries, block_ticks, legend_label
 from dashboard_panels import DashboardPanels, GridRowHandle, HANDLE_PX, seamless_figure_qss, draw_global_metric
 from file_drop import install_file_drop, expand_paths
-from behavior_import import (infer_table, read_behavior_csv, detect_time_column,
+from behavior_import import (infer_table, read_behavior_csv, detect_time_column, detect_onset_table,
                              select_identity_rows, BehaviorImportCancelled)
 from mamir_import import inspect_mamir, load_mamir
 from heatmap_display import color_name as heatmap_color_name, color_map as heatmap_color_map, color_limits as heatmap_color_limits, matplotlib_color_map
@@ -86,6 +86,8 @@ _POST_DOCK_PREFIX = "post."
 _PRE_DOCK_PREFIX = "pre."
 _BEHAVIOR_PARSE_BINARY = "binary_columns"
 _BEHAVIOR_PARSE_TIMESTAMPS = "timestamp_columns"
+# Default file type: 0/1 state columns, or onset-time columns when detected.
+_BEHAVIOR_FILE_TYPE_AUTO = "Auto (0/1 states or onset columns)"
 _FIXED_POST_RIGHT_SECTIONS = frozenset({"setup", "spatial", "psth", "export", "temporal"})
 _FIXED_POST_VISIBLE_SECTIONS = frozenset({"setup", "spatial", "psth", "export", "temporal"})
 _FIXED_POST_RIGHT_TAB_ORDER = ("setup", "psth", "spatial", "temporal", "export")
@@ -639,9 +641,55 @@ def _timestamp_columns_from_df(df) -> Dict[str, np.ndarray]:
     return behaviors
 
 
+def _point_event_record(onsets: np.ndarray, source: str = "onset table") -> Dict[str, Any]:
+    """Store onset-only events beside sampled states: zero-width, unknown duration.
+
+    Offsets equal onsets (the existing Timestamps convention), so offset
+    alignment of an onset-only label is the onset itself; durations stay NaN.
+    """
+    on = np.asarray(onsets, float).reshape(-1)
+    on = np.sort(on[np.isfinite(on)])
+    return {"on": on, "off": on.copy(), "dur": np.full(on.shape, np.nan), "source": source}
+
+
+def _onset_table_info(detected: Dict[str, Any], identity_report: Dict[str, Any]) -> Dict[str, Any]:
+    """Adapt an auto-detected onset table to the established Timestamps interface.
+
+    It is the same structure the explicit 'Timestamps per behavior' mode builds,
+    so PSTH, sync, summaries, temporal modeling and project saves handle it
+    without special cases. Onset columns are not exposed as continuous traces.
+    """
+    empty = np.array([], float)
+    report = {"format": "Event onset table", **detected["report"], **identity_report}
+    return {
+        "kind": _BEHAVIOR_PARSE_TIMESTAMPS,
+        "time": empty.copy(),
+        "behaviors": {name: np.asarray(values, float).copy() for name, values in detected["onsets"].items()},
+        "trajectory": {},
+        "trajectory_time": empty.copy(),
+        "trajectory_time_col": "",
+        "row_count": int(detected["report"].get("rows", 0)),
+        "needs_generated_time": False,
+        "time_candidates": {},
+        "auto_time_column": "",
+        "coordinate_pairs": [],
+        "default_coordinate_pair": None,
+        "import_report": report,
+    }
+
+
 def _behavior_table_info(df, parse_mode: str, fps: float, *, identity_chooser=None) -> Dict[str, Any]:
-    """Infer a table once and adapt it to the existing behavior/PSTH interface."""
+    """Infer a table once and adapt it to the existing behavior/PSTH interface.
+
+    In the default (auto-detect) mode, a table whose columns are chronological
+    onset lists is recognized and loaded as event timestamps; every other table
+    keeps the binary-state / trajectory inference.
+    """
     df, identity_report = select_identity_rows(df, identity_chooser)
+    if str(parse_mode) != _BEHAVIOR_PARSE_TIMESTAMPS:
+        detected = detect_onset_table(df)
+        if detected is not None:
+            return _onset_table_info(detected, identity_report)
     inferred = infer_table(df)
     row_count = int(len(df.index))
     time_col = inferred["time_column"]
@@ -680,8 +728,9 @@ def _load_behavior_ethovision(
     import pandas as pd
 
     if sheet_name is None:
-        xls = pd.ExcelFile(path, engine="openpyxl")
-        sheet_name = xls.sheet_names[0] if xls.sheet_names else None
+        # Close the workbook at once: an open handle locks the file on Windows.
+        with pd.ExcelFile(path, engine="openpyxl") as xls:
+            sheet_name = xls.sheet_names[0] if xls.sheet_names else None
     if not sheet_name:
         return {
             "kind": _BEHAVIOR_PARSE_BINARY,
@@ -696,7 +745,14 @@ def _load_behavior_ethovision(
     if str(parse_mode) == _BEHAVIOR_PARSE_TIMESTAMPS:
         df = pd.read_excel(path, sheet_name=sheet_name, engine="openpyxl")
     else:
-        df = clean_sheet(Path(path), sheet_name, interpolate=True)
+        try:
+            find_header_row(Path(path), sheet_name)
+        except ValueError:
+            # Not an EthoVision export (no 'Trial time' header): read the plain
+            # table, so blank padding of onset lists is never interpolated.
+            df = pd.read_excel(path, sheet_name=sheet_name, engine="openpyxl")
+        else:
+            df = clean_sheet(Path(path), sheet_name, interpolate=True)
     info = _behavior_table_info(df, parse_mode, fps, identity_chooser=identity_chooser)
     info["sheet"] = sheet_name
     return info
@@ -1903,8 +1959,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_load_beh.setProperty("class", "compactSmall")
         self.btn_load_beh.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_load_beh.setToolTip(
-            "Auto-detect MAMIR behavior/zone CSVs and EthoVision workbooks; "
-            "the timestamps file type keeps the established importer.")
+            "Auto-detect MAMIR behavior/zone CSVs, EthoVision workbooks and onset-time "
+            "columns; the timestamps file type keeps the established importer.")
         self.combo_arena = QtWidgets.QComboBox()
         self.combo_arena.setToolTip("Select the arena sheet containing the fiber-associated animal.")
         _compact_combo(self.combo_arena, min_chars=12)
@@ -1916,14 +1972,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_behavior_file_type = QtWidgets.QComboBox()
         self.combo_behavior_file_type.addItems(
             [
-                "Binary states (time + 0/1 columns)",
+                _BEHAVIOR_FILE_TYPE_AUTO,
                 "Timestamps per behavior (columns = behaviors)",
             ]
         )
         self.combo_behavior_file_type.setToolTip(
             "Choose how behavior files are parsed.\n"
-            "Binary states expects a time column and 0/1 behavior columns.\n"
-            "Timestamps mode expects one column per behavior containing event times."
+            "Auto reads 0/1 state columns against the file's time column, and recognizes\n"
+            "tables whose columns list onset times (one column per behavior, chronological,\n"
+            "shorter columns padded with blanks) as event timestamps.\n"
+            "Timestamps mode reads every column as event times, in any order."
         )
         _compact_combo(self.combo_behavior_file_type, min_chars=10)
         self.lbl_behavior_clock = QtWidgets.QLabel("Time column")
@@ -6587,14 +6645,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
                                              identity_chooser=lambda labels: self._choose_behavior_identity(p, labels))
                 elif ext == ".xlsx":
                     import pandas as pd
-                    xls = pd.ExcelFile(p, engine="openpyxl")
+                    with pd.ExcelFile(p, engine="openpyxl") as xls:  # release the file lock
+                        sheet_names = list(xls.sheet_names)
                     sheet = None
-                    if len(xls.sheet_names) > 1:
+                    if len(sheet_names) > 1:
                         sheet, ok = QtWidgets.QInputDialog.getItem(
                             self,
                             "Select sheet",
                             f"{os.path.basename(p)}: choose sheet",
-                            xls.sheet_names,
+                            sheet_names,
                             0,
                             False,
                         )
@@ -6646,8 +6705,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     f"Could not load {os.path.basename(p)}:\n{exc}",
                 )
                 continue
-        mode_label = "timestamps" if parse_mode == _BEHAVIOR_PARSE_TIMESTAMPS else "binary"
-        self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded [{mode_label}]")
+        self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded [{self._behavior_kinds_label()}]")
         self._apply_behavior_clock_choice()
         self._update_behavior_time_panel()
         self._push_recent_paths("postprocess_recent_behavior_paths", paths)
@@ -9565,9 +9623,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         self.combo_behavior_clock.addItem(name)
             del blocker
             descriptions = [
-                f"{name}: time={info.get('trajectory_time_col') or 'generated from FPS'}; "
-                f"{len(info.get('behaviors', {}))} behaviors; "
-                f"{len(info.get('coordinate_pairs', []))} coordinate pairs"
+                (f"{name}: event onset lists; {len(info.get('behaviors', {}))} behaviors"
+                 if str(info.get("kind", "")) == _BEHAVIOR_PARSE_TIMESTAMPS else
+                 f"{name}: time={info.get('trajectory_time_col') or 'generated from FPS'}; "
+                 f"{len(info.get('behaviors', {}))} behaviors; "
+                 f"{len(info.get('coordinate_pairs', []))} coordinate pairs")
                 for name, info in self._behavior_sources.items()
             ]
             self.lbl_beh.setToolTip("\n".join(descriptions))
@@ -9638,6 +9698,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._compute_spatial_heatmap()
         self._update_behavior_time_panel()
         self._update_status_strip()
+
+    def _behavior_kinds_label(self) -> str:
+        """Describe how loaded sources were actually parsed (auto-detection may differ per file)."""
+        kinds = {
+            str((info or {}).get("kind", "")).strip()
+            for info in self._behavior_sources.values()
+            if isinstance(info, dict)
+        }
+        if len(kinds) == 1 and _BEHAVIOR_PARSE_TIMESTAMPS in kinds:
+            return "timestamps"
+        if len(kinds) == 1 and _BEHAVIOR_PARSE_BINARY in kinds:
+            return "binary"
+        if len(kinds) > 1:
+            return "mixed"
+        return "timestamps" if self._current_behavior_parse_mode() == _BEHAVIOR_PARSE_TIMESTAMPS else "binary"
 
     def _current_behavior_parse_mode(self) -> str:
         text = self.combo_behavior_file_type.currentText().strip().lower() if hasattr(self, "combo_behavior_file_type") else ""
@@ -11481,11 +11556,37 @@ class PostProcessingPanel(QtWidgets.QWidget):
             old_report.update(report)
             info["import_report"] = old_report
             self._behavior_sources[key] = info
+        elif previous is not None and (
+                str(info.get("kind", _BEHAVIOR_PARSE_BINARY)) == _BEHAVIOR_PARSE_TIMESTAMPS
+                and str(previous.get("kind", _BEHAVIOR_PARSE_BINARY)) != _BEHAVIOR_PARSE_TIMESTAMPS):
+            # Onset lists joining a sampled-state source: one 'behaviors' dict
+            # cannot hold both, so the onsets become point events beside the
+            # states. The existing clock, states and trajectory stay untouched.
+            occupied = set(previous.get("behaviors") or {}) | set(previous.get("event_behaviors") or {})
+            collisions = occupied & set(info["behaviors"])
+            if collisions:
+                raise ValueError("This recording already has these labels: " + ", ".join(sorted(collisions)[:6]))
+            previous.setdefault("event_behaviors", {}).update(
+                {name: _point_event_record(values) for name, values in info["behaviors"].items()})
+            prior_report = previous.setdefault("import_report", {})
+            prior_report.setdefault("onset_imports", []).append(copy.deepcopy(report))
+            for field in ("paired_index", "paired_path"):
+                if field in report:
+                    prior_report[field] = report[field]
         elif previous is not None:
             occupied = set(previous.get("behaviors") or {}) | set(previous.get("event_behaviors") or {})
             collisions = occupied & set(info["behaviors"])
             if collisions:
                 raise ValueError("This recording already has these labels: " + ", ".join(sorted(collisions)[:6]))
+            if (str(previous.get("kind", _BEHAVIOR_PARSE_BINARY)) == _BEHAVIOR_PARSE_TIMESTAMPS
+                    and str(info.get("kind", _BEHAVIOR_PARSE_BINARY)) != _BEHAVIOR_PARSE_TIMESTAMPS):
+                # Sampled states joining an onset-list source: keep the earlier
+                # onsets as point events and adopt the new file's clock.
+                previous.setdefault("event_behaviors", {}).update(
+                    {name: _point_event_record(values)
+                     for name, values in (previous.get("behaviors") or {}).items()})
+                previous["behaviors"] = {}
+                previous["kind"] = _BEHAVIOR_PARSE_BINARY
             if (previous.get("behaviors") and len(np.asarray(previous.get("time", [])))
                     and not np.array_equal(np.asarray(previous["time"]), np.asarray(info["time"]))):
                 raise ValueError("Existing behavior data use a different time axis; import separately.")
@@ -11513,7 +11614,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._update_behavior_time_panel()
         if replace_arena:
             self._compute_psth()
-        self.statusUpdate.emit(f"Detected {fmt}; loaded {category} from {os.path.basename(path)}.", 5000)
+        counts = report.get("onset_counts") if report.get("table_layout") == "event onsets" else None
+        if counts:
+            listed = ", ".join(f"{name} ({count})" for name, count in counts.items())
+            self.statusUpdate.emit(
+                f"Detected onset-time columns in {os.path.basename(path)}: {listed}.", 8000)
+        else:
+            self.statusUpdate.emit(f"Detected {fmt}; loaded {category} from {os.path.basename(path)}.", 5000)
         self._push_recent_paths("postprocess_recent_behavior_paths", [path])
         return display_category
 
@@ -15788,8 +15895,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if session_dur <= 0 and self._processed and 0 <= idx < len(self._processed):
                     t_proc = np.asarray(self._processed[idx].time, float)
                     session_dur = float(t_proc[-1] - t_proc[0]) if t_proc.size > 1 else 0.0
-                total_time = float(np.nansum(dur))
-                frac_time = total_time / session_dur if session_dur > 0 else np.nan
+                # Point events (onset lists stored beside states) have unknown
+                # durations: their total time is undefined, not zero.
+                total_time = float(np.nansum(dur)) if np.any(np.isfinite(dur)) else np.nan
+                frac_time = total_time / session_dur if session_dur > 0 and np.isfinite(total_time) else np.nan
             else:
                 session_dur = np.nan
                 if self._processed and 0 <= idx < len(self._processed):
@@ -18316,20 +18425,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._sync_pairings = dict(sync_pairings) if isinstance(sync_pairings, dict) else {}
 
             self.lbl_group.setText(f"{len(self._processed)} file(s) loaded")
-            kinds = {
-                str((info or {}).get("kind", "")).strip()
-                for info in self._behavior_sources.values()
-                if isinstance(info, dict)
-            }
-            if len(kinds) == 1 and _BEHAVIOR_PARSE_TIMESTAMPS in kinds:
-                mode_label = "timestamps"
-            elif len(kinds) == 1 and _BEHAVIOR_PARSE_BINARY in kinds:
-                mode_label = "binary"
-            elif len(kinds) > 1:
-                mode_label = "mixed"
-            else:
-                mode_label = "timestamps" if self._current_behavior_parse_mode() == _BEHAVIOR_PARSE_TIMESTAMPS else "binary"
-            self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded [{mode_label}]")
+            self.lbl_beh.setText(f"{len(self._behavior_sources)} file(s) loaded [{self._behavior_kinds_label()}]")
 
             self._update_file_lists()
             self._refresh_dio_channels_from_processed()
@@ -18424,7 +18520,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "sync_use_aligned": False,
             "sync_auto_recompute": True,
             "sync_export_format": "CSV + H5",
-            "behavior_file_type": "Binary states (time + 0/1 columns)",
+            "behavior_file_type": _BEHAVIOR_FILE_TYPE_AUTO,
             "behavior_time_fps": 30.0,
             "behavior": self.combo_behavior_name.currentText(),
             "behavior_align": self.combo_behavior_align.currentText(),
@@ -18751,7 +18847,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.cb_sync_auto_recompute.setChecked(bool(data["sync_auto_recompute"]))
         _set_combo(self.combo_sync_export_format, data.get("sync_export_format"))
         self._on_sync_auto_threshold_toggled(self.cb_sync_auto_threshold.isChecked())
-        _set_combo(self.combo_behavior_file_type, data.get("behavior_file_type"))
+        file_type = data.get("behavior_file_type")
+        if isinstance(file_type, str) and file_type.startswith("Binary states"):
+            file_type = _BEHAVIOR_FILE_TYPE_AUTO  # label used before onset auto-detection
+        _set_combo(self.combo_behavior_file_type, file_type)
         clock = str(data.get("behavior_clock", "Auto"))
         if self.combo_behavior_clock.findText(clock) < 0:
             self.combo_behavior_clock.addItem(clock)

@@ -69,6 +69,105 @@ def read_behavior_csv(path):
     return pd.read_csv(path, sep=delimiter, comment="#", encoding="utf-8-sig", low_memory=False)
 
 
+# Labels of sample counters and acquisition bookkeeping. A table containing one
+# of them is a sampled table (one row per frame/sample), never an onset list.
+_INDEX_KEYS = {"id", "index", "idx", "row", "rows", "frame", "frames", "sample", "samples", "n"}
+
+
+def _filled_cells(series):
+    """Mask of cells that hold something; whitespace-only text counts as empty."""
+    if pd.api.types.is_numeric_dtype(series):
+        return series.notna().to_numpy(dtype=bool)
+    text = series.astype("string").str.strip()
+    return (series.notna() & text.ne("")).fillna(False).to_numpy(dtype=bool)
+
+
+def _is_row_counter(values):
+    """True for 0..n-1 or 1..n, the signature of a written-out DataFrame index."""
+    n = values.size
+    return n > 0 and (np.array_equal(values, np.arange(n)) or np.array_equal(values, np.arange(1, n + 1)))
+
+
+def detect_onset_table(df):
+    """Recognize a wide event table: one column per behavior, rows are onset times.
+
+    Example (comma-, semicolon- or tab-delimited; columns may differ in length)::
+
+        injection  CD1_entry  death
+        5.6        325        400
+        15.6       340
+        315
+
+    Every rule below must hold, so sampled state/trajectory tables keep their
+    established parser and only unambiguous onset lists are converted:
+
+    1. No recognized recording clock column (time, Trial time, timestamp...).
+    2. Every filled cell is a number or an elapsed ``hh:mm:ss`` / ``mm:ss`` time.
+    3. Within each column, onsets strictly increase down the rows and blank
+       cells only pad the end of a shorter column (no interior gaps).
+    4. At least one column holds a value other than 0/1; an all-0/1 table is a
+       binary state table.
+    5. No column is labelled as a frame, sample, row or ID counter. An unnamed
+       0..n-1 or 1..n column (a saved DataFrame index) is ignored.
+
+    A named but empty column is kept as a behavior with zero onsets. Values are
+    returned exactly as written (seconds, in the file's own time origin); no
+    sorting, rounding, deduplication or clock shift is applied.
+
+    Returns ``None`` when any rule fails, otherwise
+    ``{"onsets": {label: ndarray}, "report": {...}}``.
+    """
+    if df is None or len(df.columns) == 0 or len(df.index) == 0:
+        return None
+    if detect_time_column(df) is not None:
+        return None
+    onsets, ignored = {}, []
+    all_binary = True
+    for name in df.columns:
+        label = str(name).strip()
+        unnamed = not label or label.lower().startswith("unnamed:")
+        series = df[name]
+        if pd.api.types.is_bool_dtype(series):
+            return None  # True/False cells are sampled states
+        filled = _filled_cells(series)
+        if not filled.any():
+            if unnamed:
+                ignored.append(str(name))  # trailing delimiter: empty column
+                continue
+            if label in onsets:
+                return None
+            onsets[label] = np.array([], dtype=float)
+            continue
+        values = _numeric_values(series, clock=True)
+        if np.any(filled & ~np.isfinite(values)):
+            return None  # text, or an infinite value, in a filled cell
+        last = int(np.flatnonzero(filled)[-1])
+        if not filled[:last + 1].all():
+            return None  # interior blanks: sampled column with missing samples
+        column = values[:last + 1]
+        if column.size > 1 and np.any(np.diff(column) <= 0):
+            return None  # not a chronological onset list
+        if unnamed:
+            if _is_row_counter(column):
+                ignored.append(str(name))
+                continue
+            return None  # an unlabelled list cannot be named as a behavior
+        key = _key(label)
+        if key in _INDEX_KEYS or key.startswith(("frame", "sample", "timestamp")) or key.endswith("_id"):
+            return None
+        if label in onsets:
+            return None  # two headers collapse to the same label
+        if not np.all((column == 0) | (column == 1)):
+            all_binary = False
+        onsets[label] = column.copy()
+    if not any(values.size for values in onsets.values()) or all_binary:
+        return None
+    return {"onsets": onsets,
+            "report": {"table_layout": "event onsets", "rows": int(len(df.index)),
+                       "onset_counts": {label: int(values.size) for label, values in onsets.items()},
+                       "ignored_columns": ignored, "time_rebased": False}}
+
+
 class BehaviorImportCancelled(Exception):
     """An identity picker was cancelled; leave the loaded sources untouched."""
 

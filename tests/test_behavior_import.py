@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from pyBer.behavior_import import detect_time_column, infer_table, read_behavior_csv
+from pyBer.behavior_import import detect_onset_table, detect_time_column, infer_table, read_behavior_csv
 
 
 class BehaviorImportTests(unittest.TestCase):
@@ -93,6 +93,51 @@ class BehaviorImportTests(unittest.TestCase):
         np.testing.assert_equal(infer_table(df)["time"], [3723.5, 3724.5, 3725.5])
         df["Trial time"] = ["02:03", "02:04", "02:05"]
         np.testing.assert_equal(infer_table(df)["time"], [123, 124, 125])
+
+
+class OnsetTableDetectionTests(unittest.TestCase):
+    """Columns of chronological onset times are recognized; sampled tables are not."""
+
+    def test_tab_and_comma_onset_files_with_ragged_columns(self):
+        """Ragged columns keep their own counts; values are returned as written."""
+        rows = ["injection{0}CD1_entry{0}death", "5.6{0}325{0}400", "15.6{0}340{0}", "315{0}{0}"]
+        with tempfile.TemporaryDirectory() as directory:
+            for separator in ("\t", ",", ";"):
+                path = Path(directory) / "onsets.csv"
+                path.write_text("\n".join(row.format(separator) for row in rows), encoding="utf-8")
+                found = detect_onset_table(read_behavior_csv(path))
+                self.assertIsNotNone(found, separator)
+                np.testing.assert_equal(found["onsets"]["injection"], [5.6, 15.6, 315])
+                np.testing.assert_equal(found["onsets"]["CD1_entry"], [325, 340])
+                np.testing.assert_equal(found["onsets"]["death"], [400])
+                self.assertEqual(found["report"]["onset_counts"], {"injection": 3, "CD1_entry": 2, "death": 1})
+
+    def test_elapsed_clock_text_index_column_and_empty_behavior(self):
+        df = pd.DataFrame({"Unnamed: 0": [0, 1], "shock": ["00:01:05.5", "00:02:00"],
+                           "escape": [np.nan, np.nan]})
+        found = detect_onset_table(df)
+        np.testing.assert_equal(found["onsets"]["shock"], [65.5, 120])
+        self.assertEqual(found["onsets"]["escape"].size, 0)
+        self.assertEqual(found["report"]["ignored_columns"], ["Unnamed: 0"])
+
+    def test_sampled_tables_keep_existing_parser(self):
+        """Clocks, 0/1 states, gaps, unsorted lists, frame counters and text are rejected."""
+        rejected = {
+            "clock": pd.DataFrame({"time": [0., 1., 2.], "x": [1., 2., 3.]}),
+            "binary": pd.DataFrame({"groom": [0, 0, 1], "rear": [0, 1, 1]}),
+            "interior gap": pd.DataFrame({"a": [1., np.nan, 3.]}),
+            "unsorted": pd.DataFrame({"a": [3., 2., 9.]}),
+            "repeated": pd.DataFrame({"a": [3., 3., 9.]}),
+            "continuous": pd.DataFrame({"speed": [1., 3., 2., 5.]}),
+            "frame counter": pd.DataFrame({"frame": [0, 1, 2], "t_ms": [0, 33, 66]}),
+            "text": pd.DataFrame({"a": ["start", "stop"]}),
+            "booleans": pd.DataFrame({"a": [False, True]}),
+            "unnamed list": pd.DataFrame({"Unnamed: 0": [4., 9.], "a": [1., 2.]}),
+            "empty": pd.DataFrame({"a": [np.nan, np.nan]}),
+        }
+        for name, df in rejected.items():
+            with self.subTest(name):
+                self.assertIsNone(detect_onset_table(df))
 
 
 if __name__ == "__main__":

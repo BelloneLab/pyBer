@@ -3,9 +3,54 @@
 In Postprocessing, choose **Setup > Behavior / Events > Load behavior CSV/XLSX**.
 This familiar action now detects MAMIR behavior/zone CSVs and EthoVision
 workbooks within the existing postprocessing dashboard. For Pykaboo
-metadata, use **Binary states (time + 0/1 columns)** and load the original
-`_metadata.csv` file. No column renaming is required. **Timestamps per behavior**
-keeps the established timestamp-column importer.
+metadata, keep the default **Auto (0/1 states or onset columns)** file type and
+load the original `_metadata.csv` file. No column renaming is required.
+**Timestamps per behavior** keeps the established timestamp-column importer.
+
+## Onset-time tables (detected automatically)
+
+A file whose columns are behaviors and whose rows are onset times, in seconds
+from the recording start, is recognized with the default file type:
+
+```
+injection,CD1_entry,death
+5.6,325,400
+15.6,340,410
+315,360,
+```
+
+Each column becomes a behavior; its values become event onsets for the PSTH
+(**PSTH > Alignment > Behavior name**), the behavior summary, combined events
+and temporal modeling. Comma, semicolon and tab delimiters, `.csv` and plain
+`.xlsx` sheets, and elapsed `hh:mm:ss` / `mm:ss` values are accepted. Columns may
+have different lengths; shorter ones are padded with blank cells at the end, and
+a column left entirely blank is kept as a behavior with zero events. The status
+bar reports what was detected, e.g. `injection (3), CD1_entry (3), death (2)`.
+
+Detection is deliberately strict, so sampled tables keep their usual parser.
+A table is read as onsets only if:
+
+- it has no recognized clock column (`time`, `Trial time`, `timestamp...`);
+- every filled cell is a number (or elapsed time);
+- each column increases strictly from top to bottom, with blanks only after its
+  last onset;
+- not every column is 0/1 (that is a binary state table);
+- no column is a frame, sample, row or ID counter (an unnamed `0..n-1` index
+  column written by pandas is ignored).
+
+If your list is not chronological or has blank rows in the middle, choose
+**Timestamps per behavior** explicitly; that mode reads any column as event
+times in any order.
+
+Onset-only events have no duration: durations, total time and fraction of time
+are reported as missing, the before/during/after comparison has no complete
+bouts to use, and **offset** alignment places zero at the onset (offset =
+onset). Onset times are used exactly as written; if the behavior clock differs
+from the fiber clock, correct it with the Sync tools.
+
+When the same recording already has a 0/1 state file, loading an onset table for
+it (or the reverse) keeps both: the states keep their own clock, and the onsets
+are stored as point events beside them.
 
 ## Automatic selections
 
@@ -41,7 +86,8 @@ loader use the same column inference. Common X/Y names, numeric 0/1 behavior
 states, text boolean states and elapsed `hh:mm:ss` or `mm:ss` clocks are supported.
 Generic continuous numeric channels remain available for threshold alignment.
 Files without a recognized measured clock retain the existing FPS-based time
-option. Event-list tables should use **Timestamps** mode instead of binary mode.
+option. Chronological onset-time columns are detected automatically (see above);
+other event-list tables should use **Timestamps** mode.
 
 ## Zone and behavior analysis
 

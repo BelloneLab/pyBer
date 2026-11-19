@@ -231,7 +231,7 @@ The flagged table collects processing failures, excessive artifact load, poor fi
 | Kind | Native support |
 |---|---|
 | Raw photometry | Doric `.doric`, including current `LockInAOUT02/AIN01` and legacy `AIN01xAOUT02-LockIn/Values` layouts; compatible `.h5` / `.hdf5`; RWD fluorescence `.csv`. |
-| Behavior | Binary state tables and timestamp/event tables from `.csv`, `.tsv`, `.xlsx`, and `.xls`, including onsets, offsets, transitions, and continuous variables. |
+| Behavior | Binary state tables and timestamp/event tables from `.csv`, `.tsv`, `.xlsx`, and `.xls`, including onsets, offsets, transitions, and continuous variables. Tables of onset times (one column per behavior) are detected automatically. |
 | Synchronization | Embedded DIO/AOUT, external timestamped signals, and video ROI intensity or barcode pulse trains. |
 | Processed data | Self-describing CSV with `.pyber.json` sidecar and HDF5 with embedded metadata. |
 | Reports | Preprocessing PNG, strict QC report images, batch summaries, flagged-recording tables, analysis CSVs, model tables, and publication figure exports. |

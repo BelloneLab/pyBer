@@ -760,6 +760,94 @@ class BehaviorImportGuiTests(unittest.TestCase):
             np.testing.assert_allclose(events["walking"]["on"], [0.])
             np.testing.assert_allclose(events["attack"]["on"], [.1])
 
+    def _onset_fixture(self, directory):
+        """One fiber recording plus an onset-only table and a 0/1 state table."""
+        root = Path(directory)
+        fiber = root / "trial_0001_AIN01.csv"
+        self.panel._processed = [ProcessedTrial(
+            path=str(fiber), channel_id="AIN01", time=np.arange(0., 60., .1),
+            raw_signal=np.zeros(600), raw_reference=np.zeros(600),
+            output=np.arange(600.), output_label="dFF")]
+        onsets = root / "trial_0001_onsets.csv"
+        onsets.write_text("injection\tCD1_entry\n5.6\t32.5\n15.6\t\n", encoding="utf-8")
+        states = root / "trial_0001_states.csv"
+        pd.DataFrame({"time": np.arange(0., 60., 1.),
+                      "groom": [1 if 10 <= t < 13 else 0 for t in range(60)]}).to_csv(states, index=False)
+        return fiber, onsets, states
+
+    def _load_clicked(self, path):
+        with patch.object(QtWidgets.QFileDialog, "getOpenFileNames", return_value=([str(path)], "")):
+            self.panel._load_behavior_files()
+
+    def test_default_file_type_detects_onset_columns_for_psth(self):
+        """An onset-only table needs no file-type switch and drives the PSTH."""
+        panel = self.panel
+        self.assertEqual(panel._current_behavior_parse_mode(), "binary_columns")
+        with tempfile.TemporaryDirectory() as directory:
+            fiber, onsets, _ = self._onset_fixture(directory)
+            with patch.object(QtWidgets.QMessageBox, "warning") as warning:
+                self._load_clicked(onsets)
+            warning.assert_not_called()
+            source = panel._behavior_sources[fiber.stem]
+            self.assertEqual(source["kind"], "timestamp_columns")
+            self.assertEqual(source["trajectory"], {})
+            self.assertFalse(source["needs_generated_time"])
+            self.assertEqual(source["import_report"]["table_layout"], "event onsets")
+            np.testing.assert_equal(source["behaviors"]["injection"], [5.6, 15.6])
+            panel._refresh_behavior_list()
+            names = [panel.combo_behavior_name.itemText(i) for i in range(panel.combo_behavior_name.count())]
+            self.assertIn("CD1_entry", names)
+            panel.combo_behavior_name.setCurrentText("injection")
+            times, durations = panel._get_events_for_proc(panel._processed[0])
+            np.testing.assert_equal(times, [5.6, 15.6])
+            self.assertTrue(np.all(np.isnan(durations)))
+            self.assertEqual(panel._behavior_kinds_label(), "timestamps")
+
+    def test_onset_columns_merge_beside_states_in_either_order(self):
+        """States keep their clock; onsets become point events, whichever loads first."""
+        panel = self.panel
+        for order in ("states first", "onsets first"):
+            with self.subTest(order), tempfile.TemporaryDirectory() as directory:
+                panel._behavior_sources.clear()
+                fiber, onsets, states = self._onset_fixture(directory)
+                for path in ((states, onsets) if order == "states first" else (onsets, states)):
+                    self._load_clicked(path)
+                self.assertEqual(list(panel._behavior_sources), [fiber.stem])
+                source = panel._behavior_sources[fiber.stem]
+                self.assertEqual(source["kind"], "binary_columns")
+                np.testing.assert_equal(source["time"], np.arange(0., 60., 1.))
+                self.assertEqual(set(source["behaviors"]), {"groom"})
+                event = source["event_behaviors"]["injection"]
+                np.testing.assert_equal(event["on"], [5.6, 15.6])
+                np.testing.assert_equal(event["off"], [5.6, 15.6])
+                self.assertTrue(np.all(np.isnan(event["dur"])))
+                on, _, _ = panel._extract_behavior_events(source, "CD1_entry")
+                np.testing.assert_equal(on, [32.5])
+                on, off, _ = panel._extract_behavior_events(source, "groom")
+                np.testing.assert_equal(on, [10.])
+                np.testing.assert_equal(off, [13.])
+
+    def test_plain_workbook_onsets_are_not_interpolated(self):
+        """Blank padding in a non-EthoVision workbook stays blank (no interpolation)."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "onsets.xlsx"
+            pd.DataFrame({"shock": [2., 4., 8.], "tone": [1., np.nan, np.nan]}).to_excel(path, index=False)
+            info = _load_behavior_ethovision(str(path))
+            self.assertEqual(info["kind"], "timestamp_columns")
+            np.testing.assert_equal(info["behaviors"]["tone"], [1.])
+            np.testing.assert_equal(info["behaviors"]["shock"], [2., 4., 8.])
+
+    def test_settings_written_with_former_binary_label_restore_auto_type(self):
+        panel = self.panel
+        panel.combo_behavior_file_type.setCurrentIndex(1)
+        settings = panel._collect_settings() if hasattr(panel, "_collect_settings") else None
+        if settings is None:
+            self.skipTest("settings collector unavailable")
+        settings["behavior_file_type"] = "Binary states (time + 0/1 columns)"
+        panel._apply_settings(settings)
+        self.assertEqual(panel.combo_behavior_file_type.currentIndex(), 0)
+        self.assertEqual(panel._current_behavior_parse_mode(), "binary_columns")
+
 
 if __name__ == "__main__":
     unittest.main()
