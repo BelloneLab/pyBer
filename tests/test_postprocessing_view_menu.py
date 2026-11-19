@@ -47,8 +47,8 @@ class ViewMenuTests(unittest.TestCase):
             toolbar.show()
             self.app.processEvents()
             controls = (panel.btn_action_load, panel.btn_action_compute, panel.btn_action_export,
-                        panel.btn_view_menu, panel.combo_toolbar_scope, panel.combo_individual_file,
-                        panel.btn_action_hide)
+                        panel.btn_view_menu, panel.combo_toolbar_scope, panel.combo_individual_file)
+            self.assertTrue(panel.btn_action_hide.isHidden())
             centers = [widget.geometry().center().y() for widget in controls]
             self.assertLessEqual(max(centers) - min(centers), 1)
             self.assertEqual(toolbar.height(), 44)

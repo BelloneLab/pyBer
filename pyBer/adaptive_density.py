@@ -62,6 +62,9 @@ DEBOUNCE_MS = 40
 
 #: Layout property: keep this row (and the rows inside it) horizontal.
 KEEP_ROW_PROPERTY = "density_keep_row"
+#: Layout property: stack this row as soon as the page does not fit, before any
+#: text shrinks. For rows of lists, which are unreadable when squeezed.
+STACK_FIRST_PROPERTY = "density_stack_first"
 #: Narrowest caption / list inside a kept row once it is squeezed (pixels).
 SQUEEZED_LABEL_WIDTH = 18
 SQUEEZED_VIEW_WIDTH = 56
@@ -128,6 +131,10 @@ class AdaptiveDensity(QtCore.QObject):
         # Widgets narrowed inside kept rows: (widget, normal minimum width, tooltip).
         self._squeezed: list = []
         self._squeeze_needed = 0
+        # Rows marked to stack first: (layout, normal direction), and the page
+        # width that was needed before stacking them.
+        self._stacked_first: list = []
+        self._stack_first_needed = 0
         # Row stacked on the previous tick, kept only if it made the page narrower.
         self._trial_row = None
         self._timer = QtCore.QTimer(self)
@@ -183,9 +190,12 @@ class AdaptiveDensity(QtCore.QObject):
                 return
         if needed > available:
             # Tighten one step, mildest first, then measure again on the next tick:
-            # 1) narrow the captions and lists of kept rows, 2) denser text and
-            # controls, 3) stack rows that still cannot fit.
-            if not self._squeezed and self._squeeze(page, needed):
+            # 1) stack rows marked stack-first, 2) narrow the captions and lists
+            # of kept rows, 3) denser text and controls, 4) stack rows that
+            # still cannot fit.
+            if not self._stacked_first and self._stack_first(page, needed):
+                pass
+            elif not self._squeezed and self._squeeze(page, needed):
                 pass
             elif self._level < len(DENSITY_LEVELS) - 1:
                 self._apply(self._level + 1)
@@ -203,9 +213,50 @@ class AdaptiveDensity(QtCore.QObject):
             if previous is None or previous + HYSTERESIS_PX <= available:
                 self._apply(self._level - 1)
                 self._timer.start(0)
-        elif self._squeezed and self._squeeze_needed + HYSTERESIS_PX <= available:
-            self._unsqueeze()
+        elif self._squeezed:
+            if self._squeeze_needed + HYSTERESIS_PX <= available:
+                self._unsqueeze()
+                self._timer.start(0)
+        elif self._stacked_first and self._stack_first_needed + HYSTERESIS_PX <= available:
+            self._unstack_first()
             self._timer.start(0)
+
+    # ------------------------------------------------------------ stack first
+    def _stack_first_rows(self, layout: QtWidgets.QLayout):
+        if layout is None:
+            return
+        if bool(layout.property(STACK_FIRST_PROPERTY)) and self._is_row(layout):
+            yield layout
+        for child in self._child_layouts(layout):
+            yield from self._stack_first_rows(child)
+
+    def _stack_first(self, page: QtWidgets.QWidget, needed: int) -> bool:
+        """Stack the rows marked ``density_stack_first``. False when there is none."""
+        rows = list(self._stack_first_rows(page.layout()))
+        if not rows:
+            return False
+        self._applying = True
+        try:
+            for row in rows:
+                self._stacked_first.append((row, row.direction()))
+                row.setDirection(QtWidgets.QBoxLayout.Direction.TopToBottom)
+            page.updateGeometry()
+        finally:
+            self._applying = False
+        self._stack_first_needed = needed
+        return True
+
+    def _unstack_first(self) -> None:
+        self._applying = True
+        try:
+            for row, direction in self._stacked_first:
+                try:
+                    row.setDirection(direction)
+                except RuntimeError:
+                    pass
+        finally:
+            self._stacked_first = []
+            self._applying = False
 
     # ----------------------------------------------------------------- reflow
     @staticmethod

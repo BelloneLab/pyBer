@@ -4053,6 +4053,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     else:
                         self.act_app_theme_dark.setChecked(True)
                     self._on_app_theme_changed()
+                # Missing-data display choices apply to the plots at once.
+                try:
+                    self.post_tab._settings.sync()
+                    self.post_tab._rerender_visual_from_cache()
+                except Exception:
+                    _LOG.exception("Could not refresh plots after preferences change")
                 if getattr(self, "_toaster", None):
                     self._toaster.ok("Preferences saved.")
         except Exception:

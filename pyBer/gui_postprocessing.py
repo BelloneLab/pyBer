@@ -35,7 +35,8 @@ from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, crea
 from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
 from numeric_controls import DurationSpinBox, with_slider
-from adaptive_density import KEEP_ROW_PROPERTY, install_adaptive_density
+from adaptive_density import STACK_FIRST_PROPERTY, install_adaptive_density
+import missing_data
 from psth_metrics import (METRICS, metric_id, summarize_metrics, draw_metric_matplotlib,
                           export_selected_metrics, write_group_comparisons)
 from psth_metric_panels import MetricPanel, MetricGrid
@@ -2129,9 +2130,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_list_pairing.setWordWrap(True)
 
         lists_layout = QtWidgets.QHBoxLayout()
-        # Recordings pair line by line across these lists: a narrow drawer
-        # narrows them but never stacks them (see adaptive_density).
-        lists_layout.setProperty(KEEP_ROW_PROPERTY, True)
+        # Squeezed side by side, these lists are unreadable: in a narrow drawer
+        # they stack, each at full width. Items are numbered, so recording 1
+        # still pairs with behavior 1 (see adaptive_density).
+        lists_layout.setProperty(STACK_FIRST_PROPERTY, True)
         pre_col = QtWidgets.QVBoxLayout()
         pre_col.addLayout(pre_header)
         pre_col.addWidget(self.list_preprocessed)
@@ -16845,6 +16847,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 pass
             return
 
+        # Missing samples (Preferences > Defaults): trim rows to their common
+        # span and fill or mark interior gaps. Display only: `mat` itself, the
+        # statistics and the exports keep the original values.
+        missing_mode = str(self._settings.value(missing_data.SETTINGS_KEY_MODE, missing_data.DEFAULT_MODE)
+                           or missing_data.DEFAULT_MODE)
+        missing_trim = self._settings.value(missing_data.SETTINGS_KEY_TRIM, missing_data.DEFAULT_TRIM, type=bool)
+        source_mat = mat
+        mat, tvec, missing_report = missing_data.prepare_heatmap(mat, tvec, missing_mode, missing_trim)
+        self._heatmap_missing_report = missing_report
+        try:
+            self.plot_heat.getViewBox().setBackgroundColor(
+                None if missing_mode == missing_data.MODE_BLANK else missing_data.NO_DATA_COLOR)
+        except Exception:
+            pass
         # ImageItem maps axis-0 -> x and axis-1 -> y; transpose so time is x, trials are y.
         img = np.asarray(mat, float).T
         previous_suppression = self._suppress_heatmap_level_store
@@ -16907,7 +16923,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             y_axis.setWidth(76)
         except Exception:
             pass
-        group_display = self._active_group_display(mat)
+        group_display = self._active_group_display(source_mat)
         if group_display is not None and group_display.mode == "all" and hasattr(self, "heat_group_bands"):
             # Group blocks: one labeled tick per group and a colored strip
             # beside (not over) the data, separated by thin surface lines.
@@ -16925,6 +16941,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             )
         else:
             self.plot_heat.setToolTip("")
+        missing_note = missing_data.describe(missing_report)
+        if missing_note:
+            self.plot_heat.setToolTip((self.plot_heat.toolTip() + "\n" + missing_note).strip())
         self.heatmap_color_menu.sync()
 
     def _render_duration_hist(self, durations: np.ndarray) -> None:

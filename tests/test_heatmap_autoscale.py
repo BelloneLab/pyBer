@@ -59,7 +59,9 @@ class HeatmapAutoscaleTests(unittest.TestCase):
         np.testing.assert_allclose(self.panel.img.getLevels(), [1, 99])
         self.manual(-15, 0)
         self.panel.combo_heat_scale.setCurrentIndex(1)
-        np.testing.assert_allclose(self.panel.img.getLevels(), np.nanpercentile(matrix, [2, 98]))
+        # The first column is missing in one row: the drawn heatmap is trimmed
+        # to the span every row shares, and the limits follow what is drawn.
+        np.testing.assert_allclose(self.panel.img.getLevels(), np.nanpercentile(matrix[:, 1:], [2, 98]))
         self.panel.combo_heat_scale.setCurrentIndex(2)
         np.testing.assert_allclose(self.panel.img.getLevels(), [-99, 99])
         np.testing.assert_equal(self.panel._last_mat, original)

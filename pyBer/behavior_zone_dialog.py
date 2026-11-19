@@ -236,7 +236,10 @@ class BehaviorCheckList(QtWidgets.QListWidget):
 
     def fit_height(self) -> None:
         """Resize to the rows in use and disappear while there is no behavior."""
-        has_items = self.count() > 0
+        try:
+            has_items = self.count() > 0
+        except RuntimeError:
+            return  # deferred call arrived after the list was deleted
         height = self._wanted_height()
         changed = self.isHidden() == has_items or self.maximumHeight() != height
         self.setFixedHeight(height)

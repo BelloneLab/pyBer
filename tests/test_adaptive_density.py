@@ -12,6 +12,7 @@ from PySide6 import QtCore, QtWidgets  # noqa: E402
 from adaptive_density import (  # noqa: E402
     DENSITY_LEVELS,
     KEEP_ROW_PROPERTY,
+    STACK_FIRST_PROPERTY,
     AdaptiveDensity,
     install_adaptive_density,
 )
@@ -122,6 +123,16 @@ class AdaptiveDensityTests(unittest.TestCase):
         self.assertEqual(self.lists[0].minimumWidth(), 150)
         self.assertEqual(self.captions[0].toolTip(), "")
         self.assertEqual(self.page.minimumSizeHint().width(), self.natural)
+
+    def test_stack_first_rows_stack_before_any_text_shrinks(self):
+        self.lists_row.setProperty(KEEP_ROW_PROPERTY, False)
+        self.lists_row.setProperty(STACK_FIRST_PROPERTY, True)
+        self._resize(self.natural - 30)
+        self.assertEqual(self.lists_row.direction(), QtWidgets.QBoxLayout.Direction.TopToBottom)
+        self.assertTrue(self.density._stacked_first)
+        self.assertFalse(self.density._squeezed)              # lists are not squeezed
+        self._resize(self.natural + 200)
+        self.assertEqual(self.lists_row.direction(), QtWidgets.QBoxLayout.Direction.LeftToRight)
 
     def test_page_own_style_rules_survive(self):
         self.page.setStyleSheet("QLabel { color: red; }")

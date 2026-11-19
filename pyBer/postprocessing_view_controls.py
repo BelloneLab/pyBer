@@ -162,16 +162,38 @@ def compact_results_toolbar(panel):
         combo.setStyleSheet("QComboBox { padding: 3px 22px 3px 8px; min-height: 20px; font-size: 12px; }")
     panel.lbl_status.setMinimumWidth(0)
     panel.lbl_status.setMaximumWidth(260)
+    # "Hide drawer" left the toolbar: clicking the active rail icon closes the
+    # drawer. In Group scope its place is taken by a Show / Hide groups toggle
+    # that mirrors the PSTH panel's "Group view" option.
+    panel.btn_action_hide.hide()
+    panel.btn_group_view = QtWidgets.QPushButton("Show groups", panel)
+    panel.btn_group_view.setCheckable(True)
+    panel.btn_group_view.setAccessibleName("Show or hide groups")
+    panel.btn_group_view.setToolTip(
+        "Show recordings by group (colored blocks, one mean per group) or hide the grouping.")
+
+    def reflect_group_view(*_args):
+        """Keep the toggle's state, caption and visibility in step with the panel."""
+        checked = bool(panel.cb_group_view.isChecked())
+        with QtCore.QSignalBlocker(panel.btn_group_view):
+            panel.btn_group_view.setChecked(checked)
+        panel.btn_group_view.setText("Hide groups" if checked else "Show groups")
+        panel.btn_group_view.setVisible(panel.tab_visual_mode.currentIndex() == 1)
+
+    panel.btn_group_view.clicked.connect(lambda checked: panel.cb_group_view.setChecked(bool(checked)))
+    panel.cb_group_view.toggled.connect(reflect_group_view)
+    panel.tab_visual_mode.currentChanged.connect(reflect_group_view)
     for widget in (panel.btn_action_load, panel.btn_action_compute, panel.btn_action_export,
                    panel.btn_action_undo, panel.btn_action_redo, panel.btn_view_menu,
                    panel.combo_toolbar_scope, panel.combo_individual_file, panel.lbl_status,
-                   panel.btn_action_hide):
+                   panel.btn_group_view):
         layout.addWidget(widget, 2 if widget is panel.combo_individual_file else
                          1 if widget is panel.lbl_status else 0)
         widget.setFixedHeight(32)
         widget.show()
         if isinstance(widget, (QtWidgets.QPushButton, QtWidgets.QToolButton)):
             widget.setStyleSheet("padding: 3px 8px; font-size: 12px;")
+    reflect_group_view()
     panel.btn_action_undo.setFixedWidth(32)
     panel.btn_action_redo.setFixedWidth(32)
     panel._post_transport_bar.setFixedHeight(44)

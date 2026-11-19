@@ -20,6 +20,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+import missing_data
+
 
 # ============================================================================
 # Toast notifications
@@ -690,6 +692,8 @@ class PreferencesDialog(QtWidgets.QDialog):
         "kernel_post": "temporal_modeling/kernel_post",
         "show_tutorial": "onboarding/replay_next_launch",
         "toast_timeout": "ui/toast_timeout_ms",
+        "missing_mode": missing_data.SETTINGS_KEY_MODE,    # interpolate | gray | blank
+        "missing_trim": missing_data.SETTINGS_KEY_TRIM,    # bool
     }
 
     def __init__(self, parent: QtWidgets.QWidget, settings: QtCore.QSettings):
@@ -740,6 +744,20 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.spin_autosave.setRange(1, 60)
         self.spin_autosave.setSuffix(" min")
         d.addRow("Autosave interval", self.spin_autosave)
+        # Missing samples in heatmaps (cut artifacts, recordings of unequal length).
+        self.combo_missing = QtWidgets.QComboBox()
+        for value, caption in missing_data.MISSING_MODES:
+            self.combo_missing.addItem(caption, value)
+        self.combo_missing.setToolTip(
+            "How heatmaps draw samples without data. Display only: means, SEM, "
+            "metrics and exports always use the original data.")
+        d.addRow("Missing data in heatmaps", self.combo_missing)
+        self.chk_missing_trim = QtWidgets.QCheckBox("Trim rows to the span they all share")
+        self.chk_missing_trim.setToolTip(
+            "Every row gets the same length: the heatmap starts at the latest row start "
+            "and ends at the earliest row end. Skipped when it would keep less than half "
+            "of the longest row.")
+        d.addRow("Unequal lengths", self.chk_missing_trim)
         tabs.addTab(defaults, "Defaults")
 
         # ---- Keyboard cheat sheet ----
@@ -799,6 +817,10 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.spin_kernel_post.setValue(float(s.value(self.KEYS["kernel_post"], 3.0) or 3.0))
         self.chk_autosave.setChecked(_to_bool(s.value(self.KEYS["autosave"], True), True))
         self.spin_autosave.setValue(int(s.value(self.KEYS["autosave_min"], 5) or 5))
+        mode = str(s.value(self.KEYS["missing_mode"], missing_data.DEFAULT_MODE) or missing_data.DEFAULT_MODE)
+        self.combo_missing.setCurrentIndex(max(0, self.combo_missing.findData(mode)))
+        self.chk_missing_trim.setChecked(
+            _to_bool(s.value(self.KEYS["missing_trim"], missing_data.DEFAULT_TRIM), missing_data.DEFAULT_TRIM))
 
     def _apply(self) -> None:
         s = self._settings
@@ -809,6 +831,8 @@ class PreferencesDialog(QtWidgets.QDialog):
         s.setValue(self.KEYS["kernel_post"], float(self.spin_kernel_post.value()))
         s.setValue(self.KEYS["autosave"], bool(self.chk_autosave.isChecked()))
         s.setValue(self.KEYS["autosave_min"], int(self.spin_autosave.value()))
+        s.setValue(self.KEYS["missing_mode"], self.combo_missing.currentData())
+        s.setValue(self.KEYS["missing_trim"], bool(self.chk_missing_trim.isChecked()))
 
     def _on_accept(self) -> None:
         self._apply()
