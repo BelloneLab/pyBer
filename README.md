@@ -47,7 +47,7 @@ open and does not change system permissions.
 
 | Stage | Capabilities |
 |---|---|
-| Ingest | Current and legacy Doric HDF5 layouts, generic `.h5` / `.hdf5`, RWD fluorescence CSV exports, multiple channels, DIO/AOUT triggers, and recursive folder discovery. |
+| Ingest | Current and legacy Doric HDF5 layouts, generic `.h5` / `.hdf5`, RWD fluorescence CSV exports, [Neurophotometrics](#neurophotometrics-csv) FP3001/FP3002 CSV tables, multiple channels, DIO/AOUT triggers, and recursive folder discovery. |
 | Recommendations | Recording-aware settings from sampling rate, duration, artifact load, signal shape, 405/465 coupling, and the selected sensor's kinetics. Each recommendation explains what to use and why. |
 | Preprocessing | Time windows and sections, resampling, low-pass filtering, Savitzky-Golay or moving-window smoothing, `asls` / `arpls` / `airpls` baselines, fitted-reference motion correction, and multiple dF/F and z-score outputs. |
 | Artifact review | Smart multi-evidence detection, adaptive or global MAD modes, manual regions, interpolation, cutting, strong local low-pass repair, or annotation without modification. |
@@ -230,13 +230,25 @@ The flagged table collects processing failures, excessive artifact load, poor fi
 
 | Kind | Native support |
 |---|---|
-| Raw photometry | Doric `.doric`, including current `LockInAOUT02/AIN01` and legacy `AIN01xAOUT02-LockIn/Values` layouts; compatible `.h5` / `.hdf5`; RWD fluorescence `.csv`. |
+| Raw photometry | Doric `.doric`, including current `LockInAOUT02/AIN01` and legacy `AIN01xAOUT02-LockIn/Values` layouts; compatible `.h5` / `.hdf5`; RWD fluorescence `.csv`; Neurophotometrics `.csv` with a `LedState` or `Flags` column, including per-LED split files and header-less event lists. |
 | Behavior | Binary state tables and timestamp/event tables from `.csv`, `.tsv`, `.xlsx`, and `.xls`, including onsets, offsets, transitions, and continuous variables. Tables of onset times (one column per behavior) are detected automatically. |
 | Synchronization | Embedded DIO/AOUT, external timestamped signals, and video ROI intensity or barcode pulse trains. |
 | Processed data | Self-describing CSV with `.pyber.json` sidecar and HDF5 with embedded metadata. |
 | Reports | Preprocessing PNG, strict QC report images, batch summaries, flagged-recording tables, analysis CSVs, model tables, and publication figure exports. |
 
-Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.58.1 builds target Windows; source execution on other platforms is not part of the tested release path.
+Brutally honest limitation: pyBer does not read TDT tanks (`.tev`, `.tsq`, `.sev`) natively. Convert those acquisitions to a supported CSV or HDF5 layout first. Neurophotometrics files written without a header row (stock Bonsai `CsvWriter`, no `LedState`/`Flags` column) cannot be demultiplexed automatically, because nothing in the file says which row belongs to which LED. The packaged v0.58.1 builds target Windows; source execution on other platforms is not part of the tested release path.
+
+### Neurophotometrics CSV
+
+Open the photometry CSV, or a whole folder, in Preprocessing (or pass it to `pyBer-cli`). pyBer reads the frame table written by the FP3001/FP3002 Bonsai workflows and needs no column mapping:
+
+- **LED demultiplexing.** The three lowest bits of `LedState` / `Flags` mark the LEDs (1 = 415, 2 = 470, 4 = 560 nm). The initialisation frame (all LEDs, or none) is dropped. A frame lit by 415 nm together with a signal LED is excluded because its emission mixes both excitations; 470 + 560 nm frames (`LedState` 6) feed green and red regions.
+- **One channel per region.** `Region0G` / `G0` (and unlabelled regions): 470 nm signal. `Region1R` / `R1`: 560 nm signal. The 415 nm frames are the reference, linearly interpolated onto the signal frame times; signal values themselves are never modified.
+- **Clock.** `SystemTimestamp` (FP3002 hardware clock) is preferred, then `Timestamp`, then the millisecond computer clock (`ComputerTimestamp`, `msTimestamp`). Time starts at the first LED frame; the absolute origin is kept in the loaded file's metadata.
+- **Split files.** `FiberData415.csv` + `FiberData470.csv` (names differing only by the wavelength, each file lit only by that LED) are merged; only the 470 nm file is listed. Complete recordings whose names merely contain 415/470 are never merged.
+- **Triggers and events.** `Input0/1`, `Output0/1` and `Stimulation` columns that change state, and any changing TTL bit of `Flags` / `LedState` (for example legacy `Flags` 273/274 = bit 8), become triggers. Header-less event files in the same folder (`*_stimuli.csv`, `ttls.csv`, `*_ts0.csv`) are matched to the clock whose span contains their times, mapped through a least-squares fit between clocks, and attached: named events become one trigger per name, numeric codes one trigger per code, and `True`/`False` pairs one on/off state. Instantaneous events are drawn as 0.1 s pulses; their onsets are exact to one frame, their width is not a duration.
+
+Checked against six real NPM recordings from GuPPy's test data: every signal sample equals its raw frame value, a legacy `Flags` TTL bit and the session's `True`/`False` event file give identical onsets, and the documented ~161.4 s stimulus of one session lands at 161.43 s.
 
 ## What changed in v0.58.1
 

@@ -170,6 +170,7 @@ from analysis_core import (
     _lowpass_sos,
     coerce_time_value,
 )
+from npm_import import load_npm_csv, npm_csv_role, npm_load_summary, npm_primary_for
 from sensor_registry import SENSOR_UNKNOWN, get_sensor
 from version import __version__
 from gui_preprocessing import (
@@ -318,6 +319,14 @@ def _is_supported_preprocessing_folder_file(path: str, *, include_generic_csv: b
         return False
     if is_rwd_events_csv(path):
         return False
+    # Neurophotometrics: photometry tables are recognised by their header at
+    # any depth; per-LED split companions and sidecar event lists are merged
+    # into the photometry file by the loader, so they are never listed.
+    npm_role = npm_csv_role(path)
+    if npm_role == "photometry":
+        return True
+    if npm_role in ("split_companion", "event"):
+        return False
     if _is_rwd_fluorescence_csv_name(path):
         return True
     return bool(include_generic_csv)
@@ -328,8 +337,9 @@ def _discover_preprocessing_data_files(folder: str, *, recursive: bool = True) -
 
     Direct CSV files are kept for backward compatibility with the old one-level
     folder import. In nested folders, CSV discovery is deliberately narrower:
-    RWD fluorescence files are included, while sibling Events.csv files are
-    ignored because the RWD loader attaches them automatically.
+    RWD fluorescence files and Neurophotometrics photometry tables are
+    included, while RWD Events.csv files, NPM event lists and NPM per-LED split
+    companions are ignored because their loaders attach them automatically.
     """
     root = os.path.abspath(str(folder or ""))
     if not root or not os.path.isdir(root):
@@ -5895,6 +5905,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if rwd_loaded is not None:
             return rwd_loaded
 
+        # Neurophotometrics tables are demultiplexed from their LED state
+        # column, so no manual column mapping is needed. A recognised NPM file
+        # that cannot be used raises ValueError with the reason.
+        npm_loaded = load_npm_csv(path)
+        if npm_loaded is not None:
+            return npm_loaded
+
         rows = self._read_csv_rows(path)
         if not rows:
             raise ValueError("CSV file is empty.")
@@ -5997,7 +6014,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self,
             "Open files",
             start_dir,
-            "Data files (*.doric *.h5 *.hdf5 *.csv);;Doric/HDF5 files (*.doric *.h5 *.hdf5);;CSV files (*.csv);;All files (*.*)",
+            "Data files (*.doric *.h5 *.hdf5 *.csv);;Doric/HDF5 files (*.doric *.h5 *.hdf5);;"
+            "CSV files: RWD, Neurophotometrics, custom (*.csv);;All files (*.*)",
         )
         if not paths:
             return
@@ -6068,6 +6086,21 @@ class MainWindow(QtWidgets.QMainWindow):
                         6000,
                     )
                     continue
+                npm_role = npm_csv_role(p)
+                if npm_role == "split_companion":
+                    primary = os.path.basename(npm_primary_for(p))
+                    self._show_status_message(
+                        f"Skipped {os.path.basename(p)}: it is merged into {primary}, load that file instead.",
+                        7000,
+                    )
+                    continue
+                if npm_role == "event":
+                    self._show_status_message(
+                        f"Skipped {os.path.basename(p)}: Neurophotometrics event lists attach "
+                        "automatically to the photometry CSV in the same folder.",
+                        7000,
+                    )
+                    continue
                 try:
                     loaded_from_csv = self._load_raw_csv_as_pre_file(p)
                 except Exception as e:
@@ -6079,7 +6112,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.file_panel.add_file(p)
                 if selection_target is None:
                     selection_target = p
-                self._show_status_message(f"Loaded CSV: {os.path.basename(p)}", 5000)
+                npm_summary = npm_load_summary(loaded_from_csv)
+                if npm_summary:
+                    self._show_status_message(
+                        f"Loaded Neurophotometrics CSV {os.path.basename(p)}: {npm_summary}",
+                        8000,
+                    )
+                else:
+                    self._show_status_message(f"Loaded CSV: {os.path.basename(p)}", 5000)
                 continue
             try:
                 doric = self.processor.load_file(p)

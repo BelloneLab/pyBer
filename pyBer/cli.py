@@ -28,6 +28,7 @@ from analysis_core import (
     safe_divide,
     _lowpass_sos,
 )
+from npm_import import load_npm_csv, npm_csv_role
 from sensor_registry import SENSOR_UNKNOWN, all_sensors, get_sensor
 from version import __version__
 
@@ -56,7 +57,13 @@ def discover_raw_files(inputs: Sequence[str], recursive: bool = True) -> List[Pa
             sidecar = path.with_suffix(".pyber.json")
             if sidecar.is_file():
                 return
-            if not (explicit or root_level or _is_rwd_name(path)):
+            # Neurophotometrics: split per-LED companions and event lists are
+            # merged into the photometry file by the loader, even when named
+            # explicitly; photometry tables are found at any depth.
+            npm_role = npm_csv_role(str(path))
+            if npm_role in ("split_companion", "event"):
+                return
+            if not (explicit or root_level or _is_rwd_name(path) or npm_role == "photometry"):
                 return
         if path.suffix.lower() in {".h5", ".hdf5"}:
             try:
@@ -112,9 +119,12 @@ def load_raw_file(path: Path, processor: Optional[PhotometryProcessor] = None) -
     if path.suffix.lower() == ".csv":
         loaded = load_rwd_csv(str(path))
         if loaded is None:
+            loaded = load_npm_csv(str(path))
+        if loaded is None:
             raise ValueError(
-                "CSV is not a recognized RWD fluorescence export. Use an aligned "
-                "CH*-410/CH*-470 table or an unaligned TimeStamp/Lights table."
+                "CSV is not a recognized RWD or Neurophotometrics export. Use an RWD "
+                "aligned CH*-410/CH*-470 table or unaligned TimeStamp/Lights table, or "
+                "a Neurophotometrics table with a Flags/LedState column."
             )
         return loaded
     return processor.load_file(str(path))
@@ -562,7 +572,7 @@ def run_batch(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pyber-cli",
-        description="Recursively preprocess Doric and RWD fiber-photometry recordings.",
+        description="Recursively preprocess Doric, RWD and Neurophotometrics fiber-photometry recordings.",
     )
     parser.add_argument("inputs", nargs="+", help="One or more raw files or folders")
     parser.add_argument("-o", "--output-dir", help="Output folder (default: pyber_processed)")
