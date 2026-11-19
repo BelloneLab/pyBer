@@ -62,6 +62,11 @@ def main():
     frames[-1].save(ROOT / "assets/pyBer_taskbar.png")
     frames[-1].save(ROOT / "assets/pyBer.ico", format="ICO",
                     sizes=[(size, size) for size in SIZES], append_images=frames[:-1])
+    # The animated README logo is derived from the same SVG.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from build_animated_logo import build_animated_logo
+    build_animated_logo()
 
 
 if __name__ == "__main__":

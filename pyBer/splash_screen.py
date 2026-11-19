@@ -111,6 +111,13 @@ FIBER_LOGO_HIGHLIGHT = ((142, 313), (145, 220), (158, 181), (211, 151),
 FIBER_LOGO_WIDTH, FIBER_LOGO_HIGHLIGHT_WIDTH = 12.0, 2.5
 FIBER_LOGO_HEAD_Y = 315.2          # below this the fiber is hidden by the mouse's head
 LOGO_VIEWBOX = 500.0
+# The three small dashes between the optics (logo coordinates, from the SVG).
+# On the splash they are "sparks": each lights up when a pulse reaches the
+# optics, one after the other, and fades with the transient.
+SPARK_LOGO_LINES = (((223, 194), (223, 204)), ((264, 204), (259, 213)), ((287, 239), (277, 243)))
+SPARK_LOGO_WIDTH = 12.0
+SPARK_STAGGER_S = 0.085            # delay between successive sparks
+SPARK_RISE_S, SPARK_DECAY_S = 0.035, 0.24   # how fast a spark appears and fades
 
 FRAME_INTERVAL_MS = 16             # ~60 fps
 FADE_IN_S, FADE_OUT_S = 0.22, 0.26
@@ -444,6 +451,49 @@ class SplashArt:
                          self._logo_point(*control_points[first + 2]))
         return path
 
+    def _erase_sparks(self, logo: QtGui.QPixmap) -> None:
+        """Remove the three static dashes from the logo: they are drawn live instead."""
+        q = QtGui.QPainter(logo)
+        q.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        q.scale(self.logo_scale, self.logo_scale)
+        q.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_Clear)
+        q.setPen(_round_pen(QtGui.QColor(0, 0, 0), SPARK_LOGO_WIDTH + 3.0))
+        for (x1, y1), (x2, y2) in SPARK_LOGO_LINES:
+            q.drawLine(QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2))
+        q.end()
+
+    def spark_levels(self, t: float) -> List[float]:
+        """Brightness (0-1) of each spark: it appears when a pulse reaches the
+        optics (one spark after the other) and fades with the transient."""
+        levels = []
+        peak_at = SPARK_RISE_S * math.log(1.0 + SPARK_DECAY_S / SPARK_RISE_S)
+        norm = (1.0 - math.exp(-peak_at / SPARK_RISE_S)) * math.exp(-peak_at / SPARK_DECAY_S)
+        events = self.model.events_between(t - 8.0 * SPARK_DECAY_S, t)
+        for index in range(len(SPARK_LOGO_LINES)):
+            level = 0.0
+            for arrival, amp in events:
+                d = t - arrival - index * SPARK_STAGGER_S
+                if d > 0.0:
+                    level += min(1.0, 0.35 + 0.65 * amp) * (1.0 - math.exp(-d / SPARK_RISE_S)) \
+                        * math.exp(-d / SPARK_DECAY_S) / norm
+            levels.append(min(1.0, level))
+        return levels
+
+    def _paint_sparks(self, p: QtGui.QPainter, t: float) -> None:
+        theme, scale = self.theme, self.logo_scale
+        for level, ((x1, y1), (x2, y2)) in zip(self.spark_levels(t), SPARK_LOGO_LINES):
+            if level <= 0.01:
+                continue
+            a, b = self._logo_point(x1, y1), self._logo_point(x2, y2)
+            p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_Plus)
+            for width, alpha in ((30.0, 26), (20.0, 46)):
+                p.setPen(_round_pen(_rgba(theme.mid, alpha * level), width * scale))
+                p.drawLine(a, b)
+            p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
+            p.setPen(_round_pen(_rgba(_mix(theme.light, theme.hot, 0.55 * level), 255 * level),
+                                SPARK_LOGO_WIDTH * scale))
+            p.drawLine(a, b)
+
     def _paint_fiber_cable(self, p: QtGui.QPainter) -> None:
         """Repaint the logo's fiber in this launch's colour, exactly over the original."""
         theme, scale = self.theme, self.logo_scale
@@ -493,6 +543,7 @@ class SplashArt:
                 logo = logo.scaledToHeight(int(round(LOGO_H * self.dpr)),
                                            QtCore.Qt.TransformationMode.SmoothTransformation)
                 logo.setDevicePixelRatio(self.dpr)
+                self._erase_sparks(logo)
                 p.drawPixmap(QtCore.QPointF(self.logo_left, LOGO_TOP), logo)
                 self._paint_fiber_cable(p)
 
@@ -565,6 +616,7 @@ class SplashArt:
         p.setClipPath(self.glow_clip)
         self._paint_trace(p, t)
         self._paint_fiber(p, t)
+        self._paint_sparks(p, t)
         p.restore()
 
     def trace_path(self, t: float) -> Tuple[QtGui.QPainterPath, QtCore.QPointF, float]:

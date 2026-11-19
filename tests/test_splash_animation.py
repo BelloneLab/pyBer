@@ -161,6 +161,30 @@ class SplashArtTests(unittest.TestCase):
             finally:
                 splash._theme_memory_path = original
 
+    def test_logo_dashes_light_up_with_each_arrival_and_disappear_between(self):
+        """The three dashes are drawn live: off before a pulse arrives, lit one
+        after the other at the arrival, gone again once the transient has passed."""
+        art = splash.SplashArt(2.0, 1, 4, 8.0)
+        model = art.model
+        events = model.events_between(splash.START_T - 8, splash.START_T + 1)
+        # An isolated transient: nothing within 1.6 s before it.
+        arrival = next(b for (a, _), (b, _) in zip(events, events[1:]) if b - a > 1.6)
+        before = art.spark_levels(arrival - 0.01)
+        self.assertTrue(all(level < 0.02 for level in before))
+        first, second, third = art.spark_levels(arrival + 0.04)
+        self.assertGreater(first, 0.25)
+        self.assertGreater(first, second)                 # they appear one after the other
+        self.assertEqual(third, 0.0)
+        self.assertTrue(all(level > 0.25 for level in art.spark_levels(arrival + 0.26)))
+        # The static layer no longer contains the dashes (they would never switch off).
+        x1, y1 = splash.SPARK_LOGO_LINES[0][0]
+        x2, y2 = splash.SPARK_LOGO_LINES[0][1]
+        point = art._logo_point((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+        still = art.static.toImage().pixelColor(int(point.x() * 2), int(point.y() * 2))
+        self.assertLess(still.blue(), 110)                # dark card, not the pale dash
+        lit = _frame(art, arrival + 0.06).pixelColor(int(point.x() * 2), int(point.y() * 2))
+        self.assertGreater(lit.blue() + lit.red() + lit.green(), still.blue() + still.red() + still.green() + 150)
+
     def test_theme_is_random_and_never_repeats_the_previous_launch(self):
         with tempfile.TemporaryDirectory() as directory:
             memory = str(Path(directory) / "theme.txt")
@@ -186,6 +210,43 @@ class SplashArtTests(unittest.TestCase):
                     del os.environ[name]
                 else:
                     os.environ[name] = previous
+
+
+class AnimatedReadmeLogoTests(unittest.TestCase):
+    """The README logo is generated from the editable logo and stays in sync with it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(root / "scripts"))
+        import build_animated_logo
+        cls.builder = build_animated_logo
+        cls.root = root
+
+    def test_committed_asset_matches_the_generator_and_is_used_by_the_readme(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fresh = self.builder.build_animated_logo(Path(directory) / "logo.svg").read_text(encoding="utf-8")
+        committed = (self.root / "assets" / "pyBer_logo_animated.svg").read_text(encoding="utf-8")
+        self.assertEqual(fresh.split(), committed.split())      # same content, any line endings
+        self.assertIn("assets/pyBer_logo_animated.svg", (self.root / "README.md").read_text(encoding="utf-8"))
+
+    def test_animation_has_pulses_sparks_and_a_still_fallback(self):
+        text = (self.root / "assets" / "pyBer_logo_animated.svg").read_text(encoding="utf-8")
+        for name in ("pulse-glow", "pulse-body", "pulse-core", "implant", "optics", "spark-1", "spark-2", "spark-3"):
+            self.assertIn(f"@keyframes {name}", text)
+            self.assertIn(f'class="{name}"', text)
+        self.assertIn("prefers-reduced-motion", text)
+        self.assertNotIn("<script", text)
+        self.assertNotIn("M223,194L223,204M264,204L259,213M287,239L277,243", text)   # split into three sparks
+        launches = [launch for launch, _strength in self.builder.EVENTS]
+        gaps = [b - a for a, b in zip(launches, launches[1:])]
+        self.assertGreaterEqual(len(launches), 4)                     # several transients per loop
+        self.assertGreater(max(gaps) - min(gaps), 0.2)                # irregular rhythm
+        self.assertGreater(min(gaps), self.builder.TRAVEL_S * 1.5)    # pulses never overlap
+        last_spark_off = (launches[-1] + self.builder.TRAVEL_S + 2 * self.builder.SPARK_STAGGER_S
+                          + self.builder.SPARK_OFF_S)
+        self.assertLess(last_spark_off, self.builder.LOOP_S)          # the loop closes cleanly
 
 
 class SplashHelperProcessTests(unittest.TestCase):

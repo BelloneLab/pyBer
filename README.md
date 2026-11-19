@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/pyBer_logo_big.png" alt="pyBer logo" width="190">
+  <img src="assets/pyBer_logo_animated.svg" alt="pyBer logo" width="190">
 </p>
 
 <h1 align="center">pyBer</h1>
