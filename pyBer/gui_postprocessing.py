@@ -10450,10 +10450,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
         """Keep the chosen behavioral chart on the same recording scope as exports."""
         preset = self._style.get("postprocessing_preset", "Midnight")
         palette = POSTPROCESSING_PRESETS.get(preset, POSTPROCESSING_PRESETS["Midnight"])
+        recordings = self._psth_behavior_summary_recordings()
+        # Time-only events (no durations): duration-based charts would stay
+        # empty, so show event rate and total count over time instead.
+        time_only = bool(recordings) and not any(
+            np.any(np.isfinite(np.asarray(rec["offsets"], float))) for rec in recordings)
+        needs_duration = {"duration", "ibi", "cumulative", "occupancy", "duration_time"}
+        chosen = {self.combo_psth_behavior_metric.currentData(), self.combo_psth_behavior_metric_second.currentData()}
+        fallbacks = iter([m for m in ("frequency", "cumulative_count", "onset_interval") if m not in chosen])
         for plot, combo in ((self.plot_dur, self.combo_psth_behavior_metric),
                             (self.plot_bout_second, self.combo_psth_behavior_metric_second)):
             try:
-                summary = self._current_psth_behavior_summary(combo.currentData())
+                metric = combo.currentData()
+                if time_only and metric in needs_duration:
+                    metric = next(fallbacks, "onset_interval")
+                summary = self._current_psth_behavior_summary(metric)
                 render_behavior_summary(plot, summary, palette)
                 set_plot_has_data(plot, bool(summary["has_data"]))
             except ValueError as exc:
@@ -16042,6 +16053,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not self.last_behavior_analysis:
             return
         per_file_metrics = self.last_behavior_analysis.get("per_file_metrics", []) or []
+        # Time-only lists (onsets or offsets, no durations): only count and rate
+        # are defined, so the duration/fraction columns are hidden.
+        time_only = bool(per_file_metrics) and not any(
+            np.isfinite(float(row.get("mean_duration", np.nan))) for row in per_file_metrics)
+        for column in (2, 3, 4, 5, 7):
+            self.tbl_behavior_metrics.setColumnHidden(column, time_only)
         for row in per_file_metrics:
             r = self.tbl_behavior_metrics.rowCount()
             self.tbl_behavior_metrics.insertRow(r)
@@ -16063,7 +16080,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self.tbl_behavior_metrics.setItem(r, c, QtWidgets.QTableWidgetItem(txt))
 
         gm = self.last_behavior_analysis.get("group_metrics", {}) or {}
-        self.lbl_behavior_summary.setText(
+        if time_only:
+            self.lbl_behavior_summary.setText(
+                "Group metrics: "
+                f"count={gm.get('event_count_mean', np.nan):.4g}+-{gm.get('event_count_std', np.nan):.3g} | "
+                f"rate={gm.get('rate_per_min_mean', np.nan):.4g}+-{gm.get('rate_per_min_std', np.nan):.3g} per min")
+        else:
+            self.lbl_behavior_summary.setText(
             "Group metrics: "
             f"count={gm.get('event_count_mean', np.nan):.4g}+-{gm.get('event_count_std', np.nan):.3g} | "
             f"rate={gm.get('rate_per_min_mean', np.nan):.4g}+-{gm.get('rate_per_min_std', np.nan):.3g} per min | "
