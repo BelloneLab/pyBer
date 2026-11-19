@@ -80,8 +80,7 @@ def _prepare(recording, config):
         event = events[index]
         left = np.searchsorted(t, event - config.pre_window_s, side="left")
         right = np.searchsorted(t, event - config.guard_s, side="left")
-        native = np.arange(left, right)
-        native = native[_sample_indices(len(native), config.max_segment_samples)]
+        native = left + _sample_indices(max(0, right - left), config.max_segment_samples)
         if not native.size:
             continue
         keep = np.isfinite(y[native]) & ~_overlap(intervals, t[native], t[native])
@@ -251,7 +250,7 @@ def _evaluate_recording(recording, window, config):
 
 def _candidate_windows(config):
     """Search distinct durations and offsets wholly inside the displayed pre-event span."""
-    pre = int(np.floor(min(60.0, config.pre_window_s)))
+    pre = int(np.floor(config.pre_window_s))
     # Evaluate whole-second intervals themselves, rather than rounding their
     # labels after scoring. Stay strictly before the protected guard boundary.
     guard = int(np.floor(config.guard_s)) + 1
@@ -348,8 +347,8 @@ def suggest_baselines(recordings, config=None):
     values = asdict(config)
     if not all(np.isfinite(value) for value in values.values()):
         raise ValueError("Suggestion settings must be finite.")
-    if not 0 < config.pre_window_s <= 60 or min(config.guard_s, config.recovery_s) < 0:
-        raise ValueError("Use a positive pre-event span up to 60 s and nonnegative protection.")
+    if min(config.pre_window_s, config.guard_s, config.recovery_s) < 0:
+        raise ValueError("Use a finite nonnegative pre-event span and nonnegative protection.")
     if config.min_duration_s <= 0 or config.max_sampled_events < 1 or config.max_segment_samples < 6:
         raise ValueError("Positive duration, event count and at least six sampled points are required.")
     prepared = [_prepare(recording, config) for recording in recordings]

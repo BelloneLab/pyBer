@@ -7,6 +7,49 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from shiboken6 import isValid
 
 
+class DurationSpinBox(QtWidgets.QDoubleSpinBox):
+    """Edit a duration in the selected unit, keeping the value and signals in seconds."""
+
+    SCALES = {"s": 1, "min": 60, "h": 3600}
+    unit = "s"
+
+    def __init__(self, minimum=0, maximum=1e9, value=0):
+        super().__init__()
+        self.setDecimals(2)
+        self.setRange(minimum, maximum)
+        self.setKeyboardTracking(False)
+        self.set_unit("s")
+        self.setValue(value)
+
+    def set_unit(self, unit):
+        self.unit = unit
+        self.setSuffix(" " + unit)
+        self.setSingleStep(self.SCALES[unit])
+
+    def textFromValue(self, seconds):
+        precision = {"s": 2, "min": 5, "h": 7}[self.unit]
+        locale = self.locale()
+        text = locale.toString(seconds / self.SCALES[self.unit], "f", precision)
+        return text.rstrip(locale.zeroDigit()).removesuffix(locale.decimalPoint())
+
+    def _number_text(self, text):
+        return text.removesuffix(self.suffix()).strip()
+
+    def valueFromText(self, text):
+        value, ok = self.locale().toDouble(self._number_text(text))
+        return value * self.SCALES[self.unit] if ok else self.value()
+
+    def validate(self, text, pos):
+        number = self._number_text(text)
+        state = QtGui.QValidator.State
+        if number in ("", "-", "+", self.locale().decimalPoint(), "-" + self.locale().decimalPoint()):
+            return state.Intermediate, text, pos
+        value, ok = self.locale().toDouble(number)
+        if ok and self.minimum() <= value * self.SCALES[self.unit] <= self.maximum():
+            return state.Acceptable, text, pos
+        return state.Invalid, text, pos
+
+
 def _is_alive(obj: object) -> bool:
     """Return whether a PySide wrapper still owns a live C++ object.
 

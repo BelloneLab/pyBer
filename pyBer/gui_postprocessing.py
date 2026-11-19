@@ -33,7 +33,7 @@ from ethovision_process_gui import clean_sheet, find_header_row, extract_metadat
 from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, create_plot_card, style_plot
 from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
-from numeric_controls import with_slider
+from numeric_controls import DurationSpinBox, with_slider
 from psth_metrics import METRICS, metric_id, summarize_metrics, draw_metric_matplotlib, export_selected_metrics
 from psth_metric_panels import MetricPanel, MetricGrid
 from aligned_time_axes import AlignedTimeAxes
@@ -58,7 +58,7 @@ from behavior_summary import summarize_behavior, export_behavior_summary
 from behavior_summary_plot import render_behavior_summary
 from signal_events import preprocess_trace, estimate_noise, detect_peaks, observed_intervals, continuous_segments
 from postprocessing_core import (
-    compute_psth_matrix, extract_complete_events, group_close_events,
+    check_psth_size, psth_bin_count, compute_psth_matrix, extract_complete_events, group_close_events,
     mean_sem, normalize_events, window_metrics, paired_summary,
 )
 from time_sync import (
@@ -2043,6 +2043,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
         pre_col.setStretch(1, 1)
         beh_col.setStretch(1, 1)
         lists_layout.addLayout(pre_col)
+        self.list_outputs = QtWidgets.QListWidget()
+        self.list_outputs.setMinimumWidth(85)
+        self.list_outputs.setMaximumWidth(145)
+        self.list_outputs.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        output_column = QtWidgets.QVBoxLayout()
+        output_header = QtWidgets.QLabel("Input signal")
+        output_header.setFixedHeight(24)
+        output_header.setToolTip("Choose the saved preprocessing output used for each recording.")
+        output_column.addWidget(output_header)
+        output_column.addWidget(self.list_outputs, 1)
+        lists_layout.addLayout(output_column)
+        self.list_preprocessed.verticalScrollBar().valueChanged.connect(self.list_outputs.verticalScrollBar().setValue)
+        self.list_outputs.verticalScrollBar().valueChanged.connect(self.list_preprocessed.verticalScrollBar().setValue)
         self.cb_injection = QtWidgets.QCheckBox("Event marker")
         self.list_injection = QtWidgets.QListWidget()
         self.list_injection.setFixedWidth(145)
@@ -2174,11 +2187,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _psth_section_qss = ""
 
         # -- Widget creation (unchanged logic, reordered for sections) --
-        self.spin_pre = QtWidgets.QDoubleSpinBox(); self.spin_pre.setRange(0.1, 60); self.spin_pre.setValue(2.0); self.spin_pre.setDecimals(2)
-        self.spin_post = QtWidgets.QDoubleSpinBox(); self.spin_post.setRange(0.1, 120); self.spin_post.setValue(5.0); self.spin_post.setDecimals(2)
-        self.spin_b0 = QtWidgets.QDoubleSpinBox(); self.spin_b0.setRange(-60, 0); self.spin_b0.setValue(-1.0); self.spin_b0.setDecimals(2)
-        self.spin_b1 = QtWidgets.QDoubleSpinBox(); self.spin_b1.setRange(-60, 0); self.spin_b1.setValue(0.0); self.spin_b1.setDecimals(2)
-        self.spin_resample = QtWidgets.QDoubleSpinBox(); self.spin_resample.setRange(1, 1000); self.spin_resample.setValue(50); self.spin_resample.setDecimals(1)
+        self.spin_pre = DurationSpinBox(0, 1e9, 2)
+        self.spin_post = DurationSpinBox(0, 1e9, 5)
+        self.spin_b0 = DurationSpinBox(-1e9, 0, -1)
+        self.spin_b1 = DurationSpinBox(-1e9, 0, 0)
+        self.spin_resample = QtWidgets.QDoubleSpinBox(); self.spin_resample.setRange(0.01, 1000); self.spin_resample.setValue(50); self.spin_resample.setDecimals(2)
         self.spin_smooth = QtWidgets.QDoubleSpinBox(); self.spin_smooth.setRange(0, 5); self.spin_smooth.setValue(0.0); self.spin_smooth.setDecimals(2)
         self.combo_psth_normalization = QtWidgets.QComboBox()
         self.combo_psth_normalization.addItem("Baseline z-score", "zscore")
@@ -2232,10 +2245,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._metric_actions[key] = action
         self.btn_more_metrics.setMenu(metric_menu)
         self.btn_more_metrics.setToolTip("Add independent metric panels. Lines show medians; diamonds show means and descriptive SEM.")
-        self.spin_metric_pre0 = QtWidgets.QDoubleSpinBox(); self.spin_metric_pre0.setRange(-120, 0); self.spin_metric_pre0.setValue(-1.0); self.spin_metric_pre0.setDecimals(2)
-        self.spin_metric_pre1 = QtWidgets.QDoubleSpinBox(); self.spin_metric_pre1.setRange(-120, 0); self.spin_metric_pre1.setValue(0.0); self.spin_metric_pre1.setDecimals(2)
-        self.spin_metric_post0 = QtWidgets.QDoubleSpinBox(); self.spin_metric_post0.setRange(0, 120); self.spin_metric_post0.setValue(0.0); self.spin_metric_post0.setDecimals(2)
-        self.spin_metric_post1 = QtWidgets.QDoubleSpinBox(); self.spin_metric_post1.setRange(0, 120); self.spin_metric_post1.setValue(1.0); self.spin_metric_post1.setDecimals(2)
+        self.spin_metric_pre0 = DurationSpinBox(-1e9, 0, -1)
+        self.spin_metric_pre1 = DurationSpinBox(-1e9, 0, 0)
+        self.spin_metric_post0 = DurationSpinBox(0, 1e9, 0)
+        self.spin_metric_post1 = DurationSpinBox(0, 1e9, 1)
 
         self.cb_global_metrics = QtWidgets.QCheckBox("Enable global metrics")
         self.cb_global_metrics.setChecked(True)
@@ -2344,16 +2357,29 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fw = QtWidgets.QFormLayout(grp_window)
         fw.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
         fw.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
-        fw.addRow("Window (s)", win_widget)
-        fw.addRow("Baseline (s)", base_widget)
+        self.combo_window_unit = QtWidgets.QComboBox()
+        for label, unit in (("Seconds", "s"), ("Minutes", "min"), ("Hours", "h")):
+            self.combo_window_unit.addItem(label, unit)
+        self.combo_window_unit.currentIndexChanged.connect(self._set_psth_window_unit)
+        fw.addRow("Time unit", self.combo_window_unit)
+        fw.addRow("Window", win_widget)
+        self.btn_available_window = QtWidgets.QPushButton("Use available recording time")
+        self.btn_available_window.clicked.connect(self._use_available_window)
+        fw.addRow(self.btn_available_window)
+        fw.addRow("Baseline", base_widget)
         self.baseline_suggestions = BaselineSuggestionsWidget(
             snapshot=self._baseline_advisor_recordings,
-            config=lambda: BaselineSuggestionConfig(pre_window_s=min(60., float(self.spin_pre.value()))),
+            config=lambda: BaselineSuggestionConfig(pre_window_s=float(self.spin_pre.value())),
             parent=self,
         )
         self.baseline_suggestions.selected.connect(self._apply_recommended_baseline)
         fw.addRow(self.baseline_suggestions)
         fw.addRow("Resample (Hz)", self.spin_resample)
+        self.lbl_psth_bins = QtWidgets.QLabel()
+        for control in (self.spin_pre, self.spin_post, self.spin_resample):
+            control.valueChanged.connect(self._update_psth_bin_count)
+        self._update_psth_bin_count()
+        fw.addRow(self.lbl_psth_bins)
         fw.addRow("Smooth sigma (s)", with_slider(self.spin_smooth, logarithmic=True))
         fw.addRow("Normalization", self.combo_psth_normalization)
 
@@ -2453,8 +2479,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         met_widget = QtWidgets.QWidget(); met_widget.setLayout(met_row)
         fm.addRow(met_widget)
         self.lbl_metric = QtWidgets.QLabel("Metric")
-        self.lbl_metric_pre = QtWidgets.QLabel("Pre window (s)")
-        self.lbl_metric_post = QtWidgets.QLabel("Post window (s)")
+        self.lbl_metric_pre = QtWidgets.QLabel("Pre window")
+        self.lbl_metric_post = QtWidgets.QLabel("Post window")
         metric_selection = QtWidgets.QHBoxLayout()
         metric_selection.setContentsMargins(0, 0, 0, 0)
         metric_selection.addWidget(self.combo_metric, 1)
@@ -4607,6 +4633,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # plots share column 0, so their time axes stay pixel aligned.
         time_grid.addWidget(self.plot_heat, 0, 0)
         time_grid.addWidget(self.plot_avg, 2, 0)
+        self.lbl_recording_coverage = QtWidgets.QLabel()
+        self.lbl_recording_coverage.hide()
+        time_grid.addWidget(self.lbl_recording_coverage, 3, 0)
+        self._coverage_counts = None
+        self.plot_avg.scene().sigMouseMoved.connect(self._show_recording_coverage)
         scales = QtWidgets.QWidget()
         scale_layout = QtWidgets.QHBoxLayout(scales)
         scale_layout.setContentsMargins(0, 0, 0, 0)
@@ -6290,7 +6321,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 dt = np.nanmedian(np.diff(t))
                 fs = 1.0 / float(dt) if np.isfinite(dt) and dt > 0 else np.nan
         if np.isfinite(fs) and fs > 0:
-            fs = max(1.0, min(1000.0, float(fs)))
+            fs = max(self.spin_resample.minimum(), min(self.spin_resample.maximum(), float(fs)))
             self.spin_resample.setValue(fs)
         self._update_status_strip()
 
@@ -10148,6 +10179,51 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.lbl_plot_file.setText(f"Group view: {rows} {level} from {n_files} recording(s)")
         self.lbl_plot_file.setToolTip(f"{self.lbl_plot_file.text()}\n{status_msg}")
 
+    def _set_psth_window_unit(self):
+        unit = self.combo_window_unit.currentData()
+        for control in (self.spin_pre, self.spin_post, self.spin_b0, self.spin_b1,
+                        self.spin_metric_pre0, self.spin_metric_pre1,
+                        self.spin_metric_post0, self.spin_metric_post1):
+            control.set_unit(unit)
+        self._queue_settings_save()
+
+    def _update_psth_bin_count(self):
+        bins = psth_bin_count((-self.spin_pre.value(), self.spin_post.value()), self.spin_resample.value())
+        self.lbl_psth_bins.setText(f"{bins:,} bins per event")
+
+    def _use_available_window(self):
+        group = self.tab_sources.currentIndex() == 1 and self.tab_visual_mode.currentIndex() == 1
+        recordings = self._processed
+        if not group and recordings:
+            selected = self.combo_individual_file.currentText()
+            recordings = [next((r for r in recordings if self._file_id_for_proc(r) == selected), recordings[0])]
+        marker = self.combo_align.currentText() == "Event marker"
+        pre = post = 0.0
+        for proc in recordings:
+            if group and not self._group_view_keeps(self._file_id_for_proc(proc)):
+                continue
+            times = np.asarray(self._proc_time(proc), float)
+            observed = times[np.isfinite(times) & np.isfinite(proc.output)]
+            if observed.size < 2:
+                continue
+            events, durations = self._get_events_for_proc(proc)
+            if not marker:
+                events, _ = self._filter_events(events, durations)
+            events = events[(events >= observed[0]) & (events <= observed[-1])]
+            if not events.size:
+                continue
+            if group and not marker and self._psth_exclude_low_event_animals_enabled():
+                if events.size < self._psth_min_events_per_animal():
+                    continue
+            pre = max(pre, float(events.max() - observed[0]))
+            post = max(post, float(observed[-1] - events.min()))
+        if pre + post == 0:
+            self.statusUpdate.emit("No selected event falls within the observed recording time.", 5000)
+            return
+        # Round outwards to the precision of the editable seconds fields.
+        self.spin_pre.setValue(np.ceil(pre * 100 - 1e-9) / 100)
+        self.spin_post.setValue(np.ceil(post * 100 - 1e-9) / 100)
+
     def _baseline_advisor_recordings(self) -> Tuple[List[BaselineRecording], str]:
         """Snapshot the visible scope with filtered targets and all contaminating bouts.
 
@@ -12853,11 +12929,41 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._refresh_results_minimum_heights()
         self._queue_view_settings_save()
 
+    def _select_recording_output(self, item, label):
+        index = self.list_outputs.row(item)
+        if not 0 <= index < len(self._processed):
+            return
+        proc = self._processed[index]
+        if label == proc.output_label or label not in proc.outputs:
+            return
+        # Preprocessing can share its current trial with this panel. Change only
+        # the postprocessing selection, keeping the original trace available.
+        selected = copy.copy(proc)
+        selected.outputs = dict(proc.outputs)
+        selected.outputs.setdefault(proc.output_label or "Processed output", proc.output)
+        selected.output_label = label
+        selected.output = selected.outputs[label]
+        self._processed = list(self._processed)
+        self._processed[index] = selected
+        self.list_preprocessed.item(index).setData(QtCore.Qt.ItemDataRole.UserRole, id(selected))
+        self.list_outputs.itemWidget(item).setToolTip(label)
+        self._project_dirty = True
+        self._cancel_signal_preview()
+        self.last_signal_events = None
+        self._signal_preview_proc = None
+        self._update_signal_metrics_table()
+        self._render_signal_event_plots()
+        self._compute_psth()
+        self._compute_spatial_heatmap()
+        self.behavior_zone_panel._queue_comparison()
+        self._queue_signal_preview()
+
     def _update_file_lists(self) -> None:
         """Update the preprocessed files and behaviors lists with numbered entries."""
         self._behavior_group_cache = None
         self._pairing_cache = None
         self.list_preprocessed.clear()
+        self.list_outputs.clear()
         self._refresh_injection_rows()
         for i, proc in enumerate(self._processed, 1):
             filename = os.path.splitext(os.path.basename(proc.path))[0]
@@ -12865,6 +12971,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
             item = QtWidgets.QListWidgetItem(f"{i}. {filename_clean}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, id(proc))
             self.list_preprocessed.addItem(item)
+            output_item = QtWidgets.QListWidgetItem()
+            output_item.setSizeHint(QtCore.QSize(85, ROW_HEIGHT))
+            self.list_outputs.addItem(output_item)
+            picker = QtWidgets.QComboBox()
+            _compact_combo(picker, min_chars=6)
+            active = proc.output_label or "Processed output"
+            picker.addItem(active)
+            picker.addItems([label for label in proc.outputs if label != active])
+            picker.setEnabled(picker.count() > 1)
+            picker.setAccessibleName(f"Input signal for {filename_clean}")
+            picker.setToolTip(f"{filename_clean}: {active}")
+            self.list_outputs.setItemWidget(output_item, picker)
+            picker.currentTextChanged.connect(lambda label, item=output_item: self._select_recording_output(item, label))
 
         self.list_behaviors.clear()
         for i, (stem, source) in enumerate(self._behavior_sources.items(), 1):
@@ -15978,6 +16097,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             all_events: List[float] = []
             event_rows: List[Dict[str, object]] = []
             total_events = 0
+            requested_events = 0
             tvec = None
             injection_alignment = self.combo_align.currentText() == "Event marker"
             min_events = 1 if injection_alignment else self._psth_min_events_per_animal()
@@ -16008,6 +16128,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     dur_row = np.full(ev.shape, np.nan, dtype=float)
                 else:
                     dur_row = np.asarray(dur, float)
+                requested_events += ev.size
+                check_psth_size(psth_bin_count(window, res_hz), requested_events)
                 tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, ev, window, baseline, res_hz, smooth_sigma_s=smooth,
                                                normalization=self._psth_normalization())
                 # Invalid baselines produce missing rows, which must not count
@@ -16413,8 +16535,36 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return f"Seconds from {escape(self._marker_label())}"
         return "Time from alignment (s)"
 
+    def _show_recording_coverage(self, position):
+        if self._coverage_counts is None:
+            return
+        view = self.plot_avg.getViewBox()
+        if not view.sceneBoundingRect().contains(position):
+            return
+        t = self._group_tvec
+        x = view.mapSceneToView(position).x()
+        if x < t[0] or x > t[-1]:
+            return
+        idx = int(np.searchsorted(t, x))
+        if idx and x - t[idx - 1] < t[idx] - x:
+            idx -= 1
+        count = self._coverage_counts[idx]
+        noun = "recording" if count == 1 else "recordings"
+        self.lbl_recording_coverage.setText(f"{count} contributing {noun} at {t[idx]:g} s")
+
     def _render_avg(self, mat: np.ndarray, tvec: np.ndarray) -> None:
         ready = bool(mat.size and tvec.size and np.any(np.isfinite(mat)))
+        self._coverage_counts = None
+        if (ready and self.tab_sources.currentIndex() == 1 and self.tab_visual_mode.currentIndex() == 1
+                and self._group_mat is not None and np.array_equal(self._group_tvec, tvec)):
+            counts = np.zeros(tvec.size, dtype=int)
+            for file_id, row in zip(self._group_labels, self._group_mat):
+                if self._group_view_keeps(file_id):
+                    counts += np.isfinite(row)
+            self._coverage_counts = counts
+            self.lbl_recording_coverage.setText(f"{counts.min()}–{counts.max()} contributing recordings per bin"
+                                                " · Move over the mean plot to inspect a time.")
+        self.lbl_recording_coverage.setVisible(self._coverage_counts is not None)
         set_plot_has_data(self.plot_avg, ready)
         self._clear_group_avg_items()
         self._restore_default_avg_style()
@@ -17358,6 +17508,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     if value is None:
                         continue
                     self._write_h5_numeric(entry, field, np.asarray(value, float))
+                extra_outputs = [(label, values) for label, values in proc.outputs.items()
+                                 if label != proc.output_label]
+                if extra_outputs:
+                    signals = entry.create_group("alternate_outputs")
+                    for number, (label, values) in enumerate(extra_outputs):
+                        key = str(number)
+                        self._write_h5_numeric(signals, key, values)
+                        signals[key].attrs["label"] = label
                 sync_report = getattr(proc, "sync_report", {}) or {}
                 if sync_report:
                     self._write_h5_json_any(entry, "sync_report_json", sync_report)
@@ -17658,6 +17816,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         ra = np.asarray(regions_auto, float).reshape(-1, 2)
                         trial.artifact_regions_auto_sec = [(float(a), float(b)) for a, b in ra]
 
+                    if "alternate_outputs" in entry:
+                        trial.outputs = {trial.output_label: trial.output}
+                        for dataset in entry["alternate_outputs"].values():
+                            label = self._h5_text(dataset.attrs.get("label", ""), "")
+                            if label and dataset.shape == t.shape and label not in trial.outputs:
+                                trial.outputs[label] = np.asarray(dataset[()], float)
                     loaded_processed.append(trial)
 
             loaded_behavior: Dict[str, Dict[str, Any]] = {}
@@ -18267,6 +18431,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "behavior_from": self.combo_behavior_from.currentText(),
             "behavior_to": self.combo_behavior_to.currentText(),
             "transition_gap": 1.0,
+            "psth_time_unit": "s",
             "window_pre": 2.0,
             "window_post": 5.0,
             "baseline_start": -1.0,
@@ -18441,6 +18606,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "behavior_to": self.combo_behavior_to.currentText(),
             "transition_gap": float(self.spin_transition_gap.value()),
             "continuous_align_rules": copy.deepcopy(self._continuous_align_rules),
+            "psth_time_unit": self.combo_window_unit.currentData(),
             "window_pre": float(self.spin_pre.value()),
             "window_post": float(self.spin_post.value()),
             "baseline_start": float(self.spin_b0.value()),
@@ -18601,6 +18767,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         rules = data.get("continuous_align_rules")
         if isinstance(rules, dict):
             self._continuous_align_rules = copy.deepcopy(rules)
+        _set_combo_data(self.combo_window_unit, data.get("psth_time_unit", "s"))
         if "window_pre" in data:
             self.spin_pre.setValue(float(data["window_pre"]))
         if "window_post" in data:
@@ -19262,6 +19429,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 "selected_file": selected_file if individual_scope else None,
                 "display_level": str(getattr(self, "_last_psth_display_level", "trials")),
                 "source_files": [str(proc.path or "") for proc in self._processed],
+                "input_signals": [{"file": str(proc.path or ""), "output_label": getattr(proc, "output_label", "")}
+                                  for proc in self._processed],
                 "event_count": int(export_events.size),
                 "matrix_shape": list(np.asarray(self._last_mat).shape),
                 "excluded_files": getattr(self, "_psth_excluded_files", {}),
@@ -19342,16 +19511,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 _start_export_step("Exporting average PSTH...")
                 avg_base = os.path.join(out_dir, f"{prefix}_avg_psth")
                 avg, sem, counts = mean_sem(self._last_mat)
-                arr = np.vstack([self._last_tvec, avg, sem, counts]).T
+                columns = [self._last_tvec, avg, sem, counts]
+                header = "time,average_psth,sem,n"
+                coverage = getattr(self, "_coverage_counts", None)
+                if is_group and coverage is not None:
+                    columns.append(coverage)
+                    header += ",n_recordings"
+                arr = np.column_stack(columns)
                 if do_csv:
                     np.savetxt(f"{avg_base}.csv", arr, delimiter=",",
-                               header="time,average_psth,sem,n", comments="")
+                               header=header, comments="")
                 if do_h5:
                     with h5py.File(f"{avg_base}.h5", "w") as hf:
                         hf.create_dataset("time", data=self._last_tvec)
                         hf.create_dataset("average", data=avg)
                         hf.create_dataset("sem", data=sem)
                         hf.create_dataset("n", data=counts)
+                        if is_group and coverage is not None:
+                            hf.create_dataset("n_recordings", data=coverage)
                 group_display = (self._active_group_display(self._last_mat)
                                  if hasattr(self, "_active_group_display") else None)
                 if group_display is not None and group_display.mode == "all" and do_csv:
@@ -19549,6 +19726,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         animal_labels: List[str] = []
         all_mats: List[np.ndarray] = []
         all_labels: List[str] = []
+        requested_events = 0
         tvec = None
         selected = self.combo_individual_file.currentText().strip()
         for proc in self._processed:
@@ -19569,6 +19747,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             file_id = os.path.splitext(os.path.basename(proc.path))[0] if proc.path else "import"
             if exclude_low_events and events.size < min_events:
                 continue
+            requested_events += events.size
+            check_psth_size(psth_bin_count(window, res_hz), requested_events)
             tvec, mat = _compute_psth_matrix(self._proc_time(proc), proc.output, events, window, baseline, res_hz, smooth_sigma_s=smooth,
                                            normalization=self._psth_normalization())
             mat = mat[np.any(np.isfinite(mat), axis=1)]

@@ -123,7 +123,8 @@ class BaselineAdvisorGuiTests(unittest.TestCase):
             panel._undo_post_action()
         self.assertEqual((panel.spin_b0.value(), panel.spin_b1.value()), before)
         self.assertFalse(panel._apply_recommended_baseline((0, -1)))
-        self.assertFalse(panel._apply_recommended_baseline((-80, -1)))
+        self.assertTrue(panel._apply_recommended_baseline((-80, -1)))
+        self.assertFalse(panel._apply_recommended_baseline((panel.spin_b0.minimum() - 1, -1)))
 
     def test_transition_exclusions_include_nonmatching_component_bouts(self):
         """Failed transition matches can still contaminate a neighboring baseline."""

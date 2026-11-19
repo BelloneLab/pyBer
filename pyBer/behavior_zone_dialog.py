@@ -12,6 +12,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from behavior_zone_compare import compare_recording, group_recordings
+from numeric_controls import DurationSpinBox
 from mamir_import import legacy_import_warning
 
 
@@ -41,13 +42,10 @@ class BehaviorPsthBar(QtWidgets.QWidget):
         self.name.setAccessibleName("Event displayed in PSTH and heatmap")
         self.name.setToolTip("Choose a scored behavior or the recording’s event marker.")
         self.align = QtWidgets.QComboBox()
-        self.pre = QtWidgets.QDoubleSpinBox()
-        self.post = QtWidgets.QDoubleSpinBox()
+        self.pre = DurationSpinBox()
+        self.post = DurationSpinBox()
+        panel.combo_window_unit.currentIndexChanged.connect(self.sync_controls)
         for target, source in ((self.pre, panel.spin_pre), (self.post, panel.spin_post)):
-            target.setRange(source.minimum(), source.maximum())
-            target.setDecimals(source.decimals())
-            target.setSuffix(" s")
-            target.setKeyboardTracking(False)
             target.setMaximumWidth(110)
             target.valueChanged.connect(source.setValue)
             source.valueChanged.connect(self.sync_controls)
@@ -115,6 +113,7 @@ class BehaviorPsthBar(QtWidgets.QWidget):
         self.align.setEnabled(not marker)
         for target, source in ((self.pre, panel.spin_pre), (self.post, panel.spin_post)):
             with QtCore.QSignalBlocker(target):
+                target.set_unit(source.unit)
                 target.setValue(source.value())
 
     def _toggle_comparison(self, collapsed) -> None:

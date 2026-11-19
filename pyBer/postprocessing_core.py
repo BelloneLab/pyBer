@@ -149,6 +149,17 @@ No warning is emitted for empty columns or an empty matrix.
     return means, sem, counts
 
 
+def psth_bin_count(window, resample_hz):
+    return int(np.floor((window[1] - window[0]) * resample_hz + 1e-9)) + 1
+
+
+def check_psth_size(n_bins, n_events):
+    # The dashboard retains trial rows, recording means, and plotting copies.
+    if n_events * n_bins > 16_000_000:
+        raise ValueError(f"{n_bins:,} bins × {n_events:,} events exceeds the PSTH memory limit. "
+                         "Lower Resample (Hz) or shorten the window.")
+
+
 def compute_psth_matrix(
     t: np.ndarray, y: np.ndarray, event_times: np.ndarray,
     window: Tuple[float, float], baseline_win: Tuple[float, float],
@@ -180,7 +191,8 @@ separately within each observed segment, preserving all missing bins.
     if events.size == 0:
         return np.array([], float), np.zeros((0, 0), float)
     dt = 1.0 / resample_hz
-    n_samples = int(np.floor((window[1] - window[0]) * resample_hz + 1e-9)) + 1
+    n_samples = psth_bin_count(window, resample_hz)
+    check_psth_size(n_samples, events.size)
     relative = window[0] + np.arange(n_samples) * dt
     matrix = np.full((events.size, n_samples), np.nan)
     if t.size < 2:

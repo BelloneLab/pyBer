@@ -671,6 +671,8 @@ def _output_items_for_export(
 
     if source:
         requested = [str(m).strip() for m in (selection.output_modes or []) if str(m or "").strip()]
+        if not requested and processed.output_label in source:
+            requested = [processed.output_label]
         seen = set()
         for label in requested:
             if label in source and label not in seen:
@@ -973,6 +975,23 @@ def _looks_like_trigger_col(name: str) -> bool:
     )
 
 
+def _saved_output_columns(names, roles, metadata):
+    """Map stored output columns to display labels, including older exports without metadata."""
+    descriptions = (metadata or {}).get("outputs", {})
+    if not isinstance(descriptions, dict):
+        descriptions = {}
+    columns = {}
+    for name in names:
+        role = roles.get(name)
+        legacy_name = re.fullmatch(r"(?:dff|df/f|δf/f|z[-_ ]?score|prominence|signal_465)(?:__.+)?",
+                                   name, re.IGNORECASE)
+        if role == "output" or (not role and (name in descriptions or legacy_name)):
+            description = descriptions.get(name) or {}
+            label = description.get("label") if isinstance(description, dict) else None
+            columns[name] = str(label or name)
+    return columns
+
+
 def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
     """Load a processed-trace CSV (pyBer v1.0 sidecar-aware, with legacy fallback)."""
     import csv
@@ -1076,6 +1095,10 @@ def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
             "reference", "reference_405", "ref", "dio",
             "baseline_465", "baseline_405",
         ])
+    roles = {raw_header[idx]: role for idx, role in sidecar_role_idx.items()}
+    stored_columns = _saved_output_columns(raw_header, roles, sidecar)
+    if output_idx is None and stored_columns:
+        output_idx = raw_header.index(next(iter(stored_columns)))
     has_header = time_idx is not None and output_idx is not None
 
     raw_idx = _role_index("raw_signal") if sidecar is not None else None
@@ -1122,20 +1145,31 @@ def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
     aligned_vals: List[float] = []
     trigger_vals: Dict[str, List[float]] = {name: [] for _, name in trigger_cols}
 
+    extra_outputs = [(idx, stored_columns[name], []) for idx, name in enumerate(raw_header)
+                     if name in stored_columns and idx != output_idx]
     for r in data_rows:
         if time_idx is None or output_idx is None:
             continue
-        if len(r) <= max(time_idx, output_idx):
-            continue
         try:
             tval = _parse_processed_number(r[time_idx])
-            oval = float(r[output_idx])
-        except Exception:
+        except (IndexError, ValueError):
             continue
         if not np.isfinite(tval):
             continue
+        try:
+            oval = float(r[output_idx])
+        except (IndexError, ValueError):
+            if not extra_outputs:
+                continue
+            # Another output can have a valid sample on this same time row.
+            oval = np.nan
         time.append(tval)
         output.append(oval)
+        for idx, _, samples in extra_outputs:
+            try:
+                samples.append(float(r[idx]))
+            except (IndexError, ValueError):
+                samples.append(np.nan)
         if raw_idx is not None:
             try:
                 raw_vals.append(float(r[raw_idx]) if len(r) > raw_idx else np.nan)
@@ -1186,6 +1220,8 @@ def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
         else None
     )
 
+    if not output_label and has_header:
+        output_label = stored_columns.get(raw_header[output_idx], "")
     if not output_label:
         output_label = "Imported CSV"
         if has_header and output_idx is not None:
@@ -1198,6 +1234,11 @@ def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
                     "prominence": "Prominence normalized",
                 }.get(col_l, str(col))
                 output_label = f"Imported CSV ({pretty})"
+
+    outputs = {output_label: out}
+    for idx, label, samples in extra_outputs:
+        key = label if label not in outputs else f"{label} [{raw_header[idx]}]"
+        outputs[key] = np.asarray(samples, float)
 
     return ProcessedTrial(
         path=path,
@@ -1214,6 +1255,7 @@ def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
         baseline_ref=None,
         output=out,
         output_label=output_label,
+        outputs=outputs,
         output_context=output_context,
         sensor_label=sensor_label,
         sensor_check=sensor_check,
@@ -1269,6 +1311,7 @@ def load_processed_h5(path: str) -> Optional[ProcessedTrial]:
                         if role == "trigger":
                             trigger_meta.append((nm, str(col.get("dio_name") or nm)))
 
+            stored_columns = _saved_output_columns(g.keys(), roles, meta)
             out = None
             out_name = primary_output_name or str(gattrs.get("primary_output", "") or "")
             if out_name and out_name in g:
@@ -1285,6 +1328,9 @@ def load_processed_h5(path: str) -> Optional[ProcessedTrial]:
                     if nm in g:
                         out, out_name = _ds(nm), nm
                         break
+            if out is None and stored_columns:
+                out_name = next(iter(stored_columns))
+                out = _ds(out_name)
             if out is None:
                 return None
 
@@ -1338,7 +1384,16 @@ def load_processed_h5(path: str) -> Optional[ProcessedTrial]:
                 if isinstance(prim, dict):
                     output_label = str(prim.get("label", "") or "")
             if not output_label:
-                output_label = "Imported H5"
+                output_label = stored_columns.get(out_name, "Imported H5")
+            outputs = {output_label: out}
+            for name, label in stored_columns.items():
+                if name == out_name or not isinstance(g[name], h5py.Dataset) or g[name].shape != t.shape:
+                    continue
+                key = label if label not in outputs else f"{label} [{name}]"
+                try:
+                    outputs[key] = _ds(name)
+                except (OSError, TypeError, ValueError):
+                    continue
             output_context = str(gattrs.get("output_context", "") or "")
             sensor_label = ""
             sensor_check: Dict[str, Any] = {}
@@ -1382,6 +1437,7 @@ def load_processed_h5(path: str) -> Optional[ProcessedTrial]:
         baseline_ref=None,
         output=out,
         output_label=output_label,
+        outputs=outputs,
         output_context=output_context,
         sensor_label=sensor_label,
         sensor_check=sensor_check,
