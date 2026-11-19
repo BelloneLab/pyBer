@@ -11,7 +11,7 @@ steps the page through denser presentations until it fits:
 * proportionally smaller explicit minimum and fixed widths.
 
 Before any of that, rows marked ``density_keep_row`` (side-by-side lists that
-must stay aligned) let their captions and lists get narrower: the mildest step.
+must stay aligned) let their wider lists narrow to a readable floor.
 
 If the densest level is still too wide, rows are reflowed, the way a web page
 does on a phone:
@@ -65,9 +65,10 @@ KEEP_ROW_PROPERTY = "density_keep_row"
 #: Layout property: stack this row as soon as the page does not fit, before any
 #: text shrinks. For rows of lists, which are unreadable when squeezed.
 STACK_FIRST_PROPERTY = "density_stack_first"
-#: Narrowest caption / list inside a kept row once it is squeezed (pixels).
-SQUEEZED_LABEL_WIDTH = 18
-SQUEEZED_VIEW_WIDTH = 56
+#: Narrowest list inside a kept row once it is squeezed (pixels). Lists are
+#: only ever made narrower, never below this readable width, and captions are
+#: left alone.
+SQUEEZED_VIEW_WIDTH = 110
 #: Ancestor margins assumed around a row when testing whether it fits (pixels).
 ROW_FIT_SLACK_PX = 12
 #: When no single row is wider than the drawer, the widest row is still stacked
@@ -367,7 +368,7 @@ class AdaptiveDensity(QtCore.QObject):
 
     # ---------------------------------------------------------------- squeeze
     def _kept_row_widgets(self, layout: QtWidgets.QLayout, inside: bool = False):
-        """Captions and lists inside rows marked to stay horizontal."""
+        """Lists inside rows marked to stay horizontal."""
         if layout is None:
             return
         inside = inside or bool(layout.property(KEEP_ROW_PROPERTY))
@@ -381,27 +382,23 @@ class AdaptiveDensity(QtCore.QObject):
             widget = item.widget()
             if widget is None or widget.isHidden():
                 continue
-            if inside and isinstance(widget, (QtWidgets.QLabel, QtWidgets.QAbstractItemView)):
+            if inside and isinstance(widget, QtWidgets.QAbstractItemView):
                 yield widget
             elif widget.layout() is not None and not isinstance(widget, QtWidgets.QAbstractScrollArea):
                 yield from self._kept_row_widgets(widget.layout(), inside)
 
     def _squeeze(self, page: QtWidgets.QWidget, needed: int) -> bool:
-        """Let captions and lists in kept rows get narrower. False if already done."""
+        """Let wide lists in kept rows narrow to a readable floor. False if nothing to do."""
         if self._squeezed:
             return False
         self._applying = True
         try:
             for widget in self._kept_row_widgets(page.layout()):
-                is_view = isinstance(widget, QtWidgets.QAbstractItemView)
-                floor = SQUEEZED_VIEW_WIDTH if is_view else SQUEEZED_LABEL_WIDTH
                 current = widget.minimumWidth()
-                if 0 < current <= floor:
-                    continue
+                if current <= SQUEEZED_VIEW_WIDTH:
+                    continue  # already at or below the readable floor: leave it
                 self._squeezed.append((widget, current, widget.toolTip()))
-                if not is_view and not widget.toolTip():
-                    widget.setToolTip(widget.text())  # the full caption stays readable
-                widget.setMinimumWidth(floor)
+                widget.setMinimumWidth(SQUEEZED_VIEW_WIDTH)
             page.updateGeometry()
         finally:
             self._applying = False
@@ -482,6 +479,9 @@ class AdaptiveDensity(QtCore.QObject):
             # Numeric fields keep their width: a value must never be cut off.
             if isinstance(widget, QtWidgets.QAbstractSpinBox) or isinstance(
                     widget.parentWidget(), QtWidgets.QAbstractSpinBox):
+                continue
+            # Lists keep theirs too: a narrower list hides the names it shows.
+            if isinstance(widget, QtWidgets.QAbstractItemView):
                 continue
             minimum = widget.minimumWidth()
             if minimum > 0 or widget.property(_P_MIN_W) is not None:

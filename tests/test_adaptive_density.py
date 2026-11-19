@@ -92,11 +92,14 @@ class AdaptiveDensityTests(unittest.TestCase):
         self.assertEqual(self._clipped(), 0)
         # Mildest step first: the aligned lists got narrower.
         self.assertTrue(self.density._squeezed)
-        self.assertLess(self.lists[0].minimumWidth(), 150)
-        self.assertEqual(self.captions[0].toolTip(), "Processed recordings (12)")
+        self.assertEqual(self.lists[0].minimumWidth(), 110)       # readable floor, not less
+        self.assertEqual(self.captions[0].minimumWidth(), 0)      # captions are left alone
 
         self._resize(260)
-        self.assertEqual(self._clipped(), 0)
+        # The two lists alone need 220 px: they keep their readable width and
+        # the page scrolls sideways for the rest.
+        self.assertEqual(self.lists[0].minimumWidth(), 110)
+        self.assertGreater(self.scroll.horizontalScrollBar().maximum(), 0)
         self.assertGreater(self.density.level, 0)
         scale = DENSITY_LEVELS[self.density.level][0]
         self.assertEqual(self.field.minimumWidth(), round(160 * scale))

@@ -35,7 +35,7 @@ from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, crea
 from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
 from numeric_controls import DurationSpinBox, with_slider
-from adaptive_density import STACK_FIRST_PROPERTY, AdaptiveDensity, install_adaptive_density
+from adaptive_density import KEEP_ROW_PROPERTY, AdaptiveDensity, install_adaptive_density
 import missing_data
 from psth_metrics import (METRICS, metric_id, summarize_metrics, draw_metric_matplotlib,
                           export_selected_metrics, write_group_comparisons)
@@ -100,6 +100,8 @@ _FIXED_POST_RIGHT_TAB_ORDER = ("setup", "psth", "spatial", "temporal", "export")
 # Narrowest drawer the divider allows. Below a page's natural width its content
 # becomes denser (adaptive_density) instead of being clipped.
 _POST_RIGHT_PANEL_MIN_WIDTH = 260
+# Narrowest recording / behavior list in Setup that still shows a file name.
+_RECORDING_LIST_MIN_WIDTH = 120
 _SYNC_TOOL_ROOT = Path(r"C:\Analysis\app_project\barcode_reader\video_barcode_extractor")
 _FIXED_POST_RIGHT_TAB_TITLES: Dict[str, str] = {
     "setup": "Setup",
@@ -2130,11 +2132,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_list_pairing.setWordWrap(True)
 
         lists_layout = QtWidgets.QHBoxLayout()
-        # Squeezed side by side, these lists are unreadable: in a narrow drawer
-        # they stack, each at full width. Items are numbered, so recording 1
-        # still pairs with behavior 1 (see adaptive_density).
-        lists_layout.setProperty(STACK_FIRST_PROPERTY, True)
+        # Recordings pair line by line across these lists, so they stay side by
+        # side at every drawer width, each wide enough to read. A drawer too
+        # narrow for them scrolls sideways (see adaptive_density).
+        lists_layout.setProperty(KEEP_ROW_PROPERTY, True)
         self._recording_lists_layout = lists_layout
+        for listing in (self.list_preprocessed, self.list_behaviors):
+            listing.setMinimumWidth(_RECORDING_LIST_MIN_WIDTH)
         pre_col = QtWidgets.QVBoxLayout()
         pre_col.addLayout(pre_header)
         pre_col.addWidget(self.list_preprocessed)
@@ -13153,13 +13157,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             combo.setCurrentIndex(index if index >= 0 else 0)
 
     def _on_recordings_section_detached(self, detached: bool) -> None:
-        """Lists sit side by side in their own window; the drawer decides again on docking.
-
-        The Setup drawer stacks the recording lists when it is narrow. A
-        separate window has room, so the row returns to its normal side by
-        side layout there. Docked back, the drawer's density controller
-        re-evaluates and stacks again only if the drawer is still too narrow.
-        """
+        """Re-fit the Setup page when the recordings section leaves or returns."""
         scroll = self._section_scroll_hosts.get("setup")
         density = scroll.findChild(AdaptiveDensity) if scroll is not None else None
         if density is None:
