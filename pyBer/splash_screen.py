@@ -124,6 +124,7 @@ FADE_IN_S, FADE_OUT_S = 0.22, 0.26
 START_T = 12.0                     # animation phase of the static first frame
 HELPER_MAX_LIFETIME_S = 300.0      # safety net: the helper never outlives this
 HELPER_FLAG = "--pyber-splash"
+MAIN_WINDOW_MIN_PX = (640, 400)    # a launcher window at least this big means "loaded"
 
 
 class Theme(NamedTuple):
@@ -869,11 +870,29 @@ def build_branded_splash(theme: Optional[int] = None, seed: Optional[int] = None
 # ---------------------------------------------------------------------------
 # Animated window (runs in the helper process)
 # ---------------------------------------------------------------------------
-class ParentWatch:
-    """Tells whether the launching process is still alive."""
+def splash_log(message: str) -> None:
+    """Append one line to %LOCALAPPDATA%/pyBer/splash.log (why the splash started/stopped)."""
+    if os.environ.get("QT_QPA_PLATFORM", "") == "offscreen":
+        return                      # automated runs leave the user's log alone
+    try:
+        import time
+        path = os.path.join(os.path.dirname(_theme_memory_path()), "splash.log")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path) and os.path.getsize(path) > 40000:
+            os.remove(path)
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pid={os.getpid()} {message}\n")
+    except OSError:
+        pass
 
-    def __init__(self, pid: int) -> None:
+
+class ParentWatch:
+    """Tells whether the launching process is still alive, and whether it has
+    already put a real window on screen (the application has finished loading)."""
+
+    def __init__(self, pid: int, splash_hwnd: int = 0) -> None:
         self.pid = int(pid)
+        self.splash_hwnd = int(splash_hwnd)
         self._handle = None
         if self.pid > 0 and sys.platform == "win32":
             import ctypes
@@ -895,12 +914,50 @@ class ParentWatch:
         except OSError:
             return False
 
+    def application_window_visible(self) -> bool:
+        """True when the launching process shows a large titled window (its main
+        window) other than its splash.
+
+        This is checked from the helper itself, so the animation ends when the
+        application is on screen even if the launcher never gets to say so.
+        Small windows are ignored: the application briefly shows a panel while
+        it builds its main window. Windows only; elsewhere the stop file is used.
+        """
+        if self.pid <= 0 or sys.platform != "win32":
+            return False
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        found = []
+
+        def visit(hwnd, _lparam):
+            owner = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value != self.pid or int(hwnd or 0) == self.splash_hwnd:
+                return True
+            if not user32.IsWindowVisible(hwnd) or user32.GetWindowTextLengthW(hwnd) <= 0:
+                return True
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            if rect.right - rect.left >= MAIN_WINDOW_MIN_PX[0] and rect.bottom - rect.top >= MAIN_WINDOW_MIN_PX[1]:
+                found.append(int(hwnd))
+                return False
+            return True
+
+        callback = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(visit)
+        try:
+            user32.EnumWindows(callback, 0)
+        except OSError:
+            return False
+        return bool(found)
+
 
 class AnimatedSplashWindow(QtWidgets.QWidget):
     """Frameless, always-on-top window that plays the splash animation."""
 
     def __init__(self, parent_pid: int = 0, stop_path: str = "", theme: int = 0,
-                 seed: int = MODEL_SEED, expected_load_s: float = DEFAULT_LOAD_S) -> None:
+                 seed: int = MODEL_SEED, expected_load_s: float = DEFAULT_LOAD_S,
+                 splash_hwnd: int = 0) -> None:
         super().__init__(None, QtCore.Qt.WindowType.SplashScreen
                          | QtCore.Qt.WindowType.FramelessWindowHint
                          | QtCore.Qt.WindowType.WindowStaysOnTopHint
@@ -910,11 +967,12 @@ class AnimatedSplashWindow(QtWidgets.QWidget):
         self.setFixedSize(CARD_W, CARD_H)
         self.art = SplashArt(_screen_dpr(), theme, seed, expected_load_s)
         self.stop_path = stop_path
-        self.watch = ParentWatch(parent_pid)
+        self.watch = ParentWatch(parent_pid, splash_hwnd)
         self.clock = QtCore.QElapsedTimer()
         self.clock.start()
         self._closing_at: Optional[float] = None
         self._ticks = 0
+        self._window_seen = False
         self.frames_painted = 0
         self.setWindowOpacity(0.0)
         self.timer = QtCore.QTimer(self)
@@ -925,22 +983,35 @@ class AnimatedSplashWindow(QtWidgets.QWidget):
     def elapsed(self) -> float:
         return self.clock.nsecsElapsed() / 1e9
 
-    def _should_stop(self) -> bool:
+    def _stop_reason(self) -> str:
+        """Why the animation should end now ('' = keep playing)."""
         if self.elapsed() > HELPER_MAX_LIFETIME_S:
-            return True
+            return "time limit"
         if self.stop_path and os.path.exists(self.stop_path):
-            return True
-        return not self.watch.alive()
+            return "stop file"
+        if not self.watch.alive():
+            return "launcher gone"
+        # Slower check (it enumerates windows): about six times per second.
+        # Two sightings in a row, so a window that only flashes by is ignored.
+        if self._ticks % 9 == 0:
+            seen = self.watch.application_window_visible()
+            confirmed, self._window_seen = seen and self._window_seen, seen
+            if confirmed:
+                return "application window visible"
+        return ""
 
-    def begin_close(self) -> None:
+    def begin_close(self, reason: str = "") -> None:
         if self._closing_at is None:
             self._closing_at = self.elapsed()
+            splash_log(f"helper closing after {self._closing_at:.1f} s: {reason or 'requested'}")
 
     def _tick(self) -> None:
         now = self.elapsed()
         self._ticks += 1
-        if self._closing_at is None and self._ticks % 3 == 0 and self._should_stop():
-            self.begin_close()
+        if self._closing_at is None and self._ticks % 3 == 0:
+            reason = self._stop_reason()
+            if reason:
+                self.begin_close(reason)
         if self._closing_at is None:
             self.setWindowOpacity(min(1.0, now / FADE_IN_S))
         else:
@@ -972,7 +1043,10 @@ class AnimatedSplashWindow(QtWidgets.QWidget):
             pass
 
     def mousePressEvent(self, event) -> None:
-        event.accept()      # a click never dismisses the splash
+        # A click dismisses the animation (the still splash below it hides on
+        # a click too), so the splash can never trap what is behind it.
+        self.begin_close("clicked")
+        event.accept()
 
 
 def run_helper(argv: Sequence[str]) -> int:
@@ -982,7 +1056,8 @@ def run_helper(argv: Sequence[str]) -> int:
     appearance ends the animation), ``--pos X,Y`` (top-left corner),
     ``--theme N`` (colour theme; random when absent).
     """
-    options = {"--pid": "0", "--stop": "", "--pos": "", "--theme": "", "--seed": "", "--expect": ""}
+    options = {"--pid": "0", "--stop": "", "--pos": "", "--theme": "", "--seed": "", "--expect": "",
+               "--hwnd": "0"}
     args = list(argv)
     for index, token in enumerate(args):
         if token in options and index + 1 < len(args):
@@ -1010,7 +1085,12 @@ def run_helper(argv: Sequence[str]) -> int:
         expected = float(options["--expect"])   # expected loading time (s)
     except ValueError:
         expected = expected_load_seconds()
-    window = AnimatedSplashWindow(pid, options["--stop"], theme, seed, expected)
+    try:
+        splash_hwnd = int(options["--hwnd"])    # the launcher's still splash (never counts as "loaded")
+    except ValueError:
+        splash_hwnd = 0
+    window = AnimatedSplashWindow(pid, options["--stop"], theme, seed, expected, splash_hwnd)
+    splash_log(f"helper started for launcher {pid}")
     try:
         x, y = (int(float(v)) for v in options["--pos"].split(","))
         window.move(x, y)
@@ -1043,6 +1123,10 @@ class StartupSplash(QtWidgets.QSplashScreen):
         self.expected_load_s = float(expected_load_s)
         import time
         self._shown_at = time.monotonic()
+        self._finished = False
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         self._helper = None
         self._stop_path = ""
 
@@ -1059,7 +1143,8 @@ class StartupSplash(QtWidgets.QSplashScreen):
             corner = self.geometry().topLeft()
             arguments = ["--pid", str(os.getpid()), "--stop", self._stop_path,
                          "--pos", f"{corner.x()},{corner.y()}", "--theme", str(self.theme),
-                         "--seed", str(self.seed), "--expect", f"{self.expected_load_s:.2f}"]
+                         "--seed", str(self.seed), "--expect", f"{self.expected_load_s:.2f}",
+                         "--hwnd", str(int(self.winId()))]
             if getattr(sys, "frozen", False):
                 command = [sys.executable, HELPER_FLAG, *arguments]
             else:
@@ -1102,16 +1187,46 @@ class StartupSplash(QtWidgets.QSplashScreen):
             except OSError:
                 pass
 
-    def finish(self, window) -> None:
-        # Remember how long loading took, to pace the build-up of the next launch.
-        import time
-        remember_load_seconds(time.monotonic() - self._shown_at)
+    def _loading_finished(self) -> None:
+        """Remember the loading time (once) and stop the animation."""
+        if not self._finished:
+            self._finished = True
+            import time
+            remember_load_seconds(time.monotonic() - self._shown_at)
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                app.removeEventFilter(self)
         self.stop_animation()
-        super().finish(window)
+
+    def finish(self, window) -> None:
+        """Close at once. (QSplashScreen.finish first waits for the window while
+        running the event loop: a start-up question queued by the application
+        then opens *under* the always-on-top splash, which never closes.)"""
+        self._loading_finished()
+        self.close()
 
     def closeEvent(self, event) -> None:
-        self.stop_animation()
+        self._loading_finished()
         super().closeEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:
+        """Leave as soon as the application shows its main window or any dialog.
+
+        main.py calls finish() once the main window is up, but a start-up
+        dialog (a question, an error) can appear before that: an always-on-top
+        splash must never sit over it.
+        """
+        if (event.type() == QtCore.QEvent.Type.Show and watched is not self
+                and isinstance(watched, QtWidgets.QWidget) and watched.isWindow()):
+            # Non-modal panels that the application shows briefly while it
+            # builds its window do not count: only the main window or a
+            # dialog that waits for an answer.
+            main_window = isinstance(watched, QtWidgets.QMainWindow)
+            asking = isinstance(watched, QtWidgets.QDialog) and watched.isModal()
+            if main_window or asking:
+                self._loading_finished()
+                self.close()
+        return False
 
 
 def animation_allowed(app: QtWidgets.QApplication) -> bool:

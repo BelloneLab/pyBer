@@ -9,7 +9,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pyBer"))
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 import splash_screen as splash
 
@@ -210,6 +210,63 @@ class SplashArtTests(unittest.TestCase):
                     del os.environ[name]
                 else:
                     os.environ[name] = previous
+
+
+class SplashDismissalTests(unittest.TestCase):
+    """The still splash must never outlive loading or sit over a start-up question."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self._original_memory = splash._theme_memory_path
+        splash._theme_memory_path = lambda: str(Path(self.directory.name) / "theme.txt")
+        self.splash = splash.StartupSplash(splash.SplashArt(1.0).render())
+        self.splash.show()
+        self.app.processEvents()
+        self.assertTrue(self.splash.isVisible())
+
+    def tearDown(self):
+        self.splash.close()
+        splash._theme_memory_path = self._original_memory
+        self.directory.cleanup()
+
+    def test_finish_closes_immediately_without_running_the_event_loop(self):
+        window = QtWidgets.QMainWindow()
+        fired = []
+        QtCore.QTimer.singleShot(0, lambda: fired.append(self.splash.isVisible()))
+        self.splash.finish(window)                 # the window is not even shown: no waiting
+        self.assertFalse(self.splash.isVisible())
+        self.assertEqual(fired, [])                # queued start-up work did not run inside finish()
+        self.app.processEvents()
+        self.assertEqual(fired, [False])           # and when it runs, the splash is already gone
+        self.assertGreaterEqual(splash.expected_load_seconds(), splash.LOAD_S_LIMITS[0])
+
+    def test_main_window_or_modal_dialog_dismisses_but_start_up_panels_do_not(self):
+        panel = QtWidgets.QDialog()                # like the panel shown briefly while building the UI
+        panel.setWindowTitle("Artifact Regions")
+        panel.show()
+        self.app.processEvents()
+        self.assertTrue(self.splash.isVisible())
+        panel.close()
+        question = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Icon.Question, "pyBer", "Restore?")
+        QtCore.QTimer.singleShot(50, question.accept)
+        question.exec()
+        self.assertFalse(self.splash.isVisible())
+
+    def test_showing_the_main_window_dismisses_even_if_finish_is_never_called(self):
+        window = QtWidgets.QMainWindow()
+        window.show()
+        self.app.processEvents()
+        self.assertFalse(self.splash.isVisible())
+        window.close()
+
+    def test_helper_counts_only_a_large_titled_window_as_loaded(self):
+        watch = splash.ParentWatch(0)
+        self.assertFalse(watch.application_window_visible())      # nothing to watch
+        self.assertGreaterEqual(splash.MAIN_WINDOW_MIN_PX[0], 600)
 
 
 class AnimatedReadmeLogoTests(unittest.TestCase):
