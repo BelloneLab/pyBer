@@ -72,6 +72,10 @@ HEAD_FILL_FADE_PX = 70             # the fill under the curve melts away before 
 TRACE_LAYERS = ((15.0, 13, 0), (9.5, 24, 0), (5.6, 46, 0), (3.2, 96, 0), (1.7, 255, 1))
 
 TAU_RISE_S, TAU_DECAY_S = 0.07, 0.60   # transient kinetics
+# From time to time a transient rises much faster (a sharp, spike-like onset).
+SHARP_PROBABILITY = 0.24           # share of transients with the sharp rise
+SHARP_TAU_RISE_S = 0.014           # their rise time constant
+SHARP_AMPLITUDE_BOOST = 1.12       # and they stand slightly taller
 EVENT_GAP_S = (0.75, 2.0)          # random interval between transients
 DOUBLET_PROBABILITY = 0.22         # chance of a closely following transient
 DOUBLET_GAP_S = (0.26, 0.40)
@@ -84,9 +88,12 @@ GAP_SCALE_START, GAP_SCALE_END = 1.20, 0.62    # interval multiplier at progress
 DEFAULT_LOAD_S = 8.0               # expected loading time before one has been measured
 LOAD_S_LIMITS = (3.0, 90.0)        # accepted range of a remembered loading time
 PULSE_MAX_STRENGTH = 1.25          # light pulses saturate here (the trace keeps growing)
+TRACE_CEILING = 1.68               # stacked transients are scaled to peak near this level
+MIN_STACKED_AMPLITUDE = 0.28       # smallest transient on top of an elevated signal
 KNOT_STEP_S = 0.20                 # spacing of curve knots on smooth stretches
 # Extra knots after each transient onset, where the curve bends fastest.
 KNOT_OFFSETS_S = (0.0, 0.03, 0.07, 0.12, 0.18, 0.26, 0.36)
+CLIP_KNOT_STEP_S = 0.012           # knot spacing where tall stacked transients are soft-clipped
 
 FIBER_TRAVEL_S = 0.62              # time for light to climb the fiber
 PULSE_TAIL = 0.46                  # comet tail, as a fraction of the fiber
@@ -200,12 +207,16 @@ class SignalModel:
 
     ``events`` are (arrival time, amplitude). A transient starts on the trace
     at its arrival time; the matching light pulse left the mouse
-    ``FIBER_TRAVEL_S`` earlier. Everything is generated from a fixed seed, so
-    every launch (and the static first frame) shows the same sequence.
+    ``FIBER_TRAVEL_S`` earlier. The sequence is fully determined by ``seed``
+    and ``expected_load_s``: the launcher draws a new seed at each launch and
+    hands it to the helper, so the static first frame and the animation agree.
+    Amplitudes and rates grow with ``progress`` (see GROWTH_* parameters).
 
     The transient kernel is ``(1 - exp(-d / tau_rise)) * exp(-d / tau_decay)``
     scaled to peak at 1; its slope is known in closed form, which lets the
-    trace be drawn as smooth cubic curves instead of a polyline.
+    trace be drawn as smooth cubic curves instead of a polyline. Each
+    transient has its own ``tau_rise``: most use TAU_RISE_S, some the much
+    shorter SHARP_TAU_RISE_S.
     """
 
     def __init__(self, seed: int = MODEL_SEED, expected_load_s: float = DEFAULT_LOAD_S) -> None:
@@ -213,13 +224,31 @@ class SignalModel:
         self.expected_load_s = max(0.5, float(expected_load_s))
         self._times: List[float] = []
         self._amps: List[float] = []
+        self._rises: List[float] = []      # rise time constant of each transient
         self._next = 0.4
         self._knots: Dict[float, Tuple[float, float]] = {}
-        # Normalize the kernel so a transient of amplitude 1 peaks at 1.
-        peak_at = TAU_RISE_S * math.log(1.0 + TAU_DECAY_S / TAU_RISE_S)
-        self._norm = (1.0 - math.exp(-peak_at / TAU_RISE_S)) * math.exp(-peak_at / TAU_DECAY_S)
-        #: slope added by a transient of amplitude 1 at the instant it starts
-        self.onset_slope = 1.0 / (TAU_RISE_S * self._norm)
+        # Kernel peak for each rise time, so a transient of amplitude 1 peaks at 1.
+        self._norms = {tau: self._kernel_peak(tau) for tau in (TAU_RISE_S, SHARP_TAU_RISE_S)}
+
+    @staticmethod
+    def _kernel_peak(tau_rise: float) -> float:
+        peak_at = tau_rise * math.log(1.0 + TAU_DECAY_S / tau_rise)
+        return (1.0 - math.exp(-peak_at / tau_rise)) * math.exp(-peak_at / TAU_DECAY_S)
+
+    def _transients_at(self, t: float) -> float:
+        """Sum of the transients already generated, at time t (no ripple)."""
+        total = 0.0
+        for index in range(bisect.bisect_left(self._times, t - 9.0 * TAU_DECAY_S), len(self._times)):
+            d = t - self._times[index]
+            if d >= 0.0:
+                tau = self._rises[index]
+                total += (self._amps[index] / self._norms[tau]) * (1.0 - math.exp(-d / tau)) * math.exp(-d / TAU_DECAY_S)
+        return total
+
+    def rise_times_between(self, start: float, stop: float) -> List[float]:
+        """Rise time constant of each transient arriving in [start, stop]."""
+        self._extend(stop)
+        return self._rises[bisect.bisect_left(self._times, start):bisect.bisect_right(self._times, stop)]
 
     def _extend(self, until: float) -> None:
         rng = self._rng
@@ -228,8 +257,16 @@ class SignalModel:
             eased = progress * progress * (3.0 - 2.0 * progress)
             growth = GROWTH_START + (GROWTH_END - GROWTH_START) * eased
             pace = GAP_SCALE_START + (GAP_SCALE_END - GAP_SCALE_START) * eased
+            sharp = rng.random() < SHARP_PROBABILITY
+            amp = rng.uniform(*EVENT_AMPLITUDE) * growth * (SHARP_AMPLITUDE_BOOST if sharp else 1.0)
+            # A transient riding on an elevated signal is smaller, like a
+            # saturating indicator: peaks stay within the trace band instead
+            # of piling up into a flat, clipped top.
+            headroom = TRACE_CEILING - self._transients_at(self._next)
+            amp = min(amp, max(MIN_STACKED_AMPLITUDE, headroom))
             self._times.append(self._next)
-            self._amps.append(rng.uniform(*EVENT_AMPLITUDE) * growth)
+            self._amps.append(amp)
+            self._rises.append(SHARP_TAU_RISE_S if sharp else TAU_RISE_S)
             if rng.random() < DOUBLET_PROBABILITY:
                 self._next += rng.uniform(*DOUBLET_GAP_S)
             else:
@@ -250,11 +287,15 @@ class SignalModel:
     def value_slope(self, t: float) -> Tuple[float, float]:
         """Signal and its time derivative at t (transients starting at t included)."""
         value = slope = 0.0
-        for arrival, amp in self.events_between(t - 9.0 * TAU_DECAY_S, t):
-            d = t - arrival
-            rise, decay = math.exp(-d / TAU_RISE_S), math.exp(-d / TAU_DECAY_S)
-            value += amp * (1.0 - rise) * decay / self._norm
-            slope += amp * (rise * decay / TAU_RISE_S - (1.0 - rise) * decay / TAU_DECAY_S) / self._norm
+        self._extend(t)
+        first = bisect.bisect_left(self._times, t - 9.0 * TAU_DECAY_S)
+        for index in range(first, bisect.bisect_right(self._times, t)):
+            d = t - self._times[index]
+            tau = self._rises[index]
+            scale = self._amps[index] / self._norms[tau]
+            rise, decay = math.exp(-d / tau), math.exp(-d / TAU_DECAY_S)
+            value += scale * (1.0 - rise) * decay
+            slope += scale * (rise * decay / tau - (1.0 - rise) * decay / TAU_DECAY_S)
         w1, w2 = 2.0 * math.pi * 0.9, 2.0 * math.pi * 2.3
         value += 0.022 * math.sin(w1 * t + 0.4) + 0.011 * math.sin(w2 * t + 1.9)
         slope += 0.022 * w1 * math.cos(w1 * t + 0.4) + 0.011 * w2 * math.cos(w2 * t + 1.9)
@@ -274,10 +315,11 @@ class SignalModel:
         return cached
 
     def knots_between(self, start: float, stop: float) -> List[Tuple[float, float]]:
-        """Curve knots in [start, stop] as (time, amplitude of a transient starting there or 0).
+        """Curve knots in [start, stop] as (time, slope jump of a transient starting there or 0).
 
         Knots sit on a regular grid in signal time (so they scroll with the
-        trace and never shimmer) and cluster after each onset.
+        trace and never shimmer) and cluster after each onset; a sharp
+        transient gets an extra, proportionally tighter cluster.
         """
         # Times stay exact (never rounded): an onset knot must not fall a hair
         # before its own transient, or its slope would miss the transient.
@@ -285,18 +327,36 @@ class SignalModel:
         first = math.ceil(start / KNOT_STEP_S)
         for index in range(first, int(math.floor(stop / KNOT_STEP_S)) + 1):
             marks.setdefault(index * KNOT_STEP_S, 0.0)
-        for arrival, amp in self.events_between(start - KNOT_OFFSETS_S[-1], stop):
-            for offset in KNOT_OFFSETS_S:
+        self._extend(stop)
+        first = bisect.bisect_left(self._times, start - KNOT_OFFSETS_S[-1])
+        for index in range(first, bisect.bisect_right(self._times, stop)):
+            arrival, tau = self._times[index], self._rises[index]
+            # Slope added at the instant the transient starts: amp / (tau * peak).
+            jump = self._amps[index] / (tau * self._norms[tau])
+            offsets = set(KNOT_OFFSETS_S)
+            if tau != TAU_RISE_S:
+                offsets.update(offset * tau / TAU_RISE_S for offset in KNOT_OFFSETS_S)
+            for offset in offsets:
                 when = arrival + offset
                 if start <= when <= stop:
-                    marks[when] = amp if offset == 0.0 else marks.get(when, 0.0)
+                    marks[when] = jump if offset == 0.0 else marks.get(when, 0.0)
         ordered = sorted(marks.items())
         kept = [ordered[0]]
-        for when, amp in ordered[1:]:
-            if when - kept[-1][0] < 0.012 and amp == 0.0 and when != ordered[-1][0]:
+        for when, jump in ordered[1:]:
+            if when - kept[-1][0] < 0.003 and jump == 0.0 and when != ordered[-1][0]:
                 continue            # too close to its neighbour to matter
-            kept.append((when, amp))
-        return kept
+            kept.append((when, jump))
+        # Where stacked transients enter the soft-clip zone the displayed curve
+        # bends quickly: add evenly spaced knots there so the cubics keep up.
+        refined = [kept[0]]
+        for when, jump in kept[1:]:
+            before = refined[-1][0]
+            gap = when - before
+            if gap > CLIP_KNOT_STEP_S and max(self.knot(before)[0], self.knot(when)[0]) > _CLIP_LIMIT - 0.3:
+                pieces = int(math.ceil(gap / CLIP_KNOT_STEP_S))
+                refined.extend((before + gap * k / pieces, 0.0) for k in range(1, pieces))
+            refined.append((when, jump))
+        return refined
 
 
 _CLIP_LIMIT, _CLIP_KNEE = 1.72, 0.22
@@ -522,9 +582,9 @@ class SplashArt:
         knots = model.knots_between(start, t)
         path = QtGui.QPainterPath()
         previous = None
-        for when, onset_amp in knots:
+        for when, onset_jump in knots:
             value, slope_right = model.knot(when)
-            slope_left = slope_right - onset_amp * model.onset_slope
+            slope_left = slope_right - onset_jump
             x = TRACE_HEAD_X - (t - when) * speed
             shown, _ = _soft_clip(value)
             y = TRACE_BASE_Y - TRACE_GAIN * shown

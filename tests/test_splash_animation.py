@@ -61,19 +61,48 @@ class SplashArtTests(unittest.TestCase):
 
     def test_trace_curve_follows_the_signal_within_a_fraction_of_a_pixel(self):
         """Smooth cubic curves (no polyline corners) must still be the exact signal."""
-        art = splash.SplashArt(1.0)
         speed = splash.TRACE_HEAD_X / splash.TRACE_WINDOW_S
         worst = 0.0
-        for frame in range(0, 240, 11):
-            t = splash.START_T + frame / 60.0
-            path, head, _level = art.trace_path(t)
-            self.assertAlmostEqual(head.x(), splash.TRACE_HEAD_X)
-            for step in range(1, 200):
-                point = path.pointAtPercent(step / 200.0)
-                when = t - (splash.TRACE_HEAD_X - point.x()) / speed
-                exact = splash.TRACE_BASE_Y - splash.TRACE_GAIN * splash._soft_clip(art.model.value(when))[0]
-                worst = max(worst, abs(exact - point.y()))
+        for seed in (splash.MODEL_SEED, 3, 4):            # includes sharp-rise transients
+            art = splash.SplashArt(1.0, 0, seed, 8.0)
+            for frame in range(0, 720, 17):
+                t = splash.START_T + frame / 60.0
+                path, head, _level = art.trace_path(t)
+                self.assertAlmostEqual(head.x(), splash.TRACE_HEAD_X)
+                for step in range(1, 200):
+                    point = path.pointAtPercent(step / 200.0)
+                    when = t - (splash.TRACE_HEAD_X - point.x()) / speed
+                    value, slope = splash._soft_clip(*art.model.value_slope(when))
+                    exact = splash.TRACE_BASE_Y - splash.TRACE_GAIN * value
+                    steepness = splash.TRACE_GAIN * slope / speed
+                    # Distance from the true curve, measured across it (a near-vertical
+                    # rise must not turn a hair's width into a large vertical error).
+                    worst = max(worst, abs(exact - point.y()) / (1.0 + steepness ** 2) ** 0.5)
         self.assertLess(worst, 0.25)
+
+    def test_some_transients_have_a_much_sharper_rise(self):
+        model = splash.SignalModel(7, 8.0)
+        events = model.events_between(0, 400)
+        rises = model.rise_times_between(0, 400)
+        self.assertEqual(len(events), len(rises))
+        share = sum(r == splash.SHARP_TAU_RISE_S for r in rises) / len(rises)
+        self.assertGreater(share, 0.12)                   # from time to time...
+        self.assertLess(share, 0.40)                      # ...not most of them
+
+        def rise_10_90(arrival, tau):
+            lone = splash.SignalModel(1, 8.0)             # one isolated transient
+            lone._times, lone._amps, lone._rises, lone._next = [arrival], [1.0], [tau], 1e9
+            base = lone.value(arrival - 1e-6)
+            samples = [(k / 5000.0, lone.value(arrival + k / 5000.0) - base) for k in range(1, 1500)]
+            peak = max(v for _d, v in samples)
+            t10 = next(d for d, v in samples if v >= 0.1 * peak)
+            t90 = next(d for d, v in samples if v >= 0.9 * peak)
+            return t90 - t10
+
+        normal = rise_10_90(50.0, splash.TAU_RISE_S)
+        sharp = rise_10_90(50.0, splash.SHARP_TAU_RISE_S)
+        self.assertLess(sharp, 0.35 * normal)
+        self.assertLess(sharp, 0.04)                      # tens of milliseconds
 
     def test_at_least_seven_distinct_colour_themes_recolour_light_and_trace(self):
         self.assertGreaterEqual(len(splash.THEMES), 7)
@@ -110,7 +139,8 @@ class SplashArtTests(unittest.TestCase):
                 late_gaps.append(len(after) / 8.0)
             mean = lambda values: sum(values) / len(values)
             self.assertGreater(mean(late), 2.2 * mean(early), expected)       # bigger spikes
-            self.assertGreater(max(late), 1.45)
+            self.assertGreater(max(late), 1.3)
+            self.assertLessEqual(max(late), splash.TRACE_CEILING + 1e-9)     # stacked peaks stay in the band
             self.assertLess(max(early), 0.75)
             self.assertGreater(mean(late_gaps), 1.3 * mean(early_gaps), expected)   # and more of them
         self.assertEqual(splash.SignalModel(5, 8.0).progress(start - 1), 0.0)
