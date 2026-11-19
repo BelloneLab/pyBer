@@ -35,7 +35,7 @@ from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, crea
 from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
 from numeric_controls import DurationSpinBox, with_slider
-from adaptive_density import STACK_FIRST_PROPERTY, install_adaptive_density
+from adaptive_density import STACK_FIRST_PROPERTY, AdaptiveDensity, install_adaptive_density
 import missing_data
 from psth_metrics import (METRICS, metric_id, summarize_metrics, draw_metric_matplotlib,
                           export_selected_metrics, write_group_comparisons)
@@ -2134,6 +2134,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # they stack, each at full width. Items are numbered, so recording 1
         # still pairs with behavior 1 (see adaptive_density).
         lists_layout.setProperty(STACK_FIRST_PROPERTY, True)
+        self._recording_lists_layout = lists_layout
         pre_col = QtWidgets.QVBoxLayout()
         pre_col.addLayout(pre_header)
         pre_col.addWidget(self.list_preprocessed)
@@ -2237,6 +2238,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.recordings_section.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
                                               QtWidgets.QSizePolicy.Policy.Expanding)
         fal.addRow(self.recordings_section)
+        self.recordings_section.detachedChanged.connect(self._on_recordings_section_detached)
         self.recording_groups.changed.connect(self._on_recording_groups_changed)
 
         # Behavior controls
@@ -13149,6 +13151,23 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 combo.addItem(color_dot_icon(group["color"]), f"Only {group['name']}", f"only:{group['id']}")
             index = combo.findData(current)
             combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _on_recordings_section_detached(self, detached: bool) -> None:
+        """Lists sit side by side in their own window; the drawer decides again on docking.
+
+        The Setup drawer stacks the recording lists when it is narrow. A
+        separate window has room, so the row returns to its normal side by
+        side layout there. Docked back, the drawer's density controller
+        re-evaluates and stacks again only if the drawer is still too narrow.
+        """
+        scroll = self._section_scroll_hosts.get("setup")
+        density = scroll.findChild(AdaptiveDensity) if scroll is not None else None
+        if density is None:
+            return
+        if detached:
+            density.release_row(self._recording_lists_layout)
+        else:
+            density.refresh()
 
     def _update_group_view_hint(self, *_args: object) -> None:
         label = getattr(self, "lbl_group_view", None)

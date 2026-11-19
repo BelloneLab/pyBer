@@ -246,6 +246,23 @@ class AdaptiveDensity(QtCore.QObject):
         self._stack_first_needed = needed
         return True
 
+    def release_row(self, layout: QtWidgets.QLayout) -> None:
+        """Return one stack-first row to its normal direction and forget it.
+
+        For a row whose widget leaves the page (opened in its own window). The
+        row is found and stacked again, if needed, once it is back in the page.
+        """
+        kept = []
+        for row, direction in self._stacked_first:
+            if row is layout:
+                try:
+                    row.setDirection(direction)
+                except RuntimeError:
+                    pass
+            else:
+                kept.append((row, direction))
+        self._stacked_first = kept
+
     def _unstack_first(self) -> None:
         self._applying = True
         try:
