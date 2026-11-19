@@ -4804,7 +4804,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "Zone: existing PSTH and pre/post metrics. "
             "Behavior: add comparisons before, during and after scored bouts.")
         self.combo_event_kind.setFixedHeight(32)
-        tb_layout.insertWidget(tb_layout.indexOf(self.combo_toolbar_scope), self.combo_event_kind)
+        # The Zone/Behavior mode is internal state only; the toolbar shows one
+        # "Events" toggle that opens or closes the behavior panel like a drawer.
+        self.combo_event_kind.setVisible(False)
+        self.btn_events_drawer = QtWidgets.QPushButton("Events")
+        self.btn_events_drawer.setCheckable(True)
+        self.btn_events_drawer.setFixedHeight(32)
+        self.btn_events_drawer.setAccessibleName("Events drawer")
+        self.btn_events_drawer.setToolTip(
+            "Show or hide the events panel: loaded behaviors, before/after comparison "
+            "and the PSTH/heatmap bar.")
+        self.btn_events_drawer.toggled.connect(
+            lambda checked: self._set_event_category("behavior" if checked else "zone"))
+        tb_layout.insertWidget(tb_layout.indexOf(self.combo_toolbar_scope), self.btn_events_drawer)
         self._results_scroll = QtWidgets.QScrollArea()
         self._results_scroll.setObjectName("resultsFigure")
         self._results_scroll.setWidgetResizable(True)
@@ -11337,12 +11349,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _on_event_kind_changed(self, _index: int = 0) -> None:
         behavior = self._event_category() == "behavior"
+        if hasattr(self, "btn_events_drawer") and self.btn_events_drawer.isChecked() != behavior:
+            blocker = QtCore.QSignalBlocker(self.btn_events_drawer)
+            self.btn_events_drawer.setChecked(behavior)
+            del blocker
         self.behavior_zone_panel.setVisible(behavior)
         self._behavior_comparison_scroll.setVisible(
             behavior and not self.behavior_psth_bar.collapse_button.isChecked())
         self.behavior_psth_bar.setVisible(behavior)
         if behavior:
-            self._behavior_workspace.setSizes(self._behavior_workspace_sizes)
+            self.behavior_zone_panel.sync_workspace()
             self.behavior_psth_bar.update_summary()
         else:
             self.plot_heat.setTitle("Heatmap")
