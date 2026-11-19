@@ -58,11 +58,12 @@ class EventFilterTests(unittest.TestCase):
         _, durations = PostProcessingPanel._filter_events(_filter_panel(), [2, 1], [10])
         self.assertTrue(np.isnan(durations).all())
 
-    def test_explicit_duration_bounds_exclude_all_unknown_durations(self):
+    def test_duration_bounds_do_not_apply_to_time_only_events(self):
+        """Onset/offset-only lists have no durations; a bound must not drop them all."""
         for controls in (_filter_panel(True, minimum=1), _filter_panel(True, maximum=2)):
             times, durations = PostProcessingPanel._filter_events(controls, [1, 2], [np.nan, np.nan])
-            self.assertEqual(times.size, 0)
-            self.assertEqual(durations.size, 0)
+            np.testing.assert_array_equal(times, [1, 2])
+            self.assertTrue(np.all(np.isnan(durations)))
 
     def test_invalid_durations_remain_unknown_when_unfiltered(self):
         _, durations = PostProcessingPanel._filter_events(_filter_panel(), [1, 2, 3], [-1, np.inf, 0])

@@ -14598,8 +14598,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         min_dur = float(self.spin_dur_min.value())
         max_dur = float(self.spin_dur_max.value())
-        if min_dur > 0 or max_dur > 0:
-            # Unknown durations cannot satisfy an explicitly requested bound.
+        # Onset/offset-only time lists carry no durations at all: a duration
+        # bound does not apply to them (it would silently remove every event).
+        if (min_dur > 0 or max_dur > 0) and np.any(np.isfinite(durations)):
+            # Bouts whose own duration is unknown cannot satisfy the bound.
             mask = np.isfinite(durations)
             if min_dur > 0:
                 mask &= durations >= min_dur
