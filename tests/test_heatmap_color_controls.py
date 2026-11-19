@@ -215,5 +215,45 @@ class ColorContractTests(unittest.TestCase):
             np.testing.assert_array_equal(qt, mpl)
 
 
+class PsthDefaultViewTests(unittest.TestCase):
+    """Frameless color scale and default behavior panel pair."""
+    setUpClass = classmethod(fixture.PostprocessingEmptyStateTests.setUpClass.__func__)
+    setUp = fixture.PostprocessingEmptyStateTests.setUp
+    tearDown = fixture.PostprocessingEmptyStateTests.tearDown
+
+    def test_color_scale_has_no_frame(self):
+        panel = self.panel
+        for view in (panel.heat_colorbar_widget, panel.heat_lut):
+            self.assertEqual(view.frameShape(), QtWidgets.QFrame.Shape.NoFrame)
+        for key in ("left", "top", "bottom"):
+            self.assertEqual(panel.heat_colorbar.getAxis(key).pen().style(), QtCore.Qt.PenStyle.NoPen)
+        # The tick axis itself stays visible.
+        self.assertNotEqual(panel.heat_colorbar.axis.pen().style(), QtCore.Qt.PenStyle.NoPen)
+
+    def test_default_behavior_panels_are_duration_and_cumulative(self):
+        panel = self.panel
+        self.assertEqual(panel.combo_psth_behavior_metric.currentData(), "duration")
+        self.assertEqual(panel.combo_psth_behavior_metric_second.currentData(), "cumulative")
+
+    def test_former_default_is_migrated_once_explicit_choice_kept(self):
+        import json
+        from gui_postprocessing import _BEHAVIOR_PANEL_DEFAULT_KEY
+        panel = self.panel
+        settings = panel._collect_settings()
+        settings["psth_behavior_metric_second"] = "ibi"
+        panel._settings.setValue("postprocess_json", json.dumps(settings))
+        panel._settings.setValue(_BEHAVIOR_PANEL_DEFAULT_KEY, False)
+        panel._restore_settings()
+        self.assertEqual(panel.combo_psth_behavior_metric_second.currentData(), "cumulative")
+        # Once migrated, a deliberate inter-bout choice survives restarts.
+        panel._restore_settings()
+        self.assertEqual(panel.combo_psth_behavior_metric_second.currentData(), "ibi")
+        settings["psth_behavior_metric_second"] = "frequency"
+        panel._settings.setValue("postprocess_json", json.dumps(settings))
+        panel._settings.setValue(_BEHAVIOR_PANEL_DEFAULT_KEY, False)
+        panel._restore_settings()
+        self.assertEqual(panel.combo_psth_behavior_metric_second.currentData(), "frequency")
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -115,6 +115,10 @@ _LOG = logging.getLogger(__name__)
 _LED_SYNC_COLUMN = "LED signal"
 _LED_RAW_COLUMN = "LED raw"
 _SYNC_LED_ROI_CACHE_KEY = "sync_led_roi_cache_v1"
+# PSTH behavior panels: plot 1 = bout duration distribution (combo default),
+# plot 2 = cumulative duration. The key marks the one-time settings migration.
+_DEFAULT_SECOND_BEHAVIOR_METRIC = "cumulative"
+_BEHAVIOR_PANEL_DEFAULT_KEY = "psth_behavior_panels_default_v2"
 _SYNC_LED_ROI_SIDECAR_SUFFIX = "_pyber_led_roi.json"
 
 
@@ -2559,7 +2563,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for index in range(self.combo_psth_behavior_metric.count()):
             self.combo_psth_behavior_metric_second.addItem(
                 self.combo_psth_behavior_metric.itemText(index), self.combo_psth_behavior_metric.itemData(index))
-        self.combo_psth_behavior_metric_second.setCurrentIndex(2)
+        # Default pair: bout duration distribution + cumulative duration.
+        self.combo_psth_behavior_metric_second.setCurrentIndex(
+            self.combo_psth_behavior_metric_second.findData(_DEFAULT_SECOND_BEHAVIOR_METRIC))
         self.combo_psth_behavior_metric_second.setToolTip(self.combo_psth_behavior_metric.toolTip())
         self.combo_psth_behavior_metric_second.currentIndexChanged.connect(self._on_psth_behavior_panel_changed)
         fb_panel.addRow("First plot", self.combo_psth_behavior_metric)
@@ -4528,6 +4534,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.heat_colorbar.sigLevelsChangeFinished.connect(
             lambda *_: self._on_heatmap_colorbar_changed(finished=True))
         self.heat_colorbar_widget.addItem(self.heat_colorbar)
+        self._strip_colorbar_frame()
         self.heat_lut.hide()
         self.btn_edit_scale = QtWidgets.QPushButton("Edit scale")
         self.btn_edit_scale.setCheckable(True)
@@ -17614,6 +17621,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         self._set_heatmap_display_levels(float(levels[0]), float(levels[1]), save=save)
 
+    def _strip_colorbar_frame(self) -> None:
+        """Draw the heatmap color scale without any surrounding frame.
+
+        Two frames exist by default: the app-wide QGraphicsView border (a
+        rounded box around the whole widget) and pyqtgraph's ColorBarItem,
+        which shows its left/top/bottom axes as a box around the bar. Both are
+        removed; only the bar and its tick axis remain. Transparent pens keep
+        the axes' geometry, so tick labels at the ends are not clipped.
+        """
+        for view in (self.heat_colorbar_widget, self.heat_lut):
+            view.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            view.setStyleSheet("border: none;")
+        for key in ("left", "top", "bottom"):
+            self.heat_colorbar.getAxis(key).setPen(pg.mkPen(None))
+
     def _on_heatmap_colorbar_changed(self, *_args, finished: bool = False) -> None:
         if self._is_restoring_settings or self._suppress_heatmap_level_store:
             return
@@ -18994,7 +19016,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "baseline_start": -1.0,
             "baseline_end": 0.0,
             "psth_behavior_metric": "duration",
-            "psth_behavior_metric_second": "ibi",
+            "psth_behavior_metric_second": _DEFAULT_SECOND_BEHAVIOR_METRIC,
             "global_metric": "amp",
             "psth_behavior_bin_s": 30.0,
             "psth_behavior_auto_bins": True,
@@ -19386,7 +19408,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if "global_freq" in data:
             self.cb_global_freq.setChecked(bool(data["global_freq"]))
         _set_combo_data(self.combo_global_metric, data.get("global_metric", "amp"))
-        _set_combo_data(self.combo_psth_behavior_metric_second, data.get("psth_behavior_metric_second", "ibi"))
+        _set_combo_data(self.combo_psth_behavior_metric_second,
+                        data.get("psth_behavior_metric_second", _DEFAULT_SECOND_BEHAVIOR_METRIC))
         _set_combo(self.combo_view_layout, data.get("view_layout"))
         _set_combo_data(self.combo_psth_input, data.get("psth_signal_source", "saved"))
         self.cb_psth_available_only.setChecked(bool(data.get("psth_available_only", False)))
@@ -19565,7 +19588,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
             raw = self._settings.value("postprocess_json", "", type=str)
             if raw:
                 data = json.loads(raw)
+                if not self._settings.value(_BEHAVIOR_PANEL_DEFAULT_KEY, False, type=bool):
+                    # One-time move from the former default second plot
+                    # (inter-bout interval) to cumulative duration; any other
+                    # explicit choice is kept.
+                    if data.get("psth_behavior_metric_second", "ibi") == "ibi":
+                        data["psth_behavior_metric_second"] = _DEFAULT_SECOND_BEHAVIOR_METRIC
                 self._apply_settings(data)
+            self._settings.setValue(_BEHAVIOR_PANEL_DEFAULT_KEY, True)
             if self._app_theme_mode == "dark" and not data.get("style", {}).get("postprocessing_preset"):
                 bg = self._style_color_tuple("plot_bg", self._theme_plot_background())
                 legacy_dark_defaults = {(36, 42, 52), (18, 22, 30), (5, 8, 13)}
