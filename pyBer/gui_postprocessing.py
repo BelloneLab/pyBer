@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import json
+from html import escape
 import copy
 import logging
 from pathlib import Path
@@ -1882,7 +1883,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fal.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
 
         self.combo_align = QtWidgets.QComboBox()
-        self.combo_align.addItems(["Analog/Digital channel (from Doric)", "Behavior (CSV/XLSX)", "Injection"])
+        self.combo_align.addItems(["Analog/Digital channel (from Doric)", "Behavior (CSV/XLSX)", "Event marker"])
         self.combo_align.setCurrentIndex(1)
         _compact_combo(self.combo_align, min_chars=6)
 
@@ -2042,7 +2043,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         pre_col.setStretch(1, 1)
         beh_col.setStretch(1, 1)
         lists_layout.addLayout(pre_col)
-        self.cb_injection = QtWidgets.QCheckBox("Injection time")
+        self.cb_injection = QtWidgets.QCheckBox("Event marker")
         self.list_injection = QtWidgets.QListWidget()
         self.list_injection.setFixedWidth(145)
         self.list_injection.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -2054,7 +2055,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_injection.setToolTip("Enter one optional time per recording. A behavior file is optional.")
         self.cb_injection.toggled.connect(self.list_injection.setVisible)
         injection_col = QtWidgets.QVBoxLayout()
-        injection_label = QtWidgets.QLabel("Injection time")
+        injection_label = QtWidgets.QLabel("Marker time")
         injection_label.setFixedHeight(24)
         injection_label.hide()
         self.cb_injection.toggled.connect(injection_label.setVisible)
@@ -2066,7 +2067,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.list_preprocessed.verticalScrollBar().valueChanged.connect(self.list_injection.verticalScrollBar().setValue)
         self.list_injection.verticalScrollBar().valueChanged.connect(self.list_preprocessed.verticalScrollBar().setValue)
         self.combo_injection_period = QtWidgets.QComboBox()
-        self.combo_injection_period.addItems(["All events", "Before injection", "After injection"])
+        # Keep v0.58's period identifiers independent of the editable marker name.
+        for caption, key in (("All events", "All events"), ("Before marker", "Before injection"),
+                             ("After marker", "After injection")):
+            self.combo_injection_period.addItem(caption, key)
+        self.marker_name = QtWidgets.QLineEdit()
+        self.marker_name.setPlaceholderText("Marker name (e.g. stimulus onset)")
+        self.marker_name.setAccessibleName("Marker name")
+        self.marker_name.setMaxLength(80)
+        self.cb_injection.toggled.connect(self.marker_name.setVisible)
+        self.marker_name.hide()
         self.combo_injection_period.currentIndexChanged.connect(self._schedule_psth)
         self.injection_compare = QtWidgets.QPushButton("Compare before and after")
         self.injection_compare.clicked.connect(self._compare_injection_periods)
@@ -2119,6 +2129,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         recordings_layout.setSpacing(6)
         recordings_layout.addWidget(self.group_chip_bar)
         recordings_layout.addWidget(self.cb_injection)
+        recordings_layout.addWidget(self.marker_name)
         recordings_layout.addLayout(lists_layout, 1)
         recordings_layout.addWidget(self.lbl_list_pairing)
         self.recordings_section = DetachableSection(recordings_content, "Recordings and groups",
@@ -2280,6 +2291,30 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fa_psth = QtWidgets.QFormLayout(grp_align_psth)
         fa_psth.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
         fa_psth.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        def mirror_combo(source):
+            combo = QtWidgets.QComboBox()
+            combo.setModel(source.model())
+            combo.setCurrentIndex(source.currentIndex())
+            source.currentIndexChanged.connect(combo.setCurrentIndex)
+            combo.currentIndexChanged.connect(source.setCurrentIndex)
+            _compact_combo(combo, min_chars=8)
+            return combo
+
+        self.psth_align_source = mirror_combo(self.combo_align)
+        fa_psth.addRow("Align to", self.psth_align_source)
+        self.psth_marker_name = QtWidgets.QLineEdit()
+        self.psth_marker_name.setMaxLength(self.marker_name.maxLength())
+        self.psth_marker_name.setPlaceholderText(self.marker_name.placeholderText())
+        self.psth_marker_name.setAccessibleName("Marker name")
+        self.psth_marker_name.textChanged.connect(self.marker_name.setText)
+        self.marker_name.textChanged.connect(self.psth_marker_name.setText)
+        self.marker_name.textChanged.connect(self._refresh_marker_captions)
+        self.marker_name.editingFinished.connect(self._schedule_psth)
+        self.psth_marker_name.editingFinished.connect(self._schedule_psth)
+        fa_psth.addRow(self.psth_marker_name)
+        self.psth_marker_period = mirror_combo(self.combo_injection_period)
+        self.psth_marker_period.setAccessibleName("Behavior events relative to marker")
+        fa_psth.addRow(self.psth_marker_period)
         combined_row = QtWidgets.QHBoxLayout()
         combined_row.addWidget(self.combo_behavior_name, 1)
         self.btn_combine_events = QtWidgets.QPushButton("Combine…")
@@ -9307,7 +9342,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             w.setEnabled(use_dio)
             w.setVisible(use_dio)
 
-        injection = self.combo_align.currentText() == "Injection"
+        injection = self.combo_align.currentText() == "Event marker"
         if injection:
             self.cb_injection.setChecked(True)
         self._update_injection_controls()
@@ -9364,9 +9399,23 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _update_injection_controls(self):
         behavior = self.combo_align.currentText().startswith("Behavior")
         show = behavior and self.cb_injection.isChecked()
+        self.psth_marker_name.setVisible(self.combo_align.currentText() == "Event marker")
+        self.psth_marker_period.setVisible(show)
         self.combo_injection_period.setVisible(show)
         self.injection_compare.setVisible(show)
-        self.cb_injection.setEnabled(self.combo_align.currentText() != "Injection")
+        self.cb_injection.setEnabled(self.combo_align.currentText() != "Event marker")
+
+    def _marker_label(self):
+        return self.marker_name.text().strip() or "marker"
+
+    def _refresh_marker_captions(self):
+        label = self._marker_label()
+        self.combo_injection_period.setItemText(1, f"Before {label}")
+        self.combo_injection_period.setItemText(2, f"After {label}")
+        if hasattr(self, "behavior_psth_bar"):
+            self.behavior_psth_bar.sync_controls()
+            self.behavior_psth_bar.update_summary()
+        self._queue_settings_save()
 
     def _edit_injection(self, item):
         row = self.list_injection.row(item)
@@ -9374,7 +9423,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         proc = self._processed[row]
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Injection – " + self._file_id_for_proc(proc))
+        dialog.setWindowTitle(f"{self._marker_label()} – {self._file_id_for_proc(proc)}")
         layout = QtWidgets.QFormLayout(dialog)
         clock = QtWidgets.QComboBox()
         clock.addItem("None", "none")
@@ -9396,7 +9445,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         def accept():
             match = re.fullmatch(r"(\d+):([0-5]\d):([0-5]\d(?:\.\d{1,3})?)", time.text().strip())
             if clock.currentIndex() and not match:
-                QtWidgets.QMessageBox.warning(dialog, "Injection time", "Enter hours:minutes:seconds, for example 00:12:30.")
+                QtWidgets.QMessageBox.warning(dialog, "Marker time", "Enter hours:minutes:seconds, for example 00:12:30.")
                 return
             proc.injection_seconds = (3600 * int(match[1]) + 60 * int(match[2]) + float(match[3])
                                       if clock.currentIndex() else None)
@@ -9424,7 +9473,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             issue = injection_times(proc)[2] if seconds is not None else ""
             item = QtWidgets.QListWidgetItem(label + (" ⚠" if issue else ""))
             item.setSizeHint(QtCore.QSize(120, ROW_HEIGHT))
-            item.setToolTip(issue or "Click to enter or clear this recording’s injection time.")
+            item.setToolTip(issue or "Click to enter or clear this recording’s marker time.")
             self.list_injection.addItem(item)
         self.list_injection.verticalScrollBar().setValue(self.list_preprocessed.verticalScrollBar().value())
 
@@ -9437,7 +9486,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _compare_injection_periods(self):
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Behavior before and after injection")
+        dialog.setWindowTitle(f"Behavior before and after {self._marker_label()}")
         layout = QtWidgets.QVBoxLayout(dialog)
         table = QtWidgets.QTableWidget(0, 6)
         table.setHorizontalHeaderLabels(["Recording", "Period", "Onsets", "Observed (s)", "Onsets/min", "Time in behavior (s)"])
@@ -9463,7 +9512,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     text = "—" if value is None else format(value, ".4g") if isinstance(value, float) else str(value)
                     table.setItem(row, col, QtWidgets.QTableWidgetItem(text))
         if not table.rowCount():
-            layout.addWidget(QtWidgets.QLabel("No paired recordings with a usable injection time and behavior."))
+            layout.addWidget(QtWidgets.QLabel("No paired recordings with a usable marker time and behavior."))
         table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         table.resizeColumnsToContents()
         dialog.resize(700, 340)
@@ -10042,8 +10091,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             fs_txt = "-"
             output_label = "-"
         align_src = self.combo_align.currentText()
-        if align_src == "Injection":
-            align_detail, align_mode = "one time per recording", ""
+        if align_src == "Event marker":
+            align_detail, align_mode = self._marker_label(), ""
         elif _is_doric_channel_align(align_src):
             align_detail = self.combo_dio.currentText().strip() or "(none)"
             align_mode = self.combo_dio_align.currentText()
@@ -10137,7 +10186,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     if extra:
                         exclusions = np.vstack([exclusions, *extra])
             exclusions = exclusions[np.all(np.isfinite(exclusions), axis=1)]
-            events = raw_events if self.combo_align.currentText() == "Injection" else self._filter_events(raw_events, raw_durations)[0]
+            events = raw_events if self.combo_align.currentText() == "Event marker" else self._filter_events(raw_events, raw_durations)[0]
             recordings.append(BaselineRecording(
                 label=self._file_id_for_proc(proc), time=np.asarray(self._proc_time(proc), float).copy(),
                 signal=np.asarray(proc.output, float).copy(), events=events.copy(),
@@ -10343,13 +10392,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_heat.setYRange(0, self._last_mat.shape[0], padding=0)
 
     def _update_event_filter_enabled(self) -> None:
-        enabled = self.cb_filter_events.isChecked() and self.combo_align.currentText() != "Injection"
+        enabled = self.cb_filter_events.isChecked() and self.combo_align.currentText() != "Event marker"
         for w in (self.spin_event_start, self.spin_event_end, self.spin_group_window, self.spin_dur_min, self.spin_dur_max):
             w.setEnabled(enabled)
         self._queue_settings_save()
 
     def _update_psth_inclusion_controls(self, *_args: object) -> None:
-        enabled = self.combo_align.currentText() != "Injection" and self._psth_exclude_low_event_animals_enabled()
+        enabled = self.combo_align.currentText() != "Event marker" and self._psth_exclude_low_event_animals_enabled()
         self.spin_min_events_per_animal.setEnabled(enabled)
         self._queue_settings_save()
 
@@ -11114,7 +11163,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_heat.setLabel("bottom", "")
             self.plot_heat.getAxis("bottom").setStyle(showValues=False)
             self.plot_heat.getAxis("bottom").setHeight(8)
-            self.plot_avg.setLabel("bottom", "Time from alignment (s)")
+            self.plot_avg.setLabel("bottom", self._psth_time_axis_label())
             self.plot_avg.setTitle("PSTH: animals ± SEM" if self._last_psth_display_level == "animals"
                                    else "PSTH: mean ± SEM")
         self.lbl_behavior_name.setText("Behavior name" if behavior else "Zone / event name")
@@ -12924,7 +12973,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._update_file_lists()
             self._compute_spatial_heatmap()
             self._update_status_strip()
-            if self._behavior_sources or self.combo_align.currentText() == "Injection":
+            if self._behavior_sources or self.combo_align.currentText() == "Event marker":
                 self._schedule_psth()   # pairing follows the new line order
 
     def _sync_behavior_order_from_list(self) -> None:
@@ -14154,7 +14203,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 return off, dur
             return on, dur
 
-        if align == "Injection":
+        if align == "Event marker":
             time = self._injection_on_axis(proc)
             if time is None:
                 return np.array([], float), np.array([], float)
@@ -14509,7 +14558,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._trace_preview_durations = np.array([], float)
 
         ev, dur = self._get_events_for_proc(proc)
-        if self.combo_align.currentText() != "Injection":
+        if self.combo_align.currentText() != "Event marker":
             ev, dur = self._filter_events(ev, dur)
         if ev.size:
             dur = np.asarray(dur, float) if dur is not None else np.array([], float)
@@ -15930,7 +15979,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             event_rows: List[Dict[str, object]] = []
             total_events = 0
             tvec = None
-            injection_alignment = self.combo_align.currentText() == "Injection"
+            injection_alignment = self.combo_align.currentText() == "Event marker"
             min_events = 1 if injection_alignment else self._psth_min_events_per_animal()
             exclude_low_events = bool(group_mode and self._psth_exclude_low_event_animals_enabled())
             excluded_files: Dict[str, Dict[str, object]] = {}
@@ -16359,6 +16408,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         legend.setVisible(bool(self._group_avg_items))
         self.plot_avg.setTitle("PSTH: groups mean \u00b1 SEM")
 
+    def _psth_time_axis_label(self):
+        if self.combo_align.currentText() == "Event marker":
+            return f"Seconds from {escape(self._marker_label())}"
+        return "Time from alignment (s)"
+
     def _render_avg(self, mat: np.ndarray, tvec: np.ndarray) -> None:
         ready = bool(mat.size and tvec.size and np.any(np.isfinite(mat)))
         set_plot_has_data(self.plot_avg, ready)
@@ -16373,7 +16427,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         group_display = self._active_group_display(mat)
         if group_display is not None and group_display.mode == "all":
             self.plot_avg.setLabel("left", self._psth_units())
-            self.plot_avg.setLabel("bottom", "Time from alignment (s)")
+            self.plot_avg.setLabel("bottom", self._psth_time_axis_label())
             self.plot_avg.setToolTip("One mean +/- SEM per recording group. SEM uses the sample SD across "
                                      "the rows of each group (recordings, or trials when trial rows are kept).")
             self._render_group_avg(group_display, tvec)
@@ -16382,7 +16436,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         avg, sem, counts = mean_sem(mat)
         self.plot_avg.setLabel("left", self._psth_units())
-        self.plot_avg.setLabel("bottom", "Time from alignment (s)")
+        self.plot_avg.setLabel("bottom", self._psth_time_axis_label())
         self.plot_avg.setToolTip(f"Contributing rows per bin: {int(counts.min())} to {int(counts.max())}. SEM uses sample SD; unavailable with fewer than two rows.")
 
         self.curve_avg.setData(tvec, avg, connect="finite", skipFiniteCheck=True)
@@ -17957,6 +18011,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         try:
             self._clear_cached_analysis_outputs()
             self._processed = []
+            self.marker_name.clear()
             self._behavior_sources = {}
             self._sync_external_sources = {}
             self._sync_reference_videos = {}
@@ -18124,7 +18179,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 except Exception:
                     _LOG.exception("Sync list refresh failed during project load")
             self._set_resample_from_processed()
-            if isinstance(settings_data, dict) and settings_data:
+            if isinstance(settings_data, dict):
+                # Names were implicit in v0.58, including projects saved with the column hidden.
+                used_marker = (settings_data.get("show_injection") or settings_data.get("align") == "Injection"
+                               or any(proc.injection_seconds is not None for proc in self._processed))
+                settings_data.setdefault("marker_label", "Injection" if used_marker else "")
                 self._apply_settings(settings_data)
             self._update_behavior_time_panel()
             if isinstance(tab_idx, int) and 0 <= tab_idx < self.tab_sources.count():
@@ -18183,6 +18242,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _default_settings_payload(self) -> Dict[str, object]:
         return {
             "align": "Behavior (CSV/XLSX)",
+            "show_injection": False,
+            "injection_period": "All events",
             "dio_channel": self.combo_dio.currentText(),
             "dio_polarity": "Event high (0->1)",
             "dio_align": "Align to onset",
@@ -18351,9 +18412,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return {
             "event_kind": self._event_category(),
             "show_injection": self.cb_injection.isChecked(),
-            "injection_period": self.combo_injection_period.currentText(),
+            "marker_label": self.marker_name.text().strip(),
+            "injection_period": self.combo_injection_period.currentData(),
             "behavior_comparison": self.behavior_zone_panel.settings_state(),
-            "align": self.combo_align.currentText(),
+            "align": "Injection" if self.combo_align.currentText() == "Event marker" else self.combo_align.currentText(),
             "dio_channel": self.combo_dio.currentText(),
             "dio_polarity": self.combo_dio_polarity.currentText(),
             "dio_align": self.combo_dio_align.currentText(),
@@ -18488,9 +18550,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 combo.setCurrentIndex(idx)
 
         self._set_event_category(str(data.get("event_kind", "zone")))
-        self.cb_injection.setChecked(bool(data.get("show_injection", False)) or data.get("align") == "Injection")
-        _set_combo(self.combo_injection_period, data.get("injection_period", "All events"))
-        _set_combo(self.combo_align, data.get("align"))
+        align = data.get("align")
+        if "marker_label" in data:
+            self.marker_name.setText(str(data["marker_label"] or ""))
+        elif align == "Injection" and not self.marker_name.text():
+            self.marker_name.setText("Injection")
+        if "show_injection" in data or align in ("Injection", "Event marker"):
+            self.cb_injection.setChecked(bool(data.get("show_injection")) or align in ("Injection", "Event marker"))
+        _set_combo_data(self.combo_injection_period, data.get("injection_period"))
+        _set_combo(self.combo_align, "Event marker" if align == "Injection" else align)
         _set_combo(self.combo_dio, data.get("dio_channel"))
         _set_combo(self.combo_dio_polarity, data.get("dio_polarity"))
         _set_combo(self.combo_dio_align, data.get("dio_align"))
@@ -18838,8 +18906,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         writes both analyses to identical paths.
         """
         align_source = self.combo_align.currentText()
-        if align_source == "Injection":
-            return "injection"
+        if align_source == "Event marker":
+            return re.sub(r"[^\w-]+", "_", self._marker_label()).strip("_") or "marker"
         if _is_doric_channel_align(align_source):
             channel = self.combo_dio.currentText().strip()
             cleaned = re.sub(r"\s+", "_", channel)
@@ -18901,11 +18969,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _collect_psth_parameter_sections(self, include_heatmap: bool = False) -> List[Tuple[str, List[Tuple[str, object]]]]:
         data = self._collect_settings()
-        align_items: List[Tuple[str, object]] = [("align_source", data.get("align", ""))]
+        align_text = str(data.get("align", ""))
+        align_items: List[Tuple[str, object]] = [("align_source", "Event marker" if align_text == "Injection" else align_text)]
+        if align_text == "Injection":
+            align_items.append(("marker_label", self._marker_label()))
         combined = self._combined_event_definitions()
         if combined:
             align_items.append(("combined_labels", json.dumps(combined, sort_keys=True)))
-        align_text = str(data.get("align", ""))
         if align_text.startswith("Analog/Digital"):
             align_items.extend(
                 [
@@ -18917,7 +18987,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         elif align_text.startswith("Behavior"):
             align_items.extend(
                 [
-                    ("injection_period", data.get("injection_period", "All events") if data.get("show_injection") else "All events"),
+                    ("marker_period", self.combo_injection_period.currentText() if data.get("show_injection") else "All events"),
                     ("behavior_file_type", data.get("behavior_file_type", "")),
                     ("behavior", data.get("behavior", "")),
                     ("behavior_align", data.get("behavior_align", "")),
@@ -19534,11 +19604,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         align = getattr(self, "combo_align", None)
         period = getattr(self, "combo_injection_period", None)
         current_result = align is not None and (
-            align.currentText() == "Injection" or
+            align.currentText() == "Event marker" or
             (align.currentText().startswith("Behavior") and self.cb_injection.isChecked() and period.currentIndex() > 0)
         )
         if current_result:
-            label = ("Injection" if align.currentText() == "Injection" else
+            label = (self._marker_label() if align.currentText() == "Event marker" else
                      f"{self._behavior_suffix()} – {period.currentText()}")
             behaviors = [label]
         else:
@@ -20480,7 +20550,7 @@ class ExportDialog(QtWidgets.QDialog):
         self.cb_pub_figure = QtWidgets.QCheckBox("Multi-panel publication figure")
         self.cb_pub_figure.setChecked(False)
         self.cb_pub_figure.setToolTip(
-            "Export the active injection analysis or a figure with one row per behavior:\n"
+            "Export the active marker analysis or a figure with one row per behavior:\n"
             "heatmap | average PSTH | pre/post metrics with exact paired sign-test p-value"
         )
         pub_layout.addWidget(self.cb_pub_figure)

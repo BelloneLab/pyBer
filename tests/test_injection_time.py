@@ -30,8 +30,12 @@ class InjectionTests(unittest.TestCase):
         p._processed = [first, second, control]
         p.tab_sources.setCurrentIndex(1)
         p._update_file_lists()
-        p.combo_align.setCurrentText("Injection")
+        p.psth_align_source.setCurrentText("Event marker")
         self.assertTrue(p.cb_injection.isChecked())
+        p.psth_marker_name.setText("Stimulus onset")
+        self.assertEqual(p.marker_name.text(), "Stimulus onset")
+        self.assertEqual(p.combo_align.currentText(), "Event marker")
+        self.assertTrue(p.psth_subsections.isAncestorOf(p.psth_align_source))
         p.recordings_section.detach()
         self.app.processEvents()
         def row_y(widget, row):
@@ -59,6 +63,7 @@ class InjectionTests(unittest.TestCase):
             _export_to_folder(p, tmp, pub_figure=True, pub_content="Heatmap + Avg PSTH")
             manifest = json.loads(next(Path(tmp).glob("*_manifest.json")).read_text())
             self.assertEqual(manifest["status"], "complete")
+            self.assertEqual(manifest["settings"]["marker_label"], "Stimulus onset")
             records = {row["file"]: row for row in manifest["injections"]}
             self.assertIsNone(records["c.csv"]["entered_seconds"])
             self.assertEqual(records["a.csv"]["entered_seconds"], 30.)
@@ -66,15 +71,41 @@ class InjectionTests(unittest.TestCase):
             self.assertTrue(next(Path(tmp).glob("*_publication_figure.pdf")).stat().st_size > 100)
             path = str(Path(tmp) / "test.h5")
             p._save_project_h5(path)
+            p.marker_name.setText("Other event")
             self.assertTrue(p._load_project_from_path(path))
+            self.assertEqual(p.marker_name.text(), "Stimulus onset")
+            self.assertEqual(p.psth_marker_name.text(), "Stimulus onset")
             self.assertEqual([r.injection_seconds for r in p._processed], [None, 50., 30.])
-            self.assertEqual(p.combo_align.currentText(), "Injection")
+            self.assertEqual(p.combo_align.currentText(), "Event marker")
         control.injection_seconds = 0.
         self.assertEqual(injection_times(control)[0], 10.)
 
+    def test_legacy_settings_and_inline_marker_selection(self):
+        p = self.panel
+        r = self.recording("existing.csv")
+        r.injection_clock = "video"
+        r.injection_seconds = 25.125
+        p._processed = [r]
+        p._apply_settings({"align": "Injection", "show_injection": True, "injection_period": "After injection"})
+        self.assertEqual(p.marker_name.text(), "Injection")
+        self.assertEqual(p.combo_injection_period.currentIndex(), 2)
+        self.assertEqual(p.psth_align_source.currentText(), "Event marker")
+        p._set_event_category("behavior")
+        p.combo_behavior_name.addItem("Grooming")
+        bar = p.behavior_psth_bar
+        bar.name.setCurrentText("Grooming")
+        bar.name.activated.emit(bar.name.currentIndex())
+        self.assertTrue(p.psth_align_source.currentText().startswith("Behavior"))
+        marker_index = bar.name.findData("marker")
+        self.assertGreaterEqual(marker_index, 0)
+        bar.name.activated.emit(marker_index)
+        self.assertEqual(p.psth_align_source.currentText(), "Event marker")
+        self.assertFalse(bar.align.isEnabled())
+        self.assertEqual((r.path, r.injection_clock, r.injection_seconds), ("existing.csv", "video", 25.125))
+
     def test_video_clock_with_distinct_offsets_and_missing_sync(self):
         p = self.panel
-        p.combo_align.setCurrentText("Injection")
+        p.psth_align_source.setCurrentText("Event marker")
         for offset in (-4., 3.):
             proc = self.recording("test")
             proc.injection_clock = "video"
@@ -100,9 +131,11 @@ class InjectionTests(unittest.TestCase):
             "on": [63., 65., 80.], "off": [68., 66., 82.], "dur": [5., 1., 2.]}}}}
         p.combo_behavior_name.addItem("groom")
         p.combo_behavior_name.setCurrentText("groom")
-        p.combo_injection_period.setCurrentIndex(1)
+        p.marker_name.setText("Stimulus onset")
+        p.psth_marker_period.setCurrentText("Before Stimulus onset")
+        self.assertEqual(p.combo_injection_period.currentIndex(), 1)
         np.testing.assert_allclose(p._get_events_for_proc(proc)[0], [58.])
-        p.combo_injection_period.setCurrentIndex(2)
+        p.psth_marker_period.setCurrentText("After Stimulus onset")
         np.testing.assert_allclose(p._get_events_for_proc(proc)[0], [60., 75.])
         rows = period_summary([58., 60., 75.], [5., 1., 2.], [(10., 70.), (75., 80.)], 60.)
         self.assertEqual(rows, [("Before", 1, 50., 1.2, 2.), ("After", 2, 15., 8., 5.)])

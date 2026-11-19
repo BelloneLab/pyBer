@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+from html import escape
 from pathlib import Path
 
 import numpy as np
@@ -37,8 +38,8 @@ class BehaviorPsthBar(QtWidgets.QWidget):
         row.addWidget(QtWidgets.QLabel("PSTH / HEATMAP"))
         self.name = QtWidgets.QComboBox()
         self.name.setMinimumWidth(150)
-        self.name.setAccessibleName("Behavior displayed in PSTH and heatmap")
-        self.name.setToolTip("The plots below show this one behavior. Checked behaviors above are compared separately.")
+        self.name.setAccessibleName("Event displayed in PSTH and heatmap")
+        self.name.setToolTip("Choose a scored behavior or the recording’s event marker.")
         self.align = QtWidgets.QComboBox()
         self.pre = QtWidgets.QDoubleSpinBox()
         self.post = QtWidgets.QDoubleSpinBox()
@@ -51,6 +52,7 @@ class BehaviorPsthBar(QtWidgets.QWidget):
             target.valueChanged.connect(source.setValue)
             source.valueChanged.connect(self.sync_controls)
         self.name.activated.connect(self._choose_name)
+        panel.combo_align.currentIndexChanged.connect(self.sync_controls)
         self.align.activated.connect(panel.combo_behavior_align.setCurrentIndex)
         for source in (panel.combo_behavior_name, panel.combo_behavior_align):
             source.currentIndexChanged.connect(self.sync_controls)
@@ -86,21 +88,31 @@ class BehaviorPsthBar(QtWidgets.QWidget):
         self.sync_controls()
 
     def _choose_name(self, index) -> None:
+        if self.name.itemData(index) == "marker":
+            self.panel.combo_align.setCurrentText("Event marker")
+            return
+        name = self.name.itemText(index)
         self.panel.combo_align.setCurrentIndex(1)
         source = self.panel.combo_behavior_name
-        source.setCurrentText(self.name.itemText(index))
+        source.setCurrentText(name)
         source.activated.emit(source.currentIndex())
 
     def sync_controls(self, *_args) -> None:
         panel = self.panel
+        marker = panel.combo_align.currentText() == "Event marker"
         for target, source in ((self.name, panel.combo_behavior_name),
                                (self.align, panel.combo_behavior_align)):
             names = [source.itemText(index) for index in range(source.count())]
+            if target is self.name:
+                names.append(f"Event marker · {panel._marker_label()}" if panel.marker_name.text().strip() else "Event marker")
             with QtCore.QSignalBlocker(target):
                 if names != [target.itemText(index) for index in range(target.count())]:
                     target.clear()
                     target.addItems(names)
-                target.setCurrentIndex(source.currentIndex())
+                if target is self.name:
+                    target.setItemData(len(names) - 1, "marker")
+                target.setCurrentIndex(len(names) - 1 if marker and target is self.name else source.currentIndex())
+        self.align.setEnabled(not marker)
         for target, source in ((self.pre, panel.spin_pre), (self.post, panel.spin_post)):
             with QtCore.QSignalBlocker(target):
                 target.setValue(source.value())
@@ -143,10 +155,13 @@ class BehaviorPsthBar(QtWidgets.QWidget):
         self.summary.setText(
             f"Showing {name} only · zero = behavior {edge} · rows = {rows} · color = {units}. "
             "Real seconds, not stretched bouts. Pre/Post here are separate from Before/During/After above.")
-        if panel.combo_align.currentText() == "Injection":
-            self.summary.setText("Injection-aligned PSTH. Zero is the injection time for each recording.")
+        if panel.combo_align.currentText() == "Event marker":
+            label = escape(panel._marker_label())
+            self.summary.setText(f"PSTH zero = {label} for each recording.")
+            panel.plot_heat.setTitle(f"{label} · Heatmap ({rows})")
+            panel.plot_avg.setTitle(f"{label} · Mean PSTH ± SEM")
             for plot in (panel.plot_heat, panel.plot_avg):
-                plot.setLabel("bottom", "Seconds from injection")
+                plot.setLabel("bottom", f"Seconds from {label}")
             return
         if panel.combo_align.currentIndex() == 0:
             self.summary.setText("PSTH source is a Doric channel. Choose Behavior in Setup to plot these scored behaviors.")
@@ -768,8 +783,8 @@ class BehaviorZonePanel(QtWidgets.QWidget):
                    f"colors = {panel.combo_psth_normalization.currentText()}.")
         if panel.combo_align.currentIndex() == 0:
             heatmap = "PSTH / heatmap uses the selected Doric channel, not these behavior checkboxes."
-        if panel.combo_align.currentText() == "Injection":
-            heatmap = "PSTH / heatmap: zero = injection."
+        if panel.combo_align.currentText() == "Event marker":
+            heatmap = f"PSTH / heatmap: zero = {escape(panel._marker_label())}."
         shift = (f" Comparison-only shift: {self.offset.value():+g} s; heatmap is NOT shifted."
                  if self.offset.value() else "")
         self.timing_help.setText(
