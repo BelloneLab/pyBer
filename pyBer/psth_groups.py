@@ -69,8 +69,12 @@ def row_file_id(label: object) -> str:
 def build_group_display(matrix: np.ndarray, labels: Sequence[str], mode: str,
                         groups: Sequence[Dict[str, str]], group_of: Callable[[str], Optional[str]],
                         only_group: Optional[str] = None, level: str = "animals",
-                        include_ungrouped: bool = True) -> Optional[GroupDisplay]:
+                        include_ungrouped: bool = True,
+                        hidden_groups: Sequence[str] = ()) -> Optional[GroupDisplay]:
     """Select/reorder rows by group.
+
+    ``hidden_groups``: ids of groups left out of ``mode='all'`` ('' stands for
+    the ungrouped rows). Their rows are not drawn; nothing is recomputed.
 
     ``mode='all'``: rows are stably reordered into group blocks (group order,
     then ungrouped). ``mode='only'``: rows of ``only_group`` are kept. Returns
@@ -96,9 +100,10 @@ def build_group_display(matrix: np.ndarray, labels: Sequence[str], mode: str,
                             blocks, [group["color"]] * len(keep), level)
     blocks: List[GroupBlock] = []
     index_order: List[int] = []
+    hidden = {str(value or "") for value in hidden_groups}
     for gid in order + ([None] if include_ungrouped else []):
         rows = [i for i, value in enumerate(row_group) if value == gid]
-        if not rows:
+        if not rows or str(gid or "") in hidden:
             continue
         start = len(index_order)
         index_order.extend(rows)

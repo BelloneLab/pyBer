@@ -109,7 +109,7 @@ class GroupViewDashboardTests(unittest.TestCase):
         panel.psth_time_handle.setSizes([1400, 600])
         panel._save_settings()
         stored = json.loads(panel._settings.value("postprocess_json"))
-        self.assertEqual(stored["group_view"], {"enabled": True, "display": f"only:{self.wt}"})
+        self.assertEqual(stored["group_view"], {"enabled": True, "display": f"only:{self.wt}", "hidden": []})
         self.assertEqual(stored["dashboard_panels"]["removed"], ["bout2"])
         self.assertEqual(stored["dashboard_panels"]["time_ratio"], [1400, 600])
         panel.recording_groups.clear()

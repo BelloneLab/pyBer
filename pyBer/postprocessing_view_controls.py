@@ -1,6 +1,8 @@
 """Compact view menu and portable, named plot-splitter preferences."""
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from recording_groups import UNGROUPED_COLOR, UNGROUPED_LABEL, color_dot_icon
+
 
 def split_plot_layout(host, orientation):
     """Replace fixed spacing with a draggable divider, retaining plot ownership."""
@@ -163,26 +165,56 @@ def compact_results_toolbar(panel):
     panel.lbl_status.setMinimumWidth(0)
     panel.lbl_status.setMaximumWidth(260)
     # "Hide drawer" left the toolbar: clicking the active rail icon closes the
-    # drawer. In Group scope its place is taken by a Show / Hide groups toggle
-    # that mirrors the PSTH panel's "Group view" option.
+    # drawer. In Group scope its place is taken by a Groups menu: one check
+    # mark per group shows or hides that group's rows, mean trace and metrics.
     panel.btn_action_hide.hide()
-    panel.btn_group_view = QtWidgets.QPushButton("Show groups", panel)
-    panel.btn_group_view.setCheckable(True)
+    panel.btn_group_view = QtWidgets.QToolButton(panel)
+    panel.btn_group_view.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
     panel.btn_group_view.setAccessibleName("Show or hide groups")
     panel.btn_group_view.setToolTip(
-        "Show recordings by group (colored blocks, one mean per group) or hide the grouping.")
+        "Choose which groups are shown in the heatmap, the mean traces and the metrics. "
+        "Hidden groups keep their data; they are only left out of the display.")
+    panel.menu_group_view = QtWidgets.QMenu(panel.btn_group_view)
+    panel.btn_group_view.setMenu(panel.menu_group_view)
+
+    def group_entries():
+        """(id, name, color) of each group, then the ungrouped recordings ('')."""
+        entries = [(group["id"], group["name"], group["color"]) for group in panel.recording_groups.groups()]
+        return entries + [("", UNGROUPED_LABEL, UNGROUPED_COLOR)]
+
+    def rebuild_group_menu():
+        menu = panel.menu_group_view
+        menu.clear()
+        hidden = panel._hidden_groups()
+        for group_id, name, color in group_entries():
+            action = menu.addAction(color_dot_icon(color), name)
+            action.setCheckable(True)
+            action.setChecked(group_id not in hidden)
+            action.setData(group_id)
+            action.toggled.connect(lambda shown, gid=group_id: panel.set_group_hidden(gid, not shown))
+        menu.addSeparator()
+        show_all = menu.addAction("Show all groups", panel.show_all_groups)
+        show_all.setEnabled(bool(hidden))
+        menu.addSeparator()
+        blocks = menu.addAction("Group view (colored blocks, one mean per group)")
+        blocks.setCheckable(True)
+        blocks.setChecked(panel.cb_group_view.isChecked())
+        blocks.toggled.connect(panel.cb_group_view.setChecked)
 
     def reflect_group_view(*_args):
-        """Keep the toggle's state, caption and visibility in step with the panel."""
-        checked = bool(panel.cb_group_view.isChecked())
-        with QtCore.QSignalBlocker(panel.btn_group_view):
-            panel.btn_group_view.setChecked(checked)
-        panel.btn_group_view.setText("Hide groups" if checked else "Show groups")
+        """Keep the caption and visibility in step with the groups and the scope."""
+        total = len(group_entries())
+        shown = total - len(panel._hidden_groups())
+        panel.btn_group_view.setText("Groups" if shown == total else f"Groups {shown}/{total}")
         panel.btn_group_view.setVisible(panel.tab_visual_mode.currentIndex() == 1)
 
-    panel.btn_group_view.clicked.connect(lambda checked: panel.cb_group_view.setChecked(bool(checked)))
+    panel.menu_group_view.aboutToShow.connect(rebuild_group_menu)
+    panel.menu_group_view.aboutToHide.connect(reflect_group_view)
     panel.cb_group_view.toggled.connect(reflect_group_view)
+    panel.recording_groups.changed.connect(reflect_group_view)
     panel.tab_visual_mode.currentChanged.connect(reflect_group_view)
+    panel._rebuild_group_menu = rebuild_group_menu
+    panel._reflect_group_view = reflect_group_view
     for widget in (panel.btn_action_load, panel.btn_action_compute, panel.btn_action_export,
                    panel.btn_action_undo, panel.btn_action_redo, panel.btn_view_menu,
                    panel.combo_toolbar_scope, panel.combo_individual_file, panel.lbl_status,

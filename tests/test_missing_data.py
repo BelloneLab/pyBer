@@ -7,7 +7,6 @@ import test_postprocessing_empty_state as gui_fixture
 import missing_data
 from missing_data import common_span, interpolate_interior_gaps, prepare_heatmap
 from onboarding import PreferencesDialog
-from PySide6 import QtCore
 
 
 def _matrix():
@@ -97,7 +96,7 @@ class MissingDataGuiTests(unittest.TestCase):
         self.assertFalse(settings.value(missing_data.SETTINGS_KEY_TRIM, True, type=bool))
         dialog.deleteLater()
 
-    def test_group_toggle_replaces_hide_drawer_in_group_scope(self):
+    def test_groups_menu_replaces_hide_drawer_in_group_scope(self):
         panel = self.panel
         panel.show()
         self.app.processEvents()
@@ -106,15 +105,7 @@ class MissingDataGuiTests(unittest.TestCase):
         self.assertTrue(panel.btn_group_view.isHidden())
         panel.tab_visual_mode.setCurrentIndex(1)
         self.assertFalse(panel.btn_group_view.isHidden())
-        self.assertEqual(panel.btn_group_view.text(), "Show groups")
-        panel.btn_group_view.click()
-        self.assertTrue(panel.cb_group_view.isChecked())
-        self.assertEqual(panel.btn_group_view.text(), "Hide groups")
-        with QtCore.QSignalBlocker(panel.btn_group_view):
-            pass
-        panel.cb_group_view.setChecked(False)
-        self.assertFalse(panel.btn_group_view.isChecked())
-        self.assertEqual(panel.btn_group_view.text(), "Show groups")
+        self.assertEqual(panel.btn_group_view.text(), "Groups")
 
 
 if __name__ == "__main__":

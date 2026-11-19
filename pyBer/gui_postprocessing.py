@@ -13211,18 +13211,62 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return "pooled", None
         return ("all", None) if len(self.recording_groups) else ("off", None)
 
+    def _hidden_groups(self) -> set:
+        """Ids of the groups hidden from group visuals ('' = ungrouped recordings)."""
+        valid = {group["id"] for group in self.recording_groups.groups()} | {""}
+        hidden = set(getattr(self, "_hidden_group_ids", set())) & valid
+        self._hidden_group_ids = hidden
+        return hidden
+
+    def set_group_hidden(self, group_id: Optional[str], hidden: bool) -> None:
+        """Show or hide one group's rows, mean trace and metrics (data are untouched)."""
+        current = self._hidden_groups()
+        key = str(group_id or "")
+        if hidden:
+            current.add(key)
+        else:
+            current.discard(key)
+        self._hidden_group_ids = current
+        if self._is_restoring_settings:
+            return
+        if not self.cb_group_view.isChecked():
+            self.cb_group_view.setChecked(True)   # re-renders through the group view change
+        else:
+            self._on_group_view_changed()
+        self._queue_settings_save()
+
+    def show_all_groups(self) -> None:
+        self._hidden_group_ids = set()
+        if not self._is_restoring_settings:
+            self._on_group_view_changed()
+            self._queue_settings_save()
+
     def _group_view_keeps(self, file_id: str) -> bool:
         mode, group_id = self._group_view_state()
-        return mode != "only" or self.recording_groups.group_id_of(file_id) == group_id
+        own = self.recording_groups.group_id_of(file_id)
+        if mode == "only":
+            return own == group_id
+        if mode in ("all", "pooled"):
+            key = own if own and self.recording_groups.group(own) else ""
+            return key not in self._hidden_groups()
+        return True
 
     def _apply_group_view(self, mat: Optional[np.ndarray], labels: List[str], level: str):
         """Select or reorder displayed rows by group (no value is modified)."""
         self._group_display = None
         mode, group_id = self._group_view_state()
+        hidden = self._hidden_groups()
+        if mode == "pooled" and hidden and mat is not None and len(labels) == np.asarray(mat).shape[0]:
+            # Pooled: hidden groups leave the pool, the rest stay in their order.
+            from psth_groups import row_file_id as _row_file_id
+            keep = [index for index, label in enumerate(labels)
+                    if self._group_view_keeps(_row_file_id(label))]
+            return np.asarray(mat)[keep], [labels[index] for index in keep]
         if mode not in ("all", "only") or mat is None:
             return mat, labels
         display = build_group_display(mat, labels, mode, self.recording_groups.groups(),
-                                      self.recording_groups.group_id_of, only_group=group_id, level=level)
+                                      self.recording_groups.group_id_of, only_group=group_id, level=level,
+                                      hidden_groups=hidden)
         if display is None:
             return mat, labels
         self._group_display = display
@@ -19274,7 +19318,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "heatmap_scale_editor": self.btn_edit_scale.isChecked(),
             "recording_groups": self.recording_groups.to_state(),
             "group_view": {"enabled": self.cb_group_view.isChecked(),
-                           "display": str(self.combo_group_display.currentData() or "all")},
+                           "display": str(self.combo_group_display.currentData() or "all"),
+                           "hidden": sorted(self._hidden_groups())},
             "dashboard_panels": self.dashboard_panels.state(),
             "style": dict(self._style),
         }
@@ -19561,6 +19606,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     self.cb_group_view.setChecked(bool(view.get("enabled", False)))
                     index = self.combo_group_display.findData(str(view.get("display", "all")))
                     self.combo_group_display.setCurrentIndex(max(0, index))
+                self._hidden_group_ids = {str(value) for value in (view.get("hidden") or [])}
             if "dashboard_panels" in data:
                 self.dashboard_panels.set_state(data.get("dashboard_panels"))
             self._update_group_view_hint()
