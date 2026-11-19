@@ -120,15 +120,20 @@ class OnsetTableDetectionTests(unittest.TestCase):
         self.assertEqual(found["onsets"]["escape"].size, 0)
         self.assertEqual(found["report"]["ignored_columns"], ["Unnamed: 0"])
 
+    def test_times_in_any_order_are_sorted(self):
+        """Times listed out of order (as typed by hand) are accepted and sorted."""
+        found = detect_onset_table(pd.DataFrame({"injection": [5.6, 15.6, 315.], "death": [200., 210., 60.]}))
+        np.testing.assert_equal(found["onsets"]["death"], [60, 200, 210])
+        found = detect_onset_table(pd.DataFrame({"injection": [245., 454., 300.]}))
+        np.testing.assert_equal(found["onsets"]["injection"], [245, 300, 454])
+
     def test_sampled_tables_keep_existing_parser(self):
-        """Clocks, 0/1 states, gaps, unsorted lists, frame counters and text are rejected."""
+        """Clocks, 0/1 states, gaps, negative values, frame counters and text are rejected."""
         rejected = {
             "clock": pd.DataFrame({"time": [0., 1., 2.], "x": [1., 2., 3.]}),
             "binary": pd.DataFrame({"groom": [0, 0, 1], "rear": [0, 1, 1]}),
             "interior gap": pd.DataFrame({"a": [1., np.nan, 3.]}),
-            "unsorted": pd.DataFrame({"a": [3., 2., 9.]}),
-            "repeated": pd.DataFrame({"a": [3., 3., 9.]}),
-            "continuous": pd.DataFrame({"speed": [1., 3., 2., 5.]}),
+            "negative": pd.DataFrame({"a": [1., -2., 3.]}),
             "frame counter": pd.DataFrame({"frame": [0, 1, 2], "t_ms": [0, 33, 66]}),
             "text": pd.DataFrame({"a": ["start", "stop"]}),
             "booleans": pd.DataFrame({"a": [False, True]}),

@@ -103,16 +103,16 @@ def detect_onset_table(df):
 
     1. No recognized recording clock column (time, Trial time, timestamp...).
     2. Every filled cell is a number or an elapsed ``hh:mm:ss`` / ``mm:ss`` time.
-    3. Within each column, onsets strictly increase down the rows and blank
+    3. Times are non-negative seconds, in any order (sorted on load); blank
        cells only pad the end of a shorter column (no interior gaps).
     4. At least one column holds a value other than 0/1; an all-0/1 table is a
        binary state table.
     5. No column is labelled as a frame, sample, row or ID counter. An unnamed
        0..n-1 or 1..n column (a saved DataFrame index) is ignored.
 
-    A named but empty column is kept as a behavior with zero onsets. Values are
-    returned exactly as written (seconds, in the file's own time origin); no
-    sorting, rounding, deduplication or clock shift is applied.
+    A named but empty column is kept as a behavior with zero onsets. Values keep
+    the file's own time origin (seconds); they are only sorted, never rounded,
+    deduplicated or shifted.
 
     Returns ``None`` when any rule fails, otherwise
     ``{"onsets": {label: ndarray}, "report": {...}}``.
@@ -145,8 +145,8 @@ def detect_onset_table(df):
         if not filled[:last + 1].all():
             return None  # interior blanks: sampled column with missing samples
         column = values[:last + 1]
-        if column.size > 1 and np.any(np.diff(column) <= 0):
-            return None  # not a chronological onset list
+        if np.any(column < 0):
+            return None  # times in seconds are never negative
         if unnamed:
             if _is_row_counter(column):
                 ignored.append(str(name))
@@ -159,7 +159,8 @@ def detect_onset_table(df):
             return None  # two headers collapse to the same label
         if not np.all((column == 0) | (column == 1)):
             all_binary = False
-        onsets[label] = column.copy()
+        # Times may be listed in any order; events are used chronologically.
+        onsets[label] = np.sort(column)
     if not any(values.size for values in onsets.values()) or all_binary:
         return None
     return {"onsets": onsets,

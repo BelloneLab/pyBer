@@ -689,7 +689,7 @@ def _onset_table_info(detected: Dict[str, Any], identity_report: Dict[str, Any])
 def _behavior_table_info(df, parse_mode: str, fps: float, *, identity_chooser=None) -> Dict[str, Any]:
     """Infer a table once and adapt it to the existing behavior/PSTH interface.
 
-    In the default (auto-detect) mode, a table whose columns are chronological
+    In the default (auto-detect) mode, a table whose columns are
     onset lists is recognized and loaded as event timestamps; every other table
     keeps the binary-state / trajectory inference.
     """
@@ -1993,7 +1993,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_dio_polarity = QtWidgets.QLabel("A/D polarity")
         self.lbl_dio_align = QtWidgets.QLabel("A/D align")
 
-        self.btn_load_beh = QtWidgets.QPushButton("Load behavior CSV/XLSX...")
+        self.btn_load_beh = QtWidgets.QPushButton("Add events (CSV/XLSX)...")
         self.btn_load_beh.setProperty("class", "compactSmall")
         self.btn_load_beh.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
         self.btn_load_beh.setToolTip(
@@ -2017,7 +2017,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.combo_behavior_file_type.setToolTip(
             "Choose how behavior files are parsed.\n"
             "Auto reads 0/1 state columns against the file's time column, and recognizes\n"
-            "tables whose columns list onset times (one column per behavior, chronological,\n"
+            "tables whose columns list onset times in s (one column per behavior, any order,\n"
             "shorter columns padded with blanks) as event timestamps.\n"
             "Timestamps mode reads every column as event times, in any order."
         )
@@ -2117,7 +2117,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "Processed recordings", "Add processed files (CSV/H5); several can be selected",
             "Remove the selected recordings from the list (files on disk are untouched)")
         beh_header, self.lbl_behavior_list, self.btn_add_behaviors, self.btn_remove_behavior_list = _list_header(
-            "Behaviors", "Add behavior files (CSV/XLSX); several can be selected",
+            "Behaviors", "Add events files (CSV/XLSX): 0/1 states, MAMIR, EthoVision or time lists; several can be selected",
             "Remove the selected behavior files from the list (files on disk are untouched)")
         self.btn_add_processed.clicked.connect(self._add_processed_files)
         self.btn_add_behaviors.clicked.connect(self._load_behavior_files)
@@ -4211,7 +4211,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.act_save_project = self.menu_action_load.addAction("Save project (.h5)")
         self.act_load_project = self.menu_action_load.addAction("Load project (.h5)")
         self.menu_action_load.addSeparator()
-        self.act_load_behavior = self.menu_action_load.addAction("Load behavior CSV/XLSX")
+        self.act_load_behavior = self.menu_action_load.addAction("Add events (CSV/XLSX)")
         self.menu_action_recent = self.menu_action_load.addMenu("Load recent")
         self.menu_recent_processed = self.menu_action_recent.addMenu("Processed files")
         self.menu_recent_behavior = self.menu_action_recent.addMenu("Behavior files")
@@ -11612,7 +11612,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if paths is None:
             paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
                 self, f"Add {category} data", start_dir,
-                "Behavior and zone files (*.csv *.xlsx)")
+                "Event files (*.csv *.xlsx)")
         if not paths:
             return
         import pandas as pd
@@ -11995,9 +11995,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 pass
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
-            "Load behavior CSV/XLSX",
+            "Add events (CSV/XLSX)",
             start_dir,
-            "Behavior files (*.csv *.xlsx)",
+            "Event files (*.csv *.xlsx)",
         )
         if not paths:
             return
@@ -12555,7 +12555,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             _clear_spatial("Load processed files to compute spatial heatmap.")
             return
         if not self._behavior_sources:
-            _clear_spatial("Load behavior file(s) with trajectory columns.")
+            _clear_spatial("Add events file(s) with trajectory columns.")
             return
 
         x_col = self.combo_spatial_x.currentText().strip()
@@ -12952,7 +12952,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         rows = sorted(file_list.row(item) for item in file_list.selectedItems())
         count = file_list.count()
         menu = QtWidgets.QMenu(file_list)
-        menu.addAction("Add processed files..." if processed else "Add behavior files...",
+        menu.addAction("Add processed files..." if processed else "Add events...",
                        self._add_processed_files if processed else self._load_behavior_files)
         remove = menu.addAction(f"Remove selected ({len(rows)})" if rows else "Remove selected",
                                 self._remove_selected_preprocessed if processed else self._remove_selected_behaviors)
@@ -13927,7 +13927,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         seen.add(key)
                         names.append((f"{source_key}: {name}", "external", f"{source_key}::{name}"))
             if not names:
-                self.combo_sync_camera_column.addItem("Load behavior, Sync file, or LED video first", "")
+                self.combo_sync_camera_column.addItem("Add events, a Sync file, or an LED video first", "")
             else:
                 for label, kind, name in names:
                     self.combo_sync_camera_column.addItem(label, f"{kind}::{name}")

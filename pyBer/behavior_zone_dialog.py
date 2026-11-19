@@ -431,7 +431,7 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         selection_row = QtWidgets.QHBoxLayout(self._selection_group)
         selection_row.setContentsMargins(0, 0, 0, 0)
         selection_row.setSpacing(4)
-        self.add_file_button = QtWidgets.QPushButton("Add behavior file…")
+        self.add_file_button = QtWidgets.QPushButton("Add events…")
         self.add_file_button.clicked.connect(lambda _checked=False: self._load("behavior"))
         search = QtWidgets.QLineEdit()
         search.setPlaceholderText("Filter behaviors")

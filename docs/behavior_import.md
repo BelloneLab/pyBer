@@ -1,6 +1,6 @@
 # Behavior and trajectory imports
 
-In Postprocessing, choose **Setup > Behavior / Events > Load behavior CSV/XLSX**.
+In Postprocessing, choose **Setup > Behavior / Events > Add events (CSV/XLSX)**.
 This familiar action now detects MAMIR behavior/zone CSVs and EthoVision
 workbooks within the existing postprocessing dashboard. For Pykaboo
 metadata, keep the default **Auto (0/1 states or onset columns)** file type and
@@ -32,13 +32,13 @@ A table is read as onsets only if:
 
 - it has no recognized clock column (`time`, `Trial time`, `timestamp...`);
 - every filled cell is a number (or elapsed time);
-- each column increases strictly from top to bottom, with blanks only after its
-  last onset;
+- times are seconds (not negative), in any order (they are sorted on load),
+  with blanks only after a column's last value;
 - not every column is 0/1 (that is a binary state table);
 - no column is a frame, sample, row or ID counter (an unnamed `0..n-1` index
   column written by pandas is ignored).
 
-If your list is not chronological or has blank rows in the middle, choose
+If your list has blank rows in the middle, choose
 **Timestamps per behavior** explicitly; that mode reads any column as event
 times in any order.
 
@@ -92,7 +92,7 @@ other event-list tables should use **Timestamps** mode.
 ## Zone and behavior analysis
 
 In Postprocessing, load the processed fiber recording and use the existing
-Setup **Load behavior CSV/XLSX** action. The toolbar's **Zone / Behavior**
+Setup **Add events (CSV/XLSX)** action. The toolbar's **Zone / Behavior**
 selector chooses the analysis. **Zone** retains the established trace,
 PSTH heatmap, alignment controls and pre/post metrics. **Behavior** adds a
 before/during/after comparison for scored social or individual behaviors above
