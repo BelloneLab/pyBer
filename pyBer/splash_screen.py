@@ -26,9 +26,11 @@ What the animation shows
 Each simulated calcium transient launches a pulse of light at the implant
 on the mouse's head. The pulse travels up the fiber and, when it reaches the
 top, the transient appears at the writing head of the scrolling trace.
-Events, amplitudes and timing are deterministic (fixed seed). The colour of
-the light and of the trace is one of ``THEMES``, drawn at random at every
-launch (never the same twice in a row).
+The sequence of transients is random and different at every launch, and it
+builds up: transients grow and come faster as loading nears its end (paced by
+the loading time measured at the previous launch). The colour of the light
+and of the trace is one of ``THEMES``, also drawn at random at every launch
+(never the same twice in a row).
 
 Why it is crisp
 ---------------
@@ -65,6 +67,7 @@ TRACE_GAIN = 44                    # pixels for a transient of amplitude 1
 TRACE_HEAD_X = CARD_W - 46         # x of the writing head ("now")
 TRACE_WINDOW_S = 5.2               # seconds of signal visible left of the head
 TRACE_FADE_FRACTION = 0.24         # left part of the trace that fades out
+HEAD_FILL_FADE_PX = 70             # the fill under the curve melts away before the head
 # Trace strokes, widest first: (width, opacity 0-255, 0 = glow colour / 1 = core colour)
 TRACE_LAYERS = ((15.0, 13, 0), (9.5, 24, 0), (5.6, 46, 0), (3.2, 96, 0), (1.7, 255, 1))
 
@@ -72,8 +75,15 @@ TAU_RISE_S, TAU_DECAY_S = 0.07, 0.60   # transient kinetics
 EVENT_GAP_S = (0.75, 2.0)          # random interval between transients
 DOUBLET_PROBABILITY = 0.22         # chance of a closely following transient
 DOUBLET_GAP_S = (0.26, 0.40)
-EVENT_AMPLITUDE = (0.55, 1.0)
-MODEL_SEED = 11
+EVENT_AMPLITUDE = (0.55, 1.0)      # random size of a transient, before the build-up below
+MODEL_SEED = 11                    # sequence used when no seed is given (tests, previews)
+# Build-up toward the end of loading: transients grow and come faster as the
+# launch progresses (progress 0 = splash appears, 1 = expected end of loading).
+GROWTH_START, GROWTH_END = 0.50, 1.65      # amplitude multiplier at progress 0 and 1
+GAP_SCALE_START, GAP_SCALE_END = 1.20, 0.62    # interval multiplier at progress 0 and 1
+DEFAULT_LOAD_S = 8.0               # expected loading time before one has been measured
+LOAD_S_LIMITS = (3.0, 90.0)        # accepted range of a remembered loading time
+PULSE_MAX_STRENGTH = 1.25          # light pulses saturate here (the trace keeps growing)
 KNOT_STEP_S = 0.20                 # spacing of curve knots on smooth stretches
 # Extra knots after each transient onset, where the curve bends fastest.
 KNOT_OFFSETS_S = (0.0, 0.03, 0.07, 0.12, 0.18, 0.26, 0.36)
@@ -198,8 +208,9 @@ class SignalModel:
     trace be drawn as smooth cubic curves instead of a polyline.
     """
 
-    def __init__(self, seed: int = MODEL_SEED) -> None:
+    def __init__(self, seed: int = MODEL_SEED, expected_load_s: float = DEFAULT_LOAD_S) -> None:
         self._rng = random.Random(seed)
+        self.expected_load_s = max(0.5, float(expected_load_s))
         self._times: List[float] = []
         self._amps: List[float] = []
         self._next = 0.4
@@ -213,12 +224,21 @@ class SignalModel:
     def _extend(self, until: float) -> None:
         rng = self._rng
         while self._next <= until:
+            progress = self.progress(self._next)
+            eased = progress * progress * (3.0 - 2.0 * progress)
+            growth = GROWTH_START + (GROWTH_END - GROWTH_START) * eased
+            pace = GAP_SCALE_START + (GAP_SCALE_END - GAP_SCALE_START) * eased
             self._times.append(self._next)
-            self._amps.append(rng.uniform(*EVENT_AMPLITUDE))
+            self._amps.append(rng.uniform(*EVENT_AMPLITUDE) * growth)
             if rng.random() < DOUBLET_PROBABILITY:
                 self._next += rng.uniform(*DOUBLET_GAP_S)
             else:
-                self._next += rng.uniform(*EVENT_GAP_S)
+                self._next += rng.uniform(*EVENT_GAP_S) * pace
+
+    def progress(self, t: float) -> float:
+        """Loading progress at animation time t: 0 when the splash appears, 1 at the
+        expected end of loading (it stays at 1 if loading takes longer)."""
+        return max(0.0, min(1.0, (t - START_T) / self.expected_load_s))
 
     def events_between(self, start: float, stop: float) -> List[Tuple[float, float]]:
         """Transients arriving in [start, stop], oldest first."""
@@ -279,7 +299,7 @@ class SignalModel:
         return kept
 
 
-_CLIP_LIMIT, _CLIP_KNEE = 1.12, 0.22
+_CLIP_LIMIT, _CLIP_KNEE = 1.72, 0.22
 
 
 def _soft_clip(value: float, slope: float = 0.0) -> Tuple[float, float]:
@@ -320,11 +340,12 @@ def _round_pen(brush, width: float) -> QtGui.QPen:
 class SplashArt:
     """Draws the splash. ``paint(painter, t)`` renders the frame at time t."""
 
-    def __init__(self, dpr: float = 1.0, theme: int = 0) -> None:
+    def __init__(self, dpr: float = 1.0, theme: int = 0, seed: int = MODEL_SEED,
+                 expected_load_s: float = DEFAULT_LOAD_S) -> None:
         self.dpr = max(1.0, float(dpr))
         self.theme_index = int(theme) % len(THEMES)
         self.theme = THEMES[self.theme_index]
-        self.model = SignalModel()
+        self.model = SignalModel(seed, expected_load_s)
         self.card_path = QtGui.QPainterPath()
         self.card_path.addRoundedRect(QtCore.QRectF(1, 1, CARD_W - 2, CARD_H - 2), CARD_RADIUS, CARD_RADIUS)
         self.glow_clip = QtGui.QPainterPath()
@@ -341,8 +362,9 @@ class SplashArt:
         span = self.fiber_bottom - self.fiber_top
         self.fiber_heights = [(self.fiber_bottom - point.y()) / span for point in self.fiber_points]
         self.static = self._build_static()
-        self.band_top = TRACE_BASE_Y - int(TRACE_GAIN * 1.5) - 12
+        self.band_top = TRACE_BASE_Y - int(TRACE_GAIN * (_CLIP_LIMIT + _CLIP_KNEE)) - 14
         self.fade = self._build_left_fade()
+        self.head_fade = self._build_head_fade()
 
     # -- construction --------------------------------------------------------
     def _new_pixmap(self, width: int, height: int) -> QtGui.QPixmap:
@@ -437,6 +459,25 @@ class SplashArt:
         p.end()
         return pix
 
+    def _build_head_fade(self) -> QtGui.QPixmap:
+        """Background copy that melts the fill under the curve just before the
+        writing head, so tall transients do not end in a vertical edge there."""
+        width = HEAD_FILL_FADE_PX + 2
+        height = CARD_H - self.band_top
+        left = TRACE_HEAD_X - HEAD_FILL_FADE_PX
+        pix = self._new_pixmap(width, height)
+        p = QtGui.QPainter(pix)
+        p.drawPixmap(QtCore.QPointF(0, 0), self.static,
+                     QtCore.QRectF(left * self.dpr, self.band_top * self.dpr, width * self.dpr, height * self.dpr))
+        mask = QtGui.QLinearGradient(0, 0, HEAD_FILL_FADE_PX, 0)
+        for step in range(11):
+            x = step / 10.0
+            mask.setColorAt(x, QtGui.QColor(0, 0, 0, int(255 * x * x * (3.0 - 2.0 * x))))
+        p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_DestinationIn)
+        p.fillRect(QtCore.QRectF(0, 0, width, height), mask)
+        p.end()
+        return pix
+
     def _build_left_fade(self) -> QtGui.QPixmap:
         """Copy of the static background that dissolves the trace toward the left edge."""
         width = int(CARD_W * TRACE_FADE_FRACTION)
@@ -515,6 +556,7 @@ class SplashArt:
         fill.setColorAt(0.6, _rgba(theme.deep, 16))
         fill.setColorAt(1.0, _rgba(theme.deep, 0))
         p.fillPath(area, fill)
+        p.drawPixmap(QtCore.QPointF(TRACE_HEAD_X - HEAD_FILL_FADE_PX, self.band_top), self.head_fade)
 
         # Glow: a stack of real strokes, wide and faint to narrow and bright,
         # added as light; then the crisp core line.
@@ -614,6 +656,7 @@ class SplashArt:
             p.drawPath(self.fiber_path)
 
         for arrival, amp in self.model.events_between(t - 1.2, t + FIBER_TRAVEL_S + 0.3):
+            amp = min(amp, PULSE_MAX_STRENGTH)
             launch = arrival - FIBER_TRAVEL_S
             since_launch = t - launch
             head = since_launch / FIBER_TRAVEL_S      # 0 = implant, 1 = optics
@@ -660,12 +703,47 @@ def _screen_dpr() -> float:
         return 1.0
 
 
-def build_branded_splash(theme: Optional[int] = None) -> Optional[QtGui.QPixmap]:
+def new_seed() -> int:
+    """Seed of this launch's transient sequence (a different sequence every time)."""
+    return random.SystemRandom().randrange(1, 2 ** 31)
+
+
+def _load_time_path() -> str:
+    return os.path.join(os.path.dirname(_theme_memory_path()), "splash_load_seconds.txt")
+
+
+def expected_load_seconds() -> float:
+    """Loading time measured at the previous launch (used to pace the build-up)."""
+    try:
+        with open(_load_time_path(), "r", encoding="utf-8") as stream:
+            seconds = float(stream.read().strip())
+        if LOAD_S_LIMITS[0] <= seconds <= LOAD_S_LIMITS[1]:
+            return seconds
+    except (OSError, ValueError):
+        pass
+    return DEFAULT_LOAD_S
+
+
+def remember_load_seconds(seconds: float) -> None:
+    try:
+        seconds = max(LOAD_S_LIMITS[0], min(LOAD_S_LIMITS[1], float(seconds)))
+        os.makedirs(os.path.dirname(_load_time_path()), exist_ok=True)
+        with open(_load_time_path(), "w", encoding="utf-8") as stream:
+            stream.write(f"{seconds:.2f}")
+    except (OSError, ValueError):
+        pass
+
+
+def build_branded_splash(theme: Optional[int] = None, seed: Optional[int] = None,
+                         expected_load_s: Optional[float] = None) -> Optional[QtGui.QPixmap]:
     """Static splash frame (the first frame of the animation) in the given or a
-    random colour theme. Falls back to the raw logo if anything fails."""
+    random colour theme and transient sequence. Falls back to the raw logo if
+    anything fails."""
     try:
         index = pick_theme(remember=False) if theme is None else int(theme)
-        return SplashArt(_screen_dpr(), index).render(START_T)
+        return SplashArt(_screen_dpr(), index, new_seed() if seed is None else int(seed),
+                         expected_load_seconds() if expected_load_s is None else expected_load_s
+                         ).render(START_T)
     except Exception:
         try:
             icon_path = splash_logo_path()
@@ -709,7 +787,8 @@ class ParentWatch:
 class AnimatedSplashWindow(QtWidgets.QWidget):
     """Frameless, always-on-top window that plays the splash animation."""
 
-    def __init__(self, parent_pid: int = 0, stop_path: str = "", theme: int = 0) -> None:
+    def __init__(self, parent_pid: int = 0, stop_path: str = "", theme: int = 0,
+                 seed: int = MODEL_SEED, expected_load_s: float = DEFAULT_LOAD_S) -> None:
         super().__init__(None, QtCore.Qt.WindowType.SplashScreen
                          | QtCore.Qt.WindowType.FramelessWindowHint
                          | QtCore.Qt.WindowType.WindowStaysOnTopHint
@@ -717,7 +796,7 @@ class AnimatedSplashWindow(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setFixedSize(CARD_W, CARD_H)
-        self.art = SplashArt(_screen_dpr(), theme)
+        self.art = SplashArt(_screen_dpr(), theme, seed, expected_load_s)
         self.stop_path = stop_path
         self.watch = ParentWatch(parent_pid)
         self.clock = QtCore.QElapsedTimer()
@@ -791,7 +870,7 @@ def run_helper(argv: Sequence[str]) -> int:
     appearance ends the animation), ``--pos X,Y`` (top-left corner),
     ``--theme N`` (colour theme; random when absent).
     """
-    options = {"--pid": "0", "--stop": "", "--pos": "", "--theme": ""}
+    options = {"--pid": "0", "--stop": "", "--pos": "", "--theme": "", "--seed": "", "--expect": ""}
     args = list(argv)
     for index, token in enumerate(args):
         if token in options and index + 1 < len(args):
@@ -811,7 +890,15 @@ def run_helper(argv: Sequence[str]) -> int:
         theme = int(options["--theme"])
     except ValueError:
         theme = pick_theme()
-    window = AnimatedSplashWindow(pid, options["--stop"], theme)
+    try:
+        seed = int(options["--seed"])           # transient sequence of this launch
+    except ValueError:
+        seed = new_seed()
+    try:
+        expected = float(options["--expect"])   # expected loading time (s)
+    except ValueError:
+        expected = expected_load_seconds()
+    window = AnimatedSplashWindow(pid, options["--stop"], theme, seed, expected)
     try:
         x, y = (int(float(v)) for v in options["--pos"].split(","))
         window.move(x, y)
@@ -835,10 +922,15 @@ def run_helper(argv: Sequence[str]) -> int:
 class StartupSplash(QtWidgets.QSplashScreen):
     """Static first frame; owns the helper process that animates on top of it."""
 
-    def __init__(self, pixmap: QtGui.QPixmap, theme: int = 0) -> None:
+    def __init__(self, pixmap: QtGui.QPixmap, theme: int = 0, seed: int = MODEL_SEED,
+                 expected_load_s: float = DEFAULT_LOAD_S) -> None:
         super().__init__(pixmap, QtCore.Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.theme = int(theme)
+        self.seed = int(seed)
+        self.expected_load_s = float(expected_load_s)
+        import time
+        self._shown_at = time.monotonic()
         self._helper = None
         self._stop_path = ""
 
@@ -854,7 +946,8 @@ class StartupSplash(QtWidgets.QSplashScreen):
                 os.remove(self._stop_path)
             corner = self.geometry().topLeft()
             arguments = ["--pid", str(os.getpid()), "--stop", self._stop_path,
-                         "--pos", f"{corner.x()},{corner.y()}", "--theme", str(self.theme)]
+                         "--pos", f"{corner.x()},{corner.y()}", "--theme", str(self.theme),
+                         "--seed", str(self.seed), "--expect", f"{self.expected_load_s:.2f}"]
             if getattr(sys, "frozen", False):
                 command = [sys.executable, HELPER_FLAG, *arguments]
             else:
@@ -898,6 +991,9 @@ class StartupSplash(QtWidgets.QSplashScreen):
                 pass
 
     def finish(self, window) -> None:
+        # Remember how long loading took, to pace the build-up of the next launch.
+        import time
+        remember_load_seconds(time.monotonic() - self._shown_at)
         self.stop_animation()
         super().finish(window)
 
@@ -937,11 +1033,11 @@ def show_early_splash() -> Optional[QtWidgets.QSplashScreen]:
         # application default before creating even the startup splash.
         from app_icon import install_application_icon
         install_application_icon(app)
-        theme = pick_theme()
-        pix = build_branded_splash(theme)
+        theme, seed, expected = pick_theme(), new_seed(), expected_load_seconds()
+        pix = build_branded_splash(theme, seed, expected)
         if pix is None or pix.isNull():
             return None
-        splash = StartupSplash(pix, theme)
+        splash = StartupSplash(pix, theme, seed, expected)
         splash.setWindowIcon(app.windowIcon())
         splash.show()
         app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)

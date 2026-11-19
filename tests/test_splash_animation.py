@@ -90,6 +90,47 @@ class SplashArtTests(unittest.TestCase):
         self.assertGreater(colour.red(), colour.green() + 40)
         self.assertGreater(colour.red(), colour.blue() + 40)
 
+    def test_transient_sequence_is_random_per_launch_and_builds_up(self):
+        """A new seed gives a new sequence; transients grow and quicken as loading ends."""
+        seeds = {splash.new_seed() for _ in range(20)}
+        self.assertGreater(len(seeds), 15)
+        first = splash.SignalModel(101, 8.0).events_between(0, 40)
+        self.assertEqual(first, splash.SignalModel(101, 8.0).events_between(0, 40))
+        self.assertNotEqual(first, splash.SignalModel(202, 8.0).events_between(0, 40))
+        start = splash.START_T
+        for expected in (4.0, 8.0, 20.0):
+            early, late, early_gaps, late_gaps = [], [], [], []
+            for seed in range(1, 41):
+                model = splash.SignalModel(seed, expected)
+                before = model.events_between(start - 6.0, start + 0.15 * expected)
+                after = model.events_between(start + 0.9 * expected, start + 0.9 * expected + 8.0)
+                early += [amp for _t, amp in before]
+                late += [amp for _t, amp in after]
+                early_gaps.append(len(before) / (6.0 + 0.15 * expected))
+                late_gaps.append(len(after) / 8.0)
+            mean = lambda values: sum(values) / len(values)
+            self.assertGreater(mean(late), 2.2 * mean(early), expected)       # bigger spikes
+            self.assertGreater(max(late), 1.45)
+            self.assertLess(max(early), 0.75)
+            self.assertGreater(mean(late_gaps), 1.3 * mean(early_gaps), expected)   # and more of them
+        self.assertEqual(splash.SignalModel(5, 8.0).progress(start - 1), 0.0)
+        self.assertEqual(splash.SignalModel(5, 8.0).progress(start + 100), 1.0)
+
+    def test_loading_time_is_remembered_within_sane_limits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = splash._theme_memory_path
+            splash._theme_memory_path = lambda: str(Path(directory) / "theme.txt")
+            try:
+                self.assertEqual(splash.expected_load_seconds(), splash.DEFAULT_LOAD_S)
+                splash.remember_load_seconds(12.34)
+                self.assertAlmostEqual(splash.expected_load_seconds(), 12.34)
+                splash.remember_load_seconds(0.2)                 # absurdly short: clamped
+                self.assertEqual(splash.expected_load_seconds(), splash.LOAD_S_LIMITS[0])
+                splash.remember_load_seconds(5000)
+                self.assertEqual(splash.expected_load_seconds(), splash.LOAD_S_LIMITS[1])
+            finally:
+                splash._theme_memory_path = original
+
     def test_theme_is_random_and_never_repeats_the_previous_launch(self):
         with tempfile.TemporaryDirectory() as directory:
             memory = str(Path(directory) / "theme.txt")
@@ -125,7 +166,7 @@ class SplashHelperProcessTests(unittest.TestCase):
         stats = Path(directory) / "stats.txt"
         env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYBER_SPLASH_STATS=str(stats))
         process = subprocess.Popen([sys.executable, str(HELPER), splash.HELPER_FLAG, "--pid", str(pid),
-                                    "--stop", str(stop), "--pos", "10,10", "--theme", "3"], env=env)
+                                    "--stop", str(stop), "--pos", "10,10", "--theme", "3", "--seed", "77", "--expect", "6"], env=env)
         return process, stop, stats
 
     def test_helper_animates_then_stops_on_request(self):
