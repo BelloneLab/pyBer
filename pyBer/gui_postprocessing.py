@@ -19643,6 +19643,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     # explicit choice is kept.
                     if data.get("psth_behavior_metric_second", "ibi") == "ibi":
                         data["psth_behavior_metric_second"] = _DEFAULT_SECOND_BEHAVIOR_METRIC
+                # Every launch opens on the default view: events drawer closed
+                # and the event marker off (aligned on behavior). Projects and
+                # config files still restore whatever they saved.
+                data["event_kind"] = "zone"
+                data["show_injection"] = False
+                if data.get("align") in ("Injection", "Event marker"):
+                    data["align"] = "Behavior (CSV/XLSX)"
                 self._apply_settings(data)
             self._settings.setValue(_BEHAVIOR_PANEL_DEFAULT_KEY, True)
             if self._app_theme_mode == "dark" and not data.get("style", {}).get("postprocessing_preset"):

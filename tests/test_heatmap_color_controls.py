@@ -254,6 +254,40 @@ class PsthDefaultViewTests(unittest.TestCase):
         panel._restore_settings()
         self.assertEqual(panel.combo_psth_behavior_metric_second.currentData(), "frequency")
 
+    def test_launch_opens_with_drawer_closed_and_marker_off(self):
+        import json
+        panel = self.panel
+        settings = panel._collect_settings()
+        settings.update(event_kind="behavior", show_injection=True, align="Event marker")
+        panel._settings.setValue("postprocess_json", json.dumps(settings))
+        panel._restore_settings()
+        self.assertFalse(panel.btn_events_drawer.isChecked())
+        self.assertEqual(panel._event_category(), "zone")
+        self.assertFalse(panel.cb_injection.isChecked())
+        self.assertEqual(panel.combo_align.currentText(), "Behavior (CSV/XLSX)")
+        # A saved project/config still restores its own choice.
+        panel._apply_settings(settings)
+        self.assertTrue(panel.btn_events_drawer.isChecked())
+
+    def test_preprocessing_default_export_is_processed_output_only(self):
+        from gui_preprocessing import ParameterPanel
+        pre = ParameterPanel()
+        try:
+            for selection in (pre.export_selection(), None):
+                if selection is None:   # "Reset defaults" gives the same set
+                    pre.chk_export_raw.setChecked(True)
+                    pre.chk_export_dio.setChecked(True)
+                    pre._reset_defaults()
+                    selection = pre.export_selection()
+                self.assertTrue(selection.output)
+                self.assertFalse(any((selection.raw, selection.isobestic, selection.dio,
+                                      selection.baseline_sig, selection.baseline_ref)))
+                self.assertEqual(pre.list_export_outputs.checked_values(), [])
+                self.assertFalse(pre.auto_export_enabled())
+        finally:
+            pre.close()
+            pre.deleteLater()
+
 
 if __name__ == '__main__':
     unittest.main()

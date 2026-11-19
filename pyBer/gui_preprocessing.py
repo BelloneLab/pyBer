@@ -31,6 +31,12 @@ from sensor_registry import SENSOR_UNKNOWN
 from numeric_controls import with_slider, allow_form_wrapping
 from file_drop import install_file_drop
 
+# Default export set for the GUI (first launch and "Reset defaults"): the
+# processed output only, no extra outputs. ExportSelection() itself keeps every
+# column so the CLI and library exports are unchanged.
+GUI_DEFAULT_EXPORT = ExportSelection(raw=False, isobestic=False, output=True, dio=False,
+                                     baseline_sig=False, baseline_ref=False, output_modes=[])
+
 
 def _optimize_plot(w: pg.PlotWidget) -> None:
     w.setMenuEnabled(True)
@@ -2412,18 +2418,19 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.chk_auto_export.setToolTip(
             "Skip the folder picker and export all analog channels beside each source file."
         )
+        # Initial ticks come from GUI_DEFAULT_EXPORT (processed output only).
         self.chk_export_raw = QtWidgets.QCheckBox("Raw 465")
-        self.chk_export_raw.setChecked(True)
+        self.chk_export_raw.setChecked(GUI_DEFAULT_EXPORT.raw)
         self.chk_export_iso = QtWidgets.QCheckBox("Isobestic 405")
-        self.chk_export_iso.setChecked(True)
+        self.chk_export_iso.setChecked(GUI_DEFAULT_EXPORT.isobestic)
         self.chk_export_output = QtWidgets.QCheckBox("Processed output")
-        self.chk_export_output.setChecked(True)
+        self.chk_export_output.setChecked(GUI_DEFAULT_EXPORT.output)
         self.chk_export_dio = QtWidgets.QCheckBox("DIO / trigger")
-        self.chk_export_dio.setChecked(True)
+        self.chk_export_dio.setChecked(GUI_DEFAULT_EXPORT.dio)
         self.chk_export_baseline_sig = QtWidgets.QCheckBox("Baseline 465")
-        self.chk_export_baseline_sig.setChecked(True)
+        self.chk_export_baseline_sig.setChecked(GUI_DEFAULT_EXPORT.baseline_sig)
         self.chk_export_baseline_ref = QtWidgets.QCheckBox("Baseline 405")
-        self.chk_export_baseline_ref.setChecked(True)
+        self.chk_export_baseline_ref.setChecked(GUI_DEFAULT_EXPORT.baseline_ref)
         self.list_export_channels = CheckableListWidget()
         self.list_export_channels.setMaximumHeight(84)
         self.list_export_channels.setMinimumHeight(54)
@@ -3164,7 +3171,7 @@ class ParameterPanel(QtWidgets.QGroupBox):
         self.cb_artifact.setChecked(True)
         self.cb_filtering.setChecked(True)
         self.cb_show_artifact_overlay.setChecked(True)
-        self.set_export_selection(ExportSelection())
+        self.set_export_selection(ExportSelection(**GUI_DEFAULT_EXPORT.to_dict()))
         self.set_export_output_modes([])
         self.chk_auto_export.setChecked(False)
         self._update_auto_export_controls()
