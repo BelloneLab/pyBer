@@ -608,11 +608,12 @@ class BehaviorImportGuiTests(unittest.TestCase):
         view.clear_selection_button.click()
         item = listing.findItems("grooming", QtCore.Qt.MatchFlag.MatchExactly)[0]
         rect = listing.visualItemRect(item)
-        # Compact chips: the whole chip stays one comfortable click target.
+        # Compact chips: the chip is one comfortable click target, except the
+        # small "+" at its right end, which opens the event list instead.
         self.assertGreaterEqual(rect.width(), 180)
         self.assertGreaterEqual(rect.height(), 30)
         QtTest.QTest.mouseClick(listing.viewport(), QtCore.Qt.MouseButton.LeftButton,
-                               pos=QtCore.QPoint(rect.right() - 10, rect.center().y()))
+                               pos=QtCore.QPoint(rect.right() - 40, rect.center().y()))
         self.assertEqual(view._selected_labels(), ["grooming"])
         view.searches["behavior"].setText("att")
         view.select_visible_button.click()

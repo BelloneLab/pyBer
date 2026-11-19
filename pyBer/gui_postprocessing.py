@@ -9848,18 +9848,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._schedule_psth()
             self._queue_settings_save()
 
-    def _open_event_list(self) -> None:
-        """Non-modal list of every behavior event (timing, duration) with hide/remove."""
-        from event_list_dialog import EventListWindow
-        window = getattr(self, "_event_list_window", None)
-        if window is None:
-            window = EventListWindow(self)
-            self._event_list_window = window
-        window.reload()
-        window.show()
-        window.raise_()
-        window.activateWindow()
-
     def _on_event_exclusions_changed(self) -> None:
         """Re-run everything that consumes events after a hide/remove/restore."""
         if not self._autosave_restoring:

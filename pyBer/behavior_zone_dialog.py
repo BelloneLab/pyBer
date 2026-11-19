@@ -186,6 +186,14 @@ class BehaviorPsthBar(QtWidgets.QWidget):
         panel.plot_avg.setLabel("bottom", f"Seconds from behavior {edge}")
 
 
+_EXPANDED_ROLE = QtCore.Qt.ItemDataRole.UserRole + 7
+
+
+def _plus_rect(chip: QtCore.QRect) -> QtCore.QRect:
+    """Click target of the small '+' inside a behavior chip (right end)."""
+    return QtCore.QRect(chip.right() - 26, chip.center().y() - 10, 20, 20)
+
+
 class BehaviorChoiceDelegate(QtWidgets.QStyledItemDelegate):
     """Large, theme-aware check targets without changing the item's check role."""
 
@@ -212,8 +220,17 @@ class BehaviorChoiceDelegate(QtWidgets.QStyledItemDelegate):
             painter.setPen(QtGui.QPen(option.palette.color(QtGui.QPalette.ColorRole.HighlightedText), 2))
             painter.drawLine(box.left() + 3, box.top() + 7, box.left() + 6, box.top() + 10)
             painter.drawLine(box.left() + 6, box.top() + 10, box.left() + 11, box.top() + 4)
+        # Small "+" (or "-" when open) at the right: opens this behavior's event list.
+        expanded = bool(index.data(_EXPANDED_ROLE))
+        plus = _plus_rect(option.rect)
+        painter.setPen(QtGui.QPen(option.palette.color(QtGui.QPalette.ColorRole.Text), 1.6))
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        center = plus.center()
+        painter.drawLine(center.x() - 4, center.y(), center.x() + 4, center.y())
+        if not expanded:
+            painter.drawLine(center.x(), center.y() - 4, center.x(), center.y() + 4)
         painter.setPen(option.palette.color(QtGui.QPalette.ColorRole.Text))
-        text_rect = rect.adjusted(28, 0, -6, 0)
+        text_rect = rect.adjusted(28, 0, -(plus.width() + 8), 0)
         text = option.fontMetrics.elidedText(str(index.data()), QtCore.Qt.TextElideMode.ElideRight, text_rect.width())
         painter.drawText(text_rect, QtCore.Qt.AlignmentFlag.AlignVCenter, text)
         painter.restore()
@@ -223,6 +240,7 @@ class BehaviorCheckList(QtWidgets.QListWidget):
     """Make the whole behavior row a check target, including its text."""
 
     heightChanged = QtCore.Signal()
+    eventsRequested = QtCore.Signal(str)
 
     def sizeHint(self):
         return QtCore.QSize(660, self._wanted_height())
@@ -254,6 +272,11 @@ class BehaviorCheckList(QtWidgets.QListWidget):
 
     def mousePressEvent(self, event) -> None:
         item = self.itemAt(event.position().toPoint())
+        if (event.button() == QtCore.Qt.MouseButton.LeftButton and item is not None
+                and _plus_rect(self.visualItemRect(item)).contains(event.position().toPoint())):
+            self.eventsRequested.emit(item.text())
+            event.accept()
+            return
         if event.button() == QtCore.Qt.MouseButton.LeftButton and item is not None:
             self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
             self.setCurrentItem(item)
@@ -448,15 +471,8 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self.combine_button = QtWidgets.QPushButton("Combine…")
         self.combine_button.setToolTip("Combine checked labels into one OR event; keep the originals.")
         self.combine_button.clicked.connect(panel._open_combine_events)
-        # Small "+" opens the list of every event (timing, duration) with hide/remove.
-        self.event_list_button = QtWidgets.QToolButton()
-        self.event_list_button.setText("+")
-        self.event_list_button.setAccessibleName("Event list")
-        self.event_list_button.setToolTip("List all events with onset, offset and duration; "
-                                          "right-click to hide or remove events.")
-        self.event_list_button.clicked.connect(panel._open_event_list)
         for widget in (self.add_file_button, search, self.select_visible_button,
-                       self.clear_selection_button, self.combine_button, self.event_list_button):
+                       self.clear_selection_button, self.combine_button):
             selection_row.addWidget(widget)
 
         # Internal mirrors use the existing Individual / Group and file pickers.
@@ -533,8 +549,15 @@ class BehaviorZonePanel(QtWidgets.QWidget):
                            "to add or remove it.")
         listing.itemChanged.connect(self._selection_changed)
         listing.heightChanged.connect(self._layout_changed)
+        listing.eventsRequested.connect(self._toggle_event_list)
         root.addWidget(listing)
         self.selectors["behavior"], self.searches["behavior"] = listing, search
+        # Inline event list of one behavior (opened by the chip's "+").
+        from event_list_dialog import EventListPanel
+        self.event_list = EventListPanel(panel)
+        self.event_list.closed.connect(lambda: self._toggle_event_list(""))
+        self.event_list.hide()
+        root.addWidget(self.event_list)
 
         self.timing_help = QtWidgets.QLabel()
         self.timing_help.setWordWrap(True)
@@ -994,10 +1017,20 @@ class BehaviorZonePanel(QtWidgets.QWidget):
                 listing.addItem(item)
             listing.blockSignals(False)
             self._filter(category, self.searches[category].text())
+        # Keep an open event list in sync with the rebuilt chips (or close it).
+        if not self.event_list.isHidden():
+            open_label = self.event_list.label
+            if open_label in names["behavior"] | names["zone"]:
+                listing = self.selectors["behavior"]
+                for index in range(listing.count()):
+                    listing.item(index).setData(_EXPANDED_ROLE, listing.item(index).text() == open_label)
+                self.event_list.reload()
+            else:
+                self.event_list.hide()
         # Filter and selection tools are only useful once behaviors exist.
         has_behaviors = self.selectors["behavior"].count() > 0
         for widget in (self.searches["behavior"], self.select_visible_button,
-                       self.clear_selection_button, self.combine_button, self.event_list_button):
+                       self.clear_selection_button, self.combine_button):
             widget.setVisible(has_behaviors)
         self._selection_group.adjustSize()
         self._refold_toolbar()
@@ -1019,6 +1052,22 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         if self._pending_arena_path:
             self.status.setText("Choose the fiber-associated arena in Setup to load its data.")
         self._queue_comparison()
+
+    def _toggle_event_list(self, label: str) -> None:
+        """Open the chip's event list under the chips; same chip (or close) hides it."""
+        listing = self.selectors["behavior"]
+        current = self.event_list.label if not self.event_list.isHidden() else ""
+        target = "" if not label or label == current else label
+        for index in range(listing.count()):
+            item = listing.item(index)
+            item.setData(_EXPANDED_ROLE, item.text() == target)
+        if target:
+            self.event_list.set_label(target)
+            self.event_list.show()
+        else:
+            self.event_list.hide()
+        listing.viewport().update()
+        self._layout_changed()
 
     def _selected_labels(self) -> list[str]:
         listing = self.selectors[self._category()]
