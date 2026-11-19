@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.57.2"><img src="https://img.shields.io/badge/release-v0.57.2-7c4dff" alt="v0.57.2 release"></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/tag/v0.58"><img src="https://img.shields.io/badge/release-v0.58-7c4dff" alt="v0.58 release"></a>
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-41cd52?logo=qt&logoColor=white" alt="PySide6 and pyqtgraph">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white" alt="Windows">
@@ -18,9 +18,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.57.2/pyBer-windows.exe"><strong>Download the Windows GUI (exe)</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.58/pyBer-windows.exe"><strong>Download the Windows GUI (exe)</strong></a>
   &nbsp;|&nbsp;
-  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.57.2/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
+  <a href="https://github.com/BelloneLab/pyBer/releases/download/v0.58/pyBer-cli-windows.exe"><strong>Download the Windows CLI</strong></a>
   &nbsp;|&nbsp;
   <a href="docs/index.md"><strong>Read the full guide</strong></a>
 </p>
@@ -236,7 +236,13 @@ The flagged table collects processing failures, excessive artifact load, poor fi
 | Processed data | Self-describing CSV with `.pyber.json` sidecar and HDF5 with embedded metadata. |
 | Reports | Preprocessing PNG, strict QC report images, batch summaries, flagged-recording tables, analysis CSVs, model tables, and publication figure exports. |
 
-Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.57.2 builds target Windows; source execution on other platforms is not part of the tested release path.
+Brutally honest limitation: pyBer does not currently read TDT `.tev` or Neurophotometrics `.sev` files natively. The previous README claimed it did. Convert those acquisitions to a supported CSV or HDF5 layout first. The packaged v0.58 builds target Windows; source execution on other platforms is not part of the tested release path.
+
+## What changed in v0.58
+
+- Add an optional injection time to each recording under **Setup → Recordings and groups**. Select **Injection** as the alignment source to compare photometry before and after injection, including recordings without behavior files.
+- For scored behavior, select events before or after injection or compare onset rates and time spent in behavior across both periods.
+- Projects and export manifests retain the entered times. See the [v0.58 release notes](docs/releases/v0.58.md).
 
 ## What changed in v0.57.2
 
