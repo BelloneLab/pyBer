@@ -608,8 +608,9 @@ class BehaviorImportGuiTests(unittest.TestCase):
         view.clear_selection_button.click()
         item = listing.findItems("grooming", QtCore.Qt.MatchFlag.MatchExactly)[0]
         rect = listing.visualItemRect(item)
-        self.assertGreaterEqual(rect.width(), 210)
-        self.assertGreaterEqual(rect.height(), 38)
+        # Compact chips: the whole chip stays one comfortable click target.
+        self.assertGreaterEqual(rect.width(), 180)
+        self.assertGreaterEqual(rect.height(), 30)
         QtTest.QTest.mouseClick(listing.viewport(), QtCore.Qt.MouseButton.LeftButton,
                                pos=QtCore.QPoint(rect.right() - 10, rect.center().y()))
         self.assertEqual(view._selected_labels(), ["grooming"])
@@ -653,6 +654,8 @@ class BehaviorImportGuiTests(unittest.TestCase):
         self.assertIn("grooming", panel.plot_heat.plotItem.titleLabel.text)
         self.assertIn("behavior end", bar.summary.text())
         self.assertIn("individual bouts", bar.summary.text())
+        # Let the comparison settle: it sizes itself when its results appear.
+        QtTest.QTest.qWait(400)
         sizes = panel._behavior_workspace.sizes()
         panel._behavior_workspace.moveSplitter(sizes[0] + 60, 1)
         self.app.processEvents()

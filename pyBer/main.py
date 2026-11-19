@@ -185,6 +185,7 @@ from gui_preprocessing import (
 from gui_sensors import SensorDialog
 from gui_postprocessing import PostProcessingPanel
 from numeric_controls import install_spinbox_scrubbers
+from adaptive_density import install_adaptive_density
 from file_drop import local_paths, expand_paths, create_drop_privilege_notice
 from onboarding import (
     ToastManager,
@@ -2913,6 +2914,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
                 scroll.setWidget(widget)
                 self._pre_section_scroll_hosts[key] = scroll
+                # Denser controls, then stacked rows, when the drawer is
+                # narrower than the page: nothing is cut off.
+                install_adaptive_density(scroll)
 
                 dock = Dock(title, area=self._pre_dockarea, closable=False)
                 dock.setObjectName(f"pre.da.{key}.dock")

@@ -18,6 +18,14 @@ from mamir_import import legacy_import_warning
 
 _COLUMNS = ("Scope", "Label", "Recordings", "Events", "Rejected", "Before",
             "During", "After", "During - before", "After - before")
+# Behavior chip grid cell (pixels) and how many chip rows show before scrolling.
+_CHIP_WIDTH = 190
+_CHIP_HEIGHT = 32
+_CHIP_MAX_ROWS = 2
+# Room kept for the status text before the toolbar folds onto two rows.
+_STATUS_MIN_WIDTH = 90
+# Smallest height given to the comparison plot, its legend and the table.
+_RESULTS_MIN_HEIGHT = 200
 _COLORS = ((89, 174, 255), (245, 153, 92), (124, 207, 151),
            (202, 153, 239), (240, 203, 99), (104, 210, 213))
 
@@ -67,21 +75,24 @@ class BehaviorPsthBar(QtWidgets.QWidget):
         self.collapse_button.toggled.connect(self._toggle_comparison)
         row.addWidget(self.collapse_button)
         root.addLayout(row)
-        self.summary = QtWidgets.QLabel()
-        self.summary.setWordWrap(True)
-        root.addWidget(self.summary)
+        # Second row: what the plots show (shortened to one line, complete in
+        # its tooltip) with the plot shortcuts beside it.
+        self.summary = ElidedLabel()
         navigation = QtWidgets.QHBoxLayout()
-        self.heat_button = QtWidgets.QPushButton("Show heatmap")
-        self.mean_button = QtWidgets.QPushButton("Show mean PSTH")
-        self.settings_button = QtWidgets.QPushButton("PSTH filters / normalization…")
+        navigation.setSpacing(4)
+        self.heat_button = QtWidgets.QPushButton("Heatmap")
+        self.heat_button.setToolTip("Scroll to the heatmap.")
+        self.mean_button = QtWidgets.QPushButton("Mean PSTH")
+        self.mean_button.setToolTip("Scroll to the mean PSTH.")
+        self.settings_button = QtWidgets.QPushButton("Filters…")
+        self.settings_button.setToolTip("PSTH filters and normalization.")
         self.heat_button.clicked.connect(lambda: self._show_plot(panel.plot_heat))
         self.mean_button.clicked.connect(lambda: self._show_plot(panel.plot_avg))
         self.settings_button.clicked.connect(lambda: panel._toggle_section_popup("psth", True))
+        navigation.addWidget(self.summary, 1)
         navigation.addWidget(self.heat_button)
         navigation.addWidget(self.mean_button)
         navigation.addWidget(self.settings_button)
-        navigation.addStretch(1)
-        navigation.addWidget(QtWidgets.QLabel("Drag the divider above to resize ↑"))
         root.addLayout(navigation)
         self.sync_controls()
 
@@ -122,8 +133,8 @@ class BehaviorPsthBar(QtWidgets.QWidget):
             return
         panel._behavior_comparison_scroll.setVisible(not collapsed and panel._event_category() == "behavior")
         self.collapse_button.setText("Show comparison" if collapsed else "Hide comparison")
-        if not collapsed:
-            panel._behavior_workspace.setSizes(panel._behavior_workspace_sizes)
+        if not collapsed and panel.behavior_zone_panel is not None:
+            panel.behavior_zone_panel.sync_workspace()
 
     def _show_plot(self, plot) -> None:
         panel = self.panel
@@ -179,13 +190,13 @@ class BehaviorChoiceDelegate(QtWidgets.QStyledItemDelegate):
     """Large, theme-aware check targets without changing the item's check role."""
 
     def sizeHint(self, option, index):
-        return QtCore.QSize(220, 40)
+        return QtCore.QSize(_CHIP_WIDTH, _CHIP_HEIGHT)
 
     def paint(self, painter, option, index) -> None:
         painter.save()
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         checked = index.data(QtCore.Qt.ItemDataRole.CheckStateRole) == QtCore.Qt.CheckState.Checked.value
-        rect = option.rect.adjusted(3, 3, -3, -3)
+        rect = option.rect.adjusted(2, 2, -2, -2)
         accent = option.palette.color(QtGui.QPalette.ColorRole.Highlight)
         fill = QtGui.QColor(accent)
         fill.setAlpha(65 if checked else 12)
@@ -193,16 +204,16 @@ class BehaviorChoiceDelegate(QtWidgets.QStyledItemDelegate):
         painter.setPen(QtGui.QPen(border, 2 if option.state & QtWidgets.QStyle.StateFlag.State_HasFocus else 1))
         painter.setBrush(fill)
         painter.drawRoundedRect(rect, 6, 6)
-        box = QtCore.QRect(rect.left() + 9, rect.center().y() - 10, 20, 20)
+        box = QtCore.QRect(rect.left() + 7, rect.center().y() - 7, 14, 14)
         painter.setPen(QtGui.QPen(border, 1.5))
         painter.setBrush(accent if checked else option.palette.color(QtGui.QPalette.ColorRole.Base))
         painter.drawRoundedRect(box, 3, 3)
         if checked:
             painter.setPen(QtGui.QPen(option.palette.color(QtGui.QPalette.ColorRole.HighlightedText), 2))
-            painter.drawLine(box.left() + 4, box.top() + 10, box.left() + 8, box.top() + 14)
-            painter.drawLine(box.left() + 8, box.top() + 14, box.left() + 16, box.top() + 5)
+            painter.drawLine(box.left() + 3, box.top() + 7, box.left() + 6, box.top() + 10)
+            painter.drawLine(box.left() + 6, box.top() + 10, box.left() + 11, box.top() + 4)
         painter.setPen(option.palette.color(QtGui.QPalette.ColorRole.Text))
-        text_rect = rect.adjusted(38, 0, -8, 0)
+        text_rect = rect.adjusted(28, 0, -6, 0)
         text = option.fontMetrics.elidedText(str(index.data()), QtCore.Qt.TextElideMode.ElideRight, text_rect.width())
         painter.drawText(text_rect, QtCore.Qt.AlignmentFlag.AlignVCenter, text)
         painter.restore()
@@ -211,8 +222,32 @@ class BehaviorChoiceDelegate(QtWidgets.QStyledItemDelegate):
 class BehaviorCheckList(QtWidgets.QListWidget):
     """Make the whole behavior row a check target, including its text."""
 
+    heightChanged = QtCore.Signal()
+
     def sizeHint(self):
-        return QtCore.QSize(660, 125)
+        return QtCore.QSize(660, self._wanted_height())
+
+    def _wanted_height(self) -> int:
+        """Height of the chip rows in use: one or two rows, never empty space."""
+        shown = sum(not self.item(index).isHidden() for index in range(self.count()))
+        per_row = max(1, self.viewport().width() // max(1, self.gridSize().width()))
+        rows = max(1, min(_CHIP_MAX_ROWS, -(-shown // per_row)))
+        return rows * max(1, self.gridSize().height()) + 2 * self.frameWidth() + 2
+
+    def fit_height(self) -> None:
+        """Resize to the rows in use and disappear while there is no behavior."""
+        has_items = self.count() > 0
+        height = self._wanted_height()
+        changed = self.isHidden() == has_items or self.maximumHeight() != height
+        self.setFixedHeight(height)
+        self.setVisible(has_items)
+        if changed:
+            self.heightChanged.emit()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # Chips per row depend on the width, so the row count can change.
+        QtCore.QTimer.singleShot(0, self.fit_height)
 
     def mousePressEvent(self, event) -> None:
         item = self.itemAt(event.position().toPoint())
@@ -233,6 +268,27 @@ class BehaviorCheckList(QtWidgets.QListWidget):
         super().mouseReleaseEvent(event)
 
 
+class ElidedLabel(QtWidgets.QLabel):
+    """One-line status: shortened with an ellipsis on screen, complete in the tooltip."""
+
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        self.setToolTip(text)
+        self.update()
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(60, self.fontMetrics().height() + 2)
+
+    def sizeHint(self):
+        return QtCore.QSize(200, self.fontMetrics().height() + 2)
+
+    def paintEvent(self, _event) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setPen(self.palette().color(QtGui.QPalette.ColorRole.PlaceholderText))
+        text = self.fontMetrics().elidedText(self.text(), QtCore.Qt.TextElideMode.ElideRight, self.width())
+        painter.drawText(self.rect(), QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft, text)
+
+
 class ComparisonPlotWidget(pg.PlotWidget):
     """Stable preferred size: an expanding plot must not inflate its scroll area."""
 
@@ -244,7 +300,96 @@ class BehaviorZonePanel(QtWidgets.QWidget):
     """Compare behavior bouts; zone analysis uses the established PSTH plots."""
 
     def sizeHint(self):
-        return QtCore.QSize(900, 420)
+        return QtCore.QSize(900, self.compact_height() if self.results_hidden() else 420)
+
+    def results_hidden(self) -> bool:
+        return not hasattr(self, "results_splitter") or self.results_splitter.isHidden()
+
+    def compact_height(self) -> int:
+        """Height of the toolbar and behavior chips alone (no plot, no table)."""
+        layout = self.layout()
+        if layout is None:
+            return 60
+        height = int(layout.sizeHint().height())
+        if not self.results_hidden():
+            height -= int(self.results_splitter.sizeHint().height()) + layout.spacing()
+        return max(30, height)
+
+    def _arrange_toolbar(self, folded: bool) -> None:
+        """Lay the toolbar out on one row, or on two when one is too narrow.
+
+        One row:  [selection] status ........ [windows and actions]
+        Two rows: [selection] status / [windows and actions]
+        """
+        if folded == self._toolbar_folded:
+            return
+        self._toolbar_folded = folded
+        first, second = self._toolbar_rows
+        for row in (first, second):
+            while row.count():
+                row.takeAt(0)
+        first.addWidget(self._selection_group)
+        first.addWidget(self.status, 1)
+        if folded:
+            second.addWidget(self._action_group)
+            second.addStretch(1)
+        else:
+            first.addWidget(self._action_group)
+
+    def _refold_toolbar(self) -> None:
+        """Use one toolbar row whenever the current width allows it."""
+        needed = (self._selection_group.sizeHint().width()
+                  + self._action_group.sizeHint().width() + _STATUS_MIN_WIDTH)
+        folded = self.width() < needed
+        if folded != self._toolbar_folded:
+            self._arrange_toolbar(folded)
+            QtCore.QTimer.singleShot(0, self._layout_changed)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._refold_toolbar()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        QtCore.QTimer.singleShot(0, self.sync_workspace)
+
+    def _layout_changed(self, *_args) -> None:
+        try:
+            self.updateGeometry()
+        except RuntimeError:
+            return  # deferred call arrived after the panel was closed
+        self.sync_workspace()
+
+    def _set_results_visible(self, visible: bool) -> None:
+        """Show the plot and table only while a result exists."""
+        if self.results_splitter.isHidden() != visible:
+            return
+        self.results_splitter.setVisible(visible)
+        self._layout_changed()
+
+    def sync_workspace(self) -> None:
+        """Give the comparison only the height it needs; plots get the rest.
+
+        Without results the comparison shrinks to its toolbar and chips. With
+        results it takes the height the user last chose with the divider.
+        """
+        panel = self.panel
+        workspace = getattr(panel, "_behavior_workspace", None)
+        scroll = getattr(panel, "_behavior_comparison_scroll", None)
+        try:
+            if workspace is None or scroll is None or scroll.isHidden():
+                return
+        except RuntimeError:
+            return  # deferred call arrived after the panel was closed
+        total = sum(workspace.sizes()) or 1000
+        if self.results_hidden():
+            top = self.compact_height() + 4
+        else:
+            saved = panel._behavior_workspace_sizes
+            top = int(round(total * saved[0] / max(1, sum(saved))))
+            top = max(top, self.compact_height() + _RESULTS_MIN_HEIGHT)
+        top = min(top, max(1, total - 120))
+        workspace.setSizes([top, max(1, total - top)])
 
     def hasHeightForWidth(self):
         return False
@@ -265,68 +410,45 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self._compare_timer.timeout.connect(lambda: self._compute())
 
         root = QtWidgets.QVBoxLayout(self)
-        intro = QtWidgets.QLabel(
-            "Behavior comparison · Before / During / After · Click to add or remove behaviors"
-        )
-        intro.setWordWrap(False)
-        root.addWidget(intro)
+        root.setContentsMargins(6, 4, 6, 4)
+        root.setSpacing(4)
 
         # Arena selection belongs beside the existing Setup file loader.
         self.arena_combo = panel.combo_arena
         self.arena_hint = panel.lbl_arena_hint
         self.arena_combo.activated.connect(lambda _index: self._use_arena())
 
+        # ------------------------------------------------------------------
+        # One toolbar: [file | filter | All None Combine] status [windows | actions]
+        # It folds into stacked rows when the panel is too narrow for one line.
+        # ------------------------------------------------------------------
         self.selectors: dict[str, QtWidgets.QListWidget] = {}
         self.searches: dict[str, QtWidgets.QLineEdit] = {}
-        for category, title in (("behavior", "Behavior"),):
-            page = QtWidgets.QWidget()
-            layout = QtWidgets.QVBoxLayout(page)
-            controls = QtWidgets.QHBoxLayout()
-            button = QtWidgets.QPushButton(f"Add {title.lower()} file…")
-            button.clicked.connect(lambda _checked=False, kind=category: self._load(kind))
-            search = QtWidgets.QLineEdit()
-            search.setPlaceholderText(f"Filter {title.lower()} names")
-            search.textChanged.connect(lambda value, kind=category: self._filter(kind, value))
-            controls.addWidget(button)
-            controls.addWidget(search, 1)
-            self.select_visible_button = QtWidgets.QPushButton("Select visible")
-            self.clear_selection_button = QtWidgets.QPushButton("Clear selection")
-            self.select_visible_button.clicked.connect(lambda: self._set_visible_selection(True))
-            self.clear_selection_button.clicked.connect(lambda: self._set_visible_selection(False, all_items=True))
-            controls.addWidget(self.select_visible_button)
-            controls.addWidget(self.clear_selection_button)
-            self.combine_button = QtWidgets.QPushButton("Combine…")
-            self.combine_button.setToolTip("Combine checked labels into one OR event; keep the originals.")
-            self.combine_button.clicked.connect(panel._open_combine_events)
-            controls.addWidget(self.combine_button)
-            layout.addLayout(controls)
-            listing = BehaviorCheckList()
-            listing.setMinimumHeight(90)
-            listing.setItemDelegate(BehaviorChoiceDelegate(listing))
-            listing.setFlow(QtWidgets.QListView.Flow.LeftToRight)
-            listing.setWrapping(True)
-            listing.setResizeMode(QtWidgets.QListView.ResizeMode.Adjust)
-            listing.setGridSize(QtCore.QSize(220, 40))
-            listing.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
-            listing.setAccessibleName("Behaviors included in the comparison")
-            listing.setToolTip("Click anywhere on a behavior row, or press Space, to add/remove it.")
-            listing.itemChanged.connect(self._selection_changed)
-            layout.addWidget(listing)
-            self.content_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-            self.content_splitter.setChildrenCollapsible(False)
-            self.content_splitter.setHandleWidth(8)
-            self.content_splitter.addWidget(page)
-            root.addWidget(self.content_splitter, 1)
-            self.selectors[category], self.searches[category] = listing, search
+        self._selection_group = QtWidgets.QWidget()
+        selection_row = QtWidgets.QHBoxLayout(self._selection_group)
+        selection_row.setContentsMargins(0, 0, 0, 0)
+        selection_row.setSpacing(4)
+        self.add_file_button = QtWidgets.QPushButton("Add behavior file…")
+        self.add_file_button.clicked.connect(lambda _checked=False: self._load("behavior"))
+        search = QtWidgets.QLineEdit()
+        search.setPlaceholderText("Filter behaviors")
+        search.setClearButtonEnabled(True)
+        search.setMinimumWidth(110)
+        search.setMaximumWidth(260)
+        search.textChanged.connect(lambda value: self._filter("behavior", value))
+        self.select_visible_button = QtWidgets.QPushButton("All")
+        self.select_visible_button.setToolTip("Select every behavior shown by the filter.")
+        self.clear_selection_button = QtWidgets.QPushButton("None")
+        self.clear_selection_button.setToolTip("Clear the selection.")
+        self.select_visible_button.clicked.connect(lambda: self._set_visible_selection(True))
+        self.clear_selection_button.clicked.connect(lambda: self._set_visible_selection(False, all_items=True))
+        self.combine_button = QtWidgets.QPushButton("Combine…")
+        self.combine_button.setToolTip("Combine checked labels into one OR event; keep the originals.")
+        self.combine_button.clicked.connect(panel._open_combine_events)
+        for widget in (self.add_file_button, search, self.select_visible_button,
+                       self.clear_selection_button, self.combine_button):
+            selection_row.addWidget(widget)
 
-        comparison_body = QtWidgets.QWidget()
-        body = QtWidgets.QVBoxLayout(comparison_body)
-        body.setContentsMargins(0, 0, 0, 0)
-        self.content_splitter.addWidget(comparison_body)
-        self.content_splitter.setStretchFactor(0, 0)
-        self.content_splitter.setStretchFactor(1, 1)
-
-        options = QtWidgets.QHBoxLayout()
         # Internal mirrors use the existing Individual / Group and file pickers.
         self.scope = QtWidgets.QComboBox(self)
         self.scope.addItems(["Selected recording", "Group (all matched recordings)"])
@@ -339,10 +461,12 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self.before.setRange(0.05, 300.0)
         self.before.setValue(2.0)
         self.before.setSuffix(" s")
+        self.before.setToolTip("Seconds averaged before each bout starts.")
         self.after = QtWidgets.QDoubleSpinBox()
         self.after.setRange(0.05, 300.0)
         self.after.setValue(2.0)
         self.after.setSuffix(" s")
+        self.after.setToolTip("Seconds averaged after each bout ends.")
         self.offset = QtWidgets.QDoubleSpinBox()
         self.offset.setRange(-86400.0, 86400.0)
         self.offset.setDecimals(3)
@@ -350,11 +474,58 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self.offset.setToolTip("Adds seconds to bout times in this comparison only, not the PSTH/heatmap. "
                                "Use Sync for a clock correction shared by all analyses.")
         self.offset.valueChanged.connect(self._update_pairing)
-        for label, widget in (("Before", self.before), ("After", self.after),
-                              ("Comparison-only offset", self.offset)):
-            options.addWidget(QtWidgets.QLabel(label))
-            options.addWidget(widget)
-        body.addLayout(options)
+        self._action_group = QtWidgets.QWidget()
+        action_row = QtWidgets.QHBoxLayout(self._action_group)
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(4)
+        for label, widget, width in (("Before", self.before, 84), ("After", self.after, 84),
+                                     ("Offset", self.offset, 104)):
+            caption = QtWidgets.QLabel(label)
+            caption.setToolTip(widget.toolTip())
+            widget.setMinimumWidth(width)
+            widget.setMaximumWidth(width + 16)
+            action_row.addWidget(caption)
+            action_row.addWidget(widget)
+        self.details_button = QtWidgets.QToolButton()
+        self.details_button.setText("Details")
+        self.details_button.setToolTip("Show how recordings are paired and which seconds each window averages.")
+        self.details_button.setCheckable(True)
+        self.export_button = QtWidgets.QPushButton("Export CSV…")
+        self.export_button.setToolTip("Export the comparison table as CSV.")
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self._export)
+        self.compute_button = QtWidgets.QPushButton("Refresh")
+        self.compute_button.setToolTip("Results update automatically; click to refresh immediately.")
+        self.compute_button.clicked.connect(self._compute)
+        for widget in (self.details_button, self.export_button, self.compute_button):
+            action_row.addWidget(widget)
+
+        self.status = ElidedLabel("")
+        self.status.setAccessibleName("Behavior comparison status")
+        self._toolbar_rows = (QtWidgets.QHBoxLayout(), QtWidgets.QHBoxLayout())
+        for toolbar_row in self._toolbar_rows:
+            toolbar_row.setSpacing(8)
+            root.addLayout(toolbar_row)
+        self._toolbar_folded: bool | None = None
+        self._arrange_toolbar(folded=False)
+
+        # Behavior chips: as tall as their rows need (two at most, then scroll),
+        # and absent while no behavior file is loaded.
+        listing = BehaviorCheckList()
+        listing.setItemDelegate(BehaviorChoiceDelegate(listing))
+        listing.setFlow(QtWidgets.QListView.Flow.LeftToRight)
+        listing.setWrapping(True)
+        listing.setResizeMode(QtWidgets.QListView.ResizeMode.Adjust)
+        listing.setGridSize(QtCore.QSize(_CHIP_WIDTH, _CHIP_HEIGHT))
+        listing.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        listing.setAccessibleName("Behaviors included in the comparison")
+        listing.setToolTip("Before / During / After comparison. Click a behavior, or press Space, "
+                           "to add or remove it.")
+        listing.itemChanged.connect(self._selection_changed)
+        listing.heightChanged.connect(self._layout_changed)
+        root.addWidget(listing)
+        self.selectors["behavior"], self.searches["behavior"] = listing, search
+
         self.timing_help = QtWidgets.QLabel()
         self.timing_help.setWordWrap(True)
         self.timing_help.setToolTip(
@@ -366,39 +537,23 @@ class BehaviorZonePanel(QtWidgets.QWidget):
             "Individual heatmap rows are bouts; Group rows follow the existing animal/trial "
             "display option. Colors show signal values, not behavior probability. "
             "PSTH filters/normalization do not apply to the complete-bout comparison.")
-        body.addWidget(self.timing_help)
+        root.addWidget(self.timing_help)
         self.timing_help.hide()
         self.pairing = QtWidgets.QLabel("")
         self.pairing.setWordWrap(True)
         self.pairing.setVisible(False)
-        self.details_button = QtWidgets.QToolButton()
-        self.details_button.setText("Show timing / pairing details")
-        self.details_button.setCheckable(True)
         self.details_button.toggled.connect(self.pairing.setVisible)
         self.details_button.toggled.connect(self.timing_help.setVisible)
-        body.addWidget(self.pairing)
-
-        actions = QtWidgets.QHBoxLayout()
-        self.status = QtWidgets.QLabel("")
-        self.status.setWordWrap(True)
-        self.compute_button = QtWidgets.QPushButton("Refresh")
-        self.compute_button.setToolTip("Results update automatically; click to refresh immediately.")
-        self.compute_button.clicked.connect(self._compute)
-        self.export_button = QtWidgets.QPushButton("Export comparison CSV…")
-        self.export_button.setEnabled(False)
-        self.export_button.clicked.connect(self._export)
-        actions.addWidget(self.status, 1)
-        actions.addWidget(self.details_button)
-        actions.addWidget(self.export_button)
-        actions.addWidget(self.compute_button)
-        body.addLayout(actions)
+        self.details_button.toggled.connect(self._layout_changed)
+        root.addWidget(self.pairing)
 
         self.response = ComparisonPlotWidget(title="Mean fiber signal per behavior")
         self.response.setToolTip(
             "Means in the loaded processed signal's units. PSTH normalization and "
             "event filters apply to the PSTH plots; this comparison uses complete bouts.")
-        self.response.setLabel("bottom", "Window")
-        self.response.setMinimumHeight(140)
+        # The Before / During / After ticks name the axis; a label would only
+        # take height from the data.
+        self.response.setMinimumHeight(120)
         # Keep names outside the data rectangle, even when many behaviors are
         # selected or the comparison panel is made narrow.
         self.response_container = QtWidgets.QWidget()
@@ -409,11 +564,11 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self.response_legend.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self.response_legend.setWidgetResizable(True)
         self.response_legend.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.response_legend.setFixedHeight(46)
+        self.response_legend.setFixedHeight(30)
         self.response_legend.setAccessibleName("Behavior comparison legend")
         legend_contents = QtWidgets.QWidget()
         self.response_legend_layout = QtWidgets.QHBoxLayout(legend_contents)
-        self.response_legend_layout.setContentsMargins(6, 2, 6, 2)
+        self.response_legend_layout.setContentsMargins(6, 0, 6, 0)
         self.response_legend_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinimumSize)
         self.response_legend.setWidget(legend_contents)
         self.response_legend.hide()
@@ -423,6 +578,7 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self.table.setHorizontalHeaderLabels(_COLUMNS)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setDefaultSectionSize(24)
         self.results_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self.results_splitter.setChildrenCollapsible(False)
         self.results_splitter.setHandleWidth(8)
@@ -431,8 +587,9 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self.results_splitter.setStretchFactor(0, 1)
         self.results_splitter.setStretchFactor(1, 2)
         self.results_splitter.setSizes([420, 800])
-        body.addWidget(self.results_splitter, 1)
-        self.content_splitter.setSizes([150, 260])
+        # The plot and table take room only once there is a result to show.
+        self.results_splitter.hide()
+        root.addWidget(self.results_splitter, 1)
         for control in (self.before, self.after, self.offset):
             control.setKeyboardTracking(False)
             control.valueChanged.connect(self._queue_comparison)
@@ -595,6 +752,7 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         for index in range(self.selectors[category].count()):
             item = self.selectors[category].item(index)
             item.setHidden(value.casefold() not in item.text().casefold())
+        self.selectors[category].fit_height()
 
     def _set_visible_selection(self, checked: bool, *, all_items: bool = False) -> None:
         listing = self.selectors["behavior"]
@@ -764,12 +922,17 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         if self.panel._event_category() != "behavior":
             return
         if not self._selected_labels():
-            self.status.setText("Click a behavior to compare its fiber signal.")
+            self.status.setText("Click a behavior to compare its fiber signal."
+                                if self.selectors["behavior"].count() else
+                                "Add a behavior file to compare the signal before, during and after bouts.")
+            self._set_results_visible(False)
             return
         if not self._selected_recordings():
             self.status.setText("Load a processed fiber recording first.")
+            self._set_results_visible(False)
             return
         if self._pending_arena_path:
+            self._set_results_visible(False)
             return
         self.status.setText("Updating comparison…")
         self._compare_timer.start()
@@ -821,6 +984,13 @@ class BehaviorZonePanel(QtWidgets.QWidget):
                 listing.addItem(item)
             listing.blockSignals(False)
             self._filter(category, self.searches[category].text())
+        # Filter and selection tools are only useful once behaviors exist.
+        has_behaviors = self.selectors["behavior"].count() > 0
+        for widget in (self.searches["behavior"], self.select_visible_button,
+                       self.clear_selection_button, self.combine_button):
+            widget.setVisible(has_behaviors)
+        self._selection_group.adjustSize()
+        self._refold_toolbar()
         if (not had_choices or not self._selection_touched) and not self._selected_labels():
             self.follow_psth_selection(self.panel.combo_behavior_name.currentText())
         previous_recording = self.recording.currentData()
@@ -866,6 +1036,7 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         labels = self._selected_labels()
         if not labels:
             self.status.setText("Select at least one behavior.")
+            self._set_results_visible(False)
             return
         matched = [proc for proc in self._selected_recordings()
                    if self.panel._match_behavior_source(proc) is not None]
@@ -873,10 +1044,12 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         if len(identifiers) != len(set(identifiers)):
             self.status.setText("Recording names must be unique. Remove duplicate recordings or rename "
                                 "same-named files before group comparison.")
+            self._set_results_visible(False)
             return
         if self.scope.currentIndex() == 1 and len({proc.output_label for proc in matched}) > 1:
             self.status.setText("Cannot compare different signal units in a group. "
                                 "Load matching processed outputs or use Individual view.")
+            self._set_results_visible(False)
             return
         self.response.setLabel("left", matched[0].output_label if matched else "Processed units")
         rows: list[dict[str, object]] = []
@@ -983,6 +1156,7 @@ class BehaviorZonePanel(QtWidgets.QWidget):
         self.response.setXRange(-.2, 2.2, padding=0)
         self.response_legend_layout.addStretch(1)
         self.table.resizeColumnsToContents()
+        self._set_results_visible(bool(displayed))
 
     def _export(self) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(

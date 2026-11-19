@@ -35,6 +35,7 @@ from postprocessing_style import POSTPROCESSING_PRESETS, apply_plot_preset, crea
 from plot_empty_state import PlotEmptyState, set_plot_has_data
 from plot_trace import with_time_gap_breaks
 from numeric_controls import DurationSpinBox, with_slider
+from adaptive_density import KEEP_ROW_PROPERTY, install_adaptive_density
 from psth_metrics import METRICS, metric_id, summarize_metrics, draw_metric_matplotlib, export_selected_metrics
 from psth_metric_panels import MetricPanel, MetricGrid
 from aligned_time_axes import AlignedTimeAxes
@@ -92,7 +93,9 @@ _BEHAVIOR_FILE_TYPE_AUTO = "Auto (0/1 states or onset columns)"
 _FIXED_POST_RIGHT_SECTIONS = frozenset({"setup", "spatial", "psth", "export", "temporal"})
 _FIXED_POST_VISIBLE_SECTIONS = frozenset({"setup", "spatial", "psth", "export", "temporal"})
 _FIXED_POST_RIGHT_TAB_ORDER = ("setup", "psth", "spatial", "temporal", "export")
-_POST_RIGHT_PANEL_MIN_WIDTH = 420
+# Narrowest drawer the divider allows. Below a page's natural width its content
+# becomes denser (adaptive_density) instead of being clipped.
+_POST_RIGHT_PANEL_MIN_WIDTH = 260
 _SYNC_TOOL_ROOT = Path(r"C:\Analysis\app_project\barcode_reader\video_barcode_extractor")
 _FIXED_POST_RIGHT_TAB_TITLES: Dict[str, str] = {
     "setup": "Setup",
@@ -2123,6 +2126,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_list_pairing.setWordWrap(True)
 
         lists_layout = QtWidgets.QHBoxLayout()
+        # Recordings pair line by line across these lists: a narrow drawer
+        # narrows them but never stacks them (see adaptive_density).
+        lists_layout.setProperty(KEEP_ROW_PROPERTY, True)
         pre_col = QtWidgets.QVBoxLayout()
         pre_col.addLayout(pre_header)
         pre_col.addWidget(self.list_preprocessed)
@@ -4912,16 +4918,26 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._behavior_workspace.setHandleWidth(10)
         self._behavior_workspace.addWidget(self._behavior_comparison_scroll)
         self._behavior_workspace.addWidget(self._behavior_plot_pane)
+        # Window growth goes to the signal / PSTH plots, not the comparison.
+        self._behavior_workspace.setStretchFactor(0, 0)
+        self._behavior_workspace.setStretchFactor(1, 1)
         self._behavior_workspace.handle(1).setToolTip("Drag to resize behavior comparison and PSTH plots")
         self._behavior_workspace.setStyleSheet(
             "QSplitter#behaviorWorkspace::handle { background: palette(button); border: 1px solid palette(mid); border-radius: 3px; }")
+        # Height shared between the comparison (once it has results) and the
+        # plots. The compact layout starts once from a plot-first split,
+        # replacing the half-and-half split saved by earlier versions.
+        default_sizes = [270, 730]
         try:
+            if not self._settings.value("behavior_workspace_compact_v1", False, type=bool):
+                self._settings.setValue("behavior_workspace_compact_v1", True)
+                self._settings.remove("behavior_workspace_sizes")
             self._behavior_workspace_sizes = [max(100, int(value)) for value in
-                                              self._settings.value("behavior_workspace_sizes", [500, 500])]
+                                              self._settings.value("behavior_workspace_sizes", default_sizes)]
             if len(self._behavior_workspace_sizes) != 2:
-                self._behavior_workspace_sizes = [500, 500]
+                self._behavior_workspace_sizes = default_sizes
         except (TypeError, ValueError):
-            self._behavior_workspace_sizes = [500, 500]
+            self._behavior_workspace_sizes = default_sizes
         self._behavior_workspace.splitterMoved.connect(self._remember_behavior_workspace_size)
         rv.addWidget(self._behavior_workspace, stretch=1)
         self.combo_event_kind.currentIndexChanged.connect(self._on_event_kind_changed)
@@ -5402,6 +5418,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
             scroll.setWidget(widget)
             self._section_scroll_hosts[key] = scroll
+            # Shrink text, fields and spacing when the drawer is narrower than the page.
+            install_adaptive_density(scroll)
             dock = Dock(title, area=self._dockarea, closable=False)
             dock.setObjectName(f"post.da.{key}.dock")
             dock.addWidget(scroll)
@@ -5831,6 +5849,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
             scroll.setWidget(widget)
             self._section_scroll_hosts[key] = scroll
+            # Shrink text, fields and spacing when the drawer is narrower than the page.
+            install_adaptive_density(scroll)
 
             dock = QtWidgets.QDockWidget(title, host)
             dock.setObjectName(f"post.{key}.dock")
