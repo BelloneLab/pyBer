@@ -22,6 +22,8 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from global_signal_metrics import GLOBAL_SIGNAL_METRICS
+from plot_empty_state import set_plot_has_data
+from postprocessing_style import style_plot
 from psth_metrics import METRICS, metric_id
 
 # Slot order is also the order used in menus and persisted state.
@@ -37,6 +39,8 @@ FAMILY_LABELS = {"behavior": "Behavior summary", "metric": "Pre/post comparison"
                  "trajectory": "State-space (PCA)"}
 # Families offered under "Change to", in menu order.
 CHANGE_TO_FAMILIES = ("behavior", "metric", "global", "trajectory")
+# Equivalent positions in a side-by-side event column and the main dashboard.
+COLUMN_SLOTS = {"heat": "heatmap", "psth": "psth", "metric": "comparison"}
 TRAJECTORY_SPEC = "trajectory:pca"
 HANDLE_PX = 8            # thickness of invisible draggable dividers
 TIME_RATIO_DEFAULT = [1000, 1000]
@@ -315,8 +319,8 @@ class DashboardPanels(QtCore.QObject):
             self._restore_native(slot)
             self._set_native_selector(slot, code)
         else:
-            widget = self._substitute_widget(slot, family)
             current = self.displayed(slot)
+            widget = self._substitute_widget(slot, family)
             if current is not widget:
                 self._swap(slot, current, widget)
             self.substitutes[slot] = spec
@@ -490,18 +494,102 @@ class DashboardPanels(QtCore.QObject):
             menu.sync()
 
     # -- substitutes ---------------------------------------------------------
+    def hook_column(self, column) -> None:
+        """Attach the same slot actions to the actual plots in a new event column."""
+        column.dashboard_substitutes = {}
+        for key, slot in COLUMN_SLOTS.items():
+            self.hook_plot(getattr(column, key), slot)
+
+    def render_column(self, column, entry, show) -> None:
+        """Apply shared slot choices, rendering each replacement for this event."""
+        for widget in column.dashboard_substitutes.values():
+            widget.hide()
+        for key, slot in COLUMN_SLOTS.items():
+            native = getattr(column, key)
+            visible = show[key] and slot not in self.removed
+            spec = self.substitutes.get(slot)
+            native.setVisible(visible and spec is None)
+            if not visible or spec is None:
+                continue
+            family, code = spec.split(":", 1)
+            cache_key = (slot, family)
+            widget = column.dashboard_substitutes.get(cache_key)
+            if widget is None:
+                widget = self._new_substitute(slot, family)
+                layout = column.layout()
+                index = layout.indexOf(native)
+                layout.insertWidget(index + 1, widget, layout.stretch(index))
+                widget.setMinimumHeight(native.minimumHeight())
+                column.dashboard_substitutes[cache_key] = widget
+            widget.show()
+            self._draw_column_substitute(widget, entry, family, code)
+        if "heatmap" in self.substitutes:
+            self.panel.multi_behavior_view.colorbar_host.hide()
+
+    def _draw_column_substitute(self, widget, entry, family, code) -> None:
+        """Use the event's accepted trials for event analyses and the recording cache for global analyses."""
+        panel = self.panel
+        palette = panel._current_palette()
+        style_plot(widget, palette)
+        if family == "metric":
+            result = entry.get("metrics", {}).get(code)
+            widget.set_colors(palette)
+            widget.show_result(result, row_colors=entry.get("row_colors"))
+            counts = result["summary"] if result else {}
+            set_plot_has_data(widget, bool(counts.get("pre_n") or counts.get("post_n")))
+        elif family == "behavior":
+            from behavior_summary import summarize_behavior
+            from behavior_summary_plot import render_behavior_summary
+            summary = summarize_behavior(entry.get("summary_recordings", []), code,
+                                         bin_s=panel.spin_psth_behavior_bin.value(),
+                                         auto_bins=panel.cb_psth_behavior_auto_bins.isChecked())
+            render_behavior_summary(widget, summary, palette)
+            set_plot_has_data(widget, bool(summary["has_data"]))
+        elif family == "trajectory":
+            view = panel.pca_trajectories
+            # One report per event for trajectories, loadings and separation.
+            # A refreshed entry or changed PCA options starts a new fit.
+            signature = repr(view.options)
+            cached = entry.get("_column_pca")
+            if cached is None or cached[0] != signature:
+                try:
+                    report = view._compute([entry["name"]])
+                except (ValueError, np.linalg.LinAlgError) as exc:
+                    report = view._empty_report(view.options["method"], str(exc))
+                    report["behaviors"] = [entry["name"]]
+                cached = (signature, report)
+                entry["_column_pca"] = cached
+            report = cached[1]
+            # Cached menus outlive the data. Keep only the small fields needed
+            # to populate the options after deselecting or reordering events.
+            widget.getPlotItem().getViewBox().menu._column_pca_report = {
+                "behaviors": report["behaviors"], "method": report["method"],
+                "loading_groups": bool(report.get("loading_groups")),
+            }
+            view.render(widget, code, report=report)
+        else:
+            panel._render_substitute(widget, family, code)
+
+    def _new_substitute(self, slot, family):
+        """Create a plot with the same formatting and panel actions in either layout."""
+        if family == "metric":
+            from psth_metric_panels import MetricPanel
+            widget = MetricPanel()
+        else:
+            widget = pg.PlotWidget()
+        self.panel._prepare_substitute_plot(widget)
+        self.hook_plot(widget, slot)
+        self.panel._install_add_metric_menu(widget)
+        if family in ("metric", "global"):
+            self.panel._install_metric_view_menu(widget, with_views=(family == "metric"))
+        return widget
+
     def _substitute_widget(self, slot: str, family: str) -> QtWidgets.QWidget:
         """One reusable substitute per slot and family."""
         key = f"{slot}:{family}"
         widget = self._widgets.get(key)
         if widget is None:
-            if family == "metric":
-                from psth_metric_panels import MetricPanel
-                widget = MetricPanel()
-            else:
-                widget = pg.PlotWidget()
-            self.panel._prepare_substitute_plot(widget)
-            self.hook_plot(widget, slot)
+            widget = self._new_substitute(slot, family)
             self._widgets[key] = widget
         # The currently displayed substitute of this slot is tracked by slot too.
         self._widgets[slot] = widget
@@ -523,6 +611,15 @@ class DashboardPanels(QtCore.QObject):
                 self.panel._render_substitute(widget, family, code)
             except Exception as exc:  # a display problem must not break analysis
                 widget.setToolTip(f"Could not draw this panel: {exc}")
+        multi = self.panel.multi_behavior_view
+        if self.panel._multi_behavior_active:
+            for column, entry in zip(multi.columns, multi.entries):
+                for (slot, family), widget in column.dashboard_substitutes.items():
+                    if widget.isHidden() or (families is not None and family not in families):
+                        continue
+                    spec = self.substitutes.get(slot, "")
+                    if spec.startswith(family + ":"):
+                        self._draw_column_substitute(widget, entry, family, spec.split(":", 1)[1])
 
     # -- context menu --------------------------------------------------------
     def hook_plot(self, plot: QtWidgets.QWidget, slot: str) -> None:
@@ -575,7 +672,7 @@ class DashboardPanels(QtCore.QObject):
         # method, axes) right below "Change to".
         view = getattr(self.panel, "pca_trajectories", None)
         if str(current or "").startswith("trajectory:") and view is not None:
-            options = view.build_menu(menu)
+            options = view.build_menu(menu, column_report=getattr(menu, "_column_pca_report", None))
             menu._pyber_trajectory_menu = options
             add(options.menuAction())
         restore = QtWidgets.QMenu("Restore removed panels", menu)

@@ -625,8 +625,10 @@ class PcaTrajectoryView(QtCore.QObject):
                 "components": np.empty((0, 0)), "loading_axis": np.empty(0), "loading_label": "",
                 "loading_ticks": None, "note": note, "skipped": [], "fallback": "", "info": {}}
 
-    def _compute(self) -> Dict[str, object]:
-        behaviors = self.selected_behaviors()
+    def _compute(self, behaviors: Optional[Sequence[str]] = None) -> Dict[str, object]:
+        """Fit the selected behaviors, or those represented by a dashboard column."""
+        if behaviors is None:
+            behaviors = self.selected_behaviors()
         groups = self.selected_groups()
         method = str(self.options.get("method") or DEFAULT_METHOD)
         if not self.panel._processed or not behaviors:
@@ -903,10 +905,11 @@ class PcaTrajectoryView(QtCore.QObject):
     def _title(self, report: Dict[str, object], what: str = PANEL_LABEL) -> str:
         return f"{what} · {METHOD_TITLES.get(str(report.get('method')), '')}"
 
-    def render(self, widget: pg.PlotWidget, code: str = CODE) -> None:
+    def render(self, widget: pg.PlotWidget, code: str = CODE, report=None) -> None:
         """Draw one of the three PCA panels in a dashboard plot."""
         palette, text_color = self._prepare(widget)
-        report = self.compute()
+        if report is None:
+            report = self.compute()
         if code == CODE_LOADINGS:
             self._render_loadings(widget, report, palette, text_color)
         elif code == CODE_SEPARATION:
@@ -1231,9 +1234,10 @@ class PcaTrajectoryView(QtCore.QObject):
         widget.setToolTip("\n".join(lines))
 
     # ------------------------------------------------------------------ menu
-    def build_menu(self, parent: QtWidgets.QMenu) -> QtWidgets.QMenu:
+    def build_menu(self, parent: QtWidgets.QMenu, column_report=None) -> QtWidgets.QMenu:
         """Right-click options shared by the PCA panels: method, behaviors, groups, axes."""
         menu = QtWidgets.QMenu("PCA options", parent)
+        report = self.last_report if column_report is None else column_report
 
         methods = menu.addMenu("Method")
         for value, label in METHODS:
@@ -1243,7 +1247,9 @@ class PcaTrajectoryView(QtCore.QObject):
             action.triggered.connect(lambda _=False, v=value: self.set_option("method", v))
 
         behaviors = menu.addMenu("Behaviors")
-        if self.behaviors_apply():
+        if column_report is not None:
+            behaviors.addAction(", ".join(report["behaviors"])).setEnabled(False)
+        elif self.behaviors_apply():
             chosen = [name for name in (self.options.get("behaviors") or []) if name in self.available_behaviors()]
             follow = behaviors.addAction("Follow the PSTH behavior")
             follow.setCheckable(True)
@@ -1289,16 +1295,16 @@ class PcaTrajectoryView(QtCore.QObject):
             action.setChecked(abs(float(self.options.get("span_s") or 0) - span) < 1e-9)
             action.triggered.connect(lambda _=False, s=span: self.set_option("span_s", float(s)))
 
-        if self.last_report.get("method", self.options["method"]) == METHOD_LAG:
+        if report.get("method", self.options["method"]) == METHOD_LAG:
             weights = menu.addAction("Show delay-window weights")
             weights.setCheckable(True)
             weights.setChecked(bool(self.options["show_lag_weights"]))
             weights.triggered.connect(lambda checked: self.set_option("show_lag_weights", checked))
 
-        if self.last_report.get("loading_groups"):
+        if report.get("loading_groups"):
             by_group = menu.addAction("Fit weights separately by group")
             by_group.setCheckable(True)
-            by_group.setEnabled(self.last_report.get("method") != METHOD_LAG or self.options["show_lag_weights"])
+            by_group.setEnabled(report.get("method") != METHOD_LAG or self.options["show_lag_weights"])
             by_group.setChecked(bool(self.options["group_loadings"]))
             by_group.triggered.connect(lambda checked: self.set_option("group_loadings", checked))
 

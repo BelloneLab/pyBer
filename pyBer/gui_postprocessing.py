@@ -4996,10 +4996,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.psth_trace_legend.hide()
         self.psth_traces = TraceOverlay(self.plot_avg, self.psth_trace_legend, parent=self)
         self.plot_avg.scene().sigMouseMoved.connect(self.psth_traces.hover)
-        if _avg_view.menu is not None:
-            self.menu_psth_traces = QtWidgets.QMenu("Individual traces", _avg_view.menu)
-            self.menu_psth_traces.aboutToShow.connect(self._fill_trace_menu)
-            _avg_view.menu.addMenu(self.menu_psth_traces)
+        self.menu_psth_traces = self._install_trace_menu(self.plot_avg)
         self.act_group_legend = QtGui.QAction("Show group legend", self)
         self.act_group_legend.setCheckable(True)
         self.act_group_legend.setChecked(bool(self._style.get("group_legend_visible", True)))
@@ -5015,6 +5012,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.pca_trajectories = PcaTrajectoryView(self)
         self.dashboard_panels = DashboardPanels(self)
         self.dashboard_panels.changed.connect(self._on_dashboard_panels_changed)
+        self.multi_behavior_view.columnCreated.connect(self._install_behavior_column_menus)
+        self.multi_behavior_view.columnCreated.connect(self.dashboard_panels.hook_column)
+        self.multi_behavior_view.columnDrawn.connect(self.dashboard_panels.render_column)
+        for plot in (self.plot_heat, self.plot_avg, self.plot_metrics):
+            self._install_add_metric_menu(plot)
         self.btn_view_menu = create_view_menu(self)
         tb_layout.insertWidget(tb_layout.indexOf(self.btn_style), self.btn_view_menu)
         compact_results_toolbar(self)
@@ -10085,7 +10087,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             panels.apply()
         self._multi_behavior_layout = {
             "heat": bool(show_heat), "psth": bool(show_avg),
-            "metric": bool(show_avg and self.cb_metrics.isChecked() and layout != "Heatmap focus")}
+            "metric": bool(show_avg and layout not in ("Heatmap focus", "Trace focus", "Signal events"))}
         self._sync_heat_host()
         self._refresh_results_minimum_heights()
 
@@ -13659,6 +13661,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if "global" in families and getattr(self, "_last_global_results", None) is None:
             self._render_global_metrics()
         panels.render_substitutes()
+        if self._multi_behavior_active:
+            self.queue_multi_behavior()
         self._refresh_results_minimum_heights()
         self._queue_view_settings_save()
 
@@ -17582,10 +17586,58 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 and self._trace_view["show"] != "average"):
             self._apply_trace_view(restyle=True)
 
-    def _fill_trace_menu(self) -> None:
+    def _install_trace_menu(self, plot):
+        """Give each PSTH its own submenu backed by the shared trace settings."""
+        menu = plot.getPlotItem().getViewBox().menu
+        if menu is None:
+            return None
+        sub = menu.addMenu("Individual traces")
+        sub.aboutToShow.connect(lambda: self._fill_trace_menu(sub))
+        return sub
+
+    def _fill_trace_menu(self, menu=None) -> None:
         """Right-click > Individual traces: rebuilt each time so its checks are current."""
-        self.menu_psth_traces.clear()
-        populate_trace_menu(self.menu_psth_traces, self._trace_view, self.set_trace_view)
+        if menu is None:
+            menu = self.menu_psth_traces
+        menu.clear()
+        populate_trace_menu(menu, self._trace_view, self.set_trace_view)
+
+    def _install_add_metric_menu(self, plot) -> None:
+        """Reuse the drawer's metric selections from a result plot's context menu."""
+        menu = plot.getPlotItem().getViewBox().menu
+        if menu is not None:
+            sub = menu.addMenu("Add metric panel")
+            # The primary comparison already has a permanent panel. Other
+            # selections use the same state and callbacks as More metrics.
+            def select(action, checked):
+                if checked:
+                    self.cb_metrics.setChecked(True)
+                    if self.combo_view_layout.currentText() in ("Heatmap focus", "Trace focus", "Signal events"):
+                        self.combo_view_layout.setCurrentText("Standard")
+                action.setChecked(checked)
+
+            def fill():
+                sub.clear()
+                primary = metric_id(self.combo_metric.currentText())
+                for key, action in self._metric_actions.items():
+                    if key != primary:
+                        item = sub.addAction(action.text())
+                        item.setCheckable(True)
+                        item.setChecked(action.isChecked())
+                        item.triggered.connect(lambda checked, source=action: select(source, checked))
+            sub.aboutToShow.connect(fill)
+
+    def _install_behavior_column_menus(self, column) -> None:
+        """Wire lazy-created event plots once, including columns reused after reselection."""
+        self._install_trace_menu(column.psth)
+        for plot in (column.heat, column.psth, column.metric):
+            self._install_add_metric_menu(plot)
+        self._install_metric_view_menu(column.metric)
+        column.extraMetricCreated.connect(self._install_extra_behavior_metric_menu)
+
+    def _install_extra_behavior_metric_menu(self, plot) -> None:
+        self._install_add_metric_menu(plot)
+        self._install_metric_view_menu(plot)
 
     def _apply_trace_view(self, *, restyle: bool = False) -> None:
         """Show the average, the individual traces, or both, as chosen."""
@@ -17662,8 +17714,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         multi = bool(self._multi_behavior_active)
         show = self._multi_behavior_layout
-        self.multi_behavior_view.set_visible_panels(show["heat"], show["psth"], show["metric"])
-        multi_visible = multi and (show["heat"] or show["psth"])
+        panels = getattr(self, "dashboard_panels", None)
+        removed = panels.removed if panels else set()
+        heat = show["heat"] and "heatmap" not in removed
+        psth = show["psth"] and "psth" not in removed
+        show_metrics = show["metric"] and self.cb_metrics.isChecked()
+        metric = show_metrics and "comparison" not in removed
+        self.multi_behavior_view.set_visible_panels(heat, psth, metric, extras=show_metrics)
+        extras = show_metrics and (len(self._selected_metric_ids()) > 1 or self.metric_windows.valid_windows())
+        multi_visible = multi and bool(heat or psth or metric or extras)
         self.row_heat_page.setVisible(not multi)
         self.multi_behavior_view.setVisible(multi_visible)
         self.row_heat_host.setVisible(multi_visible or (not multi and not self.row_heat.isHidden()))
@@ -17693,7 +17752,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         entries = []
         grouped = self.tab_sources.currentIndex() == 1 and self.tab_visual_mode.currentIndex() == 1
         animal_rows = grouped and not self._psth_group_trial_view_enabled()
-        metric_ids = self._metric_family_ids()[:1] if self.cb_metrics.isChecked() else []
+        metric_ids = self._metric_family_ids() if self.cb_metrics.isChecked() else []
+        selected = self._selected_metric_ids()
+        windows = self.metric_windows.summary_arguments()
+        need_bouts = any(self.dashboard_panels.substitutes.get(slot, "").startswith("behavior:")
+                         for slot in ("heatmap", "psth", "comparison"))
         pre_window = (float(self.spin_metric_pre0.value()), float(self.spin_metric_pre1.value()))
         post_window = (float(self.spin_metric_post0.value()), float(self.spin_metric_post1.value()))
         units = self._psth_units()
@@ -17702,19 +17765,41 @@ class PostProcessingPanel(QtWidgets.QWidget):
                      "row_unit": "animals" if animal_rows else "trials", "metric": None,
                      "pre_window": pre_window, "post_window": post_window}
             try:
-                matrix, tvec, labels = self._compute_psth_for_behavior(name)
+                if need_bouts:
+                    entry["summary_recordings"] = []
+                    matrix, tvec, labels = self._compute_psth_for_behavior(name, entry["summary_recordings"])
+                else:
+                    matrix, tvec, labels = self._compute_psth_for_behavior(name)
             except ValueError as exc:
                 self.statusUpdate.emit(f"{name}: {exc}", 6000)
                 matrix = tvec = None
                 labels = []
+            display = None
+            if grouped and matrix is not None:
+                mode, group = self._group_view_state()
+                if mode in ("all", "only"):
+                    display = build_group_display(matrix, labels, mode, self.recording_groups.groups(),
+                                                  self.recording_groups.group_id_of, only_group=group,
+                                                  level=entry["row_unit"], hidden_groups=self._hidden_groups())
+                    if display is not None:
+                        matrix, labels = display.matrix, display.labels
+                        entry["row_colors"] = display.row_colors
+                elif mode == "pooled" and self._hidden_groups():
+                    keep = [i for i, label in enumerate(labels) if self._group_view_keeps(row_file_id(label))]
+                    matrix, labels = matrix[keep], [labels[i] for i in keep]
             if matrix is not None and tvec is not None and matrix.size:
                 entry.update(matrix=matrix, tvec=tvec,
                              labels=[str(label).split(" | ")[-1] if not grouped else str(label) for label in labels])
                 if metric_ids:
                     result = summarize_metrics(matrix, tvec, metric_ids, pre_window, post_window, units,
                                                independent_units=(not grouped or animal_rows),
-                                               row_unit="files" if animal_rows else "trials")
+                                               row_unit="files" if animal_rows else "trials", **windows)
+                    if display is not None:
+                        self._attach_metric_group_comparisons(matrix, result, display=display)
                     entry["metric"] = next(iter(result.values()), None)
+                    entry["metrics"] = result
+                    entry["extra_metric_keys"] = [key for key in result if key != selected[0]
+                                                  and key.split("@", 1)[0] in selected]
             entries.append(entry)
         matrices = [entry["matrix"] for entry in entries if entry["matrix"] is not None]
         if not matrices:
@@ -17859,6 +17944,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return
         if hasattr(self, "_last_mat") and self._last_mat is not None and self._last_tvec is not None:
             self._render_metrics(self._last_mat, self._last_tvec)
+        if getattr(self, "_multi_behavior_active", False):
+            self.queue_multi_behavior()
         self._queue_settings_save()
 
     def _render_metrics(self, mat: np.ndarray, tvec: np.ndarray) -> None:
@@ -17896,21 +17983,22 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if panels is not None:
             panels.render_substitutes(("metric", TRAJECTORY_FAMILY))
 
-    def _group_blocks_for_rows(self, mat: Optional[np.ndarray]):
+    def _group_blocks_for_rows(self, mat: Optional[np.ndarray], display=None):
         """(file ids per row, blocks) when 'All groups' is displayed with 2+ real groups."""
-        display = self._active_group_display(mat)
+        if display is None:
+            display = self._active_group_display(mat)
         if display is None or display.mode != "all":
             return None
         if sum(1 for block in display.blocks if block.group_id is not None) < 2:
             return None
         return [row_file_id(label) for label in display.labels], display.blocks
 
-    def _attach_metric_group_comparisons(self, mat: np.ndarray, results: Dict[str, Dict]) -> None:
+    def _attach_metric_group_comparisons(self, mat: np.ndarray, results: Dict[str, Dict], display=None) -> None:
         """Per-group Post - Pre per animal + between-group test, stored on each metric result.
 
         Trial rows are averaged per recording first, so n is the number of animals.
         """
-        layout = self._group_blocks_for_rows(mat)
+        layout = self._group_blocks_for_rows(mat, display)
         for result in results.values():
             for name in ("group_comparison", "group_rows", "group_view", "group_style"):
                 result.pop(name, None)
@@ -17954,6 +18042,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._render_metrics(self._last_mat, self._last_tvec)
         if getattr(self, "_last_global_results", None):
             self._render_global_metrics()
+        if getattr(self, "_multi_behavior_active", False):
+            self.queue_multi_behavior()
         self._queue_settings_save()
 
     def _install_metric_view_menu(self, plot: pg.PlotWidget, with_views: bool = True) -> None:
@@ -21120,7 +21210,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     names.append(beh)
         return names
 
-    def _compute_psth_for_behavior(self, behavior_name: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[str]]:
+    def _compute_psth_for_behavior(self, behavior_name: str, summary_recordings=None) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[str]]:
+        """Collect event-aligned rows and, when requested, their accepted bout times."""
         pre = float(self.spin_pre.value())
         post = float(self.spin_post.value())
         b0 = float(self.spin_b0.value())
@@ -21167,11 +21258,25 @@ class PostProcessingPanel(QtWidgets.QWidget):
             check_psth_size(psth_bin_count(window, res_hz), requested_events)
             tvec, mat = _compute_psth_matrix(self._proc_time(proc), signal, events, window, baseline, res_hz, smooth_sigma_s=smooth,
                                            normalization=self._psth_normalization())
-            mat = mat[np.any(np.isfinite(mat), axis=1)]
+            valid = np.any(np.isfinite(mat), axis=1)
+            mat = mat[valid]
             if exclude_low_events and mat.shape[0] < min_events:
                 continue
             if mat.size == 0:
                 continue
+            if summary_recordings is not None and (not is_group or self._group_view_keeps(file_id)):
+                times = np.asarray(self._proc_time(proc), float)
+                finite_times = times[np.isfinite(times)]
+                if finite_times.size:
+                    event_times, durations = events[valid], dur[valid]
+                    known = np.isfinite(durations) & (durations > 0)
+                    onsets = (event_times - np.where(known, durations, 0)
+                              if align_mode.endswith("offset") else event_times)
+                    summary_recordings.append({
+                        "file_id": file_id, "start": float(finite_times[0]), "end": float(finite_times[-1]),
+                        "onsets": onsets, "offsets": np.where(known, onsets + durations, np.nan),
+                        "observed_intervals": observed_intervals(times, np.asarray(signal, float)),
+                    })
             all_mats.append(mat)
             all_labels.extend([f"{file_id} | Trial {i + 1}" for i in range(mat.shape[0])])
             row = mean_sem(mat)[0]

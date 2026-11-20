@@ -163,7 +163,7 @@ class _WindowRow(QtWidgets.QWidget):
             spin.setMinimumWidth(SPIN_MIN_WIDTH)
             spin.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
             spin.set_unit(unit)
-            spin.valueChanged.connect(self.changed.emit)
+            spin.valueChanged.connect(lambda _value: self.changed.emit())
         self.remove_button = QtWidgets.QToolButton()
         self.remove_button.setText("×")
         self.remove_button.setToolTip("Remove this window")

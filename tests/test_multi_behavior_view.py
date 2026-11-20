@@ -9,10 +9,13 @@ from PySide6 import QtCore, QtWidgets
 import test_postprocessing_empty_state as gui_fixture
 from analysis_core import ProcessedTrial
 from gui_postprocessing import _behavior_table_info
+from metric_windows import result_key
 from multi_behavior_view import (BAND_SPACING, BEHAVIOR_COLORS, COLORBAR_WIDTH, MIN_COLUMN_WIDTH,
                                  MultiBehaviorView, behavior_color, columns_per_band, shared_range)
 from postprocessing_core import mean_sem
 from postprocessing_style import POSTPROCESSING_PRESETS
+from psth_metric_panels import MetricPanel
+from psth_metrics import METRICS, metric_values
 
 
 def _entries(count, rows=6, seed=2):
@@ -192,6 +195,154 @@ class MultiBehaviorPanelTests(unittest.TestCase):
                                else QtCore.Qt.CheckState.Unchecked)
         self.panel._compute_psth_impl()
         self.settle()
+
+    def menu_action(self, plot, *path):
+        """Open the plot's actual menu and each submenu, exactly as a right-click does."""
+        menu = plot.getPlotItem().getViewBox().menu
+        for index, label in enumerate(path):
+            self.assertIsNotNone(menu, path[:index])
+            menu.aboutToShow.emit()
+            matches = [action for action in menu.actions() if action.text() == label]
+            self.assertEqual(len(matches), 1, (label, [action.text() for action in menu.actions()]))
+            action = matches[0]
+            self.assertTrue(action.isEnabled(), path[:index + 1])
+            menu = action.menu()
+        return action
+
+    def test_trace_modes_from_either_event_menu_redraw_both_columns(self):
+        listing = self.load()
+        panel = self.panel
+        self.check(listing, {"attack", "rearing"})
+        columns = panel.multi_behavior_view.columns[:2]
+        entries = panel.multi_behavior_view.entries
+        # Compare the whole trace submenu to the single-event control, so new
+        # display settings automatically acquire coverage on both event plots.
+        def options(plot):
+            menu = self.menu_action(plot, "Individual traces").menu()
+            menu.aboutToShow.emit()
+            return [action.text() for action in menu.actions() if not action.isSeparator()]
+
+        expected = options(panel.plot_avg)
+        for column in columns:
+            self.assertEqual(options(column.psth), expected)
+        for index, (label, mode) in enumerate((("Individual traces only", "traces"),
+                                                ("Average and individual traces", "both"),
+                                                ("Average only", "average"))):
+            self.menu_action(columns[index % 2].psth, "Individual traces", label).trigger()
+            self.settle()
+            self.assertEqual(panel.trace_view()["show"], mode)
+            for entry, column in zip(entries, columns):
+                self.assertTrue(self.menu_action(column.psth, "Individual traces", label).isChecked())
+                self.assertEqual(column.mean.isVisible(), mode != "traces")
+                self.assertEqual(column.sem_band.isVisible(), mode != "traces")
+                self.assertEqual(len(column.traces.curves), 0 if mode == "average" else len(entry["matrix"]))
+
+        self.check(listing, {"rearing"})
+        self.assertFalse(panel._multi_behavior_active)
+        self.assertTrue(self.menu_action(panel.plot_avg, "Individual traces", "Average only").isChecked())
+
+    def test_additional_panel_shows_each_events_own_data_and_follows_selection(self):
+        listing = self.load()
+        panel = self.panel
+        self.check(listing, {"attack", "rearing"})
+        view = panel.multi_behavior_view
+        columns = view.columns[:2]
+        initial_height = view.required_height()
+        self.menu_action(columns[1].psth, "Add metric panel", METRICS["peak"]).trigger()
+        self.settle()
+        self.assertGreater(view.required_height(), initial_height)
+        for entry, column in zip(view.entries, columns):
+            extra = column.extra_metrics["peak"]
+            self.assertTrue(extra.isVisible())
+            self.assertTrue(column.metric.isVisible())
+            self.assertIs(extra.result, entry["metrics"]["peak"])
+            post = metric_values(entry["matrix"], entry["tvec"], panel.spin_metric_post0.value(),
+                                 panel.spin_metric_post1.value(), "peak")
+            np.testing.assert_allclose(extra.result["post_values"], post, equal_nan=True)
+        # The selected panel is available in the regular dashboard after
+        # unchecking a behavior, and can be removed from the other event column.
+        self.check(listing, {"attack"})
+        self.assertTrue(panel._extra_metric_plots["peak"].isVisible())
+        self.check(listing, {"attack", "rearing"})
+        action = self.menu_action(columns[0].psth, "Add metric panel", METRICS["peak"])
+        self.assertTrue(action.isChecked())
+        action.trigger()
+        self.settle()
+        self.assertEqual(view.required_height(), initial_height)
+        for column in columns:
+            extra = column.extra_metrics.get("peak")
+            self.assertTrue(extra is None or extra.isHidden())
+
+    def test_remove_and_restore_event_plot_row_from_another_visible_menu(self):
+        listing = self.load()
+        self.check(listing, {"attack", "rearing"})
+        columns = self.panel.multi_behavior_view.columns[:2]
+        self.menu_action(columns[1].psth, "Remove this panel").trigger()
+        self.settle()
+        self.assertTrue(all(column.psth.isHidden() for column in columns))
+        self.assertTrue(all(column.heat.isVisible() for column in columns))
+        self.menu_action(columns[0].heat, "Restore removed panels", "Average PSTH").trigger()
+        self.settle()
+        self.assertTrue(all(column.psth.isVisible() for column in columns))
+        self.check(listing, {"rearing"})
+        self.assertTrue(self.panel.plot_avg.isVisible())
+
+    def test_named_extra_window_uses_each_events_offset_and_selected_limits(self):
+        listing = self.load()
+        panel = self.panel
+        self.check(listing, {"attack", "rearing"})
+        view = panel.multi_behavior_view
+        onset_means = {entry["name"]: mean_sem(entry["matrix"])[0] for entry in view.entries}
+        panel.combo_behavior_align.setCurrentText("Align to offset")
+        panel.metric_windows.add_button.click()
+        row = panel.metric_windows._rows[0]
+        row.label.set_name("After offset", emit=True)
+        row.start.setValue(1.25)
+        row.end.setValue(2.5)
+        self.settle()
+        key = result_key("auc", row.window_id)
+        for entry, column in zip(view.entries, view.columns):
+            extra = column.extra_metrics[key]
+            self.assertTrue(extra.isVisible())
+            matrix, tvec, _ = panel._compute_psth_for_behavior(entry["name"])
+            self.assertFalse(np.allclose(mean_sem(matrix)[0], onset_means[entry["name"]]))
+            np.testing.assert_allclose(extra.result["post_values"], metric_values(matrix, tvec, 1.25, 2.5, "auc"),
+                                       equal_nan=True)
+            summary = extra.result["summary"]
+            self.assertEqual((summary["post_label"], summary["post_start_s"], summary["post_end_s"]),
+                             ("After offset", 1.25, 2.5))
+        # Editing just the limit must refresh both panels without another
+        # behavior selection or a manual request to recompute the PSTH.
+        row.end.setValue(2.0)
+        self.settle()
+        for column in view.columns[:2]:
+            self.assertEqual(column.extra_metrics[key].result["summary"]["post_end_s"], 2.0)
+        row.remove_button.click()
+        self.settle()
+        self.assertTrue(all(key not in column.extra_metrics for column in view.columns[:2]))
+
+    def test_change_to_from_event_menu_renders_the_substitute_for_each_event(self):
+        listing = self.load()
+        self.check(listing, {"attack", "rearing"})
+        panel = self.panel
+        view = panel.multi_behavior_view
+        columns = view.columns[:2]
+        self.menu_action(columns[1].heat, "Change to", "Pre/post comparison", METRICS["peak"]).trigger()
+        self.settle()
+        substitutes = []
+        for column, entry in zip(columns, view.entries):
+            self.assertTrue(column.heat.isHidden())
+            candidates = [plot for plot in column.findChildren(MetricPanel)
+                          if plot is not column.metric and plot.isVisible() and plot.result is not None]
+            self.assertEqual(len(candidates), 1)
+            substitute = candidates[0]
+            post = metric_values(entry["matrix"], entry["tvec"], panel.spin_metric_post0.value(),
+                                 panel.spin_metric_post1.value(), "peak")
+            np.testing.assert_allclose(substitute.result["post_values"], post, equal_nan=True)
+            substitutes.append(substitute)
+        self.menu_action(substitutes[0], "Change to", "Original: Heatmap").trigger()
+        self.settle()
+        self.assertTrue(all(column.heat.isVisible() for column in columns))
 
     def test_columns_replace_the_single_row_and_come_back(self):
         listing = self.load()

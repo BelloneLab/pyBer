@@ -134,6 +134,8 @@ class ElidedLabel(QtWidgets.QLabel):
 class BehaviorColumn(QtWidgets.QWidget):
     """Header, heatmap, mean PSTH and metric panel of one behavior."""
 
+    extraMetricCreated = QtCore.Signal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.name = ""
@@ -147,6 +149,7 @@ class BehaviorColumn(QtWidgets.QWidget):
         self.heat = pg.PlotWidget()
         self.psth = pg.PlotWidget()
         self.metric = MetricPanel()
+        self.extra_metrics: Dict[str, MetricPanel] = {}
         self.metric.setMinimumSize(150, METRIC_MIN_HEIGHT)
         for plot, height, stretch in ((self.heat, HEAT_MIN_HEIGHT, 3), (self.psth, PSTH_MIN_HEIGHT, 3),
                                       (self.metric, METRIC_MIN_HEIGHT, 3)):
@@ -204,16 +207,48 @@ class BehaviorColumn(QtWidgets.QWidget):
     # ------------------------------------------------------------------ theme
     def apply_theme(self, palette: Dict[str, object]) -> None:
         """Same axes, fonts and surface as the other result panels."""
-        for plot in (self.heat, self.psth, self.metric):
+        for plot in (self.heat, self.psth, self.metric, *self.extra_metrics.values()):
             style_plot(plot, palette)
             plot.getPlotItem().layout.setContentsMargins(4, 4, 8, 4)
         for plot in (self.heat, self.psth):
             plot.getAxis("left").setWidth(LEFT_AXIS_WIDTH)
         self.heat.showGrid(x=False, y=False)
         self.metric.set_colors(palette)
+        for plot in self.extra_metrics.values():
+            plot.set_colors(palette)
         self.header.setStyleSheet(f"color: {palette['text']}; font-weight: 600; font-size: 12px;")
 
     # ------------------------------------------------------------------- data
+    def sync_extra_metrics(self, entry, keys, palette, visible, first_in_band) -> None:
+        """Render selected metrics and named windows using this event's own results."""
+        for key in list(self.extra_metrics):
+            if key not in keys:
+                plot = self.extra_metrics.pop(key)
+                self.layout().removeWidget(plot)
+                plot.hide()
+                plot.deleteLater()
+        first_extra = self.layout().count() - len(self.extra_metrics)
+        for index, key in enumerate(keys):
+            plot = self.extra_metrics.get(key)
+            if plot is None:
+                plot = MetricPanel()
+                plot.setMinimumSize(150, METRIC_MIN_HEIGHT)
+                self.extra_metrics[key] = plot
+                if palette is not None:
+                    style_plot(plot, palette)
+                    plot.set_colors(palette)
+                self.extraMetricCreated.emit(plot)
+            # Reinsert in selection order after the primary metric.
+            if self.layout().indexOf(plot) != first_extra + index:
+                self.layout().insertWidget(first_extra + index, plot, 3)
+            plot.setVisible(visible)
+            result = entry.get("metrics", {}).get(key)
+            plot.show_result(result, row_colors=entry.get("row_colors"))
+            summary = result["summary"] if result else None
+            set_plot_has_data(plot, bool(summary and (summary["pre_n"] or summary["post_n"])))
+            if not first_in_band:
+                plot.setLabel("left", "")
+
     def show_entry(self, entry: Dict[str, object], color: Tuple[int, int, int], levels: Tuple[float, float],
                    lookup_table, y_range: Optional[Tuple[float, float]], units: str, time_label: str,
                    trace_view: Dict[str, object], missing_mode: str, missing_trim: bool,
@@ -263,7 +298,7 @@ class BehaviorColumn(QtWidgets.QWidget):
         self.psth_zero.setVisible(bool(tvec[0] <= 0.0 <= tvec[-1]))
         # --- metric
         result = entry.get("metric")
-        self.metric.show_result(result)
+        self.metric.show_result(result, row_colors=entry.get("row_colors"))
         summary = result["summary"] if result else None
         set_plot_has_data(self.metric, bool(summary and (summary["pre_n"] or summary["post_n"])))
         if not first_in_band:
@@ -294,6 +329,8 @@ class MultiBehaviorView(QtWidgets.QWidget):
 
     #: Emitted when the number of bands (and so the needed height) changes.
     heightChanged = QtCore.Signal()
+    columnCreated = QtCore.Signal(object)
+    columnDrawn = QtCore.Signal(object, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -302,6 +339,8 @@ class MultiBehaviorView(QtWidgets.QWidget):
         self._per_band = 0
         self._palette: Optional[Dict[str, object]] = None
         self._show = {"heat": True, "psth": True, "metric": True}
+        self._show_extra_metrics = True
+        self._extra_metric_keys = []
         self._render_args: Optional[Dict[str, object]] = None
         self.grid = QtWidgets.QGridLayout(self)
         self.grid.setContentsMargins(4, 4, 4, 4)
@@ -333,6 +372,8 @@ class MultiBehaviorView(QtWidgets.QWidget):
         for key, minimum in (("heat", HEAT_MIN_HEIGHT), ("psth", PSTH_MIN_HEIGHT), ("metric", METRIC_MIN_HEIGHT)):
             if self._show.get(key, True):
                 height += minimum + 2
+        if self._show_extra_metrics:
+            height += len(self._extra_metric_keys) * (METRIC_MIN_HEIGHT + 2)
         return height
 
     def bands(self) -> int:
@@ -390,8 +431,14 @@ class MultiBehaviorView(QtWidgets.QWidget):
         self.colorbar.axis.setTextPen(pg.mkPen(palette["muted"]))
         self.colorbar.axis.setPen(pg.mkPen(palette["axis"]))
 
-    def set_visible_panels(self, heat: bool, psth: bool, metric: bool) -> None:
-        self._show = {"heat": bool(heat), "psth": bool(psth), "metric": bool(metric)}
+    def set_visible_panels(self, heat: bool, psth: bool, metric: bool, *, extras=None) -> None:
+        show = {"heat": bool(heat), "psth": bool(psth), "metric": bool(metric)}
+        show_extras = bool(metric if extras is None else extras)
+        if self._show == show and self._show_extra_metrics == show_extras:
+            return
+        self._show, self._show_extra_metrics = show, show_extras
+        if self.entries:
+            self._relayout(force=True)
 
     def clear(self) -> None:
         self.entries = []
@@ -421,11 +468,14 @@ class MultiBehaviorView(QtWidgets.QWidget):
                      missing_trim: bool) -> None:
         """Draw one column per entry (name, matrix, tvec, labels, row_unit, metric, color)."""
         self.entries = list(entries)[:MAX_BEHAVIORS]
+        self._extra_metric_keys = list(dict.fromkeys(key for entry in self.entries
+                                                     for key in entry.get("extra_metric_keys", ())))
         while len(self.columns) < len(self.entries):
             column = BehaviorColumn(self)
             if self._palette is not None:
                 column.apply_theme(self._palette)
             self.columns.append(column)
+            self.columnCreated.emit(column)
         self._render_args = {"color_map": color_map, "levels": levels, "units": units, "time_label": time_label,
                              "trace_view": trace_view, "missing_mode": missing_mode, "missing_trim": missing_trim}
         self._relayout(force=True)
@@ -445,3 +495,6 @@ class MultiBehaviorView(QtWidgets.QWidget):
             column.show_entry(entry, entry.get("color", behavior_color(index)), (low, high), lookup, y_range,
                               args["units"], args["time_label"], view, args["missing_mode"],
                               args["missing_trim"], first_in_band=index % per_band == 0, show=self._show)
+            column.sync_extra_metrics(entry, self._extra_metric_keys, self._palette,
+                                      self._show_extra_metrics, index % per_band == 0)
+            self.columnDrawn.emit(column, entry, dict(self._show))
