@@ -278,7 +278,10 @@ class DashboardPanels(QtCore.QObject):
             items.append(("metric", key, label))
         for key, info in GLOBAL_SIGNAL_METRICS.items():
             items.append(("global", key, info["label"]))
-        items.append(("trajectory", "pca", "PCA trajectories"))
+        # State-space (PCA): the trajectories, their loadings and a separation test.
+        from pca_trajectories import PANELS as PCA_PANELS
+        for code, label in PCA_PANELS:
+            items.append(("trajectory", code, label))
         return items
 
     def current_spec(self, slot: str) -> Optional[str]:
@@ -506,6 +509,9 @@ class DashboardPanels(QtCore.QObject):
 
     def render_substitutes(self, families: Optional[Sequence[str]] = None) -> None:
         """Redraw substitute panels (optionally only those of some families)."""
+        view = getattr(self.panel, "pca_trajectories", None)
+        if view is not None:
+            view.new_pass()   # PCA panels drawn in this pass share one fresh analysis
         for slot, spec in list(self.substitutes.items()):
             widget = self._widgets.get(slot)
             if widget is None:
@@ -568,7 +574,7 @@ class DashboardPanels(QtCore.QObject):
         # A PCA trajectories panel carries its own options (behaviors, groups,
         # method, axes) right below "Change to".
         view = getattr(self.panel, "pca_trajectories", None)
-        if current == TRAJECTORY_SPEC and view is not None:
+        if str(current or "").startswith("trajectory:") and view is not None:
             options = view.build_menu(menu)
             menu._pyber_trajectory_menu = options
             add(options.menuAction())

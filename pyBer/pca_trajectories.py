@@ -1,40 +1,71 @@
-"""PCA state-space trajectories of event-aligned photometry responses.
+"""PCA state-space views of event-aligned photometry responses.
 
-A dashboard panel ("Change to > State-space (PCA) > PCA trajectories") that
-draws how the event-aligned signal moves through a low-dimensional state space,
-for one or several behaviors and one or several groups. Options are chosen from
-the panel's right-click menu.
+Three dashboard panels ("Change to > State-space (PCA)") share one analysis:
 
-Why two methods
----------------
-A PCA trajectory needs several dimensions per time point. A fiber recording
-gives one signal, so the dimensions have to come from somewhere, and the two
-honest choices answer different questions:
+* PCA trajectories : the state-space picture itself;
+* PCA loadings     : what each component measures;
+* PCA separation   : a permutation test of how far two conditions are apart.
 
-1. Delay embedding (default; works with any number of recordings, even one).
-   Each condition (group x behavior) is reduced to its mean event-aligned
-   trace y(t). Every time point is described by the trace around it,
-   [y(t), y(t+dt), ..., y(t+(m-1)dt)] (Takens / singular-spectrum embedding).
-   All conditions are embedded the same way and one PCA is fitted on all of
-   them, so the trajectories share one space and can be compared. For smooth
-   traces PC1 follows the signal level and PC2 its rate of change: the
-   trajectory is a phase portrait of the response. It describes the shape and
-   dynamics of the mean response, not a population code.
+Their options (behaviors, groups, method, axes) are chosen from the right-click
+menu of any of the three panels.
 
-2. Recordings as dimensions (pseudo-population; needs at least two recordings
-   that have every selected behavior). Each recording is one dimension, each
-   time point of each behavior one sample. One PCA is fitted on all behaviors
-   together and each behavior is one trajectory. Recordings of the selected
-   groups are pooled: groups cannot be separate trajectories here, because
-   they are the dimensions. This is the classical "neural trajectory" with
-   animals in place of neurons, and it only shows what the recordings share.
+Methods (single fiber, many trials)
+-----------------------------------
+A fiber gives one signal, so a state space has to be built from that signal's
+own time course or from its trials. Four constructions are offered.
 
-The PCA is descriptive. No test is attached to it; the axis labels give the
-variance each component explains. Nothing in the recordings is modified.
+1. Onset-to-offset trajectories (default). Each bout is taken from its onset
+   to its offset, resampled to a common phase axis (0 = onset, 1 = offset) so
+   bouts of different length can be compared, then lag-embedded: every point
+   is described by the stretch of trace around it. One PCA is fitted on all
+   bouts pooled. Thin lines are single bouts, thick lines condition means.
+   It needs bouts with a start and an end; without durations the next method
+   is used and the panel says so.
+2. Lag-embedded trajectories. The same embedding applied to each trial's
+   event-aligned response over the PSTH window (real time, no resampling of
+   bout length): the temporal response pattern of every trial.
+3. Trial-response PCA. Each trial's whole response is one sample; the plot has
+   one point per event, with a diamond per recording. It shows trial-to-trial
+   variability and whether conditions occupy different regions.
+4. Recordings as dimensions (pseudo-population). Each recording is one
+   dimension and each behavior one trajectory; the selected groups are pooled
+   because the recordings are the dimensions.
+
+In every method one PCA is fitted on all conditions together, so they share
+their axes and can be compared. Traces are block-averaged to at most
+``MAX_TRACE_POINTS`` points before embedding (display resolution; the
+recordings are not modified).
+
+Loadings
+--------
+For the lag-embedded methods a loading is a weight per lag inside the delay
+window: a flat PC1 means "local signal level", a PC2 that changes sign means
+"local slope". For event-aligned lag trajectories the panel defaults to the
+mean PC scores at successive window centers in each condition. The fixed
+lag weights are available from PCA options. For trial-response PCA a loading is a time course over the
+response window. For recordings as dimensions it is a weight per recording.
+
+Separation
+----------
+Statistic: mean Euclidean distance between the two condition mean
+trajectories (between the two centroids for trial-response PCA), in the
+shared PCA space. Null distribution: the condition labels are permuted and
+the statistic recomputed in the same, label-blind PCA space. When each
+condition has at least ``MIN_RECORDINGS_PER_CONDITION`` different recordings
+the recordings are permuted (one mean trajectory per recording: animal
+level). Otherwise single trials are permuted and the result is marked
+exploratory, because trials of one animal are not independent. All
+labelings are enumerated when there are few of them; the p-value is
+(1 + number of permuted statistics >= observed) / (1 + number of
+permutations). With more than two conditions the first two are tested.
 """
 from __future__ import annotations
 
+import itertools
+from html import escape
 import json
+import math
+import time as _time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -42,6 +73,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from postprocessing_core import compute_psth_matrix
+from postprocessing_style import style_plot
 from recording_groups import UNGROUPED_COLOR, UNGROUPED_LABEL, color_dot_icon
 
 
@@ -50,27 +82,58 @@ from recording_groups import UNGROUPED_COLOR, UNGROUPED_LABEL, color_dot_icon
 # =============================================================================
 
 FAMILY = "trajectory"
-CODE = "pca"
+CODE = "pca"                       # the trajectories / points panel
+CODE_LOADINGS = "loadings"
+CODE_SEPARATION = "separation"
 SPEC = f"{FAMILY}:{CODE}"
+SPEC_LOADINGS = f"{FAMILY}:{CODE_LOADINGS}"
+SPEC_SEPARATION = f"{FAMILY}:{CODE_SEPARATION}"
 PANEL_LABEL = "PCA trajectories"
+PANELS: Tuple[Tuple[str, str], ...] = (
+    (CODE, PANEL_LABEL), (CODE_LOADINGS, "PCA loadings"), (CODE_SEPARATION, "PCA separation test"),
+)
 
-METHOD_DELAY = "delay"
+METHOD_BOUT = "bout"
+METHOD_LAG = "lag"
+METHOD_TRIALS = "trials"
 METHOD_RECORDINGS = "recordings"
+METHOD_DELAY = METHOD_LAG          # name used by earlier versions and saved options
 METHODS: Tuple[Tuple[str, str], ...] = (
-    (METHOD_DELAY, "Delay embedding (shape and dynamics of each mean response)"),
+    (METHOD_BOUT, "Onset-to-offset trajectories (each bout, start to end)"),
+    (METHOD_LAG, "Lag-embedded trajectories (temporal pattern of each trial)"),
+    (METHOD_TRIALS, "Trial-response PCA (one point per event)"),
     (METHOD_RECORDINGS, "Recordings as dimensions (pseudo-population)"),
 )
-#: Length of the delay window, in seconds, offered in the menu.
+METHOD_TITLES = {METHOD_BOUT: "onset-to-offset trajectories", METHOD_LAG: "lag-embedded trajectories",
+                 METHOD_TRIALS: "trial responses", METHOD_RECORDINGS: "recordings as dimensions"}
+DEFAULT_METHOD = METHOD_BOUT
+
+#: Length of the delay window, in seconds, offered for lag-embedded trajectories.
 DELAY_SPANS_S: Tuple[float, ...] = (0.25, 0.5, 1.0, 2.0)
 DEFAULT_DELAY_SPAN_S = 1.0
-#: The delay window never has fewer samples than this, nor more than this
-#: fraction of the trace.
 MIN_DELAY_SAMPLES = 3
-MAX_DELAY_FRACTION = 0.5
+MAX_DELAY_FRACTION = 0.5           # the delay window never exceeds this fraction of a trace
+#: Onset-to-offset: points on the phase axis, delay window as a fraction of the
+#: bout, longest bout read (seconds; longer bouts are cut there) and the fewest
+#: samples a bout must contain.
+BOUT_PHASE_POINTS = 60
+BOUT_DELAY_FRACTION = 0.2
+BOUT_MAX_S = 60.0
+MIN_BOUT_SAMPLES = 4
+#: Traces are block-averaged to at most this many points before embedding.
+MAX_TRACE_POINTS = 200
+#: At most this many embedded samples are used to fit the PCA (evenly spaced).
+FIT_MAX_SAMPLES = 60000
 #: Component pairs offered for the two plot axes (0-based).
 AXES_CHOICES: Tuple[Tuple[int, int], ...] = ((0, 1), (0, 2), (1, 2))
 N_COMPONENTS = 3
 MIN_RECORDINGS_AS_DIMENSIONS = 2
+
+# Separation test.
+N_PERMUTATIONS = 2000
+PERMUTATION_SEED = 0               # fixed: the same data always give the same p-value
+MIN_RECORDINGS_PER_CONDITION = 3   # below this, trials are permuted (exploratory)
+HISTOGRAM_BINS = 30
 
 #: Group keys used in the options: pooled recordings and ungrouped recordings.
 POOLED = "*"
@@ -78,12 +141,16 @@ UNGROUPED = ""
 SETTINGS_KEY = "pca_trajectories_options"
 
 # Figure styling.
-LINE_WIDTH = 1.8
-MARKER_SIZE = 9
-#: Width allowed per legend column (pixels) and the plot layout row the legend
-#: uses (below the bottom axis, which sits in row 3).
-LEGEND_COLUMN_WIDTH = 135
-LEGEND_LAYOUT_ROW = 4
+MEAN_LINE_WIDTH = 2.6
+UNIT_LINE_WIDTH = 0.8
+UNIT_LINE_ALPHA = 55               # 0..255 opacity of single-trial / single-bout lines
+MAX_UNIT_LINES = 60                # single lines drawn per condition (evenly chosen)
+MARKER_SIZE = 10
+POINT_SIZE = 5
+POINT_ALPHA = 110
+RECORDING_MARKER_SIZE = 11
+LEGEND_COLUMN_WIDTH = 135          # width allowed per legend column (pixels)
+LEGEND_LAYOUT_ROW = 4              # plot layout row under the bottom axis (row 3)
 #: Categorical colors (fixed order) for behaviors when one group is shown.
 COLORS_ON_LIGHT = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948")
 COLORS_ON_DARK = ("#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#0ca30c", "#9085e9", "#e66767")
@@ -169,12 +236,14 @@ def delay_trajectories(traces: Dict[object, Tuple[np.ndarray, np.ndarray]], span
 
 
 def population_trajectories(responses: Dict[object, Tuple[np.ndarray, np.ndarray]],
-                            n_components: int = N_COMPONENTS) -> Tuple[Dict[object, Tuple[np.ndarray, np.ndarray]], np.ndarray]:
+                            n_components: int = N_COMPONENTS, return_model: bool = False):
     """Trajectories of several conditions with recordings as dimensions.
 
     ``responses``: key -> (time, matrix with one row per time point and one
     column per recording; the same recordings, in the same order, for every
     key). Time points with a missing value in any recording are dropped.
+    With ``return_model`` the components (loadings per recording) are
+    returned as a third value.
     """
     kept = {}
     for key, (time, matrix) in responses.items():
@@ -183,11 +252,137 @@ def population_trajectories(responses: Dict[object, Tuple[np.ndarray, np.ndarray
         if mat.ndim == 2 and rows.sum() >= 2:
             kept[key] = (np.asarray(time, float)[rows], mat[rows])
     if not kept:
-        return {}, np.empty(0)
+        return ({}, np.empty(0), np.empty((0, 0))) if return_model else ({}, np.empty(0))
     if len({mat.shape[1] for _t, mat in kept.values()}) != 1:
         raise ValueError("Every condition must use the same recordings.")
     mean, components, ratio = fit_pca(np.vstack([mat for _t, mat in kept.values()]), n_components)
-    return {key: (t, (mat - mean) @ components.T) for key, (t, mat) in kept.items()}, ratio
+    out = {key: (t, (mat - mean) @ components.T) for key, (t, mat) in kept.items()}
+    return (out, ratio, components) if return_model else (out, ratio)
+
+
+def decimate_rows(matrix: np.ndarray, time: np.ndarray, max_points: int = MAX_TRACE_POINTS):
+    """Block-average traces (rows) so that at most ``max_points`` samples remain.
+
+    Averaging blocks, instead of taking every n-th sample, keeps fast noise
+    from aliasing into the trajectory. A block with no finite sample stays
+    missing. Returns the reduced matrix and time axis (block centers).
+    """
+    mat = np.asarray(matrix, float)
+    t = np.asarray(time, float)
+    if mat.ndim != 2 or mat.shape[1] <= max_points:
+        return mat, t
+    factor = int(math.ceil(mat.shape[1] / float(max_points)))
+    usable = (mat.shape[1] // factor) * factor
+    blocks = mat[:, :usable].reshape(mat.shape[0], -1, factor)
+    counts = np.isfinite(blocks).sum(axis=2)
+    sums = np.where(np.isfinite(blocks), blocks, 0.0).sum(axis=2)
+    reduced = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
+    return reduced, t[:usable].reshape(-1, factor).mean(axis=1)
+
+
+def embed_units(traces: np.ndarray, n_delays: int, n_components: int = N_COMPONENTS,
+                fit_max: int = FIT_MAX_SAMPLES):
+    """Lag-embed many traces and project them in one pooled PCA space.
+
+    ``traces``: one row per unit (trial or bout), all on the same axis.
+    Returns ``(scores, centers, components, ratio)``: scores has shape
+    (units, points, components) with NaN where a delay window contained a
+    missing sample; ``centers`` is the axis index of each point.
+    """
+    mat = np.asarray(traces, float)
+    m = int(n_delays)
+    if mat.ndim != 2 or mat.shape[0] < 1 or mat.shape[1] < m or m < 1:
+        raise ValueError("Traces are too short for the delay window.")
+    windows = np.lib.stride_tricks.sliding_window_view(mat, m, axis=1)        # (units, points, m)
+    valid = np.isfinite(windows).all(axis=2)
+    samples = windows[valid]
+    if samples.shape[0] < 2:
+        raise ValueError("Not enough complete samples to fit the PCA.")
+    fit = samples if samples.shape[0] <= fit_max else samples[
+        np.linspace(0, samples.shape[0] - 1, fit_max).astype(int)]
+    mean, components, ratio = fit_pca(fit, n_components)
+    scores = np.full(windows.shape[:2] + (components.shape[0],), np.nan)
+    scores[valid] = (samples - mean) @ components.T
+    centers = np.arange(windows.shape[1]) + (m - 1) // 2
+    return scores, centers, components, ratio
+
+
+def bouts_to_phase(matrix: np.ndarray, time: np.ndarray, durations: np.ndarray,
+                   n_points: int = BOUT_PHASE_POINTS) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Resample each onset-aligned row from its onset to its offset onto a phase axis.
+
+    ``matrix`` rows are aligned to bout onset (time 0). A bout longer than the
+    available window is cut at the window end. Returns the resampled rows
+    (bouts x n_points), the index of each kept bout, and how many were cut.
+    Bouts without a duration or with too few finite samples are left out.
+    """
+    mat = np.asarray(matrix, float)
+    t = np.asarray(time, float)
+    phase = np.linspace(0.0, 1.0, int(n_points))
+    rows, kept, truncated = [], [], 0
+    window_end = float(t[-1]) if t.size else 0.0
+    # Half a sample of tolerance: the sample at the onset (or offset) must not be
+    # lost to rounding of the time axis.
+    slack = 0.5 * float(np.median(np.diff(t))) if t.size > 1 else 0.0
+    for index, duration in enumerate(np.asarray(durations, float)):
+        if not np.isfinite(duration) or duration <= 0:
+            continue
+        end = min(float(duration), window_end)
+        mask = (t >= -slack) & (t <= end + slack) & np.isfinite(mat[index])
+        if int(mask.sum()) < MIN_BOUT_SAMPLES or end <= 0:
+            continue
+        truncated += int(duration > window_end + slack)
+        rows.append(np.interp(phase, np.clip(t[mask] / end, 0.0, 1.0), mat[index][mask]))
+        kept.append(index)
+    if not rows:
+        return np.empty((0, int(n_points))), np.empty(0, dtype=int), 0
+    return np.vstack(rows), np.asarray(kept, dtype=int), truncated
+
+
+def separation_statistic(group_a: np.ndarray, group_b: np.ndarray) -> float:
+    """Mean distance between two mean trajectories (or two centroids).
+
+    Inputs: units x points x components (trajectories) or units x components
+    (points). The means are taken over units, the distance over components,
+    and the average over points.
+    """
+    difference = np.asarray(group_a, float).mean(axis=0) - np.asarray(group_b, float).mean(axis=0)
+    return float(np.mean(np.sqrt(np.sum(difference ** 2, axis=-1))))
+
+
+def permutation_separation(group_a: np.ndarray, group_b: np.ndarray, n_permutations: int = N_PERMUTATIONS,
+                           seed: int = PERMUTATION_SEED) -> Dict[str, object]:
+    """Permutation test of the separation between two sets of units.
+
+    Units are exchanged between the two conditions; the PCA space is not
+    refitted (it was fitted without the labels). All labelings are enumerated
+    when there are at most ``n_permutations`` of them (exact test). The
+    p-value is (1 + #{permuted >= observed}) / (1 + number of permutations);
+    for an exact test the observed labeling is one of the labelings and the
+    p-value is simply the fraction of labelings at least as extreme.
+    """
+    a, b = np.asarray(group_a, float), np.asarray(group_b, float)
+    n_a, n_b = a.shape[0], b.shape[0]
+    pooled = np.concatenate([a, b], axis=0)
+    observed = separation_statistic(a, b)
+    total = pooled.sum(axis=0)
+    n = n_a + n_b
+
+    def statistic(index_a) -> float:
+        sum_a = pooled[list(index_a)].sum(axis=0)
+        difference = sum_a / n_a - (total - sum_a) / n_b
+        return float(np.mean(np.sqrt(np.sum(difference ** 2, axis=-1))))
+
+    exact = math.comb(n, n_a) <= int(n_permutations)
+    if exact:
+        null = np.asarray([statistic(combo) for combo in itertools.combinations(range(n), n_a)])
+        p_value = float(np.mean(null >= observed - 1e-12))
+    else:
+        rng = np.random.default_rng(seed)
+        null = np.asarray([statistic(rng.permutation(n)[:n_a]) for _ in range(int(n_permutations))])
+        p_value = float((1 + np.count_nonzero(null >= observed - 1e-12)) / (1 + null.size))
+    return {"observed": observed, "null": null, "p": p_value, "exact": bool(exact),
+            "n_permutations": int(null.size), "n_a": int(n_a), "n_b": int(n_b)}
 
 
 # =============================================================================
@@ -195,17 +390,19 @@ def population_trajectories(responses: Dict[object, Tuple[np.ndarray, np.ndarray
 # =============================================================================
 
 class PcaTrajectoryView(QtCore.QObject):
-    """Options, data collection and drawing of the PCA trajectories panel."""
+    """Options, data collection and drawing of the three PCA panels."""
 
     def __init__(self, panel) -> None:
         super().__init__(panel)
         self.panel = panel
         # behaviors: [] = follow the PSTH behavior. groups: None = automatic
         # (the groups shown by Hide/show groups, or all recordings pooled).
-        self.options: Dict[str, object] = {"behaviors": [], "groups": None, "method": METHOD_DELAY,
-                                           "span_s": DEFAULT_DELAY_SPAN_S, "axes": [0, 1]}
+        self.options: Dict[str, object] = {"behaviors": [], "groups": None, "method": DEFAULT_METHOD,
+                                           "span_s": DEFAULT_DELAY_SPAN_S, "axes": [0, 1], "units": True,
+                                           "show_lag_weights": False}
         self._legends: Dict[int, pg.LegendItem] = {}
         self.last_report: Dict[str, object] = {}
+        self._cache: Optional[Tuple[float, str, Dict[str, object]]] = None
         self._load_options()
 
     # ---------------------------------------------------------------- options
@@ -218,20 +415,28 @@ class PcaTrajectoryView(QtCore.QObject):
             for key in self.options:
                 if key in stored:
                     self.options[key] = stored[key]
+        if self.options["method"] == "delay":          # saved by the first version
+            self.options["method"] = METHOD_LAG
         if self.options["method"] not in dict(METHODS):
-            self.options["method"] = METHOD_DELAY
+            self.options["method"] = DEFAULT_METHOD
         if tuple(self.options.get("axes") or ()) not in AXES_CHOICES:
             self.options["axes"] = [0, 1]
 
     def set_option(self, key: str, value) -> None:
         self.options[key] = value
+        self._cache = None
         try:
             self.panel._settings.setValue(SETTINGS_KEY, json.dumps(self.options))
         except Exception:
             pass
         self.refresh()
 
+    def new_pass(self) -> None:
+        """Forget the cached analysis: the dashboard is about to redraw its panels."""
+        self._cache = None
+
     def refresh(self) -> None:
+        self._cache = None
         panels = getattr(self.panel, "dashboard_panels", None)
         if panels is not None:
             panels.render_substitutes((FAMILY,))
@@ -286,7 +491,7 @@ class PcaTrajectoryView(QtCore.QObject):
         return entries
 
     def selected_groups(self) -> List[Tuple[str, str, Optional[str], List[str]]]:
-        """Groups drawn as separate trajectories (color None = use the behavior colors)."""
+        """Groups drawn as separate conditions (color None = use the behavior colors)."""
         panel = self.panel
         all_ids = [panel._file_id_for_proc(proc) for proc in panel._processed]
         pooled = (POOLED, "All recordings", None, all_ids)
@@ -301,16 +506,23 @@ class PcaTrajectoryView(QtCore.QObject):
         return out or [pooled]
 
     # ------------------------------------------------------------------ data
-    def _mean_responses(self, behaviors: Sequence[str]) -> Tuple[Dict[str, Dict[str, np.ndarray]], Optional[np.ndarray]]:
-        """Mean event-aligned trace of every recording for every behavior.
+    def _trial_responses(self, behaviors: Sequence[str], to_offset: bool):
+        """Trial matrices of every recording for every behavior.
 
         Uses the panel's own event extraction (clock, alignment edge, event
-        filters, hidden events) and the current PSTH window, baseline and
-        normalization, so a trajectory is built from the same responses as the
+        filters, hidden events) and the current PSTH baseline, normalization
+        and smoothing, so the PCA is built from the same responses as the
         PSTH. The behavior picker is switched silently and put back.
+
+        ``to_offset`` False: rows are the PSTH window around each event.
+        ``to_offset`` True : rows run from bout onset to bout offset on the
+        phase axis (see ``bouts_to_phase``).
+
+        Returns ``(responses, axis, info)`` with responses[behavior][file_id]
+        = matrix (trials x points).
         """
         panel = self.panel
-        window = (-float(panel.spin_pre.value()), float(panel.spin_post.value()))
+        pre, post = float(panel.spin_pre.value()), float(panel.spin_post.value())
         baseline = (float(panel.spin_b0.value()), float(panel.spin_b1.value()))
         rate = float(panel.spin_resample.value())
         smooth = float(panel.spin_smooth.value())
@@ -320,7 +532,8 @@ class PcaTrajectoryView(QtCore.QObject):
         switch = self.behaviors_apply()
         previous = combo.currentIndex()
         responses: Dict[str, Dict[str, np.ndarray]] = {}
-        tvec: Optional[np.ndarray] = None
+        axis: Optional[np.ndarray] = None
+        info = {"truncated": 0, "without_duration": 0}
         blocker = QtCore.QSignalBlocker(combo)
         try:
             for behavior in behaviors:
@@ -337,108 +550,279 @@ class PcaTrajectoryView(QtCore.QObject):
                     events, durations = panel._get_events_for_proc(proc)
                     if not marker_alignment:
                         events, durations = panel._filter_events(events, durations)
-                    if np.asarray(events).size == 0:
+                    events = np.asarray(events, float)
+                    durations = np.asarray(durations, float)
+                    if events.size == 0:
                         continue
+                    if durations.size != events.size:
+                        durations = np.full(events.shape, np.nan)
+                    window = (-pre, post)
+                    if to_offset:
+                        usable = np.isfinite(durations) & (durations > 0)
+                        info["without_duration"] += int(np.count_nonzero(~usable))
+                        if not usable.any():
+                            continue
+                        # Bouts are read from their onset, whichever edge the PSTH uses.
+                        if not marker_alignment and switch:
+                            events = panel._behavior_onsets(events, durations)
+                        events, durations = events[usable], durations[usable]
+                        longest = max(float(durations.max()), MIN_BOUT_SAMPLES / rate)
+                        window = (-pre, float(min(longest, BOUT_MAX_S)))
                     try:
                         time, matrix = compute_psth_matrix(panel._proc_time(proc), signal, events, window, baseline,
                                                            rate, smooth_sigma_s=smooth, normalization=normalization)
                     except ValueError:
                         continue
-                    matrix = matrix[np.any(np.isfinite(matrix), axis=1)] if matrix.ndim == 2 else matrix[:0]
-                    if matrix.size == 0:
+                    if matrix.ndim != 2 or matrix.size == 0:
                         continue
-                    with np.errstate(all="ignore"):
-                        mean = np.nanmean(matrix, axis=0)
-                    per_file[panel._file_id_for_proc(proc)] = mean
-                    tvec = time
+                    if to_offset:
+                        matrix, _kept, truncated = bouts_to_phase(matrix, time, durations)
+                        info["truncated"] += truncated
+                        time = np.linspace(0.0, 1.0, BOUT_PHASE_POINTS)
+                    else:
+                        matrix = matrix[np.any(np.isfinite(matrix), axis=1)]
+                    if matrix.shape[0] == 0:
+                        continue
+                    per_file[panel._file_id_for_proc(proc)] = matrix
+                    axis = time
                 responses[behavior] = per_file
         finally:
             if switch:
                 combo.setCurrentIndex(previous)
             del blocker
-        return responses, tvec
+        return responses, axis, info
 
     def compute(self) -> Dict[str, object]:
-        """Trajectories for the current options, with what was left out and why."""
+        """The analysis for the current options (shared by the three panels).
+
+        The three panels drawn in one dashboard pass share one computation:
+        the dashboard calls ``new_pass`` before drawing, and the result is
+        reused until then (and never for more than a second).
+        """
+        signature = json.dumps(self.options, sort_keys=True)
+        if self._cache is not None and self._cache[1] == signature and _time.monotonic() - self._cache[0] < 1.0:
+            return self._cache[2]
+        try:
+            report = self._compute()
+        except Exception as exc:        # a display problem must not break the analysis
+            report = self._empty_report(str(self.options.get("method")), f"Could not compute the PCA: {exc}")
+        self._cache = (_time.monotonic(), signature, report)
+        self.last_report = report
+        return report
+
+    def _empty_report(self, method: str, note: str) -> Dict[str, object]:
+        return {"method": method, "requested_method": method, "behaviors": [], "curves": [], "ratio": np.empty(0),
+                "components": np.empty((0, 0)), "loading_axis": np.empty(0), "loading_label": "",
+                "loading_ticks": None, "note": note, "skipped": [], "fallback": "", "info": {}}
+
+    def _compute(self) -> Dict[str, object]:
         behaviors = self.selected_behaviors()
         groups = self.selected_groups()
-        method = str(self.options.get("method") or METHOD_DELAY)
-        report: Dict[str, object] = {"method": method, "behaviors": list(behaviors), "curves": [],
-                                     "ratio": np.empty(0), "note": "", "skipped": []}
+        method = str(self.options.get("method") or DEFAULT_METHOD)
         if not self.panel._processed or not behaviors:
-            report["note"] = "Load recordings and events to draw trajectories."
-            return report
-        responses, tvec = self._mean_responses(behaviors)
-        if tvec is None:
-            report["note"] = "No event-aligned response for the selected behaviors."
-            return report
-
+            return self._empty_report(method, "Load recordings and events to draw the PCA.")
         if method == METHOD_RECORDINGS:
-            wanted: List[str] = []
-            for _key, _name, _color, members in groups:
-                wanted.extend(fid for fid in members if fid not in wanted)
-            usable = [fid for fid in wanted if all(fid in responses.get(b, {}) for b in behaviors)]
-            report["skipped"] = [fid for fid in wanted if fid not in usable]
-            report["recordings"] = usable
-            if len(usable) < MIN_RECORDINGS_AS_DIMENSIONS:
-                report["note"] = (f"Recordings as dimensions needs at least {MIN_RECORDINGS_AS_DIMENSIONS} "
-                                  f"recordings with every selected behavior ({len(usable)} available). "
-                                  "Use Delay embedding instead.")
-                return report
-            stacked = {b: (tvec, np.column_stack([responses[b][fid] for fid in usable])) for b in behaviors}
-            trajectories, ratio = population_trajectories(stacked)
-            for index, behavior in enumerate(behaviors):
-                if behavior in trajectories:
-                    time, scores = trajectories[behavior]
-                    report["curves"].append({"label": f"{behavior} (n={len(usable)} rec.)", "behavior": behavior,
-                                             "behavior_index": index, "group": None, "group_color": None,
-                                             "time": time, "scores": scores, "n": len(usable)})
-            report["ratio"] = ratio
+            return self._compute_recordings(behaviors, groups)
+        report = self._compute_units(method, behaviors, groups)
+        if method == METHOD_BOUT and not report["curves"] and not report.get("hard_error"):
+            # No bout has a start and an end: show the trial pattern instead.
+            fallback = self._compute_units(METHOD_LAG, behaviors, groups)
+            fallback["requested_method"] = METHOD_BOUT
+            fallback["fallback"] = ("No bout with a start and an end was found, so lag-embedded "
+                                    "trajectories around each event are shown instead.")
+            return fallback
+        return report
+
+    def _compute_units(self, method: str, behaviors: Sequence[str], groups) -> Dict[str, object]:
+        """Onset-to-offset, lag-embedded or trial-response PCA: units are trials or bouts."""
+        report = self._empty_report(method, "")
+        report["behaviors"] = list(behaviors)
+        responses, axis, info = self._trial_responses(behaviors, to_offset=(method == METHOD_BOUT))
+        report["info"] = info
+        if axis is None:
+            report["note"] = ("No bout with a start and an end for the selected behaviors."
+                              if method == METHOD_BOUT else "No event-aligned response for the selected behaviors.")
             return report
 
-        traces = {}
-        meta = {}
-        for group_index, (key, name, color, members) in enumerate(groups):
+        # One block of unit traces per condition (group x behavior), all on the same axis.
+        blocks = []
+        for group_index, (_key, name, color, members) in enumerate(groups):
             for behavior_index, behavior in enumerate(behaviors):
-                rows = [responses.get(behavior, {}).get(fid) for fid in members]
-                rows = [row for row in rows if row is not None]
+                rows, files = [], []
+                for fid in members:
+                    matrix = responses.get(behavior, {}).get(fid)
+                    if matrix is not None and matrix.shape[0]:
+                        rows.append(matrix)
+                        files.extend([fid] * matrix.shape[0])
                 if not rows:
                     report["skipped"].append(f"{name} / {behavior}")
                     continue
-                with np.errstate(all="ignore"):
-                    mean = np.nanmean(np.vstack(rows), axis=0)
-                traces[(key, behavior)] = (tvec, mean)
-                meta[(key, behavior)] = (name, color, behavior, behavior_index, len(rows), group_index)
-        try:
-            trajectories, ratio = delay_trajectories(traces, float(self.options.get("span_s") or DEFAULT_DELAY_SPAN_S))
-        except ValueError as exc:
-            report["note"] = str(exc)
+                blocks.append({"group": name, "group_color": color, "behavior": behavior,
+                               "behavior_index": behavior_index, "group_index": group_index,
+                               "rows": np.vstack(rows), "files": np.asarray(files, dtype=object)})
+        if not blocks:
+            report["note"] = "The selected groups have no response for the selected behaviors."
             return report
+        stacked, axis = decimate_rows(np.vstack([block["rows"] for block in blocks]), axis)
+        step = float(np.nanmedian(np.diff(axis))) if axis.size > 1 else 1.0
+
+        if method == METHOD_TRIALS:
+            complete = np.all(np.isfinite(stacked), axis=1)
+            if complete.sum() < 3:
+                report["note"] = "Trial-response PCA needs at least three complete trials."
+                return report
+            mean, components, ratio = fit_pca(stacked[complete], N_COMPONENTS)
+            scores = np.full((stacked.shape[0], components.shape[0]), np.nan)
+            scores[complete] = (stacked[complete] - mean) @ components.T
+            point_time = None
+            report.update(loading_axis=axis, loading_label="Time from event (s)")
+        else:
+            if method == METHOD_BOUT:
+                n_delays = max(MIN_DELAY_SAMPLES, int(round(BOUT_DELAY_FRACTION * axis.size)))
+            else:
+                n_delays = delay_sample_count(float(self.options.get("span_s") or DEFAULT_DELAY_SPAN_S), axis)
+            try:
+                scores, centers, components, ratio = embed_units(stacked, n_delays)
+            except ValueError as exc:
+                report["note"] = str(exc)
+                report["hard_error"] = True
+                return report
+            point_time = axis[centers]
+            lags = (np.arange(n_delays) - (n_delays - 1) // 2) * step
+            if method == METHOD_BOUT:
+                report.update(loading_axis=100.0 * lags, loading_label="Lag inside the delay window (% of bout)")
+            else:
+                report.update(loading_axis=lags, loading_label="Lag inside the delay window (s)")
+        report.update(ratio=ratio, components=components)
+
         several_groups = len(groups) > 1
         several_behaviors = len(behaviors) > 1
-        for key, (time, scores) in trajectories.items():
-            name, color, behavior, behavior_index, count, _group_index = meta[key]
-            parts = ([behavior] if several_behaviors or not several_groups else []) + \
-                    ([name] if several_groups or not several_behaviors else [])
-            report["curves"].append({"label": f"{' · '.join(parts)} (n={count})", "behavior": behavior,
-                                     "behavior_index": behavior_index, "group": name,
-                                     "group_color": color if several_groups else None,
-                                     "time": time, "scores": scores, "n": count})
-        report["ratio"] = ratio
-        if not report["curves"]:
-            report["note"] = "The selected responses are too short or incomplete for the delay window."
+        unit_word = "bouts" if method == METHOD_BOUT else "trials"
+        start = 0
+        for block in blocks:
+            count = block["rows"].shape[0]
+            unit_scores = scores[start:start + count]
+            start += count
+            files = block["files"]
+            with np.errstate(all="ignore"):
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    mean_scores = np.nanmean(unit_scores, axis=0)
+            parts = ([block["behavior"]] if several_behaviors or not several_groups else []) + \
+                    ([block["group"]] if several_groups or not several_behaviors else [])
+            n_recordings = len(set(files.tolist()))
+            report["curves"].append({
+                "label": f"{' · '.join(parts)} (n={count} {unit_word}, {n_recordings} rec.)",
+                "behavior": block["behavior"], "behavior_index": block["behavior_index"],
+                "group": block["group"], "group_color": block["group_color"] if several_groups else None,
+                "time": point_time, "scores": mean_scores, "units": unit_scores, "unit_files": files,
+                "n": count, "n_recordings": n_recordings})
         return report
+
+    def _compute_recordings(self, behaviors: Sequence[str], groups) -> Dict[str, object]:
+        """Recordings as dimensions: one trajectory per behavior, selected groups pooled."""
+        report = self._empty_report(METHOD_RECORDINGS, "")
+        report["behaviors"] = list(behaviors)
+        responses, tvec, _info = self._trial_responses(behaviors, to_offset=False)
+        if tvec is None:
+            report["note"] = "No event-aligned response for the selected behaviors."
+            return report
+        wanted: List[str] = []
+        for _key, _name, _color, members in groups:
+            wanted.extend(fid for fid in members if fid not in wanted)
+        usable = [fid for fid in wanted if all(fid in responses.get(b, {}) for b in behaviors)]
+        report["skipped"] = [fid for fid in wanted if fid not in usable]
+        report["recordings"] = usable
+        if len(usable) < MIN_RECORDINGS_AS_DIMENSIONS:
+            report["note"] = (f"Recordings as dimensions needs at least {MIN_RECORDINGS_AS_DIMENSIONS} recordings "
+                              f"with every selected behavior ({len(usable)} available). Choose another method.")
+            return report
+        stacked = {}
+        for behavior in behaviors:
+            with np.errstate(all="ignore"):
+                columns = [np.nanmean(responses[behavior][fid], axis=0) for fid in usable]
+            matrix, axis = decimate_rows(np.vstack(columns), tvec)
+            stacked[behavior] = (axis, matrix.T)
+        trajectories, ratio, components = population_trajectories(stacked, return_model=True)
+        for index, behavior in enumerate(behaviors):
+            if behavior in trajectories:
+                time, scores = trajectories[behavior]
+                report["curves"].append({"label": f"{behavior} (n={len(usable)} rec.)", "behavior": behavior,
+                                         "behavior_index": index, "group": None, "group_color": None,
+                                         "time": time, "scores": scores, "units": None, "unit_files": None,
+                                         "n": len(usable), "n_recordings": len(usable)})
+        report.update(ratio=ratio, components=components, loading_axis=np.arange(len(usable), dtype=float),
+                      loading_label="Recording", loading_ticks=list(usable))
+        return report
+
+    # ------------------------------------------------------------ separation
+    def separation(self, report: Dict[str, object]) -> Dict[str, object]:
+        """Permutation test between the first two conditions of a report (cached on it)."""
+        if "separation" in report:
+            return report["separation"]
+        result: Dict[str, object] = {"available": False, "note": ""}
+        report["separation"] = result
+        curves = [curve for curve in report.get("curves", []) if curve.get("units") is not None]
+        if report.get("method") == METHOD_RECORDINGS:
+            result["note"] = ("With recordings as dimensions each behavior has a single trajectory, "
+                              "so there is nothing to permute. Choose another method.")
+            return result
+        if len(curves) < 2:
+            result["note"] = "The separation test needs two conditions: select two groups or two behaviors."
+            return result
+        first, second = curves[0], curves[1]
+        result.update(label_a=first["label"], label_b=second["label"], extra_conditions=len(curves) - 2)
+        files_a, files_b = set(first["unit_files"].tolist()), set(second["unit_files"].tolist())
+        animal_level = (not files_a & files_b and min(len(files_a), len(files_b)) >= MIN_RECORDINGS_PER_CONDITION)
+        after_event = report.get("method") == METHOD_LAG and first["time"] is not None
+
+        def units_of(curve) -> np.ndarray:
+            units = np.asarray(curve["units"], float)
+            if animal_level:      # one mean trajectory per recording
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    units = np.stack([np.nanmean(units[curve["unit_files"] == fid], axis=0)
+                                      for fid in sorted(set(curve["unit_files"].tolist()))])
+            return units
+
+        a, b = units_of(first), units_of(second)
+        if a.ndim == 3:
+            result["window"] = "after the event" if after_event else "from onset to offset"
+            # Keep the points present in every unit (for event-aligned trajectories: after the event).
+            keep = np.isfinite(a).all(axis=(0, 2)) & np.isfinite(b).all(axis=(0, 2))
+            if after_event:
+                keep &= np.asarray(first["time"]) >= 0.0
+            if int(keep.sum()) < 2:
+                # A few incomplete units would remove every point: drop those units instead.
+                a = a[np.isfinite(a).all(axis=(1, 2))]
+                b = b[np.isfinite(b).all(axis=(1, 2))]
+                keep = np.ones(first["scores"].shape[0], bool)
+                if after_event:
+                    keep &= np.asarray(first["time"]) >= 0.0
+            a, b = a[:, keep], b[:, keep]
+        else:
+            a, b = a[np.isfinite(a).all(axis=1)], b[np.isfinite(b).all(axis=1)]
+            result["window"] = "between centroids"
+        if a.shape[0] < 1 or b.shape[0] < 1 or a.shape[0] + b.shape[0] < 3 or a[0].size == 0:
+            result["note"] = "Too few complete units to permute."
+            return result
+        result.update(permutation_separation(a, b))
+        result.update(available=True, level="recordings" if animal_level else "trials")
+        return result
 
     # --------------------------------------------------------------- drawing
     def _behavior_colors(self, palette: Dict[str, object]) -> Sequence[str]:
         text = QtGui.QColor(str(palette.get("text", "#000000")))
         return COLORS_ON_DARK if text.lightness() > 128 else COLORS_ON_LIGHT
 
-    def render(self, widget: pg.PlotWidget) -> None:
-        """Draw the trajectories of the current options in a dashboard plot."""
-        panel = self.panel
-        palette = panel._current_palette()
-        text_color = str(palette.get("text", "#000000"))
+    def _curve_color(self, curve, colors) -> str:
+        return curve["group_color"] or colors[curve["behavior_index"] % len(colors)]
+
+    def _prepare(self, widget: pg.PlotWidget) -> Tuple[Dict[str, object], str]:
+        """Empty the plot and give it the current plot style (background, axes, text)."""
+        palette = self.panel._current_palette()
         widget.clear()
         plot_item = widget.getPlotItem()
         legend = self._legends.pop(id(widget), None)
@@ -450,79 +834,324 @@ class PcaTrajectoryView(QtCore.QObject):
                     legend.scene().removeItem(legend)
             except Exception:
                 pass
-        try:
-            report = self.compute()
-        except Exception as exc:   # a display problem must not break the analysis
-            report = {"curves": [], "note": f"Could not compute trajectories: {exc}", "ratio": np.empty(0),
-                      "method": self.options.get("method"), "skipped": []}
-        self.last_report = report
-        widget.setProperty("hasPlotData", True)
-        plot_item.setVisible(True)        # stays reachable by right-click even when empty
-        method_name = "delay embedding" if report.get("method") == METHOD_DELAY else "recordings as dimensions"
-        widget.setTitle(f"{PANEL_LABEL} · {method_name}", color=text_color, size="10pt")
-        curves = report["curves"]
-        ax, ay = (int(value) for value in (self.options.get("axes") or [0, 1]))
-        ratio = np.asarray(report.get("ratio", np.empty(0)), float)
-        if not curves or ratio.size <= max(ax, ay):
-            note = report.get("note") or "This component pair is not available for the current selection."
-            message = pg.TextItem(str(note), color=text_color, anchor=(0.5, 0.5))
-            widget.addItem(message)
-            message.setPos(0.5, 0.5)
-            plot_item.setAspectLocked(False)
-            widget.setXRange(0, 1, padding=0)
-            widget.setYRange(0, 1, padding=0)
-            for axis in ("bottom", "left"):
-                widget.setLabel(axis, "")
-            widget.setToolTip(str(note))
-            return
-
-        colors = self._behavior_colors(palette)
-        # A trajectory is a parametric curve (x is not time): the time-series
-        # shortcuts of the other plots (peak downsampling, clipping to the
-        # view) would redraw it as a staircase.
+        style_plot(widget, palette)
+        plot_item.setAspectLocked(False)
+        plot_item.getAxis("bottom").setTicks(None)
+        for axis in ("bottom", "left"):
+            plot_item.getAxis(axis).setStyle(showValues=True)
+            plot_item.getAxis(axis).enableAutoSIPrefix(False)
+        # These are not time series: the shortcuts of the other plots (peak
+        # downsampling, clipping to the view) would redraw curves as staircases.
         plot_item.setDownsampling(ds=1, auto=False)
         plot_item.setClipToView(False)
-        # Legend under the x axis, outside the data area, in as many columns as fit.
-        columns = max(1, min(len(curves), widget.width() // LEGEND_COLUMN_WIDTH))
+        widget.setProperty("hasPlotData", True)
+        plot_item.setVisible(True)             # stays reachable by right-click even when empty
+        return palette, str(palette.get("text", "#000000"))
+
+    def _message(self, widget: pg.PlotWidget, text: str, color: str) -> None:
+        """Show a wrapped message in an otherwise empty panel."""
+        item = pg.TextItem(color=color, anchor=(0.5, 0.5))
+        width = max(120, widget.width() - 70)
+        item.setHtml(f'<div style="text-align:center; color:{color};">{text}</div>')
+        item.setTextWidth(width)
+        widget.addItem(item)
+        item.setPos(0.5, 0.5)
+        widget.setXRange(0, 1, padding=0)
+        widget.setYRange(0, 1, padding=0)
+        for axis in ("bottom", "left"):
+            widget.setLabel(axis, "")
+            widget.getPlotItem().getAxis(axis).setStyle(showValues=False)
+        widget.setToolTip(text)
+
+    def _legend(self, widget: pg.PlotWidget, text_color: str, entries: int) -> pg.LegendItem:
+        """Legend under the x axis, outside the data area, in as many columns as fit."""
+        plot_item = widget.getPlotItem()
+        columns = max(1, min(entries, widget.width() // LEGEND_COLUMN_WIDTH))
         legend = pg.LegendItem(labelTextColor=text_color, labelTextSize="8pt", colCount=columns)
         legend.setParentItem(plot_item)
         plot_item.layout.addItem(legend, LEGEND_LAYOUT_ROW, 1)
         self._legends[id(widget)] = legend
-        for curve in curves:
-            color = curve["group_color"] or colors[curve["behavior_index"] % len(colors)]
-            style = LINE_STYLES[curve["behavior_index"] % len(LINE_STYLES)] if curve["group_color"] else LINE_STYLES[0]
-            x, y = curve["scores"][:, ax], curve["scores"][:, ay]
-            line = widget.plot(x, y, pen=pg.mkPen(color, width=LINE_WIDTH, style=style), antialias=True)
-            legend.addItem(line, curve["label"])
-            # Start (hollow circle), event time (diamond), end (filled triangle).
-            marks = [(0, "o", None), (int(np.argmin(np.abs(curve["time"]))), "d", color), (x.size - 1, "t1", color)]
-            if not (curve["time"][0] <= 0.0 <= curve["time"][-1]):
-                marks.pop(1)
-            for index, symbol, fill in marks:
-                widget.addItem(pg.ScatterPlotItem(
-                    [x[index]], [y[index]], symbol=symbol, size=MARKER_SIZE,
-                    pen=pg.mkPen(color, width=1.5), brush=pg.mkBrush(fill) if fill else pg.mkBrush(None)))
-        widget.setLabel("bottom", f"PC{ax + 1} ({100 * ratio[ax]:.0f}% of variance)")
-        widget.setLabel("left", f"PC{ay + 1} ({100 * ratio[ay]:.0f}% of variance)")
-        plot_item.setAspectLocked(True)            # both axes share the signal's units
-        plot_item.enableAutoRange()
-        skipped = report.get("skipped") or []
-        tips = ["Hollow circle: start of the window. Diamond: event time. Triangle: end.",
-                "Descriptive only; statistics use the PSTH panels."]
-        if report.get("method") == METHOD_DELAY:
-            tips.insert(0, "Each trajectory is a mean response in delay-embedding space: "
-                           "PC1 mostly follows its level, PC2 its rate of change.")
+        return legend
+
+    def _title(self, report: Dict[str, object], what: str = PANEL_LABEL) -> str:
+        return f"{what} · {METHOD_TITLES.get(str(report.get('method')), '')}"
+
+    def render(self, widget: pg.PlotWidget, code: str = CODE) -> None:
+        """Draw one of the three PCA panels in a dashboard plot."""
+        palette, text_color = self._prepare(widget)
+        report = self.compute()
+        if code == CODE_LOADINGS:
+            self._render_loadings(widget, report, palette, text_color)
+        elif code == CODE_SEPARATION:
+            self._render_separation(widget, report, palette, text_color)
         else:
-            tips.insert(0, f"Dimensions: {len(report.get('recordings', []))} recordings (selected groups pooled).")
+            self._render_trajectories(widget, report, palette, text_color)
+
+    def _resolve_axes(self, n_components: int) -> Tuple[int, Optional[int]]:
+        """Chosen component pair, or the first pair that exists for this analysis."""
+        ax, ay = (int(value) for value in (self.options.get("axes") or [0, 1]))
+        if max(ax, ay) < n_components:
+            return ax, ay
+        return (0, 1) if n_components >= 2 else (0, None)
+
+    def _render_trajectories(self, widget, report, palette, text_color) -> None:
+        widget.setTitle(self._title(report), color=text_color, size="10pt")
+        curves = report["curves"]
+        ratio = np.asarray(report.get("ratio", np.empty(0)), float)
+        if not curves or ratio.size == 0:
+            self._message(widget, str(report.get("note") or "Nothing to show for the current selection."), text_color)
+            return
+        ax, ay = self._resolve_axes(ratio.size)
+        colors = self._behavior_colors(palette)
+        legend = self._legend(widget, text_color, len(curves))
+        method = report["method"]
+        show_units = bool(self.options.get("units", True))
+        plot_item = widget.getPlotItem()
+        surface = str(palette.get("surface", "#000000"))
+        for curve in curves:
+            color = self._curve_color(curve, colors)
+            style = LINE_STYLES[curve["behavior_index"] % len(LINE_STYLES)] if curve["group_color"] else LINE_STYLES[0]
+            faint = QtGui.QColor(color)
+            units = curve.get("units")
+            if method == METHOD_TRIALS:
+                # One point per event, a diamond per recording, in the chosen component plane.
+                points = np.asarray(units, float)
+                ok = np.isfinite(points[:, ax]) & (np.isfinite(points[:, ay]) if ay is not None else True)
+                ys = points[ok, ay] if ay is not None else np.zeros(int(ok.sum()))
+                faint.setAlpha(POINT_ALPHA)
+                widget.addItem(pg.ScatterPlotItem(points[ok, ax], ys, size=POINT_SIZE, pen=pg.mkPen(None),
+                                                  brush=pg.mkBrush(faint)))
+                files = curve["unit_files"][ok]
+                for fid in sorted(set(files.tolist())):
+                    centre = points[ok][files == fid].mean(axis=0)
+                    marker = pg.ScatterPlotItem(
+                        [centre[ax]], [centre[ay] if ay is not None else 0.0], symbol="d",
+                        size=RECORDING_MARKER_SIZE, pen=pg.mkPen(text_color, width=1.0), brush=pg.mkBrush(color))
+                    marker.setZValue(6)
+                    widget.addItem(marker)
+                sample = pg.PlotDataItem(pen=None, symbol="o", symbolSize=POINT_SIZE + 2,
+                                         symbolBrush=pg.mkBrush(color), symbolPen=pg.mkPen(None))
+                legend.addItem(sample, curve["label"])
+                continue
+            mean = np.asarray(curve["scores"], float)
+            time = np.asarray(curve["time"], float)
+            if show_units and units is not None and units.shape[0] > 1:
+                # Single trials / bouts: one faint line each, drawn as one item.
+                chosen = units if units.shape[0] <= MAX_UNIT_LINES else units[
+                    np.linspace(0, units.shape[0] - 1, MAX_UNIT_LINES).astype(int)]
+                gap = np.full((chosen.shape[0], 1), np.nan)
+                if ay is not None:
+                    xs = np.concatenate([chosen[..., ax], gap], axis=1).ravel()
+                    ys = np.concatenate([chosen[..., ay], gap], axis=1).ravel()
+                else:
+                    xs = np.concatenate([np.tile(time, (chosen.shape[0], 1)), gap], axis=1).ravel()
+                    ys = np.concatenate([chosen[..., ax], gap], axis=1).ravel()
+                faint.setAlpha(UNIT_LINE_ALPHA)
+                widget.plot(xs, ys, pen=pg.mkPen(faint, width=UNIT_LINE_WIDTH), connect="finite", antialias=True)
+            good = np.isfinite(mean[:, ax]) & (np.isfinite(mean[:, ay]) if ay is not None else True)
+            if good.sum() < 2:
+                continue
+            x = mean[good, ax] if ay is not None else time[good]
+            y = mean[good, ay] if ay is not None else mean[good, ax]
+            line = widget.plot(x, y, pen=pg.mkPen(color, width=MEAN_LINE_WIDTH, style=style), antialias=True)
+            line.setZValue(5)
+            legend.addItem(line, curve["label"])
+            t_good = time[good]
+            if method == METHOD_BOUT:   # onset: hollow circle; offset: square
+                marks = [(0, "o", None), (x.size - 1, "s", color)]
+            else:                       # start: hollow circle; event: diamond; end: triangle
+                marks = [(0, "o", None), (int(np.argmin(np.abs(t_good))), "d", color), (x.size - 1, "t1", color)]
+                if not (t_good[0] <= 0.0 <= t_good[-1]):
+                    marks.pop(1)
+            for index, symbol, fill in marks:
+                marker = pg.ScatterPlotItem([x[index]], [y[index]], symbol=symbol, size=MARKER_SIZE,
+                                            pen=pg.mkPen(color, width=1.6), brush=pg.mkBrush(fill or surface))
+                marker.setZValue(6)
+                widget.addItem(marker)
+        if ay is None:
+            widget.setLabel("bottom", "Phase of the bout (0 = onset, 1 = offset)" if method == METHOD_BOUT
+                            else "Time from event (s)")
+            widget.setLabel("left", f"PC1 ({100 * ratio[0]:.0f}% of variance)")
+        else:
+            widget.setLabel("bottom", f"PC{ax + 1} ({100 * ratio[ax]:.0f}% of variance)")
+            widget.setLabel("left", f"PC{ay + 1} ({100 * ratio[ay]:.0f}% of variance)")
+            plot_item.setAspectLocked(True)        # both axes share the signal's units
+        plot_item.enableAutoRange()
+        widget.setToolTip(self._tooltip(report))
+
+    def _tooltip(self, report: Dict[str, object]) -> str:
+        method = report.get("method")
+        tips = []
+        if report.get("fallback"):
+            tips.append(str(report["fallback"]))
+        if method == METHOD_BOUT:
+            tips.append("Each bout from its onset (hollow circle) to its offset (square), on a common phase axis. "
+                        "Thin lines: single bouts. Thick lines: condition means.")
+        elif method == METHOD_LAG:
+            tips.append("Each trial around its event. Hollow circle: start of the window. Diamond: event time. "
+                        "Triangle: end. Thin lines: single trials. Thick lines: condition means.")
+        elif method == METHOD_TRIALS:
+            tips.append("One point per event. Diamonds: mean of each recording.")
+        else:
+            tips.append(f"Dimensions: {len(report.get('recordings', []))} recordings (selected groups pooled).")
+        info = report.get("info") or {}
+        if info.get("truncated"):
+            tips.append(f"{info['truncated']} bout(s) longer than {BOUT_MAX_S:g} s were cut there.")
+        if method == METHOD_BOUT and info.get("without_duration"):
+            tips.append(f"{info['without_duration']} event(s) without a duration were left out.")
+        skipped = report.get("skipped") or []
         if skipped:
             tips.append("Left out (no response): " + ", ".join(str(item) for item in skipped[:6])
                         + (" ..." if len(skipped) > 6 else ""))
-        widget.setToolTip("\n".join(tips))
+        tips.append("Descriptive view. 'PCA separation test' gives a permutation test, "
+                    "'PCA loadings' the meaning of the axes (Change to > State-space).")
+        return "\n".join(tips)
+
+    def _render_loadings(self, widget, report, palette, text_color) -> None:
+        if report["method"] == METHOD_LAG and not self.options["show_lag_weights"]:
+            self._render_event_scores(widget, report, palette, text_color)
+            return
+        widget.setTitle(self._title(report, "PCA loadings"), color=text_color, size="10pt")
+        components = np.asarray(report.get("components", np.empty((0, 0))), float)
+        ratio = np.asarray(report.get("ratio", np.empty(0)), float)
+        if components.size == 0:
+            self._message(widget, str(report.get("note") or "Nothing to show for the current selection."), text_color)
+            return
+        x = np.asarray(report.get("loading_axis"), float)
+        colors = self._behavior_colors(palette)
+        legend = self._legend(widget, text_color, components.shape[0])
+        ticks = report.get("loading_ticks")
+        for index, row in enumerate(components):
+            color = colors[index % len(colors)]
+            if ticks is not None:      # a weight per recording: markers joined by a thin line
+                line = widget.plot(x, row, pen=pg.mkPen(color, width=1.2), symbol="o", symbolSize=7,
+                                   symbolBrush=pg.mkBrush(color), symbolPen=pg.mkPen(None), antialias=True)
+            else:
+                line = widget.plot(x, row, pen=pg.mkPen(color, width=2.0), antialias=True)
+            legend.addItem(line, f"PC{index + 1} ({100 * ratio[index]:.0f}%)")
+        zero = pg.InfiniteLine(pos=0.0, angle=0, pen=pg.mkPen(text_color, width=0.6, style=QtCore.Qt.PenStyle.DotLine))
+        zero.setZValue(-1)
+        widget.addItem(zero)
+        if ticks is not None:
+            widget.getPlotItem().getAxis("bottom").setTicks([[(float(i), str(name)) for i, name in enumerate(ticks)]])
+        widget.setLabel("bottom", str(report.get("loading_label", "")))
+        widget.setLabel("left", "Loading (weight)")
+        widget.getPlotItem().enableAutoRange()
+        embedding = ("A flat component follows the local signal level; one that changes sign across "
+                     "the window follows the local slope.")
+        meaning = {METHOD_BOUT: embedding, METHOD_LAG: embedding,
+                   METHOD_TRIALS: "Each component is a time course: a trial scores high when its response looks like it.",
+                   METHOD_RECORDINGS: "Weight of each recording in the component."}
+        widget.setToolTip(meaning.get(str(report.get("method")), ""))
+
+    def _render_event_scores(self, widget, report, palette, text_color) -> None:
+        """Draw the coordinates of the shared lag trajectories on the PSTH clock."""
+        widget.setTitle("Event-aligned PC scores", color=text_color, size="10pt")
+        curves = report["curves"]
+        if not curves:
+            self._message(widget, str(report["note"] or "No event-aligned trajectories."), text_color)
+            return
+
+        # The clock is the one used to extract the trials, including offset,
+        # transition and marker alignment. An event name can contain HTML characters.
+        behaviors = report["behaviors"]
+        event = behaviors[0] if len(behaviors) == 1 else "behavior"
+        source = self.panel.combo_align.currentText()
+        alignment = (self.panel.combo_behavior_align if source.startswith("Behavior")
+                     else self.panel.combo_dio_align).currentText()
+        if source != "Event marker" and alignment.startswith("Align to "):
+            event += " " + alignment.removeprefix("Align to ")
+        widget.setLabel("bottom", f"Time from {escape(event)} (s)")
+        widget.setLabel("left", "Mean PC score")
+
+        ratios = report["ratio"]
+        colors = self._behavior_colors(palette)
+        several = len(curves) > 1
+        many_behaviors = len(behaviors) > 1
+        many_groups = len({curve["group"] for curve in curves}) > 1
+        legend = self._legend(widget, text_color, len(ratios) + (len(curves) if several else 0))
+        for ci, curve in enumerate(curves):
+            # Match the trajectory colors when one behavior or one group is shown.
+            color = self._curve_color(curve, colors)
+            if many_behaviors and many_groups:
+                color = (colors[ci] if ci < len(colors) else pg.intColor(ci, hues=len(curves)))
+            for pc, fraction in enumerate(ratios):
+                pen = pg.mkPen(color if several else colors[pc], width=2,
+                               style=LINE_STYLES[pc] if several else LINE_STYLES[0])
+                line = widget.plot(curve["time"], curve["scores"][:, pc], pen=pen,
+                                   connect="finite", antialias=True)
+                if ci == 0:
+                    # With several conditions the PC key shows only its dash pattern.
+                    key = pg.PlotDataItem(pen=pg.mkPen(text_color, width=2, style=LINE_STYLES[pc])) if several else line
+                    legend.addItem(key, f"PC{pc + 1} ({100 * fraction:.0f}%)")
+            if several:
+                name = " · ".join(part for part in
+                                  (curve["behavior"] if many_behaviors else "", curve["group"] if many_groups else "")
+                                  if part)
+                legend.addItem(pg.PlotDataItem(pen=pg.mkPen(color, width=2)), escape(name))
+
+        event_line = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen(
+            text_color, width=1, style=QtCore.Qt.PenStyle.DashLine))
+        event_line.setZValue(-1)
+        widget.addItem(event_line, ignoreBounds=True)
+        widget.getPlotItem().enableAutoRange()
+        widget.setXRange(-self.panel.spin_pre.value(), self.panel.spin_post.value(), padding=0.01)
+        tip = ("Each line shows a condition's trial-mean PC score from the trajectory fit. "
+               "The vertical line marks the selected event. Scores are shown at delay-window "
+               "centers with valid data. Choose ‘Show delay-window weights’ to inspect the loadings.")
+        widget.setToolTip("\n".join(filter(None, (report["fallback"], tip))))
+
+    def _render_separation(self, widget, report, palette, text_color) -> None:
+        widget.setTitle(self._title(report, "PCA separation"), color=text_color, size="10pt")
+        if not report["curves"]:
+            self._message(widget, str(report.get("note") or "Nothing to show for the current selection."), text_color)
+            return
+        result = self.separation(report)
+        if not result.get("available"):
+            self._message(widget, str(result.get("note")), text_color)
+            return
+        level = "animal-level" if result["level"] == "recordings" else "trial-level, exploratory"
+        widget.setTitle(f"Separation · {level} permutation (p = {result['p']:.3g})", color=text_color, size="10pt")
+        null = np.asarray(result["null"], float)
+        observed = float(result["observed"])
+        low, high = float(min(null.min(), observed)), float(max(null.max(), observed))
+        span = (high - low) or max(abs(high), 1e-9)
+        edges = np.linspace(low - 0.02 * span, high + 0.04 * span, HISTOGRAM_BINS + 1)
+        counts, _ = np.histogram(null, bins=edges)
+        fill = QtGui.QColor(self._behavior_colors(palette)[0])
+        fill.setAlpha(170)
+        widget.addItem(pg.BarGraphItem(x0=edges[:-1], x1=edges[1:], height=counts, pen=pg.mkPen(None),
+                                       brush=pg.mkBrush(fill)))
+        widget.addItem(pg.InfiniteLine(pos=observed, angle=90,
+                                       pen=pg.mkPen(text_color, width=1.8, style=QtCore.Qt.PenStyle.DashLine)))
+        widget.setLabel("bottom", f"Mean separation, {result.get('window', '')} (dashed: observed)")
+        widget.setLabel("left", "Labelings" if result["exact"] else "Permutations")
+        widget.setXRange(float(edges[0]), float(edges[-1]), padding=0.02)
+        widget.setYRange(0, float(max(counts.max(), 1)) * 1.08, padding=0)
+        unit = "recordings" if result["level"] == "recordings" else "trials"
+        lines = [f"{result['label_a']}  vs  {result['label_b']}",
+                 f"Observed separation {observed:.4g} (dashed line); {result['n_a']} vs {result['n_b']} {unit}.",
+                 ("Exact test over all " if result["exact"] else "Random permutations: ")
+                 + f"{result['n_permutations']} labelings; p = {result['p']:.4g}."]
+        if result["level"] != "recordings":
+            lines.append(f"Trials were permuted because a condition has fewer than {MIN_RECORDINGS_PER_CONDITION} "
+                         "recordings (or the conditions share recordings). Trials of one animal are not "
+                         "independent, so this p-value is exploratory.")
+        if result.get("extra_conditions"):
+            lines.append(f"{result['extra_conditions']} further condition(s) are shown but not tested.")
+        widget.setToolTip("\n".join(lines))
 
     # ------------------------------------------------------------------ menu
     def build_menu(self, parent: QtWidgets.QMenu) -> QtWidgets.QMenu:
-        """Right-click options of the panel: behaviors, groups, method, axes."""
-        menu = QtWidgets.QMenu("PCA trajectory options", parent)
+        """Right-click options shared by the PCA panels: method, behaviors, groups, axes."""
+        menu = QtWidgets.QMenu("PCA options", parent)
+
+        methods = menu.addMenu("Method")
+        for value, label in METHODS:
+            action = methods.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self.options.get("method") == value)
+            action.triggered.connect(lambda _=False, v=value: self.set_option("method", v))
 
         behaviors = menu.addMenu("Behaviors")
         if self.behaviors_apply():
@@ -558,20 +1187,24 @@ class PcaTrajectoryView(QtCore.QObject):
             action.setChecked(chosen_groups is not None and key in chosen_groups)
             action.triggered.connect(lambda checked, k=key: self._toggle_group(k, checked))
 
-        methods = menu.addMenu("Method")
-        for value, label in METHODS:
-            action = methods.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(self.options.get("method") == value)
-            action.triggered.connect(lambda _=False, v=value: self.set_option("method", v))
+        units = menu.addAction("Show single trials / bouts")
+        units.setCheckable(True)
+        units.setChecked(bool(self.options.get("units", True)))
+        units.triggered.connect(lambda checked: self.set_option("units", bool(checked)))
 
         spans = menu.addMenu("Delay window")
-        spans.setEnabled(self.options.get("method") == METHOD_DELAY)
+        spans.setEnabled(self.options.get("method") == METHOD_LAG)
         for span in DELAY_SPANS_S:
             action = spans.addAction(f"{span:g} s")
             action.setCheckable(True)
             action.setChecked(abs(float(self.options.get("span_s") or 0) - span) < 1e-9)
             action.triggered.connect(lambda _=False, s=span: self.set_option("span_s", float(s)))
+
+        if self.last_report.get("method", self.options["method"]) == METHOD_LAG:
+            weights = menu.addAction("Show delay-window weights")
+            weights.setCheckable(True)
+            weights.setChecked(bool(self.options["show_lag_weights"]))
+            weights.triggered.connect(lambda checked: self.set_option("show_lag_weights", checked))
 
         axes = menu.addMenu("Axes")
         for first, second in AXES_CHOICES:

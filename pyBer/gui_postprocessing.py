@@ -13579,8 +13579,32 @@ class PostProcessingPanel(QtWidgets.QWidget):
     # Dashboard panels (remove / change / restore)
     # ------------------------------------------------------------------
     def _current_palette(self) -> Dict[str, object]:
-        return POSTPROCESSING_PRESETS.get(self._style.get("postprocessing_preset", "Midnight"),
-                                          POSTPROCESSING_PRESETS["Midnight"])
+        """Palette of the plots as they are drawn now.
+
+        A preset names a surface and its text colors, but the plots on screen
+        can have another background (it follows the app theme and the plot
+        style, and can be changed on its own). Added panels must match what
+        is on screen, so the surface is the background the trace plot really
+        has, and when the preset was made for the opposite lightness (a light
+        preset on dark plots, or the reverse) its text and axis colors are
+        replaced by those of the preset made for this background.
+        """
+        preset = POSTPROCESSING_PRESETS.get(self._style.get("postprocessing_preset", "Midnight"),
+                                            POSTPROCESSING_PRESETS["Midnight"])
+        native = getattr(self, "plot_trace", None)
+        background = (native.backgroundBrush().color() if native is not None
+                      else QtGui.QColor(*self._style_color_tuple("plot_bg", (12, 15, 22))[:3]))
+        if not background.isValid() or background.alpha() == 0:
+            background = QtGui.QColor(*self._style_color_tuple("plot_bg", (12, 15, 22))[:3])
+        palette = dict(preset)
+        dark_background = background.lightness() < 128
+        if (QtGui.QColor(str(preset["surface"])).lightness() < 128) != dark_background:
+            reference = POSTPROCESSING_PRESETS["Midnight" if dark_background else "Paper"]
+            for key in ("text", "muted", "axis", "border", "style"):
+                if key in reference:
+                    palette[key] = reference[key]
+        palette["surface"] = background.name()
+        return palette
 
     def _prepare_substitute_plot(self, widget: pg.PlotWidget) -> None:
         _opt_plot(widget)
@@ -13623,7 +13647,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             ok = draw_global_metric(widget, code, values, bool(info.get("grouped", False)), palette, colors)
             set_plot_has_data(widget, ok)
         elif family == TRAJECTORY_FAMILY:
-            self.pca_trajectories.render(widget)
+            self.pca_trajectories.render(widget, code)
 
     def _on_dashboard_panels_changed(self) -> None:
         panels = self.dashboard_panels
@@ -18308,11 +18332,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.recording_groups.light_theme = surface.lightnessF() > 0.6
         panels = getattr(self, "dashboard_panels", None)
         if panels is not None:
+            # Added panels follow the plots as drawn, not the preset's own surface.
+            substitute_palette = self._current_palette()
             for key, widget in panels._widgets.items():
                 if ":" in key:
-                    style_plot(widget, palette)
+                    style_plot(widget, substitute_palette)
                     if hasattr(widget, "set_colors"):
-                        widget.set_colors(palette)
+                        widget.set_colors(substitute_palette)
             panels.render_substitutes()
 
     def _on_heatmap_levels_changed(self, *, save: bool = True) -> None:
