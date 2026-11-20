@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import h5py
 import numpy as np
@@ -118,6 +119,96 @@ class PsthSignalSettingsTests(unittest.TestCase):
         np.testing.assert_allclose(p._last_mat[0], r.outputs[alternate][30:71])
         self.assertEqual(r.output_label, "dFF")
         self.assertIn(alternate, p.lbl_psth_plot_summary.text())
+
+    def test_old_project_recovers_exact_linked_zscore_when_selected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "linked.csv"
+            trial = self.trial(str(path), with_z=False)
+            trial.output_label = "Imported CSV (dFF)"
+            trial.outputs = {}
+            saved_z = np.cos(trial.time) + 17
+            np.savetxt(path, np.column_stack([trial.time, trial.output, saved_z]),
+                       delimiter=",", header="time,dFF,z-score", comments="")
+            p = self.load([trial])
+            group = p.recording_groups.add_group("Drug")
+            p.recording_groups.assign(["linked"], group)
+            project = str(Path(folder) / "old.h5")
+            p._save_project_h5(project)
+            self.assertTrue(p._load_project_from_path(project))
+            self.choose("z-score", "none")
+            np.testing.assert_array_equal(p._psth_input(p._processed[0])[1], saved_z)
+            np.testing.assert_allclose(p._last_mat[0], saved_z[30:71], atol=1e-12)
+            self.assertEqual(p._processed[0].injection_seconds, 5.)
+            self.assertEqual(p.recording_groups.assignments()["linked"], group)
+            self.assertEqual(p._processed[0].output_label, "Imported CSV (dFF)")
+
+    def test_open_saved_csv_from_preprocessing_preserves_samples_and_seconds(self):
+        from analysis_core import load_rwd_csv
+        from main import MainWindow
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "processed.csv"
+            path.write_text("time,raw_465,raw_405,dFF,z-score,baseline_465,baseline_405\n"
+                            "30.0,8,4,0.01,1.25,5,2\n30.02,9,3,0.05,4.5,5,2\n")
+            self.assertIsNone(load_rwd_csv(str(path)))
+            tabs = fixture.QtWidgets.QTabWidget()
+            tabs.addTab(fixture.QtWidgets.QWidget(), "Preprocessing")
+            tabs.addTab(self.panel, "Postprocessing")
+            try:
+                def use_saved():
+                    prompt = fixture.QtWidgets.QApplication.activeModalWidget()
+                    prompt.defaultButton().click()
+                fixture.QtCore.QTimer.singleShot(0, use_saved)
+                window = MainWindow.__new__(MainWindow)
+                fixture.QtWidgets.QMainWindow.__init__(window)
+                window.post_tab = self.panel
+                window.tabs = tabs
+                window._add_files([str(path)])
+                self.assertIs(tabs.currentWidget(), self.panel)
+                self.choose("z-score", "none")
+                trial, = self.panel._processed
+                np.testing.assert_array_equal(trial.time, [30., 30.02])
+                np.testing.assert_array_equal(self.panel._psth_input(trial)[1], [1.25, 4.5])
+            finally:
+                self.panel.setParent(None)
+
+    def test_recover_original_csv_into_primary_only_project(self):
+        r = self.trial("recording.csv", with_z=False)
+        other = self.trial("different.csv", with_z=False)
+        p = self.load([r, other])
+        group = p.recording_groups.add_group("Injected")
+        p.recording_groups.assign(["recording"], group)
+        with tempfile.TemporaryDirectory() as folder:
+            project = str(Path(folder) / "old.h5")
+            p._save_project_h5(project)
+            self.assertTrue(p._load_project_from_path(project))
+            self.choose("z-score", "none")
+            self.assertIsNone(p._last_mat)
+            self.assertFalse(p.btn_recover_psth_signal.isHidden())
+            self.assertNotIn("recording.csv", p.lbl_psth_availability.text())
+            self.assertIn("recording.csv", p.lbl_psth_availability.toolTip())
+            z = np.arange(r.time.size, dtype=float) + 7
+            paths = []
+            for name, dff in (("recording (1).csv", r.output), ("different.csv", other.output + 1)):
+                path = str(Path(folder) / name)
+                np.savetxt(path, np.column_stack([r.time, dff, z]), delimiter=",",
+                           header="time,dFF,z-score", comments="")
+                paths.append(path)
+            with patch.object(fixture.QtWidgets.QFileDialog, "getOpenFileNames", return_value=(paths, "")), \
+                 patch.object(fixture.QtWidgets.QMessageBox, "information") as report:
+                p.btn_recover_psth_signal.click()
+            self.assertIn("1 of 2", report.call_args.args[2])
+            self.assertIsNone(p._last_mat)
+            p.cb_psth_available_only.click()
+            p._compute_psth()
+            np.testing.assert_allclose(p._last_mat[0], z[30:71], rtol=0, atol=1e-12)
+            updated = str(Path(folder) / "updated.h5")
+            p._save_project_h5(updated)
+            self.assertTrue(p._load_project_from_path(updated))
+            self.assertEqual(p.recording_groups.assignments().get("recording"), group)
+            self.assertEqual([f.injection_seconds for f in p._processed], [5., 5.])
+            self.assertEqual([f.output_label for f in p._processed], ["dFF", "dFF"])
+            np.testing.assert_equal(p._processed[0].outputs["z-score"], z)
+            self.assertNotIn("z-score", p._processed[1].outputs)
 
     def test_legacy_full_output_headers_in_csv_and_h5(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -2503,6 +2503,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_psth_availability.setWordWrap(True)
         self.lbl_psth_availability.setTextFormat(QtCore.Qt.TextFormat.PlainText)
         fw.addRow(self.lbl_psth_availability)
+        self.btn_recover_psth_signal = QtWidgets.QPushButton("Recover from original CSVs…")
+        self.btn_recover_psth_signal.clicked.connect(self._recover_psth_signal)
+        fw.addRow(self.btn_recover_psth_signal)
         self.cb_psth_available_only = QtWidgets.QCheckBox("Use available recordings only")
         fw.addRow(self.cb_psth_available_only)
         fw.addRow("How should it be plotted?", self.combo_psth_normalization)
@@ -10646,12 +10649,79 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return matches[0]
         return None, None
 
+    def _recover_psth_signal(self):
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Choose original processed CSVs",
+            self._settings.value("postprocess_last_dir", os.getcwd(), type=str), "Processed CSVs (*.csv)")
+        if not paths:
+            return
+        family = self.combo_psth_input.currentData()
+        recovered = self._merge_saved_csv_signals(paths)
+        if recovered:
+            self._compute_psth()
+        message = f"Recovered {family} for {recovered} of {len(paths)} selected CSVs."
+        if recovered < len(paths):
+            message += " Each CSV must match the recording name, time and saved trace, and contain the requested signal."
+        QtWidgets.QMessageBox.information(self, "Recover saved signal", message)
+
+    def _recover_linked_psth_signal(self):
+        family = self.combo_psth_input.currentData()
+        if family not in ("dFF", "z-score"):
+            return
+        # Fresh imports already contain their saved outputs. Older project
+        # entries can contain just the primary array and its source path.
+        paths = [proc.path for proc in self._processed
+                 if not proc.outputs and str(proc.path).lower().endswith(".csv")
+                 and output_family(proc.output_label) != family and os.path.isfile(proc.path)]
+        if paths:
+            self._merge_saved_csv_signals(paths)
+
+    def _merge_saved_csv_signals(self, paths):
+        family = self.combo_psth_input.currentData()
+        pending = {}
+        for row, proc in enumerate(self._processed):
+            if self._psth_input(proc)[0] or any(output_family(k) == family for k in proc.outputs):
+                continue
+            name = str(proc.path or "").replace("\\", "/").rsplit("/", 1)[-1].casefold()
+            pending.setdefault(name, []).append(row)
+
+        recovered = 0
+        for path in paths:
+            name = Path(path).name.casefold()
+            # Browsers can append " (1)" when downloading another copy.
+            rows = pending.get(name) or pending.get(re.sub(r" \(\d+\)(?=\.csv$)", "", name), [])
+            if len(rows) != 1:
+                continue
+            row = rows[0]
+            proc = self._processed[row]
+            source = self._load_processed_csv(path)
+            if source is None or not np.array_equal(proc.time, source.time, equal_nan=True):
+                continue
+            if not any(output_family(label) == output_family(proc.output_label)
+                       and np.array_equal(values, proc.output, equal_nan=True)
+                       for label, values in source.outputs.items()):
+                continue
+            signals = {key: value for key, value in source.outputs.items()
+                       if output_family(key) == family}
+            if signals:
+                updated = copy.copy(proc)
+                updated.outputs = {**proc.outputs, **signals}
+                self._processed = list(self._processed)
+                self._processed[row] = updated
+                rows.clear()
+                recovered += 1
+        if recovered:
+            self._project_dirty = True
+            self._update_file_lists()
+        return recovered
+
     def _toggle_psth_subtraction(self, checked):
         code = "subtract" if checked else "none"
         self.combo_psth_normalization.setCurrentIndex(self.combo_psth_normalization.findData(code))
 
     def _on_group_signal_changed(self):
         if self.sender() is self.combo_psth_input and not self._is_restoring_settings:
+            self._recover_linked_psth_signal()
             with QtCore.QSignalBlocker(self.cb_psth_available_only):
                 self.cb_psth_available_only.setChecked(False)
         self._on_psth_normalization_changed()
@@ -10664,17 +10734,34 @@ class PostProcessingPanel(QtWidgets.QWidget):
         choice = self.combo_psth_input.currentData()
         resolved = [(proc, self._psth_input(proc)[0]) for proc in self._processed]
         labels = {label for _, label in resolved if label}
-        missing = [os.path.basename(proc.path) or "Recording" for proc, label in resolved if not label]
+        missing = []
+        ambiguous = []
+        for proc, label in resolved:
+            if label:
+                continue
+            names = ambiguous if any(output_family(k) == choice for k in proc.outputs) else missing
+            names.append(str(proc.path or "Recording").replace("\\", "/").rsplit("/", 1)[-1])
+        unavailable = missing + ambiguous
         status = ""
-        if missing:
-            status = (f"Available for {len(resolved) - len(missing)} of {len(resolved)} recordings. "
-                      f"Missing or ambiguous: {', '.join(missing)}. "
-                      "To choose individual variants, open Advanced options and select As saved in each file.")
+        if unavailable:
+            signal_name = self.combo_psth_input.currentText()
+            status = f"{signal_name} is ready for {len(resolved) - len(unavailable)} of {len(resolved)} recordings."
+            if missing:
+                if len(missing) == 1:
+                    status += f" Signal missing in {missing[0]}."
+                else:
+                    status += f" This signal is missing from {len(missing)} loaded recordings."
+                status += " If your CSVs contain it, choose Recover from original CSVs."
+            if ambiguous:
+                detail = ambiguous[0] if len(ambiguous) == 1 else f"{len(ambiguous)} recordings"
+                status += f" {detail}: multiple variants. Choose individual variants in Advanced options."
         elif self._processed:
             status = "Selected input: " + ", ".join(sorted(labels))
         self.lbl_psth_availability.setText(status)
+        self.lbl_psth_availability.setToolTip("\n".join(unavailable))
         self.lbl_psth_availability.setVisible(bool(status))
-        self.cb_psth_available_only.setVisible(bool(missing) and len(missing) < len(resolved))
+        self.btn_recover_psth_signal.setVisible(bool(missing))
+        self.cb_psth_available_only.setVisible(bool(unavailable) and len(unavailable) < len(resolved))
         self._psth_window_form.setRowVisible(self._psth_baseline_row, norm != "none")
         advanced = self.btn_psth_advanced.isChecked()
         saved_index = self.combo_psth_input.findData("saved")
@@ -11211,6 +11298,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     "fs_used": float(getattr(proc, "fs_used", np.nan)),
                     "n_time": int(time.size),
                     "n_output": int(output.size),
+                    "alternate_outputs": sorted(label for label in proc.outputs if label != proc.output_label),
                     "injection_seconds": getattr(proc, "injection_seconds", None),
                     "injection_clock": getattr(proc, "injection_clock", "recording"),
                     "sync_n": int(sync_time.size),
@@ -19257,6 +19345,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._settings.setValue("postprocess_last_dir", os.path.dirname(path))
             except Exception:
                 pass
+
+        self._recover_linked_psth_signal()
 
         # Embedded arrays are the saved project's authoritative snapshot. Do not
         # replace them with linked files that may have changed or disappeared.

@@ -998,6 +998,25 @@ def _saved_output_columns(names, roles, metadata):
     return columns
 
 
+def _has_saved_signal_header(names):
+    return ("time" in {name.strip().casefold() for name in names}
+            and any(output_family(label) in {"dFF", "z-score"}
+                    for label in _saved_output_columns(names, {}, {}).values()))
+
+
+def is_saved_signal_csv(path: str) -> bool:
+    """Identify an exported trace from its header without reading the samples."""
+    import csv
+    try:
+        with open(path, newline="", encoding="utf-8-sig", errors="replace") as stream:
+            for row in csv.reader(stream):
+                if any(cell.strip() for cell in row) and not row[0].lstrip().startswith("#"):
+                    return _has_saved_signal_header([cell.strip() for cell in row])
+    except (OSError, csv.Error):
+        pass
+    return False
+
+
 def load_processed_csv(path: str) -> Optional[ProcessedTrial]:
     """Load a processed-trace CSV (pyBer v1.0 sidecar-aware, with legacy fallback)."""
     import csv
@@ -3906,6 +3925,8 @@ def load_rwd_csv(path: str) -> Optional[LoadedDoricFile]:
 
     if _rwd_column_index(headers, "Lights", "Light", "Led") >= 0:
         return _rwd_load_unaligned_csv(path, headers, data_rows)
+    if _has_saved_signal_header(headers):
+        return None
     if any(_rwd_parse_wavelength_column(header) is not None for header in headers):
         return _rwd_load_aligned_csv(path, headers, data_rows)
     return None

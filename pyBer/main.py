@@ -166,6 +166,7 @@ from analysis_core import (
     export_processed_csv,
     export_processed_h5,
     load_processed_csv,
+    is_saved_signal_csv,
     load_processed_h5,
     load_rwd_csv,
     is_rwd_events_csv,
@@ -6090,6 +6091,29 @@ class MainWindow(QtWidgets.QMainWindow):
         return paths
 
     def _add_files(self, paths: List[str], select_after: bool = True) -> None:
+        # Project restoration replays an existing preprocessing choice.
+        saved_csvs = [p for p in paths if select_after and p.lower().endswith(".csv")
+                      and is_saved_signal_csv(p)]
+        if saved_csvs:
+            prompt = QtWidgets.QMessageBox(self)
+            prompt.setWindowTitle("Open processed CSVs")
+            prompt.setText("These CSVs contain saved photometry signals. How would you like to open them?")
+            use_saved = prompt.addButton("Use saved signals in Postprocessing", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+            reprocess = prompt.addButton("Reprocess raw channels", QtWidgets.QMessageBox.ButtonRole.ActionRole)
+            prompt.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+            prompt.setDefaultButton(use_saved)
+            prompt.exec()
+            if prompt.clickedButton() is use_saved:
+                if len(saved_csvs) > 1 or self.post_tab._processed:
+                    self.post_tab.tab_sources.setCurrentIndex(1)
+                self.post_tab._load_processed_paths(saved_csvs, replace=False)
+                self.tabs.setCurrentWidget(self.post_tab)
+                saved_paths = set(saved_csvs)
+                paths = [p for p in paths if p not in saved_paths]
+                if not paths:
+                    return
+            elif prompt.clickedButton() is not reprocess:
+                return
         selection_target: Optional[str] = None
         for p in paths:
             if p in self._loaded_files:
