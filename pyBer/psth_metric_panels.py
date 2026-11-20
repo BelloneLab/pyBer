@@ -140,6 +140,9 @@ class MetricPanel(pg.PlotWidget):
             self._show_groups(result)
             return
         summary = result["summary"]
+        # Window names chosen by the user (Pre / Post unless renamed or extra).
+        self.getAxis("bottom").setTicks([[(0, str(summary.get("pre_label", "Pre"))),
+                                          (1, str(summary.get("post_label", "Post")))]])
         pre, post = result["pre_values"], result["post_values"]
         paired = np.isfinite(pre) & np.isfinite(post)
         jitter = np.linspace(-0.12, 0.12, len(pre))

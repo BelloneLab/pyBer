@@ -86,41 +86,27 @@ def _describe(values):
 
 
 def summarize_metrics(matrix, time, selected, pre_window, post_window, signal_units,
-                      independent_units=True, row_unit="trials"):
+                      independent_units=True, row_unit="trials",
+                      pre_label="Pre", post_label="Post", extra_windows=()):
     """Compute matched panels and Holm-adjust their finite paired sign-test p-values.
 
     The selected family is explicit. Changing the family is exploratory and is
     not a correction for repeatedly inspecting different windows or metrics.
     Duration-sensitive metrics remain descriptive when window lengths differ.
+
+    ``extra_windows``: ``(window_id, label, (start, stop))`` response windows
+    beyond Post (for example an early and a late component). Each one is
+    compared with the same Pre window and stored under ``"<metric>@<id>"``.
+    All windows and metrics computed together form one Holm family.
     """
     keys = list(dict.fromkeys(metric_id(key) for key in selected))
     results = {}
-    same_duration = np.isclose(pre_window[1] - pre_window[0], post_window[1] - post_window[0])
-    for key in keys:
-        pre = metric_values(matrix, time, *pre_window, key)
-        post = metric_values(matrix, time, *post_window, key)
-        before, after = _describe(pre), _describe(post)
-        comparable = same_duration or key not in DURATION_SENSITIVE
-        test = paired_summary(pre, post, independent_units=independent_units and comparable)
-        summary = {
-            "metric": METRICS[key], "metric_id": key, "units": metric_units(key, signal_units),
-            "pre": before["mean"], "post": after["mean"],
-            "pre_median": before["median"], "post_median": after["median"],
-            "pre_sem": before["sem"], "post_sem": after["sem"],
-            "pre_n": before["n"], "post_n": after["n"], **test,
-            "pre_start_s": pre_window[0], "pre_end_s": pre_window[1],
-            "post_start_s": post_window[0], "post_end_s": post_window[1],
-            "row_unit": row_unit, "reduction_level": "metric of each displayed row",
-            "selected_family": ",".join(keys), "paired_p_holm": np.nan,
-            "multiplicity_method": "Holm across finite tests in selected metric family",
-            "family_size": 0,
-        }
-        if row_unit == "files":
-            summary["reduction_level"] = "metric of each file's averaged trial waveform"
-        if not comparable:
-            summary["assumption_note"] += " Unequal window lengths: this duration-sensitive metric is descriptive only."
-        summary["assumption_note"] += " SEM is descriptive. Selection across repeated analyses is not corrected."
-        results[key] = {"summary": summary, "pre_values": pre, "post_values": post}
+    # Standard Post first (keys are the metric ids), then each extra window.
+    windows = [("post", str(post_label), tuple(post_window), False)]
+    windows += [(str(wid), str(label), (float(win[0]), float(win[1])), True) for wid, label, win in extra_windows]
+    for window_id, window_label, post_window, extra in windows:
+        _summarize_window(results, matrix, time, keys, pre_window, post_window, signal_units,
+                          independent_units, row_unit, str(pre_label), window_id, window_label, extra)
     finite = [(key, result["summary"]["paired_p"]) for key, result in results.items()
               if np.isfinite(result["summary"]["paired_p"])]
     previous = 0.0
@@ -130,6 +116,41 @@ def summarize_metrics(matrix, time, selected, pre_window, post_window, signal_un
     for result in results.values():
         result["summary"]["family_size"] = len(finite)
     return results
+
+
+def _summarize_window(results, matrix, time, keys, pre_window, post_window, signal_units,
+                      independent_units, row_unit, pre_label, window_id, window_label, extra):
+    """Add one response window's metric panels to ``results`` (Holm is applied by the caller)."""
+    same_duration = np.isclose(pre_window[1] - pre_window[0], post_window[1] - post_window[0])
+    for key in keys:
+        pre = metric_values(matrix, time, *pre_window, key)
+        post = metric_values(matrix, time, *post_window, key)
+        before, after = _describe(pre), _describe(post)
+        comparable = same_duration or key not in DURATION_SENSITIVE
+        test = paired_summary(pre, post, independent_units=independent_units and comparable)
+        summary = {
+            "metric": f"{METRICS[key]} · {window_label}" if extra else METRICS[key],
+            "metric_id": key, "units": metric_units(key, signal_units),
+            "pre": before["mean"], "post": after["mean"],
+            "pre_median": before["median"], "post_median": after["median"],
+            "pre_sem": before["sem"], "post_sem": after["sem"],
+            "pre_n": before["n"], "post_n": after["n"], **test,
+            "pre_start_s": pre_window[0], "pre_end_s": pre_window[1],
+            "post_start_s": post_window[0], "post_end_s": post_window[1],
+            "row_unit": row_unit, "reduction_level": "metric of each displayed row",
+            "selected_family": ",".join(keys), "paired_p_holm": np.nan,
+            "multiplicity_method": "Holm across finite tests in selected metric family and windows",
+            "family_size": 0,
+            "window_id": window_id, "window_label": window_label,
+            "pre_label": pre_label, "post_label": window_label,
+        }
+        if row_unit == "files":
+            summary["reduction_level"] = "metric of each file's averaged trial waveform"
+        if not comparable:
+            summary["assumption_note"] += " Unequal window lengths: this duration-sensitive metric is descriptive only."
+        summary["assumption_note"] += " SEM is descriptive. Selection across repeated analyses is not corrected."
+        results[f"{key}@{window_id}" if extra else key] = {"summary": summary, "pre_values": pre,
+                                                          "post_values": post}
 
 
 def draw_metric_matplotlib(axis, result, title=None):

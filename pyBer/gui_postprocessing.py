@@ -37,6 +37,7 @@ from plot_trace import with_time_gap_breaks
 from numeric_controls import DurationSpinBox, with_slider
 from adaptive_density import KEEP_ROW_PROPERTY, AdaptiveDensity, install_adaptive_density
 import missing_data
+from metric_windows import MetricWindows
 from pca_trajectories import FAMILY as TRAJECTORY_FAMILY, PcaTrajectoryView
 from psth_metrics import (METRICS, metric_id, summarize_metrics, draw_metric_matplotlib,
                           export_selected_metrics, write_group_comparisons)
@@ -2364,6 +2365,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spin_metric_pre1 = DurationSpinBox(-1e9, 1e9, 0)
         self.spin_metric_post0 = DurationSpinBox(-1e9, 1e9, 0)
         self.spin_metric_post1 = DurationSpinBox(-1e9, 1e9, 1)
+        # Renamable Pre / Post labels and extra named windows (Early, Late, ...).
+        self.metric_windows = MetricWindows(self)
 
         self.cb_global_metrics = QtWidgets.QCheckBox("Enable global metrics")
         self.cb_global_metrics.setChecked(True)
@@ -2646,17 +2649,20 @@ class PostProcessingPanel(QtWidgets.QWidget):
         met_widget = QtWidgets.QWidget(); met_widget.setLayout(met_row)
         fm.addRow(met_widget)
         self.lbl_metric = QtWidgets.QLabel("Metric")
-        self.lbl_metric_pre = QtWidgets.QLabel("Pre window")
-        self.lbl_metric_post = QtWidgets.QLabel("Post window")
+        # Double-click either label to rename its window.
+        self.lbl_metric_pre = self.metric_windows.pre_label_widget
+        self.lbl_metric_post = self.metric_windows.post_label_widget
         metric_selection = QtWidgets.QHBoxLayout()
         metric_selection.setContentsMargins(0, 0, 0, 0)
         metric_selection.addWidget(self.combo_metric, 1)
         metric_selection.addWidget(self.btn_more_metrics)
+        metric_selection.addWidget(self.metric_windows.add_button)   # "+": add a named window
         self.metric_selection_widget = QtWidgets.QWidget()
         self.metric_selection_widget.setLayout(metric_selection)
         fm.addRow(self.lbl_metric, self.metric_selection_widget)
         fm.addRow(self.lbl_metric_pre, metric_pre_widget)
         fm.addRow(self.lbl_metric_post, metric_post_widget)
+        self.metric_windows.attach_form(fm, metric_post_widget)      # extra windows go below Post
         # Representation of the metric when recording groups are compared
         # (Groups > Show: All groups, two or more groups). Also available by
         # right-clicking a metric panel.
@@ -10509,6 +10515,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                         self.spin_metric_pre0, self.spin_metric_pre1,
                         self.spin_metric_post0, self.spin_metric_post1):
             control.set_unit(unit)
+        self.metric_windows.set_unit(unit)
         self._refresh_psth_signal_settings()
         self._queue_settings_save()
 
@@ -10988,6 +10995,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_metric_post1,
         ):
             w.setEnabled(enabled)
+        self.metric_windows.set_enabled(enabled)
         self._update_metric_regions()
         self._queue_settings_save()
 
@@ -11710,6 +11718,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_metric_post1,
         ):
             w.setVisible(not hide)
+        self.metric_windows.set_hidden(hide)
         self._refresh_section_scroll("psth")
 
     def _open_behavior_zone_explorer(self) -> None:
@@ -17516,11 +17525,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 (float(self.spin_metric_post0.value()), float(self.spin_metric_post1.value())),
                 self._psth_units(), independent_units=(not grouped or file_rows),
                 row_unit="files" if file_rows else "trials",
+                **self.metric_windows.summary_arguments(),
             )
             row_colors = self._group_row_colors(mat)
             self._attach_metric_group_comparisons(mat, self._last_metric_panels)
             for index, (key, result) in enumerate(self._last_metric_panels.items()):
-                plot = self.plot_metrics if index == 0 else self._extra_metric_plots[key]
+                # Extra-window results get their own panel, created on demand.
+                plot = self.plot_metrics if index == 0 else self.metric_windows.plot_for(key)
                 plot.show_result(result, row_colors=row_colors)
                 summary = result["summary"]
                 set_plot_has_data(plot, bool(summary["pre_n"] or summary["post_n"]))
@@ -17635,7 +17646,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         primary = getattr(self, "_plot_card_by_widget", {}).get(self.plot_metrics, self.plot_metrics)
         self.plot_metrics.setVisible(show)
         primary.setVisible(show)
-        visible = [self._extra_metric_plots[key] for key in selected[1:]]
+        visible = [self._extra_metric_plots[key] for key in selected[1:]] + self.metric_windows.visible_plots()
         self.metric_panels_widget.setVisible(show and bool(visible))
         grid = self.metric_panels_widget.layout()
         for plot in self._extra_metric_plots.values():
@@ -17807,6 +17818,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._post_region.setZValue(-5)
         self.plot_avg.addItem(self._pre_region)
         self.plot_avg.addItem(self._post_region)
+        self.metric_windows.update_regions()
 
     def _style_color_tuple(self, key: str, fallback: Tuple[int, ...]) -> Tuple[int, ...]:
         raw = self._style.get(key, fallback)
@@ -19623,6 +19635,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "metric_pre1": float(self.spin_metric_pre1.value()),
             "metric_post0": float(self.spin_metric_post0.value()),
             "metric_post1": float(self.spin_metric_post1.value()),
+            "metric_windows": self.metric_windows.state(),
             "global_metrics_enabled": self.cb_global_metrics.isChecked(),
             "global_start": float(self.spin_global_start.value()),
             "global_end": float(self.spin_global_end.value()),
@@ -19808,6 +19821,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.spin_metric_post0.setValue(float(data["metric_post0"]))
         if "metric_post1" in data:
             self.spin_metric_post1.setValue(float(data["metric_post1"]))
+        self.metric_windows.set_state(data.get("metric_windows"))
         self.cb_global_metrics.setChecked(bool(data.get("global_metrics_enabled", True)))
         if "global_start" in data:
             self.spin_global_start.setValue(float(data["global_start"]))
