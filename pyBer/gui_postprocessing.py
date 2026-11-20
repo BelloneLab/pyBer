@@ -37,6 +37,7 @@ from plot_trace import with_time_gap_breaks
 from numeric_controls import DurationSpinBox, with_slider
 from adaptive_density import KEEP_ROW_PROPERTY, AdaptiveDensity, install_adaptive_density
 import missing_data
+from pca_trajectories import FAMILY as TRAJECTORY_FAMILY, PcaTrajectoryView
 from psth_metrics import (METRICS, metric_id, summarize_metrics, draw_metric_matplotlib,
                           export_selected_metrics, write_group_comparisons)
 from psth_metric_panels import MetricPanel, MetricGrid
@@ -4961,6 +4962,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for _metric_plot in (self.plot_metrics, *self._extra_metric_plots.values()):
             self._install_metric_view_menu(_metric_plot)
         self._install_metric_view_menu(self.plot_global, with_views=False)
+        # State-space (PCA) trajectories: one more analysis a panel can show.
+        self.pca_trajectories = PcaTrajectoryView(self)
         self.dashboard_panels = DashboardPanels(self)
         self.dashboard_panels.changed.connect(self._on_dashboard_panels_changed)
         self.btn_view_menu = create_view_menu(self)
@@ -13552,6 +13555,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 return
             ok = draw_global_metric(widget, code, values, bool(info.get("grouped", False)), palette, colors)
             set_plot_has_data(widget, ok)
+        elif family == TRAJECTORY_FAMILY:
+            self.pca_trajectories.render(widget)
 
     def _on_dashboard_panels_changed(self) -> None:
         panels = self.dashboard_panels
@@ -17524,7 +17529,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._sync_metric_panel_layout()
         panels = getattr(self, "dashboard_panels", None)
         if panels is not None:
-            panels.render_substitutes(("metric",))
+            panels.render_substitutes(("metric", TRAJECTORY_FAMILY))
 
     def _group_blocks_for_rows(self, mat: Optional[np.ndarray]):
         """(file ids per row, blocks) when 'All groups' is displayed with 2+ real groups."""

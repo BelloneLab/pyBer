@@ -33,7 +33,11 @@ SLOT_LABELS = {
 }
 # Which analysis family a slot natively displays (switch its own selector).
 NATIVE_FAMILY = {"bout1": "behavior", "bout2": "behavior", "comparison": "metric", "global": "global"}
-FAMILY_LABELS = {"behavior": "Behavior summary", "metric": "Pre/post comparison", "global": "Global signal"}
+FAMILY_LABELS = {"behavior": "Behavior summary", "metric": "Pre/post comparison", "global": "Global signal",
+                 "trajectory": "State-space (PCA)"}
+# Families offered under "Change to", in menu order.
+CHANGE_TO_FAMILIES = ("behavior", "metric", "global", "trajectory")
+TRAJECTORY_SPEC = "trajectory:pca"
 HANDLE_PX = 8            # thickness of invisible draggable dividers
 TIME_RATIO_DEFAULT = [1000, 1000]
 
@@ -274,6 +278,7 @@ class DashboardPanels(QtCore.QObject):
             items.append(("metric", key, label))
         for key, info in GLOBAL_SIGNAL_METRICS.items():
             items.append(("global", key, info["label"]))
+        items.append(("trajectory", "pca", "PCA trajectories"))
         return items
 
     def current_spec(self, slot: str) -> Optional[str]:
@@ -544,7 +549,7 @@ class DashboardPanels(QtCore.QObject):
         add(remove)
         change = QtWidgets.QMenu("Change to", menu)
         current = self.current_spec(slot)
-        for family in ("behavior", "metric", "global"):
+        for family in CHANGE_TO_FAMILIES:
             sub = change.addMenu(FAMILY_LABELS[family])
             for fam, code, label in self.catalog():
                 if fam != family:
@@ -560,6 +565,13 @@ class DashboardPanels(QtCore.QObject):
         change_action.setParent(menu)
         menu._pyber_change_menu = change
         add(change_action)
+        # A PCA trajectories panel carries its own options (behaviors, groups,
+        # method, axes) right below "Change to".
+        view = getattr(self.panel, "pca_trajectories", None)
+        if current == TRAJECTORY_SPEC and view is not None:
+            options = view.build_menu(menu)
+            menu._pyber_trajectory_menu = options
+            add(options.menuAction())
         restore = QtWidgets.QMenu("Restore removed panels", menu)
         for key in SLOT_KEYS:
             if key in self.removed:
