@@ -1,13 +1,14 @@
 """PCA state-space views of event-aligned photometry responses.
 
-Three dashboard panels ("Change to > State-space (PCA)") share one analysis:
+Dashboard panels ("Change to > State-space (PCA)") share one analysis:
 
 * PCA trajectories : the state-space picture itself;
 * PCA loadings     : what each component measures;
-* PCA separation   : a permutation test of how far two conditions are apart.
+* PCA separation   : a permutation test of how far two conditions are apart;
+* Cluster separation: silhouette scores for trial-response Gaussian mixture clusters.
 
 Their options (behaviors, groups, method, axes) are chosen from the right-click
-menu of any of the three panels.
+menu of any of the PCA panels.
 
 Methods (single fiber, many trials)
 -----------------------------------
@@ -68,7 +69,6 @@ import itertools
 from html import escape
 import json
 import math
-import time as _time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -78,6 +78,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from postprocessing_core import compute_psth_matrix
 from postprocessing_style import style_plot
 from recording_groups import UNGROUPED_COLOR, UNGROUPED_LABEL, color_dot_icon
+from trial_response_clusters import cluster_ellipse, fit_trial_clusters, trial_cluster_silhouettes
 
 
 # =============================================================================
@@ -88,12 +89,15 @@ FAMILY = "trajectory"
 CODE = "pca"                       # the trajectories / points panel
 CODE_LOADINGS = "loadings"
 CODE_SEPARATION = "separation"
+CODE_CLUSTER_SEPARATION = "cluster_separation"
 SPEC = f"{FAMILY}:{CODE}"
 SPEC_LOADINGS = f"{FAMILY}:{CODE_LOADINGS}"
 SPEC_SEPARATION = f"{FAMILY}:{CODE_SEPARATION}"
+SPEC_CLUSTER_SEPARATION = f"{FAMILY}:{CODE_CLUSTER_SEPARATION}"
 PANEL_LABEL = "PCA trajectories"
 PANELS: Tuple[Tuple[str, str], ...] = (
     (CODE, PANEL_LABEL), (CODE_LOADINGS, "PCA loadings"), (CODE_SEPARATION, "PCA separation test"),
+    (CODE_CLUSTER_SEPARATION, "Cluster separation"),
 )
 
 METHOD_BOUT = "bout"
@@ -110,6 +114,7 @@ METHODS: Tuple[Tuple[str, str], ...] = (
 METHOD_TITLES = {METHOD_BOUT: "onset-to-offset trajectories", METHOD_LAG: "lag-embedded trajectories",
                  METHOD_TRIALS: "trial responses", METHOD_RECORDINGS: "recordings as dimensions"}
 DEFAULT_METHOD = METHOD_BOUT
+DISPLAY_OPTIONS = {"axes", "units", "trial_clusters", "show_lag_weights", "group_loadings"}
 
 #: Length of the delay window, in seconds, offered for lag-embedded trajectories.
 DELAY_SPANS_S: Tuple[float, ...] = (0.25, 0.5, 1.0, 2.0)
@@ -152,6 +157,9 @@ MARKER_SIZE = 10
 POINT_SIZE = 5
 POINT_ALPHA = 110
 RECORDING_MARKER_SIZE = 11
+CLUSTER_OUTLINE_WIDTH = 1.6
+CLUSTER_POINT_SIZE = 7
+TRIAL_SYMBOLS = ("o", "s", "t", "t1", "p", "h", "star", "+", "x")
 LEGEND_COLUMN_WIDTH = 135          # width allowed per legend column (pixels)
 LEGEND_LAYOUT_ROW = 4              # plot layout row under the bottom axis (row 3)
 #: Categorical colors (fixed order) for behaviors when one group is shown.
@@ -400,7 +408,7 @@ def permutation_separation(group_a: np.ndarray, group_b: np.ndarray, n_permutati
 # =============================================================================
 
 class PcaTrajectoryView(QtCore.QObject):
-    """Options, data collection and drawing of the three PCA panels."""
+    """Options, data collection and drawing of the PCA panels."""
 
     def __init__(self, panel) -> None:
         super().__init__(panel)
@@ -409,10 +417,12 @@ class PcaTrajectoryView(QtCore.QObject):
         # (the groups shown by Hide/show groups, or all recordings pooled).
         self.options: Dict[str, object] = {"behaviors": [], "groups": None, "method": DEFAULT_METHOD,
                                            "span_s": DEFAULT_DELAY_SPAN_S, "axes": [0, 1], "units": True,
-                                           "show_lag_weights": False, "group_loadings": True}
+                                           "show_lag_weights": False, "group_loadings": True,
+                                           "trial_clusters": True}
         self._legends: Dict[int, pg.LegendItem] = {}
         self.last_report: Dict[str, object] = {}
-        self._cache: Optional[Tuple[float, str, Dict[str, object]]] = None
+        self._cache: Optional[Tuple[str, Dict[str, object]]] = None
+        self._data_revision = 0
         self._load_options()
 
     # ---------------------------------------------------------------- options
@@ -431,25 +441,31 @@ class PcaTrajectoryView(QtCore.QObject):
             self.options["method"] = DEFAULT_METHOD
         if tuple(self.options.get("axes") or ()) not in AXES_CHOICES:
             self.options["axes"] = [0, 1]
+        # Earlier versions allowed pooled and named groups simultaneously,
+        # which included those groups' trials twice in the fitted PCA.
+        if POOLED in (self.options.get("groups") or []):
+            self.options["groups"] = [POOLED]
 
     def set_option(self, key: str, value) -> None:
         self.options[key] = value
-        self._cache = None
         try:
             self.panel._settings.setValue(SETTINGS_KEY, json.dumps(self.options))
         except Exception:
             pass
-        self.refresh()
+        self.refresh(reuse_fit=key in DISPLAY_OPTIONS)
 
     def new_pass(self) -> None:
-        """Forget the cached analysis: the dashboard is about to redraw its panels."""
+        """Invalidate shared and per-event fits after an external dashboard refresh."""
+        self._data_revision += 1
         self._cache = None
 
-    def refresh(self) -> None:
-        self._cache = None
+    def refresh(self, *, reuse_fit: bool = False) -> None:
+        """Redraw PCA panels. Only explicit presentation options may reuse the fit."""
         panels = getattr(self.panel, "dashboard_panels", None)
         if panels is not None:
-            panels.render_substitutes((FAMILY,))
+            panels.render_substitutes((FAMILY,), reuse_pca_fit=reuse_fit)
+        elif not reuse_fit:
+            self.new_pass()
 
     # ------------------------------------------------------- what can be shown
     def behaviors_apply(self) -> bool:
@@ -485,6 +501,22 @@ class PcaTrajectoryView(QtCore.QObject):
             return panel.combo_behavior_name.currentText().strip() or "Behavior"
         return panel.combo_dio.currentText().strip() or "Events"
 
+    def individual_recording(self) -> Optional[str]:
+        """Return the active recording ID in Individual view, or None in Group view."""
+        panel = self.panel
+        if panel.tab_visual_mode.currentIndex() != 0:
+            return None
+        selected = panel.combo_individual_file.currentText().strip()
+        if selected or not panel._processed:
+            return selected
+        # Before the PSTH populates the picker, its trace previews the first file.
+        return panel._file_id_for_proc(panel._processed[0])
+
+    def cache_signature(self) -> str:
+        """Identify a fit by its data revision, analytical options and recording."""
+        analysis = {key: value for key, value in self.options.items() if key not in DISPLAY_OPTIONS}
+        return json.dumps((self._data_revision, analysis, self.individual_recording()), sort_keys=True)
+
     def group_entries(self) -> List[Tuple[str, str, str, List[str]]]:
         """(key, name, color, recording ids) for each group that has loaded recordings."""
         panel = self.panel
@@ -503,6 +535,9 @@ class PcaTrajectoryView(QtCore.QObject):
     def selected_groups(self) -> List[Tuple[str, str, Optional[str], List[str]]]:
         """Groups drawn as separate conditions (color None = use the behavior colors)."""
         panel = self.panel
+        recording = self.individual_recording()
+        if recording is not None:
+            return [(recording, recording, None, [recording])] if recording else []
         all_ids = [panel._file_id_for_proc(proc) for proc in panel._processed]
         pooled = (POOLED, "All recordings", None, all_ids)
         entries = self.group_entries()
@@ -511,13 +546,14 @@ class PcaTrajectoryView(QtCore.QObject):
             hidden = panel._hidden_groups() if hasattr(panel, "_hidden_groups") else set()
             visible = [entry for entry in entries if entry[0] not in hidden]
             return visible if entries else [pooled]
-        out = [pooled] if POOLED in chosen else []
-        out += [entry for entry in entries if entry[0] in chosen]
+        if POOLED in chosen:
+            return [pooled]
+        out = [entry for entry in entries if entry[0] in chosen]
         return out or [pooled]
 
     # ------------------------------------------------------------------ data
     def _trial_responses(self, behaviors: Sequence[str], to_offset: bool):
-        """Trial matrices of every recording for every behavior.
+        """Trial matrices for the recordings and behaviors in the active view.
 
         Uses the panel's own event extraction (clock, alignment edge, event
         filters, hidden events) and the current PSTH baseline, normalization
@@ -544,6 +580,12 @@ class PcaTrajectoryView(QtCore.QObject):
         responses: Dict[str, Dict[str, np.ndarray]] = {}
         axis: Optional[np.ndarray] = None
         info = {"truncated": 0, "without_duration": 0}
+        recordings = panel._processed
+        recording = self.individual_recording()
+        if recording is not None:
+            # Restrict the input before event extraction, normalization and fitting.
+            active = next((proc for proc in recordings if panel._file_id_for_proc(proc) == recording), None)
+            recordings = (active,) if active is not None else ()
         blocker = QtCore.QSignalBlocker(combo)
         try:
             for behavior in behaviors:
@@ -553,7 +595,7 @@ class PcaTrajectoryView(QtCore.QObject):
                         continue
                     combo.setCurrentIndex(index)
                 per_file: Dict[str, np.ndarray] = {}
-                for proc in panel._processed:
+                for proc in recordings:
                     _label, signal = panel._psth_input(proc)
                     if signal is None:
                         continue
@@ -603,27 +645,23 @@ class PcaTrajectoryView(QtCore.QObject):
         return responses, axis, info
 
     def compute(self) -> Dict[str, object]:
-        """The analysis for the current options (shared by the three panels).
-
-        The three panels drawn in one dashboard pass share one computation:
-        the dashboard calls ``new_pass`` before drawing, and the result is
-        reused until then (and never for more than a second).
-        """
-        signature = json.dumps(self.options, sort_keys=True)
-        if self._cache is not None and self._cache[1] == signature and _time.monotonic() - self._cache[0] < 1.0:
-            return self._cache[2]
+        """Share the same fit until the dashboard starts its next render pass."""
+        signature = self.cache_signature()
+        if self._cache is not None and self._cache[0] == signature:
+            return self._cache[1]
         try:
             report = self._compute()
         except Exception as exc:        # a display problem must not break the analysis
             report = self._empty_report(str(self.options.get("method")), f"Could not compute the PCA: {exc}")
-        self._cache = (_time.monotonic(), signature, report)
+        self._cache = (signature, report)
         self.last_report = report
         return report
 
     def _empty_report(self, method: str, note: str) -> Dict[str, object]:
         return {"method": method, "requested_method": method, "behaviors": [], "curves": [], "ratio": np.empty(0),
                 "components": np.empty((0, 0)), "loading_axis": np.empty(0), "loading_label": "",
-                "loading_ticks": None, "note": note, "skipped": [], "fallback": "", "info": {}}
+                "loading_ticks": None, "note": note, "skipped": [], "fallback": "", "info": {},
+                "individual_recording": self.individual_recording()}
 
     def _compute(self, behaviors: Optional[Sequence[str]] = None) -> Dict[str, object]:
         """Fit the selected behaviors, or those represented by a dashboard column."""
@@ -634,14 +672,21 @@ class PcaTrajectoryView(QtCore.QObject):
         if not self.panel._processed or not behaviors:
             return self._empty_report(method, "Load recordings and events to draw the PCA.")
         if method == METHOD_RECORDINGS:
+            if self.individual_recording() is not None:
+                report = self._compute_units(METHOD_TRIALS, behaviors, groups)
+                report["requested_method"] = method
+                report["fallback"] = ("Individual view uses trial-response PCA for the selected recording. "
+                                      "Group view uses the selected recordings-as-dimensions method.")
+                return report
             return self._compute_recordings(behaviors, groups)
         report = self._compute_units(method, behaviors, groups)
         if method == METHOD_BOUT and not report["curves"] and not report.get("hard_error"):
             # No bout has a start and an end: show the trial pattern instead.
             fallback = self._compute_units(METHOD_LAG, behaviors, groups)
             fallback["requested_method"] = METHOD_BOUT
-            fallback["fallback"] = ("No bout with a start and an end was found, so lag-embedded "
-                                    "trajectories around each event are shown instead.")
+            if fallback["curves"]:
+                fallback["fallback"] = ("No bout with a start and an end was found, so lag-embedded "
+                                        "trajectories around each event are shown instead.")
             return fallback
         return report
 
@@ -734,11 +779,15 @@ class PcaTrajectoryView(QtCore.QObject):
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", category=RuntimeWarning)
                     mean_scores = np.nanmean(unit_scores, axis=0)
-            parts = ([block["behavior"]] if several_behaviors or not several_groups else []) + \
-                    ([block["group"]] if several_groups or not several_behaviors else [])
             n_recordings = len(set(files.tolist()))
+            if report["individual_recording"]:
+                label = f"{block['behavior']} · {block['group']} (n={count} {unit_word})"
+            else:
+                parts = ([block["behavior"]] if several_behaviors or not several_groups else []) + \
+                        ([block["group"]] if several_groups or not several_behaviors else [])
+                label = f"{' · '.join(parts)} (n={count} {unit_word}, {n_recordings} rec.)"
             report["curves"].append({
-                "label": f"{' · '.join(parts)} (n={count} {unit_word}, {n_recordings} rec.)",
+                "label": label,
                 "behavior": block["behavior"], "behavior_index": block["behavior_index"],
                 "group": block["group"], "group_color": block["group_color"] if several_groups else None,
                 "time": point_time, "scores": mean_scores, "units": unit_scores, "unit_files": files,
@@ -794,7 +843,10 @@ class PcaTrajectoryView(QtCore.QObject):
                               "so there is nothing to permute. Choose another method.")
             return result
         if len(curves) < 2:
-            result["note"] = "The separation test needs two conditions: select two groups or two behaviors."
+            if report.get("individual_recording"):
+                result["note"] = "The separation test needs two behaviors from the active recording."
+            else:
+                result["note"] = "The separation test needs two conditions: select two groups or two behaviors."
             return result
         first, second = curves[0], curves[1]
         result.update(label_a=first["label"], label_b=second["label"], extra_conditions=len(curves) - 2)
@@ -892,10 +944,11 @@ class PcaTrajectoryView(QtCore.QObject):
             widget.getPlotItem().getAxis(axis).setStyle(showValues=False)
         widget.setToolTip(text)
 
-    def _legend(self, widget: pg.PlotWidget, text_color: str, entries: int) -> pg.LegendItem:
+    def _legend(self, widget: pg.PlotWidget, text_color: str, entries: int, columns=None) -> pg.LegendItem:
         """Legend under the x axis, outside the data area, in as many columns as fit."""
         plot_item = widget.getPlotItem()
-        columns = max(1, min(entries, widget.width() // LEGEND_COLUMN_WIDTH))
+        if columns is None:
+            columns = max(1, min(entries, widget.width() // LEGEND_COLUMN_WIDTH))
         legend = pg.LegendItem(labelTextColor=text_color, labelTextSize="8pt", colCount=columns)
         legend.setParentItem(plot_item)
         plot_item.layout.addItem(legend, LEGEND_LAYOUT_ROW, 1)
@@ -906,7 +959,7 @@ class PcaTrajectoryView(QtCore.QObject):
         return f"{what} · {METHOD_TITLES.get(str(report.get('method')), '')}"
 
     def render(self, widget: pg.PlotWidget, code: str = CODE, report=None) -> None:
-        """Draw one of the three PCA panels in a dashboard plot."""
+        """Draw the selected PCA panel in a dashboard plot."""
         palette, text_color = self._prepare(widget)
         if report is None:
             report = self.compute()
@@ -914,8 +967,13 @@ class PcaTrajectoryView(QtCore.QObject):
             self._render_loadings(widget, report, palette, text_color)
         elif code == CODE_SEPARATION:
             self._render_separation(widget, report, palette, text_color)
+        elif code == CODE_CLUSTER_SEPARATION:
+            self._render_cluster_separation(widget, report, palette, text_color)
         else:
             self._render_trajectories(widget, report, palette, text_color)
+        recording = report.get("individual_recording")
+        context = (f"Recording: {recording}" if recording else "", report.get("fallback"), widget.toolTip())
+        widget.setToolTip("\n".join(filter(None, context)))
 
     def _resolve_axes(self, n_components: int) -> Tuple[int, Optional[int]]:
         """Chosen component pair, or the first pair that exists for this analysis."""
@@ -923,6 +981,89 @@ class PcaTrajectoryView(QtCore.QObject):
         if max(ax, ay) < n_components:
             return ax, ay
         return (0, 1) if n_components >= 2 else (0, None)
+
+    @staticmethod
+    def trial_clusters(report):
+        """Fit once per report so scatter plots and silhouettes share the same assignments."""
+        if "trial_clusters" not in report:
+            scores = np.vstack([curve["units"] for curve in report["curves"]])
+            result = fit_trial_clusters(scores)
+            result["scores"] = scores  # Keep the exact row order for the optional silhouette calculation.
+            report["trial_clusters"] = result
+        return report["trial_clusters"]
+
+    def _draw_trial_points(self, widget, report, colors, text_color, ax, ay, clusters):
+        """Color trials by component and preserve their condition in symbols and recording centroids."""
+        start = 0
+        n_clusters = clusters.get("n_clusters", 0)
+        cluster_brushes = [pg.mkBrush(colors[k % len(colors)]) for k in range(n_clusters)]
+        condition_labels = [curve["label"] for curve in report["curves"]]
+        cluster_labels = [f"Cluster {k + 1} (n={np.count_nonzero(clusters['labels'] == k)})"
+                          for k in range(n_clusters)]
+        if n_clusters:
+            # A full condition name plus cluster labels can force the whole graphics
+            # layout wider than the dashboard slot. Reserve the axis and legend swatches.
+            condition_labels = [name.rsplit(" (n=", 1)[0] for name in condition_labels]
+            if len(condition_labels) == 1 and report.get("individual_recording"):
+                condition_labels[0] = str(report["individual_recording"])
+        font = QtGui.QFont(widget.font())
+        font.setPointSize(8)
+        metrics = QtGui.QFontMetrics(font)
+        available = max(100, widget.width() - 85)
+        condition_labels = [metrics.elidedText(name, QtCore.Qt.TextElideMode.ElideRight, max(60, available - 55))
+                            for name in condition_labels]
+        all_labels = condition_labels + cluster_labels
+        cell_width = max(metrics.horizontalAdvance(name) for name in all_labels) + 55
+        columns = max(1, min(len(all_labels), available // cell_width))
+        legend = self._legend(widget, text_color, len(all_labels), columns)
+        for index, curve in enumerate(report["curves"]):
+            color = self._curve_color(curve, colors)
+            points = curve["units"]
+            valid = np.all(np.isfinite(points), axis=1)
+            finite = points[valid]
+            files = curve["unit_files"][valid]
+            symbol = TRIAL_SYMBOLS[index % len(TRIAL_SYMBOLS)] if n_clusters else "o"
+            point_pen = pg.mkPen(None)
+            if n_clusters:
+                labels = clusters["labels"][start:start + len(points)][valid]
+                brushes = [cluster_brushes[k] for k in labels]
+                if len(condition_labels) > 1:
+                    point_pen = pg.mkPen(color, width=1)
+            else:
+                ink = QtGui.QColor(color)
+                ink.setAlpha(POINT_ALPHA)
+                brushes = pg.mkBrush(ink)
+            start += len(points)
+            if len(finite):
+                size = CLUSTER_POINT_SIZE if n_clusters else POINT_SIZE
+                dots = pg.ScatterPlotItem(finite[:, ax], finite[:, ay] if ay is not None else np.zeros(len(finite)),
+                                          symbol=symbol, size=size, pen=point_pen, brush=brushes)
+                dots.setZValue(4)
+                widget.addItem(dots)
+            for fid in sorted(set(files.tolist())):
+                centre = finite[files == fid].mean(axis=0)
+                marker = pg.ScatterPlotItem(
+                    [centre[ax]], [centre[ay] if ay is not None else 0.0], symbol="d",
+                    size=RECORDING_MARKER_SIZE, pen=pg.mkPen(text_color, width=1), brush=pg.mkBrush(color))
+                marker.setZValue(6)
+                widget.addItem(marker)
+            if n_clusters and len(condition_labels) == 1:
+                sample = pg.PlotDataItem([0], [0], pen=None, symbol="d", symbolSize=RECORDING_MARKER_SIZE,
+                                         symbolBrush=pg.mkBrush(color), symbolPen=pg.mkPen(text_color))
+            else:
+                sample = pg.PlotDataItem([0], [0], pen=None, symbol=symbol, symbolSize=POINT_SIZE + 2,
+                                         symbolBrush=pg.mkBrush(None if n_clusters else color), symbolPen=point_pen)
+            legend.addItem(sample, escape(condition_labels[index]))
+
+        # Take the two-dimensional marginal of the same fitted component for every axis choice.
+        for k, cluster_label in enumerate(cluster_labels):
+            pen = pg.mkPen(colors[k % len(colors)], width=CLUSTER_OUTLINE_WIDTH)
+            if ay is not None:
+                contour = cluster_ellipse(clusters["means"][k], clusters["covariances"][k], ax, ay)
+                sample = widget.plot(contour[:, 0], contour[:, 1], pen=pen, antialias=True, name=cluster_label)
+            else:
+                sample = pg.PlotDataItem(pen=pen)
+            legend.addItem(sample, cluster_label)
 
     def _render_trajectories(self, widget, report, palette, text_color) -> None:
         widget.setTitle(self._title(report), color=text_color, size="10pt")
@@ -933,36 +1074,38 @@ class PcaTrajectoryView(QtCore.QObject):
             return
         ax, ay = self._resolve_axes(ratio.size)
         colors = self._behavior_colors(palette)
-        legend = self._legend(widget, text_color, len(curves))
         method = report["method"]
-        show_units = bool(self.options.get("units", True))
+        clusters = self.trial_clusters(report) if method == METHOD_TRIALS and self.options["trial_clusters"] else {}
+        if method == METHOD_TRIALS:
+            self._draw_trial_points(widget, report, colors, text_color, ax, ay, clusters)
+        else:
+            legend = self._legend(widget, text_color, len(curves))
+            self._draw_time_trajectories(widget, curves, method, legend, colors, palette, ax, ay)
         plot_item = widget.getPlotItem()
+        if ay is None and method == METHOD_TRIALS:
+            widget.setLabel("bottom", f"PC1 ({100 * ratio[0]:.0f}% of variance)")
+            widget.setLabel("left", "")
+            plot_item.getAxis("left").setStyle(showValues=False)
+        elif ay is None:
+            widget.setLabel("bottom", "Phase of the bout (0 = onset, 1 = offset)" if method == METHOD_BOUT
+                            else "Time from event (s)")
+            widget.setLabel("left", f"PC1 ({100 * ratio[0]:.0f}% of variance)")
+        else:
+            widget.setLabel("bottom", f"PC{ax + 1} ({100 * ratio[ax]:.0f}% of variance)")
+            widget.setLabel("left", f"PC{ay + 1} ({100 * ratio[ay]:.0f}% of variance)")
+            plot_item.setAspectLocked(True)        # both axes share the signal's units
+        plot_item.enableAutoRange()
+        widget.setToolTip(self._tooltip(report))
+
+    def _draw_time_trajectories(self, widget, curves, method, legend, colors, palette, ax, ay):
+        """Draw the trial or bout paths and each condition's mean in the chosen plane."""
+        show_units = bool(self.options.get("units", True))
         surface = str(palette.get("surface", "#000000"))
         for curve in curves:
             color = self._curve_color(curve, colors)
             style = LINE_STYLES[curve["behavior_index"] % len(LINE_STYLES)] if curve["group_color"] else LINE_STYLES[0]
             faint = QtGui.QColor(color)
             units = curve.get("units")
-            if method == METHOD_TRIALS:
-                # One point per event, a diamond per recording, in the chosen component plane.
-                points = np.asarray(units, float)
-                ok = np.isfinite(points[:, ax]) & (np.isfinite(points[:, ay]) if ay is not None else True)
-                ys = points[ok, ay] if ay is not None else np.zeros(int(ok.sum()))
-                faint.setAlpha(POINT_ALPHA)
-                widget.addItem(pg.ScatterPlotItem(points[ok, ax], ys, size=POINT_SIZE, pen=pg.mkPen(None),
-                                                  brush=pg.mkBrush(faint)))
-                files = curve["unit_files"][ok]
-                for fid in sorted(set(files.tolist())):
-                    centre = points[ok][files == fid].mean(axis=0)
-                    marker = pg.ScatterPlotItem(
-                        [centre[ax]], [centre[ay] if ay is not None else 0.0], symbol="d",
-                        size=RECORDING_MARKER_SIZE, pen=pg.mkPen(text_color, width=1.0), brush=pg.mkBrush(color))
-                    marker.setZValue(6)
-                    widget.addItem(marker)
-                sample = pg.PlotDataItem(pen=None, symbol="o", symbolSize=POINT_SIZE + 2,
-                                         symbolBrush=pg.mkBrush(color), symbolPen=pg.mkPen(None))
-                legend.addItem(sample, curve["label"])
-                continue
             mean = np.asarray(curve["scores"], float)
             time = np.asarray(curve["time"], float)
             if show_units and units is not None and units.shape[0] > 1:
@@ -998,22 +1141,10 @@ class PcaTrajectoryView(QtCore.QObject):
                                             pen=pg.mkPen(color, width=1.6), brush=pg.mkBrush(fill or surface))
                 marker.setZValue(6)
                 widget.addItem(marker)
-        if ay is None:
-            widget.setLabel("bottom", "Phase of the bout (0 = onset, 1 = offset)" if method == METHOD_BOUT
-                            else "Time from event (s)")
-            widget.setLabel("left", f"PC1 ({100 * ratio[0]:.0f}% of variance)")
-        else:
-            widget.setLabel("bottom", f"PC{ax + 1} ({100 * ratio[ax]:.0f}% of variance)")
-            widget.setLabel("left", f"PC{ay + 1} ({100 * ratio[ay]:.0f}% of variance)")
-            plot_item.setAspectLocked(True)        # both axes share the signal's units
-        plot_item.enableAutoRange()
-        widget.setToolTip(self._tooltip(report))
 
     def _tooltip(self, report: Dict[str, object]) -> str:
         method = report.get("method")
         tips = []
-        if report.get("fallback"):
-            tips.append(str(report["fallback"]))
         if method == METHOD_BOUT:
             tips.append("Each bout from its onset (hollow circle) to its offset (square), on a common phase axis. "
                         "Thin lines: single bouts. Thick lines: condition means.")
@@ -1022,6 +1153,15 @@ class PcaTrajectoryView(QtCore.QObject):
                         "Triangle: end. Thin lines: single trials. Thick lines: condition means.")
         elif method == METHOD_TRIALS:
             tips.append("One point per event. Diamonds: mean of each recording.")
+            tips.extend(curve["label"] for curve in report["curves"])
+            if self.options["trial_clusters"] and "trial_clusters" in report:
+                clusters = report["trial_clusters"]
+                if clusters["n_clusters"]:
+                    tips.append("Point colors give Gaussian mixture assignments. Shapes identify conditions. "
+                                "Outlines enclose 95% of each fitted Gaussian in the displayed plane. "
+                                "The lowest BIC among eligible models selects the component count.")
+                if clusters["note"]:
+                    tips.append(clusters["note"])
         else:
             tips.append(f"Dimensions: {len(report.get('recordings', []))} recordings (selected groups pooled).")
         info = report.get("info") or {}
@@ -1191,7 +1331,52 @@ class PcaTrajectoryView(QtCore.QObject):
         tip = ("Each line shows a condition's trial-mean PC score from the trajectory fit. "
                "The vertical line marks the selected event. Scores are shown at delay-window "
                "centers with valid data. Choose ‘Show delay-window weights’ to inspect the loadings.")
-        widget.setToolTip("\n".join(filter(None, (report["fallback"], tip))))
+        widget.setToolTip(tip)
+
+    def _render_cluster_separation(self, widget, report, palette, text_color):
+        """Draw each trial's silhouette, sorted within its assigned mixture component."""
+        widget.setTitle("Cluster separation", color=text_color, size="10pt")
+        if report["method"] != METHOD_TRIALS:
+            self._message(widget, "Choose Trial-response PCA under PCA options to see cluster separation.", text_color)
+            return
+        if not report["curves"]:
+            self._message(widget, report.get("note") or "No trial responses are available.", text_color)
+            return
+        result = self.trial_clusters(report)
+        if result["n_clusters"] < 2:
+            self._message(widget, result["note"], text_color)
+            return
+
+        silhouettes = trial_cluster_silhouettes(result["scores"], result)
+        mean = float(np.nanmean(silhouettes))
+        widget.setTitle(f"Cluster separation · mean {mean:.2f}", color=text_color, size="10pt")
+        colors = self._behavior_colors(palette)
+        ticks, counts = [], []
+        position = 0
+        gap = max(1, round(np.count_nonzero(np.isfinite(silhouettes)) * 0.035))
+        for k in range(result["n_clusters"]):
+            values = np.sort(silhouettes[result["labels"] == k])
+            xs = position + np.arange(len(values))
+            widget.addItem(pg.BarGraphItem(x=xs, height=values, width=0.8, pen=pg.mkPen(None),
+                                           brush=pg.mkBrush(colors[k % len(colors)])))
+            ticks.append((position + (len(values) - 1) / 2, f"C{k + 1}"))
+            counts.append(f"C{k + 1}: {len(values)} trials")
+            position += len(values) + gap
+        widget.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen(text_color, width=0.7)))
+        widget.addItem(pg.InfiniteLine(pos=mean, angle=0,
+                                       pen=pg.mkPen(text_color, width=1.5, style=QtCore.Qt.PenStyle.DashLine)))
+        widget.setLabel("bottom", "Trials by cluster")
+        widget.setLabel("left", "Silhouette score")
+        widget.getAxis("bottom").setTicks([ticks])
+        widget.setXRange(-0.5, position - gap - 0.5, padding=0.015)
+        widget.setYRange(-1, 1, padding=0.025)
+        tip = [result["note"], ", ".join(counts), f"Dashed line: mean silhouette {mean:.3f}.",
+               "Each bar compares one trial's mean distance to its own cluster with its mean distance "
+               "to the nearest other cluster, across the retained PC scores. Values near 1 indicate "
+               "separation, near 0 indicate overlap, and negative values favor a different cluster."]
+        if result["silhouette_sampled"]:
+            tip.append("Distances use a reproducible reference sample within each large cluster.")
+        widget.setToolTip("\n".join(tip))
 
     def _render_separation(self, widget, report, palette, text_color) -> None:
         widget.setTitle(self._title(report, "PCA separation"), color=text_color, size="10pt")
@@ -1240,10 +1425,19 @@ class PcaTrajectoryView(QtCore.QObject):
         report = self.last_report if column_report is None else column_report
 
         methods = menu.addMenu("Method")
+        group_only_method = self.options["method"] == METHOD_RECORDINGS and self.individual_recording() is not None
+        effective_method = METHOD_TRIALS if group_only_method else self.options["method"]
         for value, label in METHODS:
+            if group_only_method and value == METHOD_TRIALS:
+                label += " (Individual view)"
+            if group_only_method and value == METHOD_RECORDINGS:
+                label += " (selected for Group view)"
             action = methods.addAction(label)
             action.setCheckable(True)
-            action.setChecked(self.options.get("method") == value)
+            action.setChecked(effective_method == value)
+            if value == METHOD_RECORDINGS and self.individual_recording() is not None:
+                action.setEnabled(False)
+                action.setToolTip("Switch to Group view to use recordings as dimensions.")
             action.triggered.connect(lambda _=False, v=value: self.set_option("method", v))
 
         behaviors = menu.addMenu("Behaviors")
@@ -1265,22 +1459,7 @@ class PcaTrajectoryView(QtCore.QObject):
             note = behaviors.addAction("Align the PSTH to a behavior to choose several")
             note.setEnabled(False)
 
-        groups = menu.addMenu("Groups")
-        chosen_groups = self.options.get("groups")
-        automatic = groups.addAction("Automatic (groups shown by Hide/show groups)")
-        automatic.setCheckable(True)
-        automatic.setChecked(chosen_groups is None)
-        automatic.triggered.connect(lambda: self.set_option("groups", None))
-        groups.addSeparator()
-        pooled = groups.addAction("All recordings pooled")
-        pooled.setCheckable(True)
-        pooled.setChecked(chosen_groups is not None and POOLED in chosen_groups)
-        pooled.triggered.connect(lambda checked: self._toggle_group(POOLED, checked))
-        for key, name, color, members in self.group_entries():
-            action = groups.addAction(color_dot_icon(color), f"{name} ({len(members)})")
-            action.setCheckable(True)
-            action.setChecked(chosen_groups is not None and key in chosen_groups)
-            action.triggered.connect(lambda checked, k=key: self._toggle_group(k, checked))
+        self._add_scope_menu(menu)
 
         units = menu.addAction("Show single trials / bouts")
         units.setCheckable(True)
@@ -1300,6 +1479,13 @@ class PcaTrajectoryView(QtCore.QObject):
             weights.setCheckable(True)
             weights.setChecked(bool(self.options["show_lag_weights"]))
             weights.triggered.connect(lambda checked: self.set_option("show_lag_weights", checked))
+
+        if report.get("method", self.options["method"]) == METHOD_TRIALS:
+            clusters = menu.addAction("Show GMM clusters")
+            clusters.setToolTip("Color trials by cluster and show the fitted 95% outlines.")
+            clusters.setCheckable(True)
+            clusters.setChecked(bool(self.options["trial_clusters"]))
+            clusters.triggered.connect(lambda checked: self.set_option("trial_clusters", bool(checked)))
 
         if report.get("loading_groups"):
             by_group = menu.addAction("Fit weights separately by group")
@@ -1325,8 +1511,37 @@ class PcaTrajectoryView(QtCore.QObject):
             chosen.remove(name)
         self.set_option("behaviors", [item for item in available if item in chosen])
 
+    def _add_scope_menu(self, menu: QtWidgets.QMenu) -> None:
+        """Expose group filters only where the toolbar permits multiple recordings."""
+        recording = self.individual_recording()
+        if recording is not None:
+            menu.addAction(f"Recording · {recording}" if recording else "No recording selected").setEnabled(False)
+            return
+        groups = menu.addMenu("Groups")
+        chosen_groups = self.options.get("groups")
+        automatic = groups.addAction("Automatic (groups shown by Hide/show groups)")
+        automatic.setCheckable(True)
+        automatic.setChecked(chosen_groups is None)
+        automatic.triggered.connect(lambda: self.set_option("groups", None))
+        groups.addSeparator()
+        pooled = groups.addAction("All recordings pooled")
+        pooled.setCheckable(True)
+        pooled.setChecked(chosen_groups is not None and POOLED in chosen_groups)
+        pooled.triggered.connect(lambda checked: self._toggle_group(POOLED, checked))
+        for key, name, color, members in self.group_entries():
+            action = groups.addAction(color_dot_icon(color), f"{name} ({len(members)})")
+            action.setCheckable(True)
+            action.setChecked(chosen_groups is not None and key in chosen_groups)
+            action.triggered.connect(lambda checked, k=key: self._toggle_group(k, checked))
+
     def _toggle_group(self, key: str, checked: bool) -> None:
+        """Select either one pooled sample or a set of distinct group samples."""
         chosen = list(self.options.get("groups") or [])
+        if checked and key == POOLED:
+            self.set_option("groups", [POOLED])
+            return
+        if checked and POOLED in chosen:
+            chosen.remove(POOLED)
         if checked and key not in chosen:
             chosen.append(key)
         elif not checked and key in chosen:

@@ -321,6 +321,34 @@ class MultiBehaviorPanelTests(unittest.TestCase):
         self.settle()
         self.assertTrue(all(key not in column.extra_metrics for column in view.columns[:2]))
 
+    def test_cluster_panels_share_each_behavior_columns_own_trial_fit(self):
+        """Selecting the two PCA panels from a column uses only that event's recording trials."""
+        from pca_trajectories import decimate_rows
+
+        listing = self.load()
+        self.check(listing, {"attack", "rearing"})
+        panel = self.panel
+        panel.tab_visual_mode.setCurrentIndex(0)
+        panel.pca_trajectories.set_option("method", "trials")
+        first = panel.multi_behavior_view.columns[0]
+        self.menu_action(first.heat, "Change to", "State-space (PCA)", "PCA trajectories").trigger()
+        self.menu_action(first.psth, "Change to", "State-space (PCA)", "Cluster separation").trigger()
+        self.settle()
+        entries = panel.multi_behavior_view.entries
+        self.assertEqual([entry["name"] for entry in entries], ["attack", "rearing"])
+        for column, entry in zip(panel.multi_behavior_view.columns, entries):
+            report = entry["_column_pca"][1]
+            self.assertEqual(report["behaviors"], [entry["name"]])
+            self.assertEqual(report["individual_recording"], "fiber")
+            model = report["trial_clusters"]
+            rows, _ = decimate_rows(entry["matrix"], entry["tvec"])
+            valid = np.isfinite(rows).all(axis=1)
+            expected = (rows[valid] - rows[valid].mean(axis=0)) @ report["components"].T
+            np.testing.assert_allclose(model["scores"][valid], expected, atol=1e-8)
+            self.assertEqual(model["fit_count"], int(valid.sum()))
+            for slot in ("heatmap", "psth"):
+                self.assertTrue(column.dashboard_substitutes[(slot, "trajectory")].isVisible())
+
     def test_change_to_from_event_menu_renders_the_substitute_for_each_event(self):
         listing = self.load()
         self.check(listing, {"attack", "rearing"})

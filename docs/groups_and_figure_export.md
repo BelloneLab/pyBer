@@ -224,6 +224,42 @@ All displayed pre/post comparisons, including panels changed to a metric, form
 one Holm family, so adding a comparison panel correctly widens the multiple
 comparison correction.
 
+### Trial-response PCA and cluster separation
+
+Under **Change to > State-space (PCA)**, choose **PCA trajectories**. In
+**Individual** view, the recording picker controls the data used to fit the
+trajectories, loadings, and separation panels. Switching recordings refits
+the axes, so each recording has its own PC1 and PC2. Use **Group** view for
+a shared coordinate system across recordings. If Group view uses
+**Recordings as dimensions**, switching to Individual shows trial-response PCA
+for that file. Returning to Group restores the multi-recording method.
+
+Right-click a PCA panel and choose **PCA options > Method > Trial-response
+PCA**. Each point represents one event-aligned response. **Show GMM clusters**
+colors the trials by their fitted Gaussian mixture component. Each outline
+encloses 95% probability under that component in the displayed PC plane.
+Changing the displayed plane preserves the assignments.
+
+The mixture uses up to three retained PCs. The Bayesian information criterion
+(BIC) selects among eligible models with one to six components. The number
+of complete trials limits how many components can compete. A split must have
+at least five assigned trials per component, or seven in three dimensions,
+and enough variation to fit a covariance matrix. For more than 2,000 complete
+trials, a reproducible sample of 2,000 determines the model and all complete
+trials receive an assignment. When several models qualify, the tooltip reports
+the BIC difference from the next-best model.
+
+To inspect overlap, right-click a second panel and choose **Change to >
+State-space (PCA) > Cluster separation**. Each bar shows one trial's
+silhouette score in the fitted PC space. Values near 1 indicate clear
+separation, values near 0 indicate overlap, and negative values indicate a
+trial lies closer on average to another cluster. The dashed line shows the
+mean. For clusters larger than 256 trials, distances use a reproducible
+sample of 256 reference trials per cluster. With one cluster, the panel
+reports the model-selection outcome.
+This is a descriptive check on the fitted groups. The separate **PCA
+separation test** compares predefined experimental conditions.
+
 ## 4. Editable PDF and SVG export
 
 Image export now writes **PNG + PDF + SVG**. The PDF and SVG are rebuilt from

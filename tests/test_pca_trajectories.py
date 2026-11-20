@@ -20,6 +20,7 @@ from pca_trajectories import (
     SPEC,
     SPEC_LOADINGS,
     SPEC_SEPARATION,
+    SPEC_CLUSTER_SEPARATION,
     bouts_to_phase,
     decimate_rows,
     delay_embed,
@@ -184,11 +185,12 @@ class PcaPanelTests(dashboard.GroupViewDashboardTests):
         self.app.processEvents()
         return panel, panel.dashboard_panels.displayed(slot)
 
-    def test_three_panels_are_offered_and_lag_trajectories_separate_opposite_groups(self):
+    def test_pca_panels_are_offered_and_lag_trajectories_separate_opposite_groups(self):
         panel, widget = self._panel(METHOD_LAG)
         catalog = [(code, label) for family, code, label in panel.dashboard_panels.catalog() if family == "trajectory"]
         self.assertEqual(catalog, [("pca", "PCA trajectories"), ("loadings", "PCA loadings"),
-                                   ("separation", "PCA separation test")])
+                                   ("separation", "PCA separation test"),
+                                   ("cluster_separation", "Cluster separation")])
         self.assertEqual(panel.dashboard_panels.label_for("global"), "PCA trajectories")
         report = panel.pca_trajectories.last_report
         self.assertEqual(report["method"], METHOD_LAG)
@@ -246,6 +248,42 @@ class PcaPanelTests(dashboard.GroupViewDashboardTests):
         # The first loading is the response time course: flat before the event, a step after it.
         time, loading = report["loading_axis"], report["components"][0]
         self.assertGreater(abs(loading[(time > 0.2) & (time < 1.8)].mean()), 5 * abs(loading[time < -0.5].mean()))
+
+    def test_cluster_outlines_and_separation_share_the_trial_assignments(self):
+        """Reproject one fitted mixture and compare the companion bars with its trial scores."""
+        from trial_response_clusters import cluster_ellipse
+
+        panel, scatter = self._panel(METHOD_TRIALS)
+        view = panel.pca_trajectories
+        first = view.last_report["trial_clusters"]
+        self.assertGreaterEqual(first["n_clusters"], 2)
+        self.assertIsNone(first["silhouettes"])
+        panel.dashboard_panels.set_spec("bout2", SPEC_CLUSTER_SEPARATION)
+        separation = panel.dashboard_panels.displayed("bout2")
+        view.set_option("axes", [1, 2])
+        model = view.last_report["trial_clusters"]
+        np.testing.assert_array_equal(first["labels"], model["labels"])
+        outlines = [line for line in scatter.listDataItems() if (line.name() or "").startswith("Cluster ")]
+        self.assertEqual(len(outlines), model["n_clusters"])
+        for k, outline in enumerate(outlines):
+            expected = cluster_ellipse(model["means"][k], model["covariances"][k], 1, 2)
+            np.testing.assert_allclose(np.column_stack(outline.getData()), expected)
+
+        bars = [item for item in separation.getPlotItem().items if isinstance(item, pg.BarGraphItem)]
+        self.assertEqual(len(bars), model["n_clusters"])
+        for k, bar in enumerate(bars):
+            scores = model["silhouettes"][model["labels"] == k]
+            np.testing.assert_allclose(np.sort(bar.opts["height"]), np.sort(scores))
+        self.assertIn("Silhouette", separation.getAxis("left").labelText)
+
+        menu = view.build_menu(scatter.getPlotItem().getViewBox().menu)
+        toggle = next(action for action in menu.actions() if action.text() == "Show GMM clusters")
+        self.assertTrue(toggle.isChecked())
+        toggle.trigger()
+        self.assertFalse(any((item.name() or "").startswith("Cluster ") for item in scatter.listDataItems()))
+        self.assertIn("Silhouette", separation.getAxis("left").labelText)
+        view.set_option("method", METHOD_BOUT)
+        self.assertIn("Trial-response PCA", separation.toolTip())
 
     def test_loadings_and_separation_panels_share_the_analysis(self):
         panel, widget = self._panel(METHOD_LAG, slot="bout2", spec=SPEC_LOADINGS)

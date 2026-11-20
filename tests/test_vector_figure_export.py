@@ -76,6 +76,26 @@ class VectorExportTests(unittest.TestCase):
         self.assertAlmostEqual(float(box.group(1)), 480, delta=1)
         self.assertAlmostEqual(float(box.group(2)), 300, delta=1)
 
+    def test_legend_in_plot_layout_is_exported_once(self):
+        """PCA component outlines use a legend beneath the horizontal axis."""
+        root = self.build()
+        try:
+            plot = root.findChild(pg.PlotWidget).getPlotItem()
+            legend = pg.LegendItem()
+            legend.setParentItem(plot)
+            plot.layout.addItem(legend, 4, 1)
+            sample = pg.PlotDataItem([0], [0], pen=None, symbol="s", symbolBrush=pg.mkBrush(None),
+                                     symbolPen=pg.mkPen("#a43192"))
+            legend.addItem(sample, "Cluster 1 (n=17)")
+            self.app.processEvents()
+            with tempfile.TemporaryDirectory() as folder:
+                written = export_vector_files(root, str(Path(folder) / "clusters"), formats=("svg",))
+                svg = Path(written["svg"]).read_text(encoding="utf-8")
+                self.assertEqual(svg.count("Cluster 1 (n=17)"), 1)
+                self.assertIn("stroke: #a43192", svg)
+        finally:
+            root.close()
+
     def test_heatmap_image_is_the_only_raster(self):
         root = self.build(with_image=True)
         try:

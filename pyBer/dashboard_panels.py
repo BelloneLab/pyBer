@@ -548,8 +548,8 @@ class DashboardPanels(QtCore.QObject):
         elif family == "trajectory":
             view = panel.pca_trajectories
             # One report per event for trajectories, loadings and separation.
-            # A refreshed entry or changed PCA options starts a new fit.
-            signature = repr(view.options)
+            # Display-only changes reuse the fit for this event.
+            signature = view.cache_signature()
             cached = entry.get("_column_pca")
             if cached is None or cached[0] != signature:
                 try:
@@ -595,10 +595,10 @@ class DashboardPanels(QtCore.QObject):
         self._widgets[slot] = widget
         return widget
 
-    def render_substitutes(self, families: Optional[Sequence[str]] = None) -> None:
+    def render_substitutes(self, families: Optional[Sequence[str]] = None, *, reuse_pca_fit: bool = False) -> None:
         """Redraw substitute panels (optionally only those of some families)."""
         view = getattr(self.panel, "pca_trajectories", None)
-        if view is not None:
+        if view is not None and not reuse_pca_fit and (families is None or "trajectory" in families):
             view.new_pass()   # PCA panels drawn in this pass share one fresh analysis
         for slot, spec in list(self.substitutes.items()):
             widget = self._widgets.get(slot)

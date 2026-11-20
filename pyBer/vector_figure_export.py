@@ -347,9 +347,15 @@ class VectorFigureBuilder:
             except Exception:
                 _LOG.exception("Vector export skipped %s", type(item).__name__)
                 self.skipped.append(type(item).__name__)
-        legend = getattr(plot_item, "legend", None)
-        if legend is not None and legend.isVisible():
-            self._export_legend(legend, mapper, name)
+        # PCA places its legend in the plot layout below the axes. The usual
+        # floating legend belongs to the view box and is exposed by PlotItem.
+        legends = [child for child in plot_item.childItems() if isinstance(child, pg.LegendItem)]
+        floating = getattr(plot_item, "legend", None)
+        if floating is not None and floating not in legends:
+            legends.append(floating)
+        for legend in legends:
+            if legend.isVisible():
+                self._export_legend(legend, mapper, name)
         self._export_plot_decorations(plot_item, mapper, name)
         for side in ("left", "bottom", "right", "top"):
             entry = plot_item.axes.get(side) if isinstance(plot_item.axes, dict) else None
@@ -823,10 +829,12 @@ class VectorFigureBuilder:
             symbol = opts.get("symbol") if isinstance(opts, dict) else None
             if symbol is not None:
                 face = _brush_rgba(opts.get("symbolBrush"))
+                edge = _pen_kwargs(opts.get("symbolPen")) or {}
                 fig.add_artist(Line2D([(a[0] + b[0]) / 2], [a[1]], transform=fig.transFigure,
                                       marker=_SYMBOLS.get(str(symbol), "o"), linestyle="none",
                                       markersize=float(opts.get("symbolSize", 7)) * PX_TO_PT,
-                                      markerfacecolor=face or "none", markeredgecolor="none",
+                                      markerfacecolor=face or "none", markeredgecolor=edge.get("color", "none"),
+                                      markeredgewidth=edge.get("linewidth", 0),
                                       zorder=7, gid=gid))
             text_item = label.item
             text = text_item.toPlainText().strip()
