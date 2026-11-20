@@ -269,6 +269,21 @@ class PsthDefaultViewTests(unittest.TestCase):
         panel._apply_settings(settings)
         self.assertTrue(panel.btn_events_drawer.isChecked())
 
+    def test_drawer_opens_wide_enough_on_small_window(self):
+        """A 1024 px window must not squeeze a newly opened drawer (release UI audit)."""
+        panel = self.panel
+        if panel._dockarea_splitter is None:
+            self.skipTest("dock-area layout disabled")
+        panel.resize(1000, 700)
+        panel.show()
+        self.app.processEvents()
+        panel._section_buttons["signal"].setChecked(True)
+        for _ in range(20):
+            self.app.processEvents()
+        drawer, center = panel._dockarea_splitter.sizes()[:2]
+        self.assertGreaterEqual(drawer, 400)
+        self.assertGreaterEqual(center, 400)
+
     def test_preprocessing_default_export_is_processed_output_only(self):
         from gui_preprocessing import ParameterPanel
         pre = ParameterPanel()

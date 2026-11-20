@@ -48,8 +48,10 @@ from vector_figure_export import write_vector_figure
 from recording_groups import (RecordingGroups, GroupChipBar, FileRowDelegate, DetachableSection,
                               build_assign_menu, color_dot_icon, UNGROUPED_COLOR, GRIP_W, ROW_HEIGHT)
 from psth_groups import (HeatmapGroupBands, build_group_display, block_summaries, block_ticks, legend_label,
-                         row_file_id, draw_group_comparison)
+                         row_file_id, draw_group_comparison, place_legend_clear_of_curves)
 from group_stats import compare_groups, per_file_means, stats_label, comparison_rows
+from group_metric_views import (GROUP_VIEWS, DEFAULT_GROUP_VIEW, SUMMARY_STYLES, DEFAULT_SUMMARY_STYLE,
+                                build_group_view)
 from dashboard_panels import DashboardPanels, GridRowHandle, HANDLE_PX, seamless_figure_qss, draw_global_metric
 from file_drop import install_file_drop, expand_paths
 from behavior_import import (infer_table, read_behavior_csv, detect_time_column, detect_onset_table,
@@ -101,6 +103,10 @@ _FIXED_POST_RIGHT_TAB_ORDER = ("setup", "psth", "spatial", "temporal", "export")
 # Narrowest drawer the divider allows. Below a page's natural width its content
 # becomes denser (adaptive_density) instead of being clipped.
 _POST_RIGHT_PANEL_MIN_WIDTH = 260
+# Narrowest plot area beside an open drawer. Set explicitly so the splitter
+# does not treat the toolbar's full natural width as a minimum: that squeezed a
+# freshly opened drawer to ~290 px on a 1024 px window and clipped its fields.
+_POST_CENTER_PANEL_MIN_WIDTH = 400
 # Narrowest recording / behavior list in Setup that still shows a file name.
 _RECORDING_LIST_MIN_WIDTH = 120
 _SYNC_TOOL_ROOT = Path(r"C:\Analysis\app_project\barcode_reader\video_barcode_extractor")
@@ -2291,8 +2297,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # -- Widget creation (unchanged logic, reordered for sections) --
         self.spin_pre = DurationSpinBox(0, 1e9, 2)
         self.spin_post = DurationSpinBox(0, 1e9, 5)
-        self.spin_b0 = DurationSpinBox(-1e9, 0, -1)
-        self.spin_b1 = DurationSpinBox(-1e9, 0, 0)
+        self.spin_b0 = DurationSpinBox(-1e9, 1e9, -1)
+        self.spin_b1 = DurationSpinBox(-1e9, 1e9, 0)
         self.spin_resample = QtWidgets.QDoubleSpinBox(); self.spin_resample.setRange(0.01, 1000); self.spin_resample.setValue(50); self.spin_resample.setDecimals(2)
         self.spin_smooth = QtWidgets.QDoubleSpinBox(); self.spin_smooth.setRange(0, 5); self.spin_smooth.setValue(0.0); self.spin_smooth.setDecimals(2)
         self.combo_psth_input = QtWidgets.QComboBox()
@@ -2353,10 +2359,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._metric_actions[key] = action
         self.btn_more_metrics.setMenu(metric_menu)
         self.btn_more_metrics.setToolTip("Add independent metric panels. Lines show medians; diamonds show means and descriptive SEM.")
-        self.spin_metric_pre0 = DurationSpinBox(-1e9, 0, -1)
-        self.spin_metric_pre1 = DurationSpinBox(-1e9, 0, 0)
-        self.spin_metric_post0 = DurationSpinBox(0, 1e9, 0)
-        self.spin_metric_post1 = DurationSpinBox(0, 1e9, 1)
+        self.spin_metric_pre0 = DurationSpinBox(-1e9, 1e9, -1)
+        self.spin_metric_pre1 = DurationSpinBox(-1e9, 1e9, 0)
+        self.spin_metric_post0 = DurationSpinBox(-1e9, 1e9, 0)
+        self.spin_metric_post1 = DurationSpinBox(-1e9, 1e9, 1)
 
         self.cb_global_metrics = QtWidgets.QCheckBox("Enable global metrics")
         self.cb_global_metrics.setChecked(True)
@@ -2382,7 +2388,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             w.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
         # -- Helper: dual-spin row --
-        def _dual_row(lbl_a: str, w_a, lbl_b: str, w_b):
+        def _dual_row(lbl_a: str, w_a, lbl_b: str, w_b, trailing=None):
             g = QtWidgets.QGridLayout()
             g.setHorizontalSpacing(6); g.setContentsMargins(0, 0, 0, 0)
             la = QtWidgets.QLabel(lbl_a); la.setMinimumWidth(35)
@@ -2390,6 +2396,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             g.addWidget(la, 0, 0); g.addWidget(w_a, 0, 1)
             g.addWidget(lb, 0, 2); g.addWidget(w_b, 0, 3)
             g.setColumnStretch(1, 1); g.setColumnStretch(3, 1)
+            if trailing is not None:
+                # Compact action that belongs to the pair (e.g. "Auto").
+                g.addWidget(trailing, 0, 4)
             w = QtWidgets.QWidget(); w.setLayout(g)
             # The fields shrink freely (Ignored policy), so the row's size hint
             # is smaller than what its labels + fields really need. Declare the
@@ -2399,7 +2408,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
             return w
 
         win_widget = _dual_row("Pre:", self.spin_pre, "Post:", self.spin_post)
-        base_widget = _dual_row("Start:", self.spin_b0, "End:", self.spin_b1)
+        # "Auto" proposes baseline windows on request; it sits beside the two
+        # fields, which stay fully manual.
+        self.baseline_suggestions = BaselineSuggestionsWidget(
+            snapshot=self._baseline_advisor_recordings,
+            config=lambda: BaselineSuggestionConfig(pre_window_s=float(self.spin_pre.value())),
+            parent=self,
+        )
+        self.baseline_suggestions.selected.connect(self._apply_recommended_baseline)
+        self.baseline_suggestions.message.connect(lambda text: self.statusUpdate.emit(text, 6000))
+        base_widget = _dual_row("Start:", self.spin_b0, "End:", self.spin_b1, self.baseline_suggestions)
         metric_pre_widget = _dual_row("Start:", self.spin_metric_pre0, "End:", self.spin_metric_pre1)
         metric_post_widget = _dual_row("Start:", self.spin_metric_post0, "End:", self.spin_metric_post1)
         global_widget = _dual_row("Start:", self.spin_global_start, "End:", self.spin_global_end)
@@ -2517,13 +2535,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.btn_available_window = QtWidgets.QPushButton("Use available recording time")
         self.btn_available_window.clicked.connect(self._use_available_window)
         fw.addRow(self.btn_available_window)
-        self.baseline_suggestions = BaselineSuggestionsWidget(
-            snapshot=self._baseline_advisor_recordings,
-            config=lambda: BaselineSuggestionConfig(pre_window_s=float(self.spin_pre.value())),
-            parent=self,
-        )
-        self.baseline_suggestions.selected.connect(self._apply_recommended_baseline)
-        fw.addRow(self.baseline_suggestions)
         fw.addRow("Resample (Hz)", self.spin_resample)
         self.lbl_psth_bins = QtWidgets.QLabel()
         for control in (self.spin_pre, self.spin_post, self.spin_resample):
@@ -2642,6 +2653,30 @@ class PostProcessingPanel(QtWidgets.QWidget):
         fm.addRow(self.lbl_metric, self.metric_selection_widget)
         fm.addRow(self.lbl_metric_pre, metric_pre_widget)
         fm.addRow(self.lbl_metric_post, metric_post_widget)
+        # Representation of the metric when recording groups are compared
+        # (Groups > Show: All groups, two or more groups). Also available by
+        # right-clicking a metric panel.
+        self.combo_metric_group_view = QtWidgets.QComboBox()
+        for code, label in GROUP_VIEWS.items():
+            self.combo_metric_group_view.addItem(label, code)
+        self.combo_metric_group_view.setToolTip(
+            "What is compared when groups are shown.\n"
+            "Post \u2212 Pre: the change per animal, tested between groups.\n"
+            "Post only / Pre only: one window, tested between groups.\n"
+            "Pre and Post side by side: each animal joined by a line; paired Pre vs Post test "
+            "within each group (Holm across groups) and the change tested between groups.\n"
+            "One point is one animal (trials are averaged per recording).")
+        self.combo_metric_style = QtWidgets.QComboBox()
+        for code, label in SUMMARY_STYLES.items():
+            self.combo_metric_style.addItem(label, code)
+        self.combo_metric_style.setToolTip(
+            "How each group is summarized: points with median and mean \u00b1 SEM, "
+            "bars (mean \u00b1 SEM) with points, or box plots with points. The statistics do not change.")
+        for picker in (self.combo_metric_group_view, self.combo_metric_style):
+            _compact_combo(picker, min_chars=8)
+            picker.currentIndexChanged.connect(self._on_metric_group_view_changed)
+        fm.addRow("Group comparison", self.combo_metric_group_view)
+        fm.addRow("Summary style", self.combo_metric_style)
 
         # =======================================================
         # Section 4 - Global metrics
@@ -3300,7 +3335,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             sb.setPrefix(prefix)
             sb.setSuffix(" %")
             sb.setMaximumWidth(120)
-            sb.setMinimumWidth(90)
+            # Two fields + gap must fit the 178 px field column of a default
+            # 420 px drawer: 90 px each overflowed it by a few pixels.
+            sb.setMinimumWidth(84)
         for sb, prefix in (
             (self.spin_spatial_time_min, "Start "),
             (self.spin_spatial_time_max, "End "),
@@ -3336,11 +3373,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # Build the form into clearly-labelled subsections instead of a 15-row flat list.
         # All form labels share a fixed minimum width so columns line up across subsections.
         FORM_LABEL_W = 108  # fits "Invert Y axis" at the 9.8pt UI font
+        FORM_LABEL_GAP = 10  # space between a label and its field
 
         def _form() -> QtWidgets.QFormLayout:
             f = QtWidgets.QFormLayout()
             f.setContentsMargins(0, 2, 0, 2)
-            f.setHorizontalSpacing(10)
+            # The label/field gap is part of the label width (FORM_LABEL_GAP)
+            # and the layout spacing is zero: Qt decides whether a row fits
+            # side by side without counting the horizontal spacing, which
+            # squeezed paired fields a few pixels past the card edge.
+            f.setHorizontalSpacing(0)
             f.setVerticalSpacing(8)
             f.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
             f.setFormAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
@@ -3350,8 +3392,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
         def _add_row(form: QtWidgets.QFormLayout, label: str, field: QtWidgets.QWidget) -> None:
             lbl = QtWidgets.QLabel(label)
-            lbl.setMinimumWidth(FORM_LABEL_W)
-            lbl.setMaximumWidth(FORM_LABEL_W)
+            lbl.setMinimumWidth(FORM_LABEL_W + FORM_LABEL_GAP)
+            lbl.setMaximumWidth(FORM_LABEL_W + FORM_LABEL_GAP)
             form.addRow(lbl, field)
 
         # ---- Subsection: trajectory source ----
@@ -4547,6 +4589,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
             lambda *_: self._on_heatmap_colorbar_changed(finished=True))
         self.heat_colorbar_widget.addItem(self.heat_colorbar)
         self._strip_colorbar_frame()
+        # Keep the bar as tall as the heatmap plotting area (after any resize,
+        # title or axis change of either widget).
+        self._heat_colorbar_align_timer = QtCore.QTimer(self)
+        self._heat_colorbar_align_timer.setSingleShot(True)
+        self._heat_colorbar_align_timer.setInterval(0)
+        self._heat_colorbar_align_timer.timeout.connect(self._align_heat_colorbar)
+        for _view in (self.plot_heat.getPlotItem().getViewBox(), self.heat_colorbar.getViewBox()):
+            _view.sigResized.connect(lambda *_: self._heat_colorbar_align_timer.start())
         self.heat_lut.hide()
         self.btn_edit_scale = QtWidgets.QPushButton("Edit scale")
         self.btn_edit_scale.setCheckable(True)
@@ -4886,6 +4936,28 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.psth_group_legend.setParentItem(self.plot_avg.getPlotItem().vb)
         self.plot_avg.getPlotItem().legend = self.psth_group_legend
         self.psth_group_legend.hide()
+        # The legend moves to the corner that hides the least of the curves
+        # (re-evaluated after zoom / resize) and can be hidden from the
+        # right-click menu of the plot.
+        self._group_legend_curves: List[Tuple[np.ndarray, np.ndarray]] = []
+        self._group_legend_timer = QtCore.QTimer(self)
+        self._group_legend_timer.setSingleShot(True)
+        self._group_legend_timer.setInterval(120)
+        self._group_legend_timer.timeout.connect(self._place_group_legend)
+        _avg_view = self.plot_avg.getPlotItem().getViewBox()
+        _avg_view.sigRangeChanged.connect(lambda *_: self._group_legend_timer.start())
+        _avg_view.sigResized.connect(lambda *_: self._group_legend_timer.start())
+        self.act_group_legend = QtGui.QAction("Show group legend", self)
+        self.act_group_legend.setCheckable(True)
+        self.act_group_legend.setChecked(bool(self._style.get("group_legend_visible", True)))
+        self.act_group_legend.toggled.connect(self._set_group_legend_visible)
+        if _avg_view.menu is not None:
+            _avg_view.menu.addAction(self.act_group_legend)
+            _avg_view.menu.aboutToShow.connect(
+                lambda: self.act_group_legend.setVisible(bool(self._group_avg_items)))
+        for _metric_plot in (self.plot_metrics, *self._extra_metric_plots.values()):
+            self._install_metric_view_menu(_metric_plot)
+        self._install_metric_view_menu(self.plot_global, with_views=False)
         self.dashboard_panels = DashboardPanels(self)
         self.dashboard_panels.changed.connect(self._on_dashboard_panels_changed)
         self.btn_view_menu = create_view_menu(self)
@@ -4989,6 +5061,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             # Wrap the central plots in a rounded center panel.
             self._post_center_panel = QtWidgets.QFrame()
             self._post_center_panel.setObjectName("centerPanel")
+            self._post_center_panel.setMinimumWidth(_POST_CENTER_PANEL_MIN_WIDTH)
             _cp_layout = QtWidgets.QVBoxLayout(self._post_center_panel)
             _cp_layout.setContentsMargins(10, 10, 10, 10)
             _cp_layout.setSpacing(8)
@@ -5234,10 +5307,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.tab_sources.currentChanged.connect(self._refresh_signal_file_combo)
         self.tab_visual_mode.currentChanged.connect(self._on_visual_mode_changed)
         self.tab_visual_mode.currentChanged.connect(self._queue_view_settings_save)
-        self.tab_visual_mode.currentChanged.connect(self.baseline_suggestions.queue)
+        self.tab_visual_mode.currentChanged.connect(self.baseline_suggestions.invalidate)
         self.combo_individual_file.currentIndexChanged.connect(self._on_individual_file_changed)
         self.combo_individual_file.currentIndexChanged.connect(self._queue_view_settings_save)
-        self.combo_individual_file.currentIndexChanged.connect(self.baseline_suggestions.queue)
+        self.combo_individual_file.currentIndexChanged.connect(self.baseline_suggestions.invalidate)
 
         self.combo_align.currentIndexChanged.connect(self._update_align_ui)
         self.combo_behavior_file_type.currentIndexChanged.connect(self._update_align_ui)
@@ -10209,7 +10282,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 self._last_mat = mat
                 self._last_tvec = tvec
                 self.lbl_plot_file.setText(f"File: {sel_id}")
-                self.plot_avg.setTitle("PSTH: mean +/- SEM")
+                self._set_psth_caption("PSTH: mean \u00b1 SEM")
         # Always refresh the trace preview to match the selected file
         if self._last_mat is None:
             self._clear_psth_result_view()
@@ -10530,8 +10603,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return recordings, scope
 
     def _open_baseline_advisor(self) -> None:
-        """Refresh the inline choices; retained for older command integrations."""
-        self.baseline_suggestions.queue()
+        """Compute and show the suggested windows; retained for older command integrations."""
+        self.baseline_suggestions.request_menu()
 
     def _apply_recommended_baseline(self, window: Tuple[float, float]) -> bool:
         """Apply a reviewed window atomically as one undoable settings change."""
@@ -10553,7 +10626,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         """Debounce edits so a changed control cannot silently label old results."""
         suggestions = getattr(self, "baseline_suggestions", None)
         if suggestions is not None:
-            suggestions.queue()
+            # Edits never trigger a computation: "Auto" evaluates on request.
+            suggestions.invalidate()
         if self._is_restoring_settings or self._psth_computing:
             return
         self._psth_pending = True
@@ -10602,7 +10676,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_psth_availability.setVisible(bool(status))
         self.cb_psth_available_only.setVisible(bool(missing) and len(missing) < len(resolved))
         self._psth_window_form.setRowVisible(self._psth_baseline_row, norm != "none")
-        self.baseline_suggestions.setVisible(norm != "none")
         advanced = self.btn_psth_advanced.isChecked()
         saved_index = self.combo_psth_input.findData("saved")
         saved_text = "As saved in each file"
@@ -11579,8 +11652,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.plot_heat.getAxis("bottom").setStyle(showValues=False)
             self.plot_heat.getAxis("bottom").setHeight(8)
             self.plot_avg.setLabel("bottom", self._psth_time_axis_label())
-            self.plot_avg.setTitle("PSTH: animals ± SEM" if self._last_psth_display_level == "animals"
-                                   else "PSTH: mean ± SEM")
+            self._set_psth_caption("PSTH: animals \u00b1 SEM" if self._last_psth_display_level == "animals"
+                                   else "PSTH: mean \u00b1 SEM")
         self.lbl_behavior_name.setText("Behavior name" if behavior else "Zone / event name")
         self.behavior_zone_panel.reload()
         self._queue_settings_save()
@@ -13380,9 +13453,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if self._group_view_state()[0] == "all":
                 colors = [self._group_color_for_file(fid) for fid in info.get("file_ids", [])]
             comparison = self._global_group_comparison(code)
+            widget.getAxis("bottom").setHeight(None)
             if comparison is not None and code in GLOBAL_SIGNAL_METRICS:
                 widget.clear()
-                draw_group_comparison(widget, comparison, str(palette["text"]))
+                draw_group_comparison(widget, comparison, str(palette["text"]), self._metric_summary_style())
                 widget.setTitle(f"{GLOBAL_SIGNAL_METRICS[code]['label']} · {stats_label(comparison)}",
                                 color=palette["text"], size="10pt")
                 widget.setLabel("left", GLOBAL_SIGNAL_METRICS[code]["unit"])
@@ -15191,7 +15265,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _update_trace_preview(self) -> None:
         suggestions = getattr(self, "baseline_suggestions", None)
         if suggestions is not None:
-            suggestions.queue()
+            suggestions.invalidate()
         # show first processed trace
         if not self._processed:
             self._clear_trace_preview()
@@ -16964,6 +17038,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             finally:
                 self._suppress_heatmap_level_store = False
             self.heat_zero_line.setVisible(False)
+            if getattr(self, "_heat_gap_backing", None) is not None:
+                self._heat_gap_backing.setVisible(False)
             if hasattr(self, "heat_group_bands"):
                 self.heat_group_bands.clear()
             self.plot_heat.setXRange(0.0, 1.0, padding=0)
@@ -16984,11 +17060,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         source_mat = mat
         mat, tvec, missing_report = missing_data.prepare_heatmap(mat, tvec, missing_mode, missing_trim)
         self._heatmap_missing_report = missing_report
-        try:
-            self.plot_heat.getViewBox().setBackgroundColor(
-                None if missing_mode == missing_data.MODE_BLANK else missing_data.NO_DATA_COLOR)
-        except Exception:
-            pass
         # ImageItem maps axis-0 -> x and axis-1 -> y; transpose so time is x, trials are y.
         img = np.asarray(mat, float).T
         previous_suppression = self._suppress_heatmap_level_store
@@ -17032,7 +17103,24 @@ class PostProcessingPanel(QtWidgets.QWidget):
         n_rows = img.shape[1]
         # Pixel centers, rather than pixel edges, represent the sample times.
         half_step = float(tvec[1] - tvec[0]) / 2 if tvec.size > 1 else 0.5
-        self.img.setRect(QtCore.QRectF(x0 - half_step, 0, x1 - x0 + 2 * half_step, n_rows))
+        image_rect = QtCore.QRectF(x0 - half_step, 0, x1 - x0 + 2 * half_step, n_rows)
+        self.img.setRect(image_rect)
+        # "No data" gray is drawn only in the explicit gray mode and only
+        # behind the image itself: the rest of the panel (for example the part
+        # of a shared time axis beyond a trimmed heatmap) keeps the plot
+        # background instead of a gray block.
+        backing = getattr(self, "_heat_gap_backing", None)
+        if backing is None:
+            backing = QtWidgets.QGraphicsRectItem()
+            backing.setPen(pg.mkPen(None))
+            backing.setBrush(pg.mkBrush(missing_data.NO_DATA_COLOR))
+            backing.setZValue(self.img.zValue() - 1)
+            self.plot_heat.addItem(backing, ignoreBounds=True)
+            self._heat_gap_backing = backing
+        backing.setRect(image_rect)
+        backing.setVisible(missing_mode == missing_data.MODE_GRAY and bool(missing_report.get("missing")))
+        if hasattr(self, "_heat_colorbar_align_timer"):
+            self._heat_colorbar_align_timer.start()
         self.plot_heat.setXRange(x0 - half_step, x1 + half_step, padding=0)
         self.plot_heat.setYRange(0, float(n_rows), padding=0)
         self.heat_zero_line.setPos(0.0)
@@ -17101,6 +17189,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
         self._group_avg_items = []
+        self._group_legend_curves = []
         legend = getattr(self, "psth_group_legend", None)
         if legend is not None:
             legend.clear()
@@ -17138,8 +17227,42 @@ class PostProcessingPanel(QtWidgets.QWidget):
             curve.setZValue(2)
             legend.addItem(curve, legend_label(block, level))
             self._group_avg_items.extend([high, low, fill, curve])
-        legend.setVisible(bool(self._group_avg_items))
-        self.plot_avg.setTitle("PSTH: groups mean \u00b1 SEM")
+            self._group_legend_curves.extend([(tvec, avg), (tvec, avg + sem_safe), (tvec, avg - sem_safe)])
+        self._sync_group_legend_visibility()
+        self._group_legend_timer.start()
+        self._set_psth_caption("PSTH: groups mean \u00b1 SEM")
+
+    def _set_psth_caption(self, text: str) -> None:
+        """Describe the mean PSTH in its tooltip; the plot itself carries no generic title.
+
+        What is averaged (trials, animals or groups) is already told by the
+        legend and the axis labels, so the title row is given back to the data.
+        """
+        # Empty the label before hiding it: a hidden title still reserves the
+        # width of its text, which would shift the time axis against the heatmap.
+        self.plot_avg.getPlotItem().titleLabel.setText("")
+        self.plot_avg.setTitle(None)
+        self.plot_avg.setToolTip(text)
+
+    def _sync_group_legend_visibility(self) -> None:
+        """Shown only with group curves and when not hidden from the right-click menu."""
+        wanted = bool(self._style.get("group_legend_visible", True))
+        self.psth_group_legend.setVisible(bool(self._group_avg_items) and wanted)
+
+    def _set_group_legend_visible(self, visible: bool) -> None:
+        """Right-click > Show group legend. Stored with the plot style."""
+        self._style["group_legend_visible"] = bool(visible)
+        self._sync_group_legend_visibility()
+        self._place_group_legend()
+        self._queue_settings_save()
+
+    def _place_group_legend(self) -> Optional[str]:
+        """Move the legend where it covers the fewest curve samples; returns the position name."""
+        legend = self.psth_group_legend
+        if not legend.isVisible() or not self._group_legend_curves:
+            return None
+        return place_legend_clear_of_curves(legend, self.plot_avg.getPlotItem().getViewBox(),
+                                            self._group_legend_curves)
 
     def _psth_time_axis_label(self):
         if self.combo_align.currentText() == "Event marker":
@@ -17221,9 +17344,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_avg.setXRange(float(tvec[0]), float(tvec[-1]), padding=0)
         display_level = str(getattr(self, "_last_psth_display_level", "trials") or "trials")
         if display_level == "animals":
-            self.plot_avg.setTitle("PSTH: animals \u00b1 SEM")
+            self._set_psth_caption("PSTH: animals \u00b1 SEM")
         else:
-            self.plot_avg.setTitle("PSTH: mean \u00b1 SEM")
+            self._set_psth_caption("PSTH: mean \u00b1 SEM")
         if group_display is not None and group_display.mode == "only" and group_display.blocks:
             # One group only: the same pooled statistics, drawn in its color.
             block = group_display.blocks[0]
@@ -17232,7 +17355,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             band.setAlpha(60)
             self.curve_avg.setPen(pg.mkPen(color, width=2.0))
             self.sem_band.setBrush(pg.mkBrush(band))
-            self.plot_avg.setTitle(f"PSTH: {block.name} mean \u00b1 SEM")
+            self._set_psth_caption(f"PSTH: {block.name} mean \u00b1 SEM")
 
     @staticmethod
     def _finite_mean_sem(values: np.ndarray) -> Tuple[float, float, int]:
@@ -17331,8 +17454,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         """
         layout = self._group_blocks_for_rows(mat)
         for result in results.values():
-            result.pop("group_comparison", None)
-            result.pop("group_rows", None)
+            for name in ("group_comparison", "group_rows", "group_view", "group_style"):
+                result.pop(name, None)
         if layout is None:
             return
         file_ids, blocks = layout
@@ -17344,13 +17467,59 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 ids = file_ids[block.start:block.stop]
                 order, pre_f = per_file_means(pre[block.start:block.stop], ids)
                 _, post_f = per_file_means(post[block.start:block.stop], ids)
-                delta = post_f - pre_f
-                groups.append({"name": block.name, "color": block.color, "values": delta, "ids": order,
-                               "tested": block.group_id is not None})
+                groups.append({"name": block.name, "color": block.color, "pre": pre_f, "post": post_f,
+                               "ids": order, "tested": block.group_id is not None})
                 rows.extend({"metric_id": key, "file_id": fid, "group": block.name, "pre": a, "post": b,
                              "post_minus_pre": b - a} for fid, a, b in zip(order, pre_f, post_f))
-            result["group_comparison"] = compare_groups(groups)
+            view = build_group_view(self._metric_group_view(), groups, result["summary"]["metric"])
+            result["group_view"] = view
+            result["group_style"] = self._metric_summary_style()
+            # The between-group test of the chosen quantity (Post - Pre for the paired view).
+            result["group_comparison"] = view["between"]
             result["group_rows"] = rows
+
+    def _metric_group_view(self) -> str:
+        """Selected group representation code (group_metric_views.GROUP_VIEWS)."""
+        combo = getattr(self, "combo_metric_group_view", None)
+        return str(combo.currentData() or DEFAULT_GROUP_VIEW) if combo is not None else DEFAULT_GROUP_VIEW
+
+    def _metric_summary_style(self) -> str:
+        """Selected summary style code (group_metric_views.SUMMARY_STYLES)."""
+        combo = getattr(self, "combo_metric_style", None)
+        return str(combo.currentData() or DEFAULT_SUMMARY_STYLE) if combo is not None else DEFAULT_SUMMARY_STYLE
+
+    def _on_metric_group_view_changed(self, *_args) -> None:
+        """Redraw metric and global panels in the chosen representation (no PSTH recompute)."""
+        if getattr(self, "_is_restoring_settings", False) or not hasattr(self, "plot_global"):
+            return
+        if getattr(self, "_last_mat", None) is not None and getattr(self, "_last_tvec", None) is not None:
+            self._render_metrics(self._last_mat, self._last_tvec)
+        if getattr(self, "_last_global_results", None):
+            self._render_global_metrics()
+        self._queue_settings_save()
+
+    def _install_metric_view_menu(self, plot: pg.PlotWidget, with_views: bool = True) -> None:
+        """Right-click > Group comparison / Summary style on a metric panel."""
+        menu = plot.getPlotItem().getViewBox().menu
+        if menu is None or getattr(menu, "_pyber_metric_view_menus", None):
+            return
+        created = []
+        for title, combo, wanted in (("Group comparison", self.combo_metric_group_view, with_views),
+                                     ("Summary style", self.combo_metric_style, True)):
+            if not wanted:
+                continue
+            sub = QtWidgets.QMenu(title, menu)
+            group = QtGui.QActionGroup(sub)
+            for index in range(combo.count()):
+                action = sub.addAction(combo.itemText(index))
+                action.setCheckable(True)
+                group.addAction(action)
+                action.triggered.connect(lambda _checked=False, c=combo, i=index: c.setCurrentIndex(i))
+            sub.aboutToShow.connect(lambda c=combo, m=sub: [a.setChecked(i == c.currentIndex())
+                                                             for i, a in enumerate(m.actions())])
+            menu.addMenu(sub)
+            created.append(sub)
+        menu._pyber_metric_view_menus = created
 
     def _metric_family_ids(self) -> List[str]:
         """Selected metric panels followed by metrics shown through Change to."""
@@ -17432,6 +17601,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for item in getattr(self, "_global_group_items", []):
             self.plot_global.removeItem(item)
         self._global_group_items = []
+        self.plot_global.getAxis("bottom").setHeight(None)   # group views reserve extra label lines
         self._last_global_group_stats = {}
         self._last_global_metrics = None
         set_plot_has_data(self.plot_global, False)
@@ -17489,7 +17659,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
                                          if (comparison := self._global_group_comparison(name)) is not None}
         comparison = self._last_global_group_stats.get(key)
         if comparison is not None:
-            self._global_group_items = draw_group_comparison(self.plot_global, comparison, str(palette["text"]))
+            self._global_group_items = draw_group_comparison(self.plot_global, comparison, str(palette["text"]),
+                                                             self._metric_summary_style())
             self.plot_global.setToolTip(info["description"] + " Each point is one recording. "
                                         "Colored line: group median. Diamond: mean ± SEM. " + comparison["note"])
             self.lbl_global_metrics.setText(f"{info['label']}: {stats_label(comparison)}")
@@ -17724,6 +17895,37 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if not isinstance(levels, (list, tuple)) or len(levels) < 2:
             return
         self._set_heatmap_display_levels(float(levels[0]), float(levels[1]), save=save)
+
+    def _align_heat_colorbar(self, *_args) -> None:
+        """Make the color bar start and end with the heatmap plotting area.
+
+        The bar lives in its own widget beside the heatmap. Its top and bottom
+        margins are set from the position of the heatmap view box (below the
+        title, above the time axis), so both have exactly the same height.
+        """
+        widget = getattr(self, "heat_colorbar_widget", None)
+        if widget is None or not widget.isVisible() or not self.plot_heat.isVisible():
+            return
+        heat_view = self.plot_heat.getPlotItem().getViewBox()
+        heat_rect = heat_view.sceneBoundingRect()
+        if heat_rect.height() < 4:
+            return
+        # Target edges of the bar, in the color-bar widget's own coordinates.
+        top = widget.mapFromGlobal(self.plot_heat.mapToGlobal(
+            self.plot_heat.mapFromScene(heat_rect.topLeft()))).y()
+        bottom = widget.mapFromGlobal(self.plot_heat.mapToGlobal(
+            self.plot_heat.mapFromScene(heat_rect.bottomLeft()))).y()
+        layout = widget.ci.layout
+        left, margin_top, right, margin_bottom = layout.getContentsMargins()
+        bar_rect = self.heat_colorbar.getViewBox().sceneBoundingRect()
+        bar_top = widget.mapFromScene(bar_rect.topLeft()).y()
+        bar_bottom = widget.mapFromScene(bar_rect.bottomLeft()).y()
+        # Space the color-bar item itself keeps above / below its bar.
+        inset_top, inset_bottom = bar_top - margin_top, (widget.height() - bar_bottom) - margin_bottom
+        new_top = max(0.0, float(top) - inset_top)
+        new_bottom = max(0.0, float(widget.height() - bottom) - inset_bottom)
+        if abs(new_top - margin_top) >= 1.0 or abs(new_bottom - margin_bottom) >= 1.0:
+            layout.setContentsMargins(left, new_top, right, new_bottom)
 
     def _strip_colorbar_frame(self) -> None:
         """Draw the heatmap color scale without any surrounding frame.
@@ -19137,6 +19339,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "psth_group_keep_trials": False,
             "metrics_enabled": True,
             "metric": "AUC",
+            "metric_group_view": DEFAULT_GROUP_VIEW,
+            "metric_summary_style": DEFAULT_SUMMARY_STYLE,
             "metric_pre0": -1.0,
             "metric_pre1": 0.0,
             "metric_post0": 0.0,
@@ -19317,6 +19521,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "psth_group_keep_trials": self.cb_group_keep_trials.isChecked(),
             "metrics_enabled": self.cb_metrics.isChecked(),
             "metric": self.combo_metric.currentText(),
+            "metric_group_view": self._metric_group_view(),
+            "metric_summary_style": self._metric_summary_style(),
             "extra_metrics": [key for key, action in self._metric_actions.items() if action.isChecked()],
             "metric_pre0": float(self.spin_metric_pre0.value()),
             "metric_pre1": float(self.spin_metric_pre1.value()),
@@ -19491,6 +19697,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.cb_group_keep_trials.setChecked(bool(data["psth_group_keep_trials"]))
         self._update_psth_inclusion_controls()
         self.cb_metrics.setChecked(bool(data.get("metrics_enabled", True)))
+        for combo, code in ((self.combo_metric_group_view, data.get("metric_group_view", DEFAULT_GROUP_VIEW)),
+                            (self.combo_metric_style, data.get("metric_summary_style", DEFAULT_SUMMARY_STYLE))):
+            with QtCore.QSignalBlocker(combo):
+                combo.setCurrentIndex(max(0, combo.findData(code)))
         _set_combo(self.combo_metric, "Mean signal" if data.get("metric") == "Mean z" else data.get("metric"))
         for key, action in self._metric_actions.items():
             with QtCore.QSignalBlocker(action):
@@ -19633,6 +19843,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.combo_plot_preset.blockSignals(True)
             self.combo_plot_preset.setCurrentText(self._style.get("postprocessing_preset", "Midnight"))
             self.combo_plot_preset.blockSignals(False)
+            if hasattr(self, "act_group_legend"):
+                with QtCore.QSignalBlocker(self.act_group_legend):
+                    self.act_group_legend.setChecked(bool(self._style.get("group_legend_visible", True)))
+                self._sync_group_legend_visibility()
             self._apply_plot_style()
         self._apply_behavior_time_settings()
         self._update_event_filter_enabled()

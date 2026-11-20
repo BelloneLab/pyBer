@@ -81,14 +81,35 @@ described in "Metrics by group" below.
 
 With **Show: All groups** and at least two groups, the PSTH metric panels and
 the global metric panel switch to a per-group layout: one column per group,
-one point per animal, the group median as a colored line and mean ± SEM as a
-diamond, with the between-group test written above the points.
+one point per animal, with the test written above the points.
+
+Two selectors in **PSTH → Metrics** (also in the right-click menu of a metric
+panel) choose what is drawn. Changing them redraws the panels without
+recomputing the PSTH.
+
+| Group comparison | Drawn per group | Statistics |
+|---|---|---|
+| Post − Pre (change) | change per animal | between groups, on the change |
+| Post only | Post window value | between groups, on Post |
+| Pre only | Pre window value | between groups, on Pre (baseline check) |
+| Pre and Post side by side | Pre and Post columns, each animal joined by a line | within each group: paired Pre vs Post (paired t-test if the differences pass Shapiro-Wilk, otherwise Wilcoxon signed-rank; Holm across groups). Between groups: on the change |
+
+**Summary style** draws the same numbers three ways: points with the median
+line and mean ± SEM diamond, bars (mean ± SEM) with points, or box plots
+(median, quartiles, 1.5 IQR whiskers) with points. It also applies to the
+global metric panel.
+
+Annotations: the omnibus or two-group test and its effect size are written
+above the data. Brackets mark the pairs with a Holm-adjusted p < 0.05 (at most
+three, the most significant first). In the paired view the label above each
+pair is the Holm-adjusted paired test of that group. Nothing is written for a
+comparison that could not be tested (fewer than 3 animals in a group).
 
 - **Unit of analysis = animal / recording.** Trial rows (Keep trial rows) are
   first averaged per recording, so n is always the number of animals.
-- **PSTH metrics** compare **Post − Pre** per animal (the selected metric in the
-  post window minus the pre window). **Global metrics** compare one value per
-  recording.
+- **PSTH metrics** compare the quantity chosen in **Group comparison** (default:
+  **Post − Pre**, the selected metric in the post window minus the pre window).
+  **Global metrics** compare one value per recording.
 - **Test choice** (reported in the panel tooltip and the CSV):
   - 2 groups: Welch t-test if every group passes Shapiro-Wilk (p > 0.05),
     otherwise Mann-Whitney U. Effect size: Hedges g or rank-biserial r.
@@ -99,8 +120,10 @@ diamond, with the between-group test written above the points.
 - **Ungrouped** recordings are shown but never tested.
 - Exports: `<prefix>_metrics_selected_groups.csv` (n, mean, SEM, median, SD per
   group and the test), `_group_pairwise.csv` (3+ groups) and `_group_rows.csv`
-  (per-animal pre, post and post − pre); the same files with `_metrics_global`
-  for global metrics. **Pooled** and **Only <group>** keep the original display.
+  (per-animal pre, post and post − pre), plus `_group_paired.csv` (paired Pre vs
+  Post test per group) when the paired view is selected; the same files with
+  `_metrics_global` for global metrics. The `quantity` column names what was
+  tested (`post_minus_pre`, `post` or `pre`). **Pooled** and **Only <group>** keep the original display.
 
 With few animals per group the tests have little power; report effect sizes
 and confidence in the per-animal values, not only p.

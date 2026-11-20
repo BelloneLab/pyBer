@@ -8,9 +8,18 @@ from shiboken6 import isValid
 
 
 class DurationSpinBox(QtWidgets.QDoubleSpinBox):
-    """Edit a duration in the selected unit, keeping the value and signals in seconds."""
+    """Edit a duration in the selected unit, keeping the value and signals in seconds.
+
+    Typing is never blocked: any partial entry is accepted while editing and
+    only interpreted on Enter / focus-out. An entry that is not a number
+    restores the previous value. Values are shown without thousands separators
+    (a separator inside the text made Qt reject edits such as a backspace in
+    "2'700"), and both "." and "," are read as the decimal mark.
+    """
 
     SCALES = {"s": 1, "min": 60, "h": 3600}
+    #: Characters people (and locales) use to group thousands; ignored on input.
+    GROUPING = "    '’_"
     unit = "s"
 
     def __init__(self, minimum=0, maximum=1e9, value=0):
@@ -18,6 +27,8 @@ class DurationSpinBox(QtWidgets.QDoubleSpinBox):
         self.setDecimals(2)
         self.setRange(minimum, maximum)
         self.setKeyboardTracking(False)
+        self.setGroupSeparatorShown(False)
+        self.setCorrectionMode(QtWidgets.QAbstractSpinBox.CorrectionMode.CorrectToPreviousValue)
         self.set_unit("s")
         self.setValue(value)
 
@@ -28,26 +39,35 @@ class DurationSpinBox(QtWidgets.QDoubleSpinBox):
 
     def textFromValue(self, seconds):
         precision = {"s": 2, "min": 5, "h": 7}[self.unit]
-        locale = self.locale()
-        text = locale.toString(seconds / self.SCALES[self.unit], "f", precision)
-        return text.rstrip(locale.zeroDigit()).removesuffix(locale.decimalPoint())
+        text = f"{seconds / self.SCALES[self.unit]:.{precision}f}".rstrip("0").rstrip(".")
+        if text in ("-0", ""):
+            text = "0"
+        return text.replace(".", self.locale().decimalPoint())
 
     def _number_text(self, text):
         return text.removesuffix(self.suffix()).strip()
 
+    def _parse(self, text) -> Optional[float]:
+        """Seconds for an entry in the current unit, or None when it is not a number."""
+        number = self._number_text(text).replace("−", "-")
+        for mark in self.GROUPING:
+            number = number.replace(mark, "")
+        if "," in number and "." not in number:
+            number = number.replace(",", ".")
+        try:
+            value = float(number)
+        except ValueError:
+            return None
+        return value * self.SCALES[self.unit] if math.isfinite(value) else None
+
     def valueFromText(self, text):
-        value, ok = self.locale().toDouble(self._number_text(text))
-        return value * self.SCALES[self.unit] if ok else self.value()
+        value = self._parse(text)
+        return self.value() if value is None else value
 
     def validate(self, text, pos):
-        number = self._number_text(text)
+        """Acceptable for a number, Intermediate otherwise: keystrokes are never swallowed."""
         state = QtGui.QValidator.State
-        if number in ("", "-", "+", self.locale().decimalPoint(), "-" + self.locale().decimalPoint()):
-            return state.Intermediate, text, pos
-        value, ok = self.locale().toDouble(number)
-        if ok and self.minimum() <= value * self.SCALES[self.unit] <= self.maximum():
-            return state.Acceptable, text, pos
-        return state.Invalid, text, pos
+        return (state.Intermediate if self._parse(text) is None else state.Acceptable), text, pos
 
 
 def _is_alive(obj: object) -> bool:

@@ -1,4 +1,10 @@
-"""Compact, automatically refreshed baseline choices with a bounded worker queue."""
+"""Compact "Auto" baseline button: scored windows computed on request.
+
+Nothing is computed or changed until the user clicks the button. The click
+evaluates the current signal and events in a background worker, then opens a
+small menu of scored windows; choosing one applies it. Manual entries in the
+baseline fields are never touched.
+"""
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -63,9 +69,16 @@ def _snapshot_key(recordings, config):
 
 
 class BaselineSuggestionsWidget(QtWidgets.QWidget):
-    """Offer scored windows in one menu; only an explicit selection changes a baseline."""
+    """One compact button; only an explicit menu selection changes a baseline."""
 
     selected = QtCore.Signal(object)
+    #: Short progress / outcome text for the status bar of the application.
+    message = QtCore.Signal(str)
+
+    BUTTON_TEXT = "Auto"
+    BUSY_TEXT = "…"
+    HELP = ("Suggest a baseline window from the signal and the selected events.\n"
+            "Click to compute and choose a window. Nothing changes until you pick one.")
 
     def __init__(self, snapshot, config, parent=None):
         super().__init__(parent)
@@ -75,23 +88,24 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
         self._job = None
         self._pending = None
         self._closed = False
+        # True between a button click and the display of its result.
+        self._popup_when_ready = False
         self.report = None
         self.scope = ""
         self.timer = QtCore.QTimer(self)
         self.timer.setSingleShot(True)
-        self.timer.setInterval(240)
+        self.timer.setInterval(0)
         self.timer.timeout.connect(self._refresh)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 3, 0, 3)
-        layout.setSpacing(4)
-        self.title = QtWidgets.QLabel("Suggested baseline")
-        self.title.setStyleSheet("font-weight: 600;")
-        layout.addWidget(self.title)
-        self.menu_button = QtWidgets.QPushButton("Choose a window")
-        self.menu_button.setMinimumHeight(31)
-        self.menu_button.setStyleSheet("QPushButton { padding: 4px 24px 4px 8px; }")
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.menu_button = QtWidgets.QPushButton(self.BUTTON_TEXT)
+        self.menu_button.setProperty("class", "compactSmall")
         self.menu_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.menu_button.setAccessibleName("Suggested baseline windows")
+        self.menu_button.setAccessibleName("Suggest a baseline window")
+        self.menu_button.setToolTip(self.HELP)
+        self.menu_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.menu_button.clicked.connect(self.request_menu)
         self.menu = QtWidgets.QMenu(self.menu_button)
         self.menu.setToolTipsVisible(True)
         self.actions = []
@@ -101,23 +115,55 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
             action.setEnabled(False)
             action.triggered.connect(lambda _checked=False, number=index: self._apply(number))
             self.actions.append(action)
-        self.menu_button.setMenu(self.menu)
-        self.menu_button.setEnabled(False)
         layout.addWidget(self.menu_button)
-        self.status = QtWidgets.QLabel("Select a signal and events.")
-        self.status.setProperty("class", "hint")
-        self.status.setWordWrap(True)
+        # Outcome text (mirrored in the button tooltip). Kept as a label for
+        # callers that read it, but not shown: the control is one button.
+        self.status = QtWidgets.QLabel("Select a signal and events.", self)
         self.status.setTextFormat(QtCore.Qt.TextFormat.PlainText)
-        layout.addWidget(self.status)
+        self.status.hide()
+
+    # --------------------------------------------------------------- requests
+    def request_menu(self):
+        """Button click: compute for the current inputs, then open the choices."""
+        if self._closed:
+            return
+        self._popup_when_ready = True
+        self.menu_button.setText(self.BUSY_TEXT)
+        self.menu_button.setEnabled(False)
+        self.message.emit("Evaluating baseline windows…")
+        self.queue()
+
+    def invalidate(self):
+        """Inputs changed: drop the displayed choices without computing anything."""
+        if self._closed:
+            return
+        if self._popup_when_ready:
+            # The user asked for suggestions and is waiting: a recompute that
+            # lands meanwhile must not cancel the request silently. Evaluate
+            # the newest inputs instead.
+            self.queue()
+            return
+        self.timer.stop()
+        self._wanted_key = None
+        self._pending = None
+        self.report = None
+        self.menu.close()
+        for action in self.actions:
+            action.setEnabled(False)
+        self._idle()
+
+    def _idle(self):
+        """Return the button to its clickable resting state."""
+        self.menu_button.setText(self.BUTTON_TEXT)
+        self.menu_button.setEnabled(True)
 
     def queue(self):
-        """Debounce rapid edits and disable stale choices before the next snapshot."""
+        """Evaluate the current snapshot (cached inputs are not recomputed)."""
         if self._closed:
             return
         self._wanted_key = None
         self._pending = None
         self.menu.close()
-        self.menu_button.setEnabled(False)
         for button in self.actions:
             button.setEnabled(False)
         self.timer.start()
@@ -137,7 +183,6 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
             self._show_unavailable(f"Suggestions unavailable: {exc}")
             return
         self.scope = scope
-        self.title.setToolTip(scope)
         self._wanted_key = key
         if key in self._cache:
             self._cache.move_to_end(key)
@@ -149,7 +194,7 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
             self._pending = None
             return
         payload = (key, recordings, config)
-        self.status.setText("Updating suggestions...")
+        self._set_status("Updating suggestions...")
         if self._job is not None:
             self._pending = payload if self._job.key != key else None
             return
@@ -198,23 +243,29 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
             else:
                 self._start(pending)
 
+    # ---------------------------------------------------------------- display
+    def _set_status(self, text, tooltip=None):
+        """Keep the outcome readable from the button tooltip."""
+        self.status.setText(text)
+        self.status.setToolTip(tooltip if tooltip is not None else text)
+        self.menu_button.setToolTip(self.HELP + "\n\n" + text)
+
     def _show_unavailable(self, message):
-        """Empty or unusable signals produce a compact status, not made-up choices."""
+        """Empty or unusable signals produce a short status, not made-up choices."""
         self.report = None
-        self.menu_button.setEnabled(False)
-        self.menu_button.setText("No suggested window")
         for button in self.actions:
             button.setVisible(False)
             button.setEnabled(False)
-        self.status.setText(message)
-        self.status.setToolTip(message)
+        self._set_status(message)
+        self._idle()
+        if self._popup_when_ready:
+            self._popup_when_ready = False
+            self.message.emit(message)
 
     def _show_report(self, report):
         """Present fit scores with explicit limitations in every choice tooltip."""
         self.report = report
         choices = report.get("choices", [])
-        self.menu_button.setEnabled(bool(choices))
-        self.menu_button.setText("Choose a window" if choices else "No suggested window")
         for index, button in enumerate(self.actions):
             visible = index < len(choices)
             button.setVisible(visible)
@@ -236,16 +287,22 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
             )
             button.setToolTip(tooltip)
         if not choices:
-            self.status.setText(report.get("summary", "No usable pre-event baseline."))
+            text = report.get("summary", "No usable pre-event baseline.")
         else:
             best = choices[0]
             if best["quality"] == "Limited":
                 cautions = best.get("diagnostics", {}).get("cautions", [])
                 short = cautions[0].split(":")[0].lower() if cautions else "limited signal information"
-                self.status.setText(f"Limited: {short}. Hover for details.")
+                text = f"Limited: {short}. Hover a choice for details."
             else:
-                self.status.setText("Fit score, not confidence. Select a window to apply.")
-        self.status.setToolTip(report.get("summary", ""))
+                text = "Fit score, not confidence. Select a window to apply."
+        self._set_status(text, report.get("summary", ""))
+        self._idle()
+        if self._popup_when_ready:
+            self._popup_when_ready = False
+            self.message.emit(text if choices else f"No suggested baseline window: {text}")
+            if choices and self.menu_button.isVisible():
+                self.menu.popup(self.menu_button.mapToGlobal(QtCore.QPoint(0, self.menu_button.height())))
 
     def _apply(self, index):
         """Only enabled current choices can be applied, never an outdated result."""
@@ -253,6 +310,7 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
         if 0 <= index < len(choices) and self.actions[index].isEnabled():
             self.selected.emit(tuple(choices[index]["window"]))
 
+    # -------------------------------------------------------------- lifecycle
     def stop(self):
         """Panel closure drops callbacks while Qt safely owns any finishing work."""
         self._closed = True
@@ -267,6 +325,6 @@ class BaselineSuggestionsWidget(QtWidgets.QWidget):
             self._job = None
 
     def resume(self):
-        """A reopened settings panel can resume after an ordinary close event."""
+        """A reopened settings panel starts idle: suggestions are computed on request only."""
         self._closed = False
-        self.queue()
+        self.invalidate()

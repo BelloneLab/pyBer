@@ -136,7 +136,8 @@ def draw_metric_matplotlib(axis, result, title=None):
     """Render export panels with the same numerical summaries as the live view."""
     summary = result["summary"]
     if result.get("group_comparison"):
-        _draw_groups_matplotlib(axis, summary, result["group_comparison"], title)
+        _draw_groups_matplotlib(axis, summary, result["group_comparison"], title,
+                                result.get("group_view"), result.get("group_style", "points"))
         return
     pre, post = result["pre_values"], result["post_values"]
     pairs = np.isfinite(pre) & np.isfinite(post)
@@ -166,31 +167,13 @@ def draw_metric_matplotlib(axis, result, title=None):
     axis.spines[["top", "right"]].set_visible(False)
 
 
-def _draw_groups_matplotlib(axis, summary, comparison, title=None):
-    """Publication panel of the group view: Post - Pre per animal, one column per group."""
-    from group_stats import stats_label
-    names = []
-    for index, group in enumerate(comparison["groups"]):
-        values = np.asarray(group["values"], float)
-        values = values[np.isfinite(values)]
-        names.append(f"{group['name']}\nn={group['n']}")
-        x = index + (np.linspace(-0.14, 0.14, values.size) if values.size > 1 else np.zeros(values.size))
-        axis.scatter(x, values, s=12, color=group["color"], alpha=0.8, edgecolors="none", zorder=2)
-        if np.isfinite(group["median"]):
-            axis.plot([index - 0.24, index + 0.24], [group["median"]] * 2, color=group["color"],
-                      linewidth=2.2, zorder=4)
-        if np.isfinite(group["mean"]):
-            axis.errorbar(index + 0.32, group["mean"], yerr=group["sem"] if np.isfinite(group["sem"]) else None,
-                          fmt="D", ms=3, color="#526371", capsize=2, linewidth=0.9, zorder=5)
-    axis.set_title(title or f"{summary['metric']}: Post − Pre", fontsize=10, fontweight="bold", pad=30)
-    axis.text(0.5, 1.015, f"{stats_label(comparison)}\nanimals · line: median · diamond: mean ± SEM",
-              transform=axis.transAxes, ha="center", va="bottom", fontsize=6.5, color="#546274", clip_on=False)
-    axis.axhline(0, color="#A7B1BD", linewidth=0.6, zorder=0)
-    axis.set_xticks(range(len(names)), names)
-    axis.set_xlim(-0.6, len(names) - 0.4)
-    axis.margins(y=0.28)
-    axis.set_ylabel(summary["units"], fontsize=8)
-    axis.spines[["top", "right"]].set_visible(False)
+def _draw_groups_matplotlib(axis, summary, comparison, title=None, view=None, style="points"):
+    """Publication panel of the group view (same representation and style as on screen)."""
+    from group_metric_views import draw_group_view_matplotlib, view_from_comparison
+    if view is None:
+        view = view_from_comparison(comparison, f"{summary['metric']}: Post \u2212 Pre")
+        view["zero_line"] = True
+    draw_group_view_matplotlib(axis, view, style, title, summary["units"])
 
 
 def export_selected_metrics(results, prefix, write_csv=True, write_h5=True):
@@ -215,10 +198,22 @@ def export_selected_metrics(results, prefix, write_csv=True, write_h5=True):
                 for row, (pre, post) in enumerate(zip(result["pre_values"], result["post_values"]), 1):
                     writer.writerow([key, row, summary["row_unit"], summary["units"], pre, post, post - pre])
     if write_csv:
+        views = [result["group_view"] for result in results.values() if result.get("group_view")]
         write_group_comparisons({key: result["group_comparison"] for key, result in results.items()
                                  if result.get("group_comparison")},
-                                base, id_field="metric_id", quantity="post_minus_pre",
+                                base, id_field="metric_id",
+                                quantity=views[0]["quantity"] if views else "post_minus_pre",
                                 rows=[row for result in results.values() for row in result.get("group_rows", [])])
+        # Paired Pre vs Post tests within each group (paired representation only).
+        from group_metric_views import within_rows
+        paired = [row for key, result in results.items() if result.get("group_view")
+                  for row in within_rows(result["group_view"], metric_id=key,
+                                         unit_of_analysis="animal / recording")]
+        if paired:
+            with open(base + "_group_paired.csv", "w", newline="", encoding="utf-8-sig") as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(paired[0]))
+                writer.writeheader()
+                writer.writerows(paired)
     if write_h5:
         with h5py.File(base + "_selected.h5", "w") as file:
             for key, result in results.items():

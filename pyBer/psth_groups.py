@@ -239,43 +239,93 @@ def block_ticks(blocks: Sequence[GroupBlock], level: str, max_chars: int = 9) ->
 
 
 def draw_group_comparison(plot: pg.PlotWidget, comparison: Dict[str, object], text_color: str,
-                          jitter_width: float = 0.14) -> List[pg.GraphicsObject]:
-    """One column per group: animal points (group color), median line and mean +/- SEM.
+                          style: str = "points") -> List[pg.GraphicsObject]:
+    """One column per group of per-recording values, in the chosen summary style.
 
-    Returns the created items so callers can remove them before the next draw.
-    The y range is fitted to the data; the x axis is labelled with group and n.
+    Thin wrapper kept for callers that hold a plain between-group comparison
+    (global signal metrics). Returns the created items so callers can remove
+    them before the next draw.
     """
-    items: List[pg.GraphicsObject] = []
-    ticks = []
-    bounds: List[float] = []
-    for index, group in enumerate(comparison.get("groups", [])):
-        values = np.asarray(group["values"], float)
-        values = values[np.isfinite(values)]
-        ticks.append((float(index), f"{group['name']}\nn={group['n']}"))
-        if not values.size:
+    from group_metric_views import draw_group_view, view_from_comparison
+    return draw_group_view(plot, view_from_comparison(comparison), text_color, style)
+
+
+# ---------------------------------------------------------------------------
+# Legend placement: the corner that hides the least of the curves
+# ---------------------------------------------------------------------------
+#: Candidate positions, in order of preference when several are equally free:
+#: (name, horizontal anchor 0..1, vertical anchor 0..1 from the top).
+LEGEND_POSITIONS: Tuple[Tuple[str, float, float], ...] = (
+    ("top right", 1.0, 0.0), ("top left", 0.0, 0.0),
+    ("bottom right", 1.0, 1.0), ("bottom left", 0.0, 1.0),
+    ("top center", 0.5, 0.0), ("bottom center", 0.5, 1.0),
+)
+LEGEND_MARGIN_PX = 8            # gap between the legend and the plot edge
+LEGEND_SAMPLES_PER_CURVE = 600  # points tested per curve (dense traces are thinned)
+
+
+def legend_overlap_counts(curves: Sequence[Tuple[np.ndarray, np.ndarray]], view_range,
+                          view_size_px: Tuple[float, float], legend_size_px: Tuple[float, float],
+                          margin_px: float = LEGEND_MARGIN_PX) -> Dict[str, int]:
+    """Number of curve samples under the legend for every candidate position.
+
+    ``curves``: (x, y) arrays in data coordinates. ``view_range``: ((x0, x1),
+    (y0, y1)). Sizes are in pixels. Pure function, so the choice is testable.
+    """
+    (x0, x1), (y0, y1) = view_range
+    width, height = float(view_size_px[0]), float(view_size_px[1])
+    counts = {name: 0 for name, _ax, _ay in LEGEND_POSITIONS}
+    if width <= 0 or height <= 0 or x1 == x0 or y1 == y0:
+        return counts
+    legend_w, legend_h = float(legend_size_px[0]), float(legend_size_px[1])
+    for x, y in curves:
+        x, y = np.asarray(x, float), np.asarray(y, float)
+        if x.size == 0 or x.size != y.size:
             continue
-        x = index + (np.linspace(-jitter_width, jitter_width, values.size) if values.size > 1 else np.zeros(1))
-        scatter = pg.ScatterPlotItem(x=x, y=values, size=6, pen=None, brush=pg.mkBrush(group["color"]))
-        median = pg.PlotDataItem([index - 0.24, index + 0.24], [group["median"]] * 2,
-                                 pen=pg.mkPen(group["color"], width=2.5))
-        items.extend([scatter, median])
-        bounds.extend(values.tolist())
-        if np.isfinite(group["mean"]):
-            sem = group["sem"] if np.isfinite(group["sem"]) else 0.0
-            mean = pg.ScatterPlotItem(x=[index + 0.32], y=[group["mean"]], size=8, symbol="d",
-                                      pen=None, brush=pg.mkBrush(text_color))
-            error = pg.ErrorBarItem(x=np.array([index + 0.32]), y=np.array([group["mean"]]),
-                                    top=np.array([sem]), bottom=np.array([sem]), beam=0.1,
-                                    pen=pg.mkPen(text_color, width=1))
-            items.extend([mean, error])
-            bounds.extend([group["mean"] - sem, group["mean"] + sem])
-    for item in items:
-        plot.addItem(item)
-    plot.getAxis("bottom").setTicks([ticks])
-    count = max(1, len(ticks))
-    plot.setXRange(-0.6, count - 0.4, padding=0)
-    if bounds:
-        low, high = min(bounds), max(bounds)
-        span = high - low or max(abs(high) * 0.1, 1.0)
-        plot.setYRange(low - span * 0.08, high + span * 0.45, padding=0)
-    return items
+        step = max(1, x.size // LEGEND_SAMPLES_PER_CURVE)
+        x, y = x[::step], y[::step]
+        keep = np.isfinite(x) & np.isfinite(y)
+        # Pixel position inside the view; y grows downwards like the screen.
+        px = (x[keep] - x0) / (x1 - x0) * width
+        py = (y1 - y[keep]) / (y1 - y0) * height
+        for name, ax, ay in LEGEND_POSITIONS:
+            left = margin_px + ax * (width - legend_w - 2 * margin_px)
+            top = margin_px + ay * (height - legend_h - 2 * margin_px)
+            inside = ((px >= left - 4) & (px <= left + legend_w + 4) &
+                      (py >= top - 4) & (py <= top + legend_h + 4))
+            counts[name] += int(np.count_nonzero(inside))
+    return counts
+
+
+def best_legend_position(counts: Dict[str, int]) -> Tuple[str, float, float]:
+    """Least-covered candidate; ties keep the preferred order of LEGEND_POSITIONS."""
+    return min(LEGEND_POSITIONS, key=lambda item: counts.get(item[0], 0))
+
+
+def place_legend_clear_of_curves(legend: pg.LegendItem, view_box: pg.ViewBox,
+                                 curves: Sequence[Tuple[np.ndarray, np.ndarray]]) -> str:
+    """Lay out and anchor ``legend`` where it covers the fewest curve samples.
+
+    Besides the six positions, the entries are tried in one column, two
+    columns and one row: a short, wide plot is usually clearer of curves along
+    its top or bottom edge. Layouts wider than the plot are skipped. Ties keep
+    fewer columns, then the preferred position order. Returns the position name.
+    """
+    size = view_box.size()
+    entries = max(1, len(legend.items))
+    best = None
+    for columns in sorted({1, min(2, entries), entries}):
+        legend.setColumnCount(columns)
+        box = legend.boundingRect()
+        if columns > 1 and box.width() > size.width() - 2 * LEGEND_MARGIN_PX:
+            continue
+        counts = legend_overlap_counts(curves, view_box.viewRange(), (size.width(), size.height()),
+                                       (box.width(), box.height()))
+        name, ax, ay = best_legend_position(counts)
+        if best is None or counts[name] < best[0]:
+            best = (counts[name], columns, name, ax, ay)
+    _count, columns, name, ax, ay = best
+    legend.setColumnCount(columns)
+    offset = (LEGEND_MARGIN_PX * (1 - 2 * ax) if ax != 0.5 else 0.0, LEGEND_MARGIN_PX * (1 - 2 * ay))
+    legend.anchor(itemPos=(ax, ay), parentPos=(ax, ay), offset=offset)
+    return name

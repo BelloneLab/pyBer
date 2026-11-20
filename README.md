@@ -129,7 +129,7 @@ The modeling workbench consumes the current processed recordings, behavior varia
 ## Groups, seamless figure and editable export
 
 - Create recording groups (label + color), attribute recordings by clicking a group chip or by right-click, and open the recordings list in its own window for long lists.
-- PSTH **Groups** view: all groups overlaid (one mean +/- SEM per group with `n` legend and a grouped heatmap), one group only, or pooled. In **All groups**, PSTH metrics (Post − Pre per animal) and global metrics are shown per group with a between-group test (Welch t / Mann-Whitney, ANOVA / Kruskal-Wallis with Holm), exported as CSV.
+- PSTH **Groups** view: all groups overlaid (one mean +/- SEM per group with `n` legend and a grouped heatmap), one group only, or pooled. In **All groups**, PSTH metrics and global metrics are shown per group, one point per animal. PSTH metrics can be compared as Post − Pre, Post only, Pre only, or Pre and Post side by side with paired lines; the tests follow the choice (between groups: Welch t / Mann-Whitney, ANOVA / Kruskal-Wallis with Holm; within group: paired t / Wilcoxon with Holm) and are exported as CSV. Points, bars or box plots.
 - The results area reads as one figure; dividers stay draggable. Right-click a plot to remove it or change it to another analysis.
 - Image export writes PNG plus editable vector PDF and SVG (one path per curve, real text, plain colors).
 - Details: [groups and figure export guide](docs/groups_and_figure_export.md).
@@ -255,7 +255,8 @@ Checked against six real NPM recordings from GuPPy's test data: every signal sam
 - Load Neurophotometrics (FP3001/FP3002) CSV recordings in preprocessing.
 - Event-time tables (one column per behavior, no durations) load directly; align on onsets or offsets.
 - One **Events** button opens the behavior panel; list, hide, remove or restore single events.
-- Group scope: per-animal Post minus Pre metrics per group with between-group tests and CSV exports; hide groups with the eye on each chip.
+- Group scope: compare groups on Post − Pre, Post only, Pre only, or paired Pre and Post, as points, bars or box plots, with matching tests and CSV exports; hide groups with the eye on each chip.
+- Type any value in the baseline and metric window fields; baseline suggestions run only from the **Auto** button.
 - Heatmaps fill display gaps, the color scale has no frame, and preprocessing exports only the processed output by default. See the [release notes](docs/releases/v0.59.md).
 
 ## What changed in v0.58.1

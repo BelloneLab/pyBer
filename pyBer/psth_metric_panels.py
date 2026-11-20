@@ -50,13 +50,20 @@ class MetricPanel(pg.PlotWidget):
         self.result = None
         self._data_bounds = None
         self._group_items = []
+        # Whether a note belongs to the current result. ``note.isVisible()`` is
+        # False while the whole plot is hidden (no data yet), which used to
+        # skip the placement and leave the note clipped under the title.
+        self._note_wanted = False
+        # Summary style of the group views: points | bars | box (group_metric_views).
+        self.summary_style = "points"
         self.set_colors({"text": "#CED8E6", "accent": "#4D93BD"})
         self.getViewBox().sigResized.connect(self._fit_note)
         self.getViewBox().sigXRangeChanged.connect(self._fit_note)
+        self.getPlotItem().visibleChanged.connect(self._fit_note)
 
     def _fit_note(self, *_args):
         """Keep the summary centered and legible when a metric card resizes."""
-        if not self.note.isVisible():
+        if not self._note_wanted:
             return
         view = self.getViewBox()
         font = QtGui.QFont("Segoe UI", 8)
@@ -118,6 +125,8 @@ class MetricPanel(pg.PlotWidget):
         for item in self.errors:
             item.setData(x=np.array([]), y=np.array([]), top=np.array([]), bottom=np.array([]))
         self.note.hide()
+        self._note_wanted = False
+        self.getAxis("bottom").setHeight(None)   # group views reserve extra tick-label lines
         for item in self._group_items:
             self.removeItem(item)
         self._group_items = []
@@ -127,6 +136,7 @@ class MetricPanel(pg.PlotWidget):
             self.setYRange(0, 1, padding=0)
             return
         if result.get("group_comparison"):
+            self.summary_style = result.get("group_style", self.summary_style)
             self._show_groups(result)
             return
         summary = result["summary"]
@@ -170,32 +180,42 @@ class MetricPanel(pg.PlotWidget):
             span = high - low or max(abs(high) * 0.1, 1.0)
             self.setYRange(low - span * 0.08, high + span * 0.48, padding=0)
             pvalue = summary["paired_p_holm"]
-            test = f"Holm p={pvalue:.3g}" if np.isfinite(pvalue) else "Descriptive only"
-            self.note.setText(f"{test} · n={summary['paired_n']}\nMedian line | Mean ± SEM")
-            self.note.setPos(0.55, high + span * 0.40)
-            self.note.show()
-            self._fit_note()
+            if np.isfinite(pvalue):
+                self.note.setText(f"Holm p={pvalue:.3g} · n={summary['paired_n']}\nMedian line | Mean ± SEM")
+                self.note.setPos(0.55, high + span * 0.40)
+                self.note.show()
+                self._note_wanted = True
+                self._fit_note()
+            else:
+                # No test was possible: no "descriptive only" text on the plot.
+                self.setYRange(low - span * 0.08, high + span * 0.10, padding=0)
 
     def _show_groups(self, result):
-        """Group view: one column per group of per-animal Post - Pre values + between-group test."""
-        from group_stats import stats_label
-        from psth_groups import draw_group_comparison
-        summary, comparison = result["summary"], result["group_comparison"]
-        self._group_items = draw_group_comparison(self, comparison, self._text_color.name())
-        self.setTitle(f"{summary['metric']}: Post − Pre")
+        """Group view chosen by the user (change, Post only, Pre only or paired Pre/Post).
+
+        The view description carries the per-animal values, the statistics
+        that match the representation and the annotation text.
+        """
+        from group_metric_views import draw_group_view, view_note, view_from_comparison
+        summary = result["summary"]
+        view = result.get("group_view")
+        if view is None:   # results attached by older callers: Post - Pre comparison only
+            view = view_from_comparison(result["group_comparison"], f"{summary['metric']}: Post \u2212 Pre")
+            view["zero_line"] = True
+        self._group_items = draw_group_view(self, view, self._text_color.name(), self.summary_style)
+        self.setTitle(view["title"])
         self.setLabel("left", summary["units"])
-        self.setToolTip("Each point is one animal (trials averaged per recording): Post − Pre. "
-                        "Colored line: group median. Diamond: mean ± SEM. " + comparison["note"] +
-                        (" " + comparison["normality"] if comparison["normality"] else "") +
-                        (" " + comparison["variance"] if comparison["variance"] else ""))
-        values = [v for g in comparison["groups"] for v in np.asarray(g["values"], float) if np.isfinite(v)]
-        if values:
-            low, high = min(values), max(values)
-            means = [(g["mean"], g["sem"]) for g in comparison["groups"] if np.isfinite(g["mean"])]
-            for mean, sem in means:
-                sem = sem if np.isfinite(sem) else 0.0
-                low, high = min(low, mean - sem), max(high, mean + sem)
-            self._data_bounds = (low, high)
-            self.note.setText(stats_label(comparison) + "\nanimals · median line | mean ± SEM")
+        self.setToolTip(view["tooltip"])
+        bounds = view.get("_drawn_bounds")
+        note = view_note(view, self.summary_style)
+        if bounds is not None and note:
+            self._data_bounds = bounds
+            self.note.setText(note)
             self.note.show()
+            self._note_wanted = True
             self._fit_note()
+        elif bounds is not None:
+            # Nothing was tested: no annotation, so the data use the full height.
+            low, high = bounds
+            span = high - low or max(abs(high) * 0.1, 1.0)
+            self.setYRange(low - span * 0.08, high + span * 0.10, padding=0)

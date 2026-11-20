@@ -65,7 +65,6 @@ class BaselineSuggestionsWidgetTests(unittest.TestCase):
         self.widget.queue()
         self.wait_for(lambda: self.widget.report is not None)
         self.assertEqual(choices, [])
-        self.assertIs(self.widget.menu_button.menu(), self.widget.menu)
         self.assertEqual(self.widget.menu.actions(), self.widget.actions)
         self.assertTrue(self.widget.actions[0].isEnabled())
         self.widget.actions[0].trigger()
@@ -75,10 +74,32 @@ class BaselineSuggestionsWidgetTests(unittest.TestCase):
         start, end = choices[0]
         self.assertTrue(self.widget.actions[0].text().startswith(f"{start:.0f} to {end:.0f} s"))
         self.assertIn("not confidence", self.widget.actions[0].toolTip())
-        self.widget.queue()
-        self.assertFalse(self.widget.menu_button.isEnabled())
+        # Changed inputs drop the choices; the button stays available.
+        self.widget.invalidate()
+        self.assertTrue(self.widget.menu_button.isEnabled())
+        self.assertFalse(self.widget.actions[0].isEnabled())
         self.widget._apply(0)
         self.assertEqual(len(choices), 1)
+
+    def test_nothing_is_computed_until_the_button_is_clicked(self):
+        """Edits only invalidate; one click evaluates and reports."""
+        messages = []
+        self.widget.message.connect(messages.append)
+        with patch("baseline_suggestions_widget.suggest_baselines", wraps=suggest_baselines) as estimate:
+            for _ in range(3):
+                self.widget.invalidate()
+            QtTest.QTest.qWait(60)
+            self.assertEqual(estimate.call_count, 0)
+            self.assertIsNone(self.widget.report)
+            self.assertEqual(self.widget.menu_button.text(), "Auto")
+            self.widget.menu_button.click()
+            self.assertFalse(self.widget.menu_button.isEnabled())   # busy while evaluating
+            self.wait_for(lambda: self.widget.report is not None)
+            self.assertEqual(estimate.call_count, 1)
+            self.assertTrue(self.widget.menu_button.isEnabled())
+            self.assertEqual(self.widget.menu_button.text(), "Auto")
+            self.assertGreaterEqual(len(messages), 2)
+            self.assertIn(self.widget.status.text(), self.widget.menu_button.toolTip())
 
     def test_unchanged_baseline_edits_hit_cache_but_prewindow_changes_recompute(self):
         with patch("baseline_suggestions_widget.suggest_baselines", wraps=suggest_baselines) as estimate:
