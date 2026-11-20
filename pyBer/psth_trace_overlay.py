@@ -6,10 +6,9 @@ animal in Group scope) on the same axes, with three choices:
 
 * what is shown: the average only, the average with the individual traces, or
   the individual traces only;
-* how traces are told apart: shades of the average color that fade with the
-  row order (the first trial is the most opaque, the last the faintest), or
-  one color per trace taken from an ordered color scale;
-* the line style (full, dashed, dotted, dash-dot) and an optional legend.
+* how traces are told apart: rank by row order or response amplitude, using
+  shades of the average color or a multicolor palette;
+* opacity, line style (full, dashed, dotted, dash-dot) and an optional legend.
 
 Whatever the choice, moving the pointer over a trace highlights it and names
 it, so a legend is not needed to identify one trial among many.
@@ -40,9 +39,11 @@ SHOW_MODES: Dict[str, str] = {
 }
 #: How individual traces are told apart.
 COLOR_MODES: Dict[str, str] = {
-    "fade": "Shades of the average color (first = darkest)",
+    "fade": "Shades of the average color",
     "distinct": "One color per trace",
 }
+RANK_MODES = {"order": "Trial / row order", "amplitude": "Response amplitude"}
+OPACITY_PRESETS = {"auto": "Automatic (trace density)", 25: "25%", 50: "50%", 75: "75%", 100: "100%"}
 #: Line styles of the individual traces.
 LINE_STYLES: Dict[str, str] = {
     "solid": "Full line",
@@ -55,17 +56,20 @@ _QT_STYLES = {
     "dot": QtCore.Qt.PenStyle.DotLine, "dashdot": QtCore.Qt.PenStyle.DashDotLine,
 }
 #: Default view: exactly the previous behavior (average only).
-DEFAULT_TRACE_VIEW: Dict[str, object] = {"show": "average", "color": "fade", "style": "solid", "legend": False}
+DEFAULT_TRACE_VIEW: Dict[str, object] = {
+    "show": "average", "color": "fade", "rank": "order", "opacity": "auto", "style": "solid", "legend": False,
+}
 
-ALPHA_FIRST = 235            # opacity of the first trace in "fade" mode (0-255)
-ALPHA_LAST = 55              # opacity of the last trace in "fade" mode
-DISTINCT_ALPHA = 215         # opacity of traces in "distinct" mode
+# Perceived brightness in sRGB, from the least to the most prominent rank.
+# Both ends retain contrast against the plot even for very pale or dark base colors.
+DARK_PLOT_RAMP = (0.36, 0.90)
+LIGHT_PLOT_RAMP = (0.65, 0.13)
+LUMA_WEIGHTS = (0.2126, 0.7152, 0.0722)
 TRACE_WIDTH = 1.0            # px
 HIGHLIGHT_WIDTH = 2.6        # px, trace under the pointer
 MAX_TRACES = 300             # more rows than this are thinned evenly for drawing
 LEGEND_ENTRIES_FADE = 6      # legend budget: a gradient needs only a few key entries
 LEGEND_ENTRIES_DISTINCT = 12  # legend budget when every trace has its own color
-MEAN_WIDTH_WITH_TRACES = 2.8  # px: the average stays readable on top of its traces
 HOVER_DISTANCE_PX = 9        # pointer-to-trace distance that still selects a trace
 #: Up to this many traces get clearly different hues; more follow an ordered color scale.
 QUALITATIVE = ("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9",
@@ -80,18 +84,51 @@ def normalize_trace_view(view: Optional[Dict[str, object]]) -> Dict[str, object]
     """Fill missing keys and replace unknown codes by the defaults."""
     out = dict(DEFAULT_TRACE_VIEW)
     if isinstance(view, dict):
-        for key, allowed in (("show", SHOW_MODES), ("color", COLOR_MODES), ("style", LINE_STYLES)):
-            if view.get(key) in allowed:
+        for key, allowed in (("show", SHOW_MODES), ("color", COLOR_MODES), ("rank", RANK_MODES), ("style", LINE_STYLES)):
+            if isinstance(view.get(key), str) and view[key] in allowed:
                 out[key] = view[key]
+        opacity = view.get("opacity")
+        if type(opacity) is int and 1 <= opacity <= 100:
+            out["opacity"] = opacity
         out["legend"] = bool(view.get("legend", out["legend"]))
     return out
 
 
-def fade_alphas(count: int) -> List[int]:
-    """Opacity per row, from ``ALPHA_FIRST`` (first row) down to ``ALPHA_LAST`` (last row)."""
-    if count <= 0:
-        return []
-    return [int(round(v)) for v in np.linspace(ALPHA_FIRST, ALPHA_LAST, count)] if count > 1 else [ALPHA_FIRST]
+def response_amplitudes(rows, tvec, pre_window, post_window) -> np.ndarray:
+    """Largest absolute Post excursion from each row's finite Pre mean, in signal units."""
+    rows, tvec = np.asarray(rows, float), np.asarray(tvec, float)
+    missing = np.full(len(rows), np.nan)
+    if pre_window is None or post_window is None:
+        return missing
+    pre = rows[:, (tvec >= pre_window[0]) & (tvec <= pre_window[1])]
+    post = rows[:, (tvec >= post_window[0]) & (tvec <= post_window[1])]
+    if not pre.shape[1] or not post.shape[1]:
+        return missing
+    # An unobserved window has no rank. Never turn a missing trial into a zero response.
+    finite = np.isfinite(pre)
+    counts = finite.sum(axis=1)
+    baseline = np.divide(np.sum(pre, axis=1, where=finite), counts, out=missing, where=counts > 0)
+    excursion = np.abs(post - baseline[:, None])
+    return np.fmax.reduce(np.where(np.isfinite(excursion), excursion, np.nan), axis=1)
+
+
+def _ranks(values: np.ndarray) -> np.ndarray:
+    """Space observed amplitude levels evenly. Ties share a shade and NaNs stay unranked."""
+    ranks = np.full(values.shape, np.nan)
+    valid = np.isfinite(values)
+    levels, inverse = np.unique(values[valid], return_inverse=True)
+    ranks[valid] = inverse / (len(levels) - 1) if len(levels) > 1 else 0.5
+    return ranks
+
+
+def trace_opacity(view: dict, count: int) -> int:
+    """Return a percent. In Auto, dense overlays and overlays behind a mean use less ink."""
+    if view["opacity"] != "auto":
+        return int(view["opacity"])
+    percent = 108 - 8 * np.log2(max(1, count))
+    if view["show"] == "traces":
+        percent += 14
+    return int(round(np.clip(percent, 48, 95)))
 
 
 def distinct_colors(count: int) -> List[Tuple[int, int, int]]:
@@ -102,18 +139,49 @@ def distinct_colors(count: int) -> List[Tuple[int, int, int]]:
         return [QtGui.QColor(code).getRgb()[:3] for code in QUALITATIVE[:count]]
     try:
         scale = pg.colormap.get("turbo")
-    except Exception:
+    except FileNotFoundError:
         scale = pg.colormap.get("viridis")
     # Stay away from the very dark / very bright ends so every trace is visible.
-    return [tuple(int(v) for v in scale.map(float(p), mode="byte")[:3]) for p in np.linspace(0.06, 0.94, count)]
+    colors = scale.map(np.linspace(0.06, 0.94, count), mode="byte")
+    return [tuple(int(v) for v in color[:3]) for color in colors]
 
 
-def trace_colors(count: int, base_color, mode: str) -> List[Tuple[int, int, int, int]]:
-    """RGBA of each row of one segment (a recording's trials or a group's animals)."""
+def trace_colors(count: int, base_color, mode: str, *, ranks=None, background="#101520",
+                 opacity: int = 100, rank_by: str = "order") -> List[Tuple[int, int, int, int]]:
+    """Return colors in original row order. Only RGB encodes rank, and alpha controls opacity."""
+    if count <= 0:
+        return []
+    if ranks is None:
+        ranks = np.linspace(0, 1, count) if count > 1 else np.array([0.5])
+    ranks = np.asarray(ranks, float)
+    missing = ~np.isfinite(ranks)
+    positions = np.where(missing, 0.5, ranks)
+    alpha = round(255 * opacity / 100)
+    surface = np.array(pg.mkColor(background).getRgbF()[:3])
+    surface_luma = surface @ LUMA_WEIGHTS
+    dark = surface_luma < 0.5
     if mode == "distinct":
-        return [(r, g, b, DISTINCT_ALPHA) for r, g, b in distinct_colors(count)]
-    red, green, blue = QtGui.QColor(base_color).getRgb()[:3]
-    return [(red, green, blue, alpha) for alpha in fade_alphas(count)]
+        if rank_by == "order":
+            rgb = np.array(distinct_colors(count))
+        else:
+            # Viridis encodes amplitude monotonically, including for just a few trials.
+            scale = pg.colormap.get("viridis")
+            if not dark:
+                positions = 1 - positions
+            rgb = scale.map(0.12 + 0.76 * positions, mode="byte")[:, :3].copy()
+    else:
+        # Interpolate through the chosen hue at prescribed brightness levels.
+        # A blue, yellow, or grayscale selection spans the same visible range.
+        base = np.array(pg.mkColor(base_color).getRgbF()[:3])
+        luma = base @ LUMA_WEIGHTS
+        low, high = DARK_PLOT_RAMP if dark else LIGHT_PLOT_RAMP
+        low = max(low, surface_luma + 0.15) if dark else min(low, surface_luma - 0.15)
+        target = (low + (high - low) * positions)[:, None]
+        shade = base * target / max(luma, 1e-12)
+        tint = base + (1 - base) * (target - luma) / max(1 - luma, 1e-12)
+        rgb = np.rint(255 * np.where(target < luma, shade, tint)).astype(int)
+    rgb[missing] = 152 if dark else 110
+    return [(int(r), int(g), int(b), alpha) for r, g, b in rgb]
 
 
 def thinned_indices(count: int, limit: int = MAX_TRACES) -> List[int]:
@@ -135,8 +203,8 @@ def nearest_trace(rows: np.ndarray, tvec: np.ndarray, x: float, y: float, y_per_
     """Row whose value at time ``x`` is closest to ``y``, if within ``max_px`` pixels.
 
     With ``subset`` (row indices), only those rows are compared and the result
-    is an index into ``subset``. Only one column is read, so this stays fast
-    for long windows.
+    is an index into ``subset``. Interpolate the two adjacent samples so the
+    pointer follows sloping lines even in a coarsely binned PSTH.
     """
     rows, tvec = np.asarray(rows, float), np.asarray(tvec, float)
     if rows.ndim != 2 or rows.shape[0] == 0 or tvec.size != rows.shape[1] or tvec.size == 0:
@@ -145,10 +213,15 @@ def nearest_trace(rows: np.ndarray, tvec: np.ndarray, x: float, y: float, y_per_
         return None
     if not np.isfinite(x) or not np.isfinite(y) or x < tvec[0] or x > tvec[-1] or y_per_px <= 0:
         return None
-    column = int(np.clip(np.searchsorted(tvec, x), 0, tvec.size - 1))
-    if column and abs(tvec[column - 1] - x) < abs(tvec[column] - x):
-        column -= 1
-    values = rows[:, column] if subset is None else rows[np.asarray(subset, int), column]
+    column = int(np.searchsorted(tvec, x))
+    selected = slice(None) if subset is None else np.asarray(subset, int)
+    values = rows[selected, column]
+    if column and tvec[column] != x:
+        previous = rows[selected, column - 1]
+        fraction = (x - tvec[column - 1]) / (tvec[column] - tvec[column - 1])
+        # A gap touching either endpoint remains unselectable between samples.
+        with np.errstate(invalid="ignore"):
+            values = previous + fraction * (values - previous)
     distance = np.abs(values - y) / y_per_px
     distance[~np.isfinite(distance)] = np.inf
     best = int(np.argmin(distance))
@@ -170,6 +243,7 @@ class TraceOverlay(QtCore.QObject):
         self.row_of_curve: List[int] = []            # matrix row of each curve
         self.colors: List[Tuple[int, int, int, int]] = []
         self.labels: List[str] = []
+        self.amplitudes = np.empty(0)               # finite-window excursions in signal units, if ranked
         self.rows = np.zeros((0, 0))
         self.tvec = np.zeros(0)
         self.style = "solid"
@@ -189,6 +263,7 @@ class TraceOverlay(QtCore.QObject):
         for curve in self.curves:
             self.plot.removeItem(curve)
         self.curves, self.row_of_curve, self.colors, self.labels = [], [], [], []
+        self.amplitudes = np.empty(0)
         self.rows, self.tvec = np.zeros((0, 0)), np.zeros(0)
         self._highlighted = None
         self.tip.hide()
@@ -204,34 +279,55 @@ class TraceOverlay(QtCore.QObject):
         return pg.mkPen(QtGui.QColor(*color), width=width, style=_QT_STYLES.get(self.style, _QT_STYLES["solid"]))
 
     def draw(self, tvec: np.ndarray, rows: np.ndarray, labels: Sequence[str],
-             segments: Sequence[Tuple[int, int, object, str]], view: Dict[str, object]) -> None:
+             segments: Sequence[Tuple[int, int, object, str]], view: Dict[str, object], *,
+             pre_window=None, post_window=None, restyle=False) -> None:
         """Draw the rows of ``rows`` (one trace each) in the chosen colors and style.
 
         ``segments``: (start, stop, base color, name) row ranges that share a
         base color: the whole matrix in Individual scope, one per group in the
-        group view. The fade (first = darkest) restarts in every segment.
+        group view. A single-hue scale restarts in every segment. Window
+        boundaries refer to seconds on the displayed alignment clock.
         """
-        self.clear()
         view = normalize_trace_view(view)
         rows, tvec = np.asarray(rows, float), np.asarray(tvec, float)
+        # Menu and window edits reuse the live curves only for the exact cached
+        # dataset. A data refresh always rebuilds paths and the finite-row selection.
+        reuse = restyle and self.rows is rows and self.tvec is tvec
+        if reuse:
+            self._set_highlight(None)
+            self.legend.clear()
+            self.legend.hide()
+        else:
+            self.clear()
         if rows.ndim != 2 or rows.shape[0] == 0 or tvec.size != rows.shape[1]:
             return
         self.rows, self.tvec, self.style = rows, tvec, str(view["style"])
         count = rows.shape[0]
         self.labels = [str(labels[i]) if i < len(labels) else f"Row {i + 1}" for i in range(count)]
-        # Colors: per segment for the fade, across the whole matrix for distinct colors.
-        colors: List[Tuple[int, int, int, int]] = [(128, 128, 128, 160)] * count
-        if view["color"] == "distinct":
-            colors = trace_colors(count, None, "distinct")
+        # Rank the complete matrix, even when the rendering budget samples only some rows.
+        if view["rank"] == "amplitude":
+            self.amplitudes = response_amplitudes(rows, tvec, pre_window, post_window)
         else:
-            for start, stop, base, _name in segments:
-                for offset, color in enumerate(trace_colors(max(0, stop - start), base, "fade")):
-                    colors[start + offset] = color
-        self.colors = colors
-        for row in thinned_indices(count):
-            if not np.any(np.isfinite(rows[row])):
+            self.amplitudes = np.empty(0)
+        if reuse:
+            drawn_rows = self.row_of_curve
+        else:
+            drawn_rows = [row for row in thinned_indices(count) if np.isfinite(rows[row]).any()]
+        opacity = trace_opacity(view, len(drawn_rows))
+        surface = self.plot.backgroundBrush().color()
+        ranges = list(segments) or [(0, count, "#808080", "")]
+        color_ranges = [(0, count, None, "")] if view["color"] == "distinct" else ranges
+        self.colors = [(128, 128, 128, round(255 * opacity / 100))] * count
+        for start, stop, base, _name in color_ranges:
+            ranks = _ranks(self.amplitudes[start:stop]) if self.amplitudes.size else None
+            self.colors[start:stop] = trace_colors(stop - start, base, view["color"], ranks=ranks,
+                                                   background=surface, opacity=opacity, rank_by=view["rank"])
+        for index, row in enumerate(drawn_rows):
+            pen = self._pen(self.colors[row])
+            if reuse:
+                self.curves[index].setPen(pen)
                 continue
-            curve = pg.PlotDataItem(tvec, rows[row], pen=self._pen(colors[row]), connect="finite")
+            curve = pg.PlotDataItem(tvec, rows[row], pen=pen, connect="finite")
             curve.setZValue(-3)          # behind the SEM band and the mean
             self.plot.addItem(curve)
             # Set after the item has a view box: pyqtgraph resolves the view
@@ -241,21 +337,30 @@ class TraceOverlay(QtCore.QObject):
             self.curves.append(curve)
             self.row_of_curve.append(row)
         if view["legend"] and self.curves:
-            ranges = list(segments) or [(0, count, None, "")]
             budget = LEGEND_ENTRIES_DISTINCT if view["color"] == "distinct" else LEGEND_ENTRIES_FADE
             # The budget is shared by the segments (groups); each names at
             # least its first and last trace, which is what a fade needs.
             limit = max(2, budget // max(1, len(ranges)))
             for start, stop, _base, name in ranges:
                 drawn = [i for i, row in enumerate(self.row_of_curve) if start <= row < stop]
+                if self.amplitudes.size:
+                    drawn.sort(key=lambda i: np.nan_to_num(self.amplitudes[self.row_of_curve[i]], nan=np.inf))
                 for position in legend_indices(len(drawn), limit):
                     index = drawn[position]
-                    label = self.labels[self.row_of_curve[index]]
+                    label = self._row_label(self.row_of_curve[index])
                     self.legend.addItem(self.curves[index], f"{name}: {label}" if name else label)
             relayout_legend(self.legend, 1)
             self.legend.show()
 
     # ------------------------------------------------------------------ hover
+    def _row_label(self, row: int) -> str:
+        """Keep the original trial ID and add the measured excursion when color represents amplitude."""
+        if not self.amplitudes.size:
+            return self.labels[row]
+        value = self.amplitudes[row]
+        amplitude = f"{value:.3g}" if np.isfinite(value) else "unavailable"
+        return f"{self.labels[row]} · amplitude {amplitude}"
+
     def hover(self, scene_position) -> Optional[str]:
         """Highlight and name the trace under the pointer; returns its label (or None)."""
         if not self.curves:
@@ -272,8 +377,12 @@ class TraceOverlay(QtCore.QObject):
         self._set_highlight(row)
         if row is None:
             return None
-        label = self.labels[self.row_of_curve[row]]
+        label = self._row_label(self.row_of_curve[row])
         self.tip.setText(label)
+        # Place the tip toward the middle so trial names are readable at the plot edges.
+        rect = view.sceneBoundingRect()
+        self.tip.setAnchor((float(scene_position.x() > rect.center().x()),
+                            float(scene_position.y() > rect.center().y())))
         self.tip.setPos(point.x(), point.y())
         self.tip.show()
         return label
@@ -291,7 +400,7 @@ class TraceOverlay(QtCore.QObject):
             return
         red, green, blue, _alpha = self.colors[self.row_of_curve[index]]
         self.curves[index].setPen(pg.mkPen(QtGui.QColor(red, green, blue, 255), width=HIGHLIGHT_WIDTH))
-        self.curves[index].setZValue(5)
+        self.curves[index].setZValue(1)   # over the other trials, below the mean
 
 
 # =============================================================================
@@ -302,6 +411,7 @@ def populate_trace_menu(menu: QtWidgets.QMenu, view: Dict[str, object], change) 
     """Fill ``menu`` with the trace options; ``change(key, value)`` applies one."""
     view = normalize_trace_view(view)
     for title, key, choices in ((None, "show", SHOW_MODES), ("Trace colors", "color", COLOR_MODES),
+                                ("Color by", "rank", RANK_MODES), ("Trace opacity", "opacity", OPACITY_PRESETS),
                                 ("Line style", "style", LINE_STYLES)):
         target = menu if title is None else menu.addMenu(title)
         group = QtGui.QActionGroup(target)
@@ -311,6 +421,28 @@ def populate_trace_menu(menu: QtWidgets.QMenu, view: Dict[str, object], change) 
             action.setChecked(view[key] == code)
             group.addAction(action)
             action.triggered.connect(lambda _checked=False, k=key, c=code: change(k, c))
+            if code == "amplitude":
+                action.setToolTip("Largest absolute change in Post from that row's mean in Pre. "
+                                  "Set both windows in PSTH metrics.")
+        if key == "opacity":
+            current = view["opacity"]
+            custom = target.addAction(f"Custom ({current}%)…" if current not in choices else "Custom…")
+            custom.setCheckable(True)
+            group.addAction(custom)
+            custom.setChecked(current not in choices)
+
+            def choose_opacity():
+                """Allow exact percentages as well as the one-click presets."""
+                percent, ok = QtWidgets.QInputDialog.getInt(
+                    menu, "Trace opacity", "Individual trace opacity (%)",
+                    current if isinstance(current, int) else 70, 1, 100)
+                if ok:
+                    change("opacity", percent)
+
+            custom.triggered.connect(choose_opacity)
+        if key == "rank":
+            target.setToolTipsVisible(True)
+            target.addAction("Single hue: later or larger = stronger contrast").setEnabled(False)
         if title is None:
             menu.addSeparator()
     legend = menu.addAction("Trace legend")

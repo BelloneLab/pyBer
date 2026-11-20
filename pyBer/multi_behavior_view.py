@@ -34,7 +34,8 @@ from plot_empty_state import set_plot_has_data
 from postprocessing_core import mean_sem
 from postprocessing_style import style_plot
 from psth_metric_panels import MetricPanel
-from psth_trace_overlay import MEAN_WIDTH_WITH_TRACES, TraceOverlay, normalize_trace_view
+from psth_mean_band import sem_band, style_mean_band
+from psth_trace_overlay import TraceOverlay, normalize_trace_view
 
 # =============================================================================
 # Configuration
@@ -52,7 +53,6 @@ PSTH_MIN_HEIGHT = 170
 METRIC_MIN_HEIGHT = 200
 BAND_SPACING = 10            # px between bands and between columns
 LEFT_AXIS_WIDTH = 58         # px: identical in every panel so the plots line up
-SEM_ALPHA = 60               # 0-255 opacity of the SEM band
 MAX_HEAT_TICKS = 6           # row labels on a heatmap
 INVISIBLE_PEN = (0, 0, 0, 0)  # RGBA of the SEM band edges (drawn, but fully transparent)
 
@@ -79,8 +79,8 @@ def shared_range(entries: Sequence[Dict[str, object]], include_rows: bool) -> Op
         if matrix is None or not np.size(matrix):
             continue
         mean, sem, _counts = mean_sem(np.asarray(matrix, float))
-        sem = np.where(np.isfinite(sem), sem, 0.0)
-        values = [mean - sem, mean + sem] + ([np.asarray(matrix, float)] if include_rows else [])
+        # The mean still sets the axis range in bins with only one observation.
+        values = [mean, mean - sem, mean + sem] + ([np.asarray(matrix, float)] if include_rows else [])
         for block in values:
             finite = block[np.isfinite(block)]
             if finite.size:
@@ -166,8 +166,7 @@ class BehaviorColumn(QtWidgets.QWidget):
         # without pen, and the band between two such curves stays empty.
         self.sem_high = self.psth.plot(pen=INVISIBLE_PEN)
         self.sem_low = self.psth.plot(pen=INVISIBLE_PEN)
-        self.sem_band = pg.FillBetweenItem(self.sem_high, self.sem_low)
-        self.sem_band.setZValue(-1)
+        self.sem_band = sem_band(self.sem_high, self.sem_low)
         self.psth.addItem(self.sem_band)
         self.mean = self.psth.plot(pen=pg.mkPen("#4D93BD", width=2.0))
         self.mean.setZValue(2)
@@ -232,8 +231,8 @@ class BehaviorColumn(QtWidgets.QWidget):
         self.metric.setVisible(show.get("metric", True))
         for plot in (self.heat, self.psth):
             set_plot_has_data(plot, bool(ready))
-        self.traces.clear()
         if not ready:
+            self.traces.clear()
             self.metric.show_result(None)
             set_plot_has_data(self.metric, False)
             return
@@ -252,22 +251,10 @@ class BehaviorColumn(QtWidgets.QWidget):
         self.heat_zero.setVisible(bool(tvec[0] <= 0.0 <= tvec[-1]))
         # --- mean PSTH
         mean, sem, _counts = mean_sem(matrix)
-        sem = np.where(np.isfinite(sem), sem, 0.0)
-        pen_color = QtGui.QColor(*color)
-        band = QtGui.QColor(*color)
-        band.setAlpha(SEM_ALPHA)
-        view = normalize_trace_view(trace_view)
-        mean_visible = view["show"] != "traces"
-        width = MEAN_WIDTH_WITH_TRACES if view["show"] == "both" else 2.0
         self.mean.setData(tvec, mean, connect="finite")
-        self.mean.setPen(pg.mkPen(pen_color, width=width))
         self.sem_high.setData(tvec, mean + sem, connect="finite")
         self.sem_low.setData(tvec, mean - sem, connect="finite")
-        self.sem_band.setBrush(pg.mkBrush(band))
-        for item in (self.mean, self.sem_band):
-            item.setVisible(mean_visible)
-        if view["show"] != "average":
-            self.traces.draw(tvec, matrix, list(entry.get("labels") or []), [(0, rows, pen_color, "")], view)
+        self.set_trace_view(entry, color, trace_view)
         self.psth.setXRange(float(tvec[0]), float(tvec[-1]), padding=0)
         if y_range is not None:
             self.psth.setYRange(y_range[0], y_range[1], padding=0)
@@ -282,6 +269,20 @@ class BehaviorColumn(QtWidgets.QWidget):
         if not first_in_band:
             self.metric.setLabel("left", "")
         QtCore.QTimer.singleShot(0, self._recenter_axis_labels)
+
+    def set_trace_view(self, entry, color, view, *, restyle=False) -> None:
+        """Restyle one cached PSTH, keeping the heatmap, statistics and current zoom intact."""
+        pen_color = QtGui.QColor(*color)
+        style_mean_band(self.mean, self.sem_band, pen_color, self.psth.backgroundBrush().color(),
+                        mean_width=2.0, combined=view["show"] == "both")
+        for item in (self.mean, self.sem_band):
+            item.setVisible(view["show"] != "traces")
+        if view["show"] == "average":
+            self.traces.clear()
+        else:
+            rows = entry["matrix"]
+            self.traces.draw(entry["tvec"], rows, entry.get("labels") or [], [(0, len(rows), pen_color, "")], view,
+                             pre_window=entry.get("pre_window"), post_window=entry.get("post_window"), restyle=restyle)
 
 
 # =============================================================================
@@ -398,6 +399,22 @@ class MultiBehaviorView(QtWidgets.QWidget):
         for column in self.columns:
             column.traces.clear()
             column.hide()
+
+    def set_trace_view(self, view, pre_window, post_window) -> None:
+        """Apply a menu or window change to the cached columns without rebuilding the PSTHs."""
+        if self._render_args is None:
+            return
+        rows_were_visible = self._render_args["trace_view"].get("show", "average") != "average"
+        self._render_args["trace_view"] = view
+        rows_visible = view["show"] != "average"
+        # Preserve the current zoom unless switching between mean and individual-trial extents.
+        limits = shared_range(self.entries, rows_visible) if rows_visible != rows_were_visible else None
+        for index, (entry, column) in enumerate(zip(self.entries, self.columns)):
+            entry.update(pre_window=pre_window, post_window=post_window)
+            if column.psth.property("hasPlotData"):
+                column.set_trace_view(entry, entry.get("color", behavior_color(index)), view, restyle=True)
+                if limits is not None:
+                    column.psth.setYRange(*limits, padding=0)
 
     def show_entries(self, entries: Sequence[Dict[str, object]], *, color_map, levels: Tuple[float, float],
                      units: str, time_label: str, trace_view: Dict[str, object], missing_mode: str,

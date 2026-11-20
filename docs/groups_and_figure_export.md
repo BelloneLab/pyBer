@@ -134,31 +134,40 @@ color, source path) whenever groups exist.
 
 ### Individual traces behind the mean
 
-The mean ± SEM does not show how consistent the single responses are. The mean
-PSTH plot can also draw every displayed row: each trial in Individual scope,
-each animal in Group scope (or each trial when trial rows are kept).
+Right-click the mean PSTH and open **Individual traces**. The same controls
+are available under **Hide/show traces** in Individual scope and **Hide/show
+groups > Individual traces** in Group scope. Each line represents one trial,
+or one animal when Group scope displays animal averages.
 
-Open **Hide/show traces** in the toolbar (Individual scope), the **Individual
-traces** submenu of **Hide/show groups** (Group scope), or right-click the mean
-PSTH and choose **Individual traces**:
+- Choose **Average and individual traces** to see the bold mean and its
+  outlined, filled ±1 SEM band above the trial lines. SEM uses the finite
+  displayed rows at each time sample and requires at least two. **Average
+  only** is the default. **Individual traces only** shows the responses on
+  their own.
+- **Color by** defaults to trial order. Choose response amplitude to rank
+  each trace by its largest absolute excursion in the **Post** metric
+  window relative to its mean in **Pre**. This gives equal weight to upward
+  and downward responses of the same magnitude. Both windows include their
+  endpoints and use finite samples. A trace with no finite samples in
+  either window appears in a neutral shade.
+- **Trace colors** lets you choose a single hue or multiple colors. In a
+  single hue, earlier trials or smaller responses have the most muted shade.
+  Later trials or larger responses gain contrast against the plot background.
+  Each group has its own single-hue scale. To compare amplitude ranks across
+  groups, choose **One color per trace**, which uses a shared color scale
+  within the plot. Tied amplitudes share a shade. Changing the ranking
+  preserves the row order and trial labels.
+- **Trace opacity** adjusts the individual lines independently of the mean
+  and SEM. Automatic opacity makes dense overlays lighter. Choose a preset
+  percentage or select **Custom** to enter an opacity from 1% to 100%.
+- **Line style** offers solid, dashed, dotted and dash-dot lines. Enable
+  **Trace legend** to label a selection of traces, or point at a line to
+  identify it. In amplitude mode the hover label includes the response
+  amplitude in the plotted signal units.
 
-- **Average only** (default), **Average and individual traces**, or
-  **Individual traces only**. With both, the average is drawn thicker.
-- **Trace colors**: *Shades of the average color* fades from the first trace
-  (darkest) to the last (faintest), so a drift across trials is visible at a
-  glance; in the group view each animal takes its group color and the fade
-  restarts in every group. *One color per trace* gives separate hues to up to
-  ten traces and an ordered color scale to more.
-- **Line style**: full, dashed, dotted or dash-dot.
-- **Trace legend**: off by default. It names all traces when they are few and
-  an even selection (first and last included) when they are many, and it is
-  placed clear of the curves and of the group legend.
-
-Point at a trace to highlight it and read its name (trial number or
-recording), with or without the legend. Above 300 rows an even selection is
-drawn. This is display only: the matrix, the mean, the SEM, the metrics and
-the exports do not change. The choice is saved with the settings and the
-project.
+For more than 300 rows, the overlay draws a sample of up to 300 traces. The
+mean and SEM still use all displayed rows. Trace preferences are saved with
+the settings and project.
 
 ### Several behaviors side by side
 

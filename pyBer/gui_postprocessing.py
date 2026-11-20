@@ -55,7 +55,8 @@ from psth_groups import (HeatmapGroupBands, build_group_display, block_summaries
 from group_stats import compare_groups, per_file_means, stats_label, comparison_rows
 from group_metric_views import (GROUP_VIEWS, DEFAULT_GROUP_VIEW, SUMMARY_STYLES, DEFAULT_SUMMARY_STYLE,
                                 build_group_view)
-from psth_trace_overlay import (DEFAULT_TRACE_VIEW, MEAN_WIDTH_WITH_TRACES, TraceOverlay,
+from psth_mean_band import sem_band, style_mean_band
+from psth_trace_overlay import (DEFAULT_TRACE_VIEW, TraceOverlay,
                                 normalize_trace_view, populate_trace_menu)
 from multi_behavior_view import MAX_BEHAVIORS, MultiBehaviorView, behavior_color
 from dashboard_panels import DashboardPanels, GridRowHandle, HANDLE_PX, seamless_figure_qss, draw_global_metric
@@ -4660,13 +4661,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.spatial_lut_velocity.setImageItem(self.img_spatial_velocity)
 
         self.curve_avg = self.plot_avg.plot(pen=pg.mkPen(self._style["avg"], width=1.0))
-        self.curve_sem_hi = self.plot_avg.plot(pen=pg.mkPen((152, 201, 143), width=1.0))
-        self.curve_sem_lo = self.plot_avg.plot(pen=pg.mkPen((152, 201, 143), width=1.0))
-        self.sem_band = pg.FillBetweenItem(
-            self.curve_sem_hi,
-            self.curve_sem_lo,
-            brush=pg.mkBrush(188, 230, 178, 96),
-        )
+        # The fill item paints both bounds. Transparent curve pens preserve
+        # their paths without drawing the same edges twice.
+        self.curve_sem_hi = self.plot_avg.plot(pen=(0, 0, 0, 0))
+        self.curve_sem_lo = self.plot_avg.plot(pen=(0, 0, 0, 0))
+        self.sem_band = sem_band(self.curve_sem_hi, self.curve_sem_lo)
         self.plot_avg.addItem(self.sem_band)
         self.plot_avg.addLine(x=0, pen=pg.mkPen((200, 200, 200), style=QtCore.Qt.PenStyle.DashLine))
         # Backward-compatible handles refer to the primary metric panel.
@@ -4970,6 +4969,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # Heatmap group strips and per-group PSTH overlays (display only).
         self._group_display = None
         self._group_avg_items: List[object] = []
+        self._group_mean_bands: List[pg.FillBetweenItem] = []
+        self._single_group_color = None
         self.heat_group_bands = HeatmapGroupBands(self.plot_heat, parent=self)
         self.psth_group_legend = pg.LegendItem(offset=(-10, 8), verSpacing=-4)
         self.psth_group_legend.setParentItem(self.plot_avg.getPlotItem().vb)
@@ -5421,6 +5422,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.cb_global_freq.stateChanged.connect(self._schedule_psth)
         for w in (self.spin_metric_pre0, self.spin_metric_pre1, self.spin_metric_post0, self.spin_metric_post1):
             w.valueChanged.connect(self._update_metric_regions)
+            w.valueChanged.connect(self._refresh_trace_amplitudes)
         for w in (self.combo_spatial_x, self.combo_spatial_y, self.combo_spatial_weight):
             w.currentIndexChanged.connect(self._compute_spatial_heatmap)
         for w in (
@@ -17379,18 +17381,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 pass
         self._group_avg_items = []
         self._group_mean_curves = []
+        self._group_mean_bands = []
         self._group_legend_curves = []
         legend = getattr(self, "psth_group_legend", None)
         if legend is not None:
             legend.clear()
             legend.hide()
-
-    def _restore_default_avg_style(self) -> None:
-        """Undo a one-group tint: pooled curves use the plot theme colors."""
-        self.curve_avg._pyber_base_pen = None
-        self.curve_avg.setPen(pg.mkPen(self._style_color_tuple("avg", (90, 190, 255)), width=2.0))
-        self.sem_band.setBrush(pg.mkBrush(*self._style_color_tuple("sem_fill", (188, 230, 178, 96))))
-        self.sem_band.setVisible(True)
 
     def _render_group_avg(self, display, tvec: np.ndarray) -> None:
         """One mean +/- SEM per group, colored by group, with an n legend."""
@@ -17406,23 +17402,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
         legend.setLabelTextColor(QtGui.QColor(str(palette["text"])))
         for block, avg, sem, _counts in block_summaries(display):
             color = QtGui.QColor(block.color)
-            band = QtGui.QColor(color)
-            band.setAlpha(60)
-            sem_safe = np.where(np.isfinite(sem), sem, 0.0)
-            # Transparent pen, not None: pyqtgraph builds no path for a curve
-            # without pen, which left the SEM band between them empty.
+            # Keep undefined SEM bins as gaps, including any single-animal bin.
             edge = pg.mkPen(0, 0, 0, 0)
-            high = self.plot_avg.plot(tvec, avg + sem_safe, pen=edge, connect="finite")
-            low = self.plot_avg.plot(tvec, avg - sem_safe, pen=edge, connect="finite")
-            fill = pg.FillBetweenItem(high, low, brush=pg.mkBrush(band))
-            fill.setZValue(-1)
+            high = self.plot_avg.plot(tvec, avg + sem, pen=edge, connect="finite")
+            low = self.plot_avg.plot(tvec, avg - sem, pen=edge, connect="finite")
+            fill = sem_band(high, low)
             self.plot_avg.addItem(fill)
             curve = self.plot_avg.plot(tvec, avg, pen=pg.mkPen(color, width=1.8), connect="finite")
             curve.setZValue(2)
             legend.addItem(curve, legend_label(block, level))
             self._group_avg_items.extend([high, low, fill, curve])
             self._group_mean_curves.append(curve)
-            self._group_legend_curves.extend([(tvec, avg), (tvec, avg + sem_safe), (tvec, avg - sem_safe)])
+            self._group_mean_bands.append(fill)
+            self._group_legend_curves.extend([(tvec, avg), (tvec, avg + sem), (tvec, avg - sem)])
         relayout_legend(legend, 1)
         self._sync_group_legend_visibility()
         self._group_legend_timer.start()
@@ -17519,7 +17511,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.lbl_recording_coverage.setVisible(self._coverage_counts is not None)
         set_plot_has_data(self.plot_avg, ready)
         self._clear_group_avg_items()
-        self._restore_default_avg_style()
+        self._single_group_color = None
         self._trace_overlay_args = None
         if not ready:
             self.curve_avg.setData([], [])
@@ -17548,24 +17540,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.plot_avg.setLabel("bottom", self._psth_time_axis_label())
         self.plot_avg.setToolTip(f"Contributing rows per bin: {int(counts.min())} to {int(counts.max())}. SEM uses sample SD; unavailable with fewer than two rows.")
 
-        self.curve_avg.setData(tvec, avg, connect="finite", skipFiniteCheck=True)
-        self.curve_sem_hi.setData(tvec, avg + sem, connect="finite", skipFiniteCheck=True)
-        self.curve_sem_lo.setData(tvec, avg - sem, connect="finite", skipFiniteCheck=True)
+        self.curve_avg.setData(tvec, avg, connect="finite")
+        self.curve_sem_hi.setData(tvec, avg + sem, connect="finite")
+        self.curve_sem_lo.setData(tvec, avg - sem, connect="finite")
         self.plot_avg.setXRange(float(tvec[0]), float(tvec[-1]), padding=0)
         display_level = str(getattr(self, "_last_psth_display_level", "trials") or "trials")
         if display_level == "animals":
             self._set_psth_caption("PSTH: animals \u00b1 SEM")
         else:
             self._set_psth_caption("PSTH: mean \u00b1 SEM")
+        color = pg.mkColor(self._style_color_tuple("avg", (90, 190, 255)))
         if group_display is not None and group_display.mode == "only" and group_display.blocks:
             # One group only: the same pooled statistics, drawn in its color.
             block = group_display.blocks[0]
             color = QtGui.QColor(block.color)
-            band = QtGui.QColor(color)
-            band.setAlpha(60)
-            self.curve_avg.setPen(pg.mkPen(color, width=2.0))
-            self.curve_avg._pyber_base_pen = None
-            self.sem_band.setBrush(pg.mkBrush(band))
+            self._single_group_color = color
             self._set_psth_caption(f"PSTH: {block.name} mean \u00b1 SEM")
         # Individual traces: every displayed row, in shades of the mean color.
         labels = list(getattr(self, "_last_display_labels", []) or [])
@@ -17573,7 +17562,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             unit = "Animal" if display_level == "animals" else "Trial"
             labels = [f"{unit} {index + 1}" for index in range(mat.shape[0])]
         self._trace_overlay_args = (tvec, mat, labels,
-                                    [(0, mat.shape[0], self.curve_avg.opts["pen"].color(), "")])
+                                    [(0, mat.shape[0], color, "")])
         self._apply_trace_view()
 
     # -- individual traces behind the mean PSTH ------------------------------
@@ -17584,15 +17573,21 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def set_trace_view(self, key: str, value: object) -> None:
         """Change one trace option (menu callback) and redraw; no PSTH recompute."""
         self._trace_view = normalize_trace_view({**self._trace_view, key: value})
-        self._apply_trace_view()
+        self._apply_trace_view(restyle=True)
         self._queue_settings_save()
+
+    def _refresh_trace_amplitudes(self) -> None:
+        """Recolor the displayed rows when a response window changes, including with metrics hidden."""
+        if (not self._is_restoring_settings and self._trace_view["rank"] == "amplitude"
+                and self._trace_view["show"] != "average"):
+            self._apply_trace_view(restyle=True)
 
     def _fill_trace_menu(self) -> None:
         """Right-click > Individual traces: rebuilt each time so its checks are current."""
         self.menu_psth_traces.clear()
         populate_trace_menu(self.menu_psth_traces, self._trace_view, self.set_trace_view)
 
-    def _apply_trace_view(self) -> None:
+    def _apply_trace_view(self, *, restyle: bool = False) -> None:
         """Show the average, the individual traces, or both, as chosen."""
         if not hasattr(self, "psth_traces"):
             return
@@ -17603,7 +17598,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         # Pooled mean (hidden while per-group means are drawn) and group means.
         for item in (self.curve_avg, self.curve_sem_hi, self.curve_sem_lo):
             item.setVisible(mean_visible)
-        self.sem_band.setVisible(mean_visible and not grouped)
+        self.sem_band.setVisible(mean_visible and not grouped and args is not None)
         means = getattr(self, "_group_mean_curves", [])
         for item in self._group_avg_items:
             if any(item is curve for curve in means):
@@ -17617,24 +17612,31 @@ class PostProcessingPanel(QtWidgets.QWidget):
         surface.setAlpha(215)
         self.psth_trace_legend.setBrush(pg.mkBrush(surface))
         self.psth_trace_legend.setLabelTextColor(QtGui.QColor(str(self._current_palette().get("text", "#CED8E6"))))
-        # With its traces behind it, the average is drawn thicker so it stays readable.
-        emphasize = view["show"] == "both" and args is not None
-        for curve in [self.curve_avg, *getattr(self, "_group_mean_curves", [])]:
-            base = getattr(curve, "_pyber_base_pen", None)
-            if base is None:
-                base = QtGui.QPen(curve.opts["pen"])
-                curve._pyber_base_pen = base
-            pen = QtGui.QPen(base)
-            if emphasize:
-                pen.setWidthF(max(base.widthF(), MEAN_WIDTH_WITH_TRACES))
-            curve.setPen(pen)
+        combined = view["show"] == "both" and args is not None
+        background = self.plot_avg.backgroundBrush().color()
+        fill = edge = None
+        if self._single_group_color is None:
+            color = pg.mkColor(self._style_color_tuple("avg", (90, 190, 255)))
+            fill = pg.mkColor(self._style_color_tuple("sem_fill", (188, 230, 178, 96)))
+            edge = pg.mkColor(self._style_color_tuple("sem_edge", (152, 201, 143, 175)))
+        else:
+            color = self._single_group_color
+        style_mean_band(self.curve_avg, self.sem_band, color, background, mean_width=2.0,
+                        combined=combined, fill_color=fill, edge_color=edge)
+        for curve, band in zip(means, self._group_mean_bands):
+            color = curve.opts["pen"].color()
+            style_mean_band(curve, band, color, background, mean_width=1.8, combined=combined)
+        pre_window = (self.spin_metric_pre0.value(), self.spin_metric_pre1.value())
+        post_window = (self.spin_metric_post0.value(), self.spin_metric_post1.value())
         if args is None or view["show"] == "average":
             self.psth_traces.clear()
         else:
-            self.psth_traces.draw(*args, view)
+            self.psth_traces.draw(*args, view, pre_window=pre_window, post_window=post_window, restyle=restyle)
         if hasattr(self, "_group_legend_timer"):
             self._group_legend_timer.start()
-        if hasattr(self, "_multi_behavior_timer"):
+        if restyle and self._multi_behavior_active:
+            self.multi_behavior_view.set_trace_view(view, pre_window, post_window)
+        elif not restyle and hasattr(self, "_multi_behavior_timer"):
             self._multi_behavior_timer.start()
 
     # -- several behaviors side by side ---------------------------------------
@@ -17697,7 +17699,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
         units = self._psth_units()
         for index, name in enumerate(names[:MAX_BEHAVIORS]):
             entry = {"name": name, "color": behavior_color(index), "matrix": None, "tvec": None, "labels": [],
-                     "row_unit": "animals" if animal_rows else "trials", "metric": None}
+                     "row_unit": "animals" if animal_rows else "trials", "metric": None,
+                     "pre_window": pre_window, "post_window": post_window}
             try:
                 matrix, tvec, labels = self._compute_psth_for_behavior(name)
             except ValueError as exc:
@@ -18190,20 +18193,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _apply_plot_style(self) -> None:
         trace_color = self._style_color_tuple("trace", (90, 190, 255))
-        avg_color = self._style_color_tuple("avg", (90, 190, 255))
-        # No shadow pens: a wide translucent shadow forces Qt's slow
-        # stroke-to-fill path (~70x per-frame cost on long traces).
+        # Keep the full recording preview light to render. The shorter PSTH
+        # means have a narrow opaque casing only when overlaid on trials.
         self.curve_trace.setPen(pg.mkPen(trace_color, width=1.0))
         self.curve_trace.setShadowPen(None)
         self.curve_behavior.setPen(pg.mkPen(self._style_color_tuple("behavior", (220, 180, 80)), width=1.0))
-        self.curve_avg.setPen(pg.mkPen(avg_color, width=2.0))
-        self.curve_avg.setShadowPen(None)
-        sem_edge = self._style_color_tuple("sem_edge", (152, 201, 143))
-        sem_fill = self._style_color_tuple("sem_fill", (188, 230, 178, 96))
-        self.curve_sem_hi.setPen(pg.mkPen(None))
-        self.curve_sem_lo.setPen(pg.mkPen(None))
-        if hasattr(self, "sem_band"):
-            self.sem_band.setBrush(pg.mkBrush(*sem_fill))
         bg = self._style_color_tuple("plot_bg", (12, 15, 22))
         grid_enabled = bool(self._style.get("grid_enabled", True))
         try:
@@ -18311,6 +18305,16 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "border: none; padding: 0px; font-size: 12px;"
         )
         self._apply_figure_theme(palette)
+        if self._trace_overlay_args is not None or self._multi_behavior_active:
+            # Restyle the current samples in place so theme changes keep zoom
+            # and avoid rerunning an analysis in each behavior column.
+            if self._trace_overlay_args is not None and not self._group_avg_items and self._single_group_color is None:
+                tvec, matrix, labels, _ = self._trace_overlay_args
+                color = pg.mkColor(self._style_color_tuple("avg", (90, 190, 255)))
+                self._trace_overlay_args = tvec, matrix, labels, [(0, len(matrix), color, "")]
+            if self._multi_behavior_active:
+                self.multi_behavior_view.apply_theme(self._current_palette())
+            self._apply_trace_view(restyle=True)
         if hasattr(self, "combo_psth_behavior_metric"):
             self._refresh_psth_duration_view()
 
