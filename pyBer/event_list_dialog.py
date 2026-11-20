@@ -8,16 +8,30 @@ status. Right-click hides selected events from plots and metrics, removes them
 from the list, or restores them. Nothing in the loaded arrays or source files
 is modified: exclusions are stored per source in its import report (saved with
 projects) and applied when events are extracted.
+
+"Export" writes the listed events to a CSV file: the rows on screen, in their
+current order, with the loaded times (not the three decimals shown).
 """
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+import csv
+import os
+import re
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 COLUMNS = ["Recording", "#", "Onset (s)", "Offset (s)", "Duration (s)", "Status"]
 MAX_VISIBLE_ROWS = 8
+# Export: column names of the CSV file and its text encoding. The byte-order
+# mark lets spreadsheet programs read accented recording names correctly.
+EXPORT_COLUMNS = ["recording", "behavior", "event", "onset_s", "offset_s", "duration_s", "status"]
+EXPORT_ENCODING = "utf-8-sig"
+# Decimals kept for exported times (nanoseconds): far finer than any acquisition
+# clock, and it drops the binary rounding digits of a computed duration
+# (3.1666660000000206 is written 3.166666).
+EXPORT_TIME_DECIMALS = 9
 
 
 def _fmt(value: float) -> str:
@@ -58,6 +72,12 @@ class EventListPanel(QtWidgets.QFrame):
         self.summary.setProperty("class", "hint")
         self.show_removed = QtWidgets.QCheckBox("Show removed")
         self.show_removed.toggled.connect(self.reload)
+        self.export_button = QtWidgets.QToolButton()
+        self.export_button.setText("Export")
+        self.export_button.setToolTip("Save the listed events as a CSV file: recording, event number, "
+                                      "onset, offset, duration and status. Removed events are "
+                                      "included only while \"Show removed\" is checked.")
+        self.export_button.clicked.connect(self._export)
         restore_all = QtWidgets.QToolButton()
         restore_all.setText("Restore all")
         restore_all.clicked.connect(self._restore_all)
@@ -68,7 +88,7 @@ class EventListPanel(QtWidgets.QFrame):
         for widget in (self.title, self.summary):
             top.addWidget(widget)
         top.addStretch(1)
-        for widget in (self.show_removed, restore_all, close):
+        for widget in (self.show_removed, self.export_button, restore_all, close):
             top.addWidget(widget)
         root.addLayout(top)
         self.table = QtWidgets.QTableWidget(0, len(COLUMNS))
@@ -146,6 +166,7 @@ class EventListPanel(QtWidgets.QFrame):
         removed = sum(1 for row in rows if row[5] == "removed")
         self.title.setText(f"{self.label} · events")
         self.summary.setText(f"{used} used · {hidden} hidden · {removed} removed")
+        self.export_button.setEnabled(bool(visible))
         # Height follows the rows (up to MAX_VISIBLE_ROWS, then scroll).
         row_h = self.table.verticalHeader().defaultSectionSize()
         shown = max(1, min(MAX_VISIBLE_ROWS, len(visible)))
@@ -178,6 +199,66 @@ class EventListPanel(QtWidgets.QFrame):
                                               if str(entry[0]) != self.label]
         self.reload()
         self.panel._on_event_exclusions_changed()
+
+    # -- export -------------------------------------------------------------
+    def export_rows(self) -> List[Dict[str, object]]:
+        """The listed events as records, in the order shown.
+
+        Times come from the values behind the cells, so the file keeps the
+        precision of the loaded data (EXPORT_TIME_DECIMALS decimals). An event
+        without an offset (a point event) has empty offset and duration fields.
+        """
+        def number(row: int, column: int):
+            value = self.table.item(row, column).data(QtCore.Qt.ItemDataRole.UserRole)
+            if not isinstance(value, float) or not np.isfinite(value):
+                return ""
+            return round(float(value), EXPORT_TIME_DECIMALS)
+
+        records = []
+        for row in range(self.table.rowCount()):
+            records.append(dict(zip(EXPORT_COLUMNS, [
+                self.table.item(row, 0).text(), self.label, int(number(row, 1)),
+                number(row, 2), number(row, 3), number(row, 4), self.table.item(row, 5).text()])))
+        return records
+
+    def write_csv(self, path: str) -> int:
+        """Write the listed events to ``path``; return the number of events written."""
+        records = self.export_rows()
+        with open(path, "w", newline="", encoding=EXPORT_ENCODING) as handle:
+            writer = csv.DictWriter(handle, fieldnames=EXPORT_COLUMNS)
+            writer.writeheader()
+            writer.writerows(records)
+        return len(records)
+
+    def default_export_name(self) -> str:
+        """``<behavior>_events.csv``, prefixed by the recording when one is listed."""
+        recordings = {self.table.item(row, 0).text() for row in range(self.table.rowCount())}
+        parts = ([next(iter(recordings))] if len(recordings) == 1 else []) + [self.label, "events"]
+        safe = [re.sub(r"[^A-Za-z0-9_\-]+", "_", part).strip("_") for part in parts]
+        return "_".join(part for part in safe if part) + ".csv"
+
+    def _export(self) -> None:
+        """Ask where to save, then write the listed events as CSV."""
+        if not self.table.rowCount():
+            return
+        start_dir = getattr(self.panel, "_export_start_dir", lambda: "")() or os.getcwd()
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export events", os.path.join(start_dir, self.default_export_name()), "CSV (*.csv)")
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        try:
+            count = self.write_csv(path)
+        except OSError as error:
+            QtWidgets.QMessageBox.warning(self, "Export events", f"Could not write the file:\n{error}")
+            return
+        remember = getattr(self.panel, "_remember_export_dir", None)
+        if remember is not None:
+            remember(os.path.dirname(path))
+        status = getattr(self.panel, "statusUpdate", None)
+        if status is not None:
+            status.emit(f"Exported {count} {self.label} events to {os.path.basename(path)}", 5000)
 
     def _context_menu(self, position: QtCore.QPoint) -> None:
         if not self._selected_keys():

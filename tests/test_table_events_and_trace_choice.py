@@ -1,5 +1,9 @@
 """Single events inside the comparison table; trace preview choice in Group scope."""
+import csv
+import os
+import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -8,9 +12,9 @@ import test_group_view_dashboard as dashboard
 import test_postprocessing_empty_state as gui_fixture
 from analysis_core import ProcessedTrial
 from behavior_zone_dialog import _EVENTS_COLUMN, _EXPANDED_ROLE
-from event_list_dialog import EventListPanel
+from event_list_dialog import EXPORT_COLUMNS, EXPORT_ENCODING, EventListPanel
 from gui_postprocessing import _behavior_table_info
-from PySide6 import QtCore
+from PySide6 import QtCore, QtWidgets
 
 
 class TableEventListTests(unittest.TestCase):
@@ -102,6 +106,80 @@ class TableEventListTests(unittest.TestCase):
         events.set_label("grooming")
         self.assertEqual({events.table.item(r, 0).text() for r in range(events.table.rowCount())},
                          {"fiber", "elsewhere"})
+        events.deleteLater()
+
+    def test_export_writes_the_listed_events_at_full_precision(self):
+        view = self._load()
+        panel = self.panel
+        events = EventListPanel(panel)
+        events.set_label("grooming")
+        self.assertTrue(events.export_button.isEnabled())
+        onsets, offsets, durations = panel._extract_behavior_events_raw(panel._behavior_sources["fiber"],
+                                                                         "grooming")
+        self.assertEqual(events.default_export_name(), "fiber_grooming_events.csv")
+
+        # Remove the first event: it leaves the list, so it leaves the file too.
+        events.table.selectRow(0)
+        events._set_selected("removed")
+        events.table.selectRow(0)
+        events._set_selected("hidden")
+        self._settle()
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "events.csv")
+            statuses = []
+            panel.statusUpdate.connect(lambda text, _ms: statuses.append(text))
+            with patch.object(QtWidgets.QFileDialog, "getSaveFileName",
+                              return_value=(path[:-4], "CSV (*.csv)")), \
+                    patch.object(panel, "_remember_export_dir") as remember:
+                events.export_button.click()
+            remember.assert_called_once_with(folder)
+            self.assertTrue(any("Exported" in text and "grooming" in text for text in statuses))
+            with open(path, newline="", encoding=EXPORT_ENCODING) as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(list(rows[0]), EXPORT_COLUMNS)
+            self.assertEqual(len(rows), len(onsets) - 1)
+            self.assertEqual([int(row["event"]) for row in rows], list(range(2, len(onsets) + 1)))
+            self.assertEqual([row["status"] for row in rows], ["hidden"] + ["used"] * (len(onsets) - 2))
+            self.assertEqual({row["recording"] for row in rows}, {"fiber"})
+            self.assertEqual({row["behavior"] for row in rows}, {"grooming"})
+            # Values of the loaded arrays, not the three decimals of the cells.
+            np.testing.assert_array_equal([float(row["onset_s"]) for row in rows], onsets[1:])
+            np.testing.assert_array_equal([float(row["offset_s"]) for row in rows], offsets[1:])
+            np.testing.assert_allclose([float(row["duration_s"]) for row in rows], (offsets - onsets)[1:])
+
+            # "Show removed" lists the removed event again, and the file follows the list;
+            # sorting the table changes the order of the file in the same way.
+            events.show_removed.setChecked(True)
+            events.table.sortItems(2, QtCore.Qt.SortOrder.DescendingOrder)
+            self.assertEqual(events.write_csv(path), len(onsets))
+            with open(path, newline="", encoding=EXPORT_ENCODING) as handle:
+                rows = list(csv.DictReader(handle))
+            np.testing.assert_array_equal([float(row["onset_s"]) for row in rows], onsets[::-1])
+            self.assertEqual(rows[-1]["status"], "removed")
+
+            # Cancelling the dialog writes nothing.
+            os.remove(path)
+            with patch.object(QtWidgets.QFileDialog, "getSaveFileName", return_value=("", "")):
+                events.export_button.click()
+            self.assertFalse(os.path.exists(path))
+        events._restore_all()
+        events.deleteLater()
+
+    def test_export_is_disabled_without_events_and_marks_point_events(self):
+        self._load()
+        panel = self.panel
+        events = EventListPanel(panel)
+        events.set_label("no such behavior")
+        self.assertFalse(events.export_button.isEnabled())
+        events.set_label("grooming")
+        self.assertTrue(events.export_button.isEnabled())
+        # A point event has no offset: its offset and duration fields are empty, never "nan".
+        item = events.table.item(0, 3)
+        item.setData(QtCore.Qt.ItemDataRole.UserRole, float("nan"))
+        events.table.item(0, 4).setData(QtCore.Qt.ItemDataRole.UserRole, float("nan"))
+        first = events.export_rows()[0]
+        self.assertEqual((first["offset_s"], first["duration_s"]), ("", ""))
+        self.assertIsInstance(first["onset_s"], float)
         events.deleteLater()
 
 
