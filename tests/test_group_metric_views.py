@@ -9,7 +9,11 @@ from PySide6 import QtCore, QtWidgets
 from scipy import stats
 
 import test_postprocessing_empty_state as fixture
-from test_group_view_dashboard import GroupViewDashboardTests, N_PER_GROUP
+# The module is imported, not the class: a TestCase imported by name would be
+# collected and run again by this module.
+import test_group_view_dashboard as dashboard
+
+N_PER_GROUP = dashboard.N_PER_GROUP
 from group_metric_views import (GROUP_VIEWS, SUMMARY_STYLES, build_group_view, bracket_layout,
                                 draw_group_view_matplotlib, paired_test, significance_stars,
                                 view_bounds, view_from_comparison, view_note, within_rows)
@@ -165,7 +169,7 @@ class GroupViewGuiTests(unittest.TestCase):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     setUp = fixture.PostprocessingEmptyStateTests.setUp
     tearDown = fixture.PostprocessingEmptyStateTests.tearDown
-    load = GroupViewDashboardTests.load
+    load = dashboard.GroupViewDashboardTests.load
 
     def show_groups(self):
         self.load()

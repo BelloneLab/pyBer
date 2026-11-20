@@ -21,6 +21,24 @@ from analysis_core import (
 from gui_postprocessing import PostProcessingPanel
 
 
+def release_orphan_widgets(app) -> None:
+    """Delete the hidden parentless widgets that a destroyed panel leaves behind.
+
+    Every pyqtgraph view box owns a context menu (with sub-menus and control
+    widgets) that has no Qt parent, and every color-map editor owns a color
+    dialog. They survive the panel: about 3,400 widgets per panel. Over a full
+    run these piled up to more than a million widgets, and the one test module
+    that applies the application style sheet then needed many gigabytes and
+    minutes to restyle them (the run looked hung). Nothing visible is touched.
+    """
+    # Only true orphans: a window that still has a parent (a sub-menu, the
+    # widget of a menu action) is deleted by that parent, never twice.
+    for widget in app.topLevelWidgets():
+        if isinstance(widget, QtWidgets.QMenu) and widget.parent() is None and not widget.isVisible():
+            widget.deleteLater()
+    app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+
+
 class PostprocessingEmptyStateTests(unittest.TestCase):
     """A plot becomes visible only when its own finite data is available."""
 
@@ -58,6 +76,7 @@ class PostprocessingEmptyStateTests(unittest.TestCase):
         self.panel.close()
         self.panel.deleteLater()
         self.app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+        release_orphan_widgets(self.app)
         self.resources.close()
         QtCore.QSettings.setDefaultFormat(self.previous_format)
 

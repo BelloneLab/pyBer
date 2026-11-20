@@ -129,6 +129,8 @@ The modeling workbench consumes the current processed recordings, behavior varia
 ## Groups, seamless figure and editable export
 
 - Create recording groups (label + color), attribute recordings by clicking a group chip or by right-click, and open the recordings list in its own window for long lists.
+- Several behaviors side by side: check two or more behaviors in the Events panel to get one column per behavior (heatmap, mean PSTH, metric) on a shared color scale and y range, with every behavior's events drawn in its own color on the trace preview. Columns wrap onto further rows instead of shrinking.
+- Individual traces behind the mean PSTH: show the average, every trial (or every animal in Group scope), or both, from **Hide/show traces** or the plot's right-click menu. Traces fade from the first to the last trial in the average color, or take one color each; full, dashed, dotted or dash-dot lines; optional legend. Point at a trace to highlight and name it.
 - PSTH **Groups** view: all groups overlaid (one mean +/- SEM per group with `n` legend and a grouped heatmap), one group only, or pooled. In **All groups**, PSTH metrics and global metrics are shown per group, one point per animal. PSTH metrics can be compared as Post − Pre, Post only, Pre only, or Pre and Post side by side with paired lines; the tests follow the choice (between groups: Welch t / Mann-Whitney, ANOVA / Kruskal-Wallis with Holm; within group: paired t / Wilcoxon with Holm) and are exported as CSV. Points, bars or box plots.
 - The results area reads as one figure; dividers stay draggable. Right-click a plot to remove it or change it to another analysis.
 - Image export writes PNG plus editable vector PDF and SVG (one path per curve, real text, plain colors).

@@ -50,10 +50,14 @@ from vector_figure_export import write_vector_figure
 from recording_groups import (RecordingGroups, GroupChipBar, FileRowDelegate, DetachableSection,
                               build_assign_menu, color_dot_icon, UNGROUPED_COLOR, GRIP_W, ROW_HEIGHT)
 from psth_groups import (HeatmapGroupBands, build_group_display, block_summaries, block_ticks, legend_label,
-                         row_file_id, draw_group_comparison, place_legend_clear_of_curves)
+                         row_file_id, draw_group_comparison, place_legend_clear_of_curves,
+                         relayout_legend)
 from group_stats import compare_groups, per_file_means, stats_label, comparison_rows
 from group_metric_views import (GROUP_VIEWS, DEFAULT_GROUP_VIEW, SUMMARY_STYLES, DEFAULT_SUMMARY_STYLE,
                                 build_group_view)
+from psth_trace_overlay import (DEFAULT_TRACE_VIEW, MEAN_WIDTH_WITH_TRACES, TraceOverlay,
+                                normalize_trace_view, populate_trace_menu)
+from multi_behavior_view import MAX_BEHAVIORS, MultiBehaviorView, behavior_color
 from dashboard_panels import DashboardPanels, GridRowHandle, HANDLE_PX, seamless_figure_qss, draw_global_metric
 from file_drop import install_file_drop, expand_paths
 from behavior_import import (infer_table, read_behavior_csv, detect_time_column, detect_onset_table,
@@ -4912,7 +4916,32 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._results_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         self._results_splitter.setChildrenCollapsible(False)
         self._results_splitter.setHandleWidth(6)
-        for index, widget in enumerate((self.trace_card, self.row_heat, self.row_signal, self.row_behavior)):
+        # The heatmap/PSTH row shares its place with the multi-behavior
+        # columns (two or more behaviors checked): exactly one of them shows.
+        self.row_heat_page = QtWidgets.QWidget()
+        _page = QtWidgets.QVBoxLayout(self.row_heat_page)
+        _page.setContentsMargins(0, 0, 0, 0)
+        _page.addWidget(self.row_heat)
+        self.multi_behavior_view = MultiBehaviorView()
+        self.multi_behavior_view.hide()
+        self.multi_behavior_view.heightChanged.connect(self._refresh_results_minimum_heights)
+        self.row_heat_host = QtWidgets.QWidget()
+        _host = QtWidgets.QVBoxLayout(self.row_heat_host)
+        _host.setContentsMargins(0, 0, 0, 0)
+        _host.setSpacing(0)
+        _host.addWidget(self.row_heat_page)
+        _host.addWidget(self.multi_behavior_view)
+        for _surface in (self.row_heat_page, self.row_heat_host, self.multi_behavior_view):
+            _surface.setObjectName("figureSurface")
+        self._multi_behavior_active = False
+        self._multi_behavior_layout = {"heat": True, "psth": True, "metric": True}
+        self._multi_event_items: List[object] = []
+        self._multi_behavior_timer = QtCore.QTimer(self)
+        self._multi_behavior_timer.setSingleShot(True)
+        self._multi_behavior_timer.setInterval(120)
+        self._multi_behavior_timer.timeout.connect(self._refresh_multi_behavior)
+        self.row_heat.installEventFilter(self)
+        for index, widget in enumerate((self.trace_card, self.row_heat_host, self.row_signal, self.row_behavior)):
             self._results_splitter.addWidget(widget)
             self._results_splitter.setStretchFactor(index, 1 if index == 0 else 2)
         self._results_splitter.setSizes([240, 500, 220, 360])
@@ -4957,6 +4986,19 @@ class PostProcessingPanel(QtWidgets.QWidget):
         _avg_view = self.plot_avg.getPlotItem().getViewBox()
         _avg_view.sigRangeChanged.connect(lambda *_: self._group_legend_timer.start())
         _avg_view.sigResized.connect(lambda *_: self._group_legend_timer.start())
+        # Individual traces (trials, or animals in Group scope) behind the mean,
+        # with their own optional legend and a hover highlight.
+        self._trace_view: Dict[str, object] = dict(DEFAULT_TRACE_VIEW)
+        self._trace_overlay_args = None
+        self.psth_trace_legend = pg.LegendItem(offset=(10, 8), verSpacing=-6)
+        self.psth_trace_legend.setParentItem(_avg_view)
+        self.psth_trace_legend.hide()
+        self.psth_traces = TraceOverlay(self.plot_avg, self.psth_trace_legend, parent=self)
+        self.plot_avg.scene().sigMouseMoved.connect(self.psth_traces.hover)
+        if _avg_view.menu is not None:
+            self.menu_psth_traces = QtWidgets.QMenu("Individual traces", _avg_view.menu)
+            self.menu_psth_traces.aboutToShow.connect(self._fill_trace_menu)
+            _avg_view.menu.addMenu(self.menu_psth_traces)
         self.act_group_legend = QtGui.QAction("Show group legend", self)
         self.act_group_legend.setCheckable(True)
         self.act_group_legend.setChecked(bool(self._style.get("group_legend_visible", True)))
@@ -10039,6 +10081,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
         if panels is not None:
             # Removed/changed panels override the preset; neighbors take the space.
             panels.apply()
+        self._multi_behavior_layout = {
+            "heat": bool(show_heat), "psth": bool(show_avg),
+            "metric": bool(show_avg and self.cb_metrics.isChecked() and layout != "Heatmap focus")}
+        self._sync_heat_host()
         self._refresh_results_minimum_heights()
 
     def _refresh_results_minimum_heights(self) -> None:
@@ -10047,7 +10093,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
             # vertically instead of compressing titles and axes into one another.
             show_heat, show_avg = not self.plot_heat.isHidden(), not self.plot_avg.isHidden()
             heat_height = 440 if show_heat and show_avg else 220
-            minima = ((self.trace_card, 240), (self.row_heat, heat_height), (self.row_signal, 220), (self.row_behavior, 360))
+            multi = bool(getattr(self, "_multi_behavior_active", False))
+            if multi:
+                # Columns may wrap onto several bands: reserve all of them.
+                heat_entry = (self.row_heat_host, self.multi_behavior_view.required_height())
+            else:
+                heat_entry = (self.row_heat, heat_height)
+                if hasattr(self, "row_heat_host"):
+                    self.row_heat_host.setMinimumHeight(0)
+            minima = ((self.trace_card, 240), heat_entry, (self.row_signal, 220), (self.row_behavior, 360))
             visible = [(widget, height) for widget, height in minima if not widget.isHidden()]
             for widget, height in minima:
                 widget.setMinimumHeight(height)
@@ -13285,6 +13339,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
         """Right-click must not toggle multi-selection; it targets the row instead."""
+        if watched is getattr(self, "row_heat", None) and event.type() in (
+                QtCore.QEvent.Type.ShowToParent, QtCore.QEvent.Type.HideToParent):
+            # Keep the heatmap row and the multi-behavior columns mutually exclusive.
+            QtCore.QTimer.singleShot(0, self._sync_heat_host)
         for file_list in (getattr(self, "list_preprocessed", None), getattr(self, "list_behaviors", None)):
             if file_list is None or watched is not file_list.viewport():
                 continue
@@ -15457,6 +15515,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self._trace_preview_events = np.array([], float)
             self._trace_preview_durations = np.array([], float)
             self.plot_trace.setTitle(self._trace_preview_title(proc))
+        self._trace_preview_source = source
+        if getattr(self, "_multi_behavior_active", False):
+            self._render_multi_behavior_events()
+        else:
+            self._clear_multi_behavior_events()
         self._refresh_signal_overlay()
 
         if fit_trace:
@@ -17291,6 +17354,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             except Exception:
                 pass
         self._group_avg_items = []
+        self._group_mean_curves = []
         self._group_legend_curves = []
         legend = getattr(self, "psth_group_legend", None)
         if legend is not None:
@@ -17299,6 +17363,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
 
     def _restore_default_avg_style(self) -> None:
         """Undo a one-group tint: pooled curves use the plot theme colors."""
+        self.curve_avg._pyber_base_pen = None
         self.curve_avg.setPen(pg.mkPen(self._style_color_tuple("avg", (90, 190, 255)), width=2.0))
         self.sem_band.setBrush(pg.mkBrush(*self._style_color_tuple("sem_fill", (188, 230, 178, 96))))
         self.sem_band.setVisible(True)
@@ -17320,8 +17385,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
             band = QtGui.QColor(color)
             band.setAlpha(60)
             sem_safe = np.where(np.isfinite(sem), sem, 0.0)
-            high = self.plot_avg.plot(tvec, avg + sem_safe, pen=None, connect="finite")
-            low = self.plot_avg.plot(tvec, avg - sem_safe, pen=None, connect="finite")
+            # Transparent pen, not None: pyqtgraph builds no path for a curve
+            # without pen, which left the SEM band between them empty.
+            edge = pg.mkPen(0, 0, 0, 0)
+            high = self.plot_avg.plot(tvec, avg + sem_safe, pen=edge, connect="finite")
+            low = self.plot_avg.plot(tvec, avg - sem_safe, pen=edge, connect="finite")
             fill = pg.FillBetweenItem(high, low, brush=pg.mkBrush(band))
             fill.setZValue(-1)
             self.plot_avg.addItem(fill)
@@ -17329,7 +17397,9 @@ class PostProcessingPanel(QtWidgets.QWidget):
             curve.setZValue(2)
             legend.addItem(curve, legend_label(block, level))
             self._group_avg_items.extend([high, low, fill, curve])
+            self._group_mean_curves.append(curve)
             self._group_legend_curves.extend([(tvec, avg), (tvec, avg + sem_safe), (tvec, avg - sem_safe)])
+        relayout_legend(legend, 1)
         self._sync_group_legend_visibility()
         self._group_legend_timer.start()
         self._set_psth_caption("PSTH: groups mean \u00b1 SEM")
@@ -17361,10 +17431,17 @@ class PostProcessingPanel(QtWidgets.QWidget):
     def _place_group_legend(self) -> Optional[str]:
         """Move the legend where it covers the fewest curve samples; returns the position name."""
         legend = self.psth_group_legend
-        if not legend.isVisible() or not self._group_legend_curves:
-            return None
-        return place_legend_clear_of_curves(legend, self.plot_avg.getPlotItem().getViewBox(),
-                                            self._group_legend_curves)
+        view = self.plot_avg.getPlotItem().getViewBox()
+        name = None
+        if legend.isVisible() and self._group_legend_curves:
+            name = place_legend_clear_of_curves(legend, view, self._group_legend_curves)
+        traces = getattr(self, "psth_traces", None)
+        if traces is not None and self.psth_trace_legend.isVisible() and traces.has_traces():
+            # The trace legend also keeps clear of the group legend.
+            avoid = legend.mapRectToParent(legend.boundingRect()) if legend.isVisible() else None
+            place_legend_clear_of_curves(self.psth_trace_legend, view,
+                                         list(self._group_legend_curves) + traces.curve_data(), avoid=avoid)
+        return name
 
     def _psth_time_axis_label(self):
         if self.combo_align.currentText() == "Event marker":
@@ -17419,10 +17496,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         set_plot_has_data(self.plot_avg, ready)
         self._clear_group_avg_items()
         self._restore_default_avg_style()
+        self._trace_overlay_args = None
         if not ready:
             self.curve_avg.setData([], [])
             self.curve_sem_hi.setData([], [])
             self.curve_sem_lo.setData([], [])
+            self._apply_trace_view()
             return
 
         group_display = self._active_group_display(mat)
@@ -17433,6 +17512,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
                                      "the rows of each group (recordings, or trials when trial rows are kept).")
             self._render_group_avg(group_display, tvec)
             self.plot_avg.setXRange(float(tvec[0]), float(tvec[-1]), padding=0)
+            # Individual traces: the rows of each group, in that group's color.
+            self._trace_overlay_args = (
+                tvec, group_display.matrix, list(group_display.labels),
+                [(block.start, block.stop, block.color, block.name) for block in group_display.blocks])
+            self._apply_trace_view()
             return
 
         avg, sem, counts = mean_sem(mat)
@@ -17456,8 +17540,251 @@ class PostProcessingPanel(QtWidgets.QWidget):
             band = QtGui.QColor(color)
             band.setAlpha(60)
             self.curve_avg.setPen(pg.mkPen(color, width=2.0))
+            self.curve_avg._pyber_base_pen = None
             self.sem_band.setBrush(pg.mkBrush(band))
             self._set_psth_caption(f"PSTH: {block.name} mean \u00b1 SEM")
+        # Individual traces: every displayed row, in shades of the mean color.
+        labels = list(getattr(self, "_last_display_labels", []) or [])
+        if len(labels) != mat.shape[0]:
+            unit = "Animal" if display_level == "animals" else "Trial"
+            labels = [f"{unit} {index + 1}" for index in range(mat.shape[0])]
+        self._trace_overlay_args = (tvec, mat, labels,
+                                    [(0, mat.shape[0], self.curve_avg.opts["pen"].color(), "")])
+        self._apply_trace_view()
+
+    # -- individual traces behind the mean PSTH ------------------------------
+    def trace_view(self) -> Dict[str, object]:
+        """Current options of the individual traces (psth_trace_overlay.DEFAULT_TRACE_VIEW keys)."""
+        return dict(self._trace_view)
+
+    def set_trace_view(self, key: str, value: object) -> None:
+        """Change one trace option (menu callback) and redraw; no PSTH recompute."""
+        self._trace_view = normalize_trace_view({**self._trace_view, key: value})
+        self._apply_trace_view()
+        self._queue_settings_save()
+
+    def _fill_trace_menu(self) -> None:
+        """Right-click > Individual traces: rebuilt each time so its checks are current."""
+        self.menu_psth_traces.clear()
+        populate_trace_menu(self.menu_psth_traces, self._trace_view, self.set_trace_view)
+
+    def _apply_trace_view(self) -> None:
+        """Show the average, the individual traces, or both, as chosen."""
+        if not hasattr(self, "psth_traces"):
+            return
+        view = normalize_trace_view(self._trace_view)
+        args = self._trace_overlay_args
+        mean_visible = view["show"] != "traces" or args is None
+        grouped = bool(self._group_avg_items)
+        # Pooled mean (hidden while per-group means are drawn) and group means.
+        for item in (self.curve_avg, self.curve_sem_hi, self.curve_sem_lo):
+            item.setVisible(mean_visible)
+        self.sem_band.setVisible(mean_visible and not grouped)
+        means = getattr(self, "_group_mean_curves", [])
+        for item in self._group_avg_items:
+            if any(item is curve for curve in means):
+                # Faded out, not hidden: the group legend keeps its colored
+                # samples (a hidden curve is shown as a crossed-out eye).
+                item.setOpacity(1.0 if mean_visible else 0.0)
+            else:
+                item.setVisible(mean_visible)
+        # The trace legend sits on a translucent panel: it stays readable over the traces.
+        surface = QtGui.QColor(str(self._current_palette().get("surface", "#101520")))
+        surface.setAlpha(215)
+        self.psth_trace_legend.setBrush(pg.mkBrush(surface))
+        self.psth_trace_legend.setLabelTextColor(QtGui.QColor(str(self._current_palette().get("text", "#CED8E6"))))
+        # With its traces behind it, the average is drawn thicker so it stays readable.
+        emphasize = view["show"] == "both" and args is not None
+        for curve in [self.curve_avg, *getattr(self, "_group_mean_curves", [])]:
+            base = getattr(curve, "_pyber_base_pen", None)
+            if base is None:
+                base = QtGui.QPen(curve.opts["pen"])
+                curve._pyber_base_pen = base
+            pen = QtGui.QPen(base)
+            if emphasize:
+                pen.setWidthF(max(base.widthF(), MEAN_WIDTH_WITH_TRACES))
+            curve.setPen(pen)
+        if args is None or view["show"] == "average":
+            self.psth_traces.clear()
+        else:
+            self.psth_traces.draw(*args, view)
+        if hasattr(self, "_group_legend_timer"):
+            self._group_legend_timer.start()
+        if hasattr(self, "_multi_behavior_timer"):
+            self._multi_behavior_timer.start()
+
+    # -- several behaviors side by side ---------------------------------------
+    def _psth_dashboard_widget(self) -> QtWidgets.QWidget:
+        """Widget exported as the PSTH figure: the columns when several behaviors are shown."""
+        return self.multi_behavior_view if self._multi_behavior_active else self.row_heat
+
+    def _multi_behavior_names(self) -> List[str]:
+        """Behaviors to draw side by side: the ones checked in the Events panel (2 or more)."""
+        if not self._processed or self._event_category() != "behavior":
+            return []
+        if self.combo_align.currentText() != "Behavior (CSV/XLSX)":
+            return []
+        if self.combo_behavior_align.currentText().startswith("Transition"):
+            return []
+        panel = getattr(self, "behavior_zone_panel", None)
+        names = list(panel._selected_labels()) if panel is not None else []
+        return names if len(names) >= 2 else []
+
+    def _sync_heat_host(self) -> None:
+        """Show either the standard heatmap/PSTH row or the multi-behavior columns."""
+        if not hasattr(self, "row_heat_host"):
+            return
+        multi = bool(self._multi_behavior_active)
+        show = self._multi_behavior_layout
+        self.multi_behavior_view.set_visible_panels(show["heat"], show["psth"], show["metric"])
+        multi_visible = multi and (show["heat"] or show["psth"])
+        self.row_heat_page.setVisible(not multi)
+        self.multi_behavior_view.setVisible(multi_visible)
+        self.row_heat_host.setVisible(multi_visible or (not multi and not self.row_heat.isHidden()))
+
+    def queue_multi_behavior(self) -> None:
+        """Called when the checked behaviors change: redraw columns and trace events soon."""
+        if hasattr(self, "_multi_behavior_timer"):
+            self._multi_behavior_timer.start()
+
+    def _refresh_multi_behavior(self) -> None:
+        """Compute and draw one column per checked behavior (same settings as the main PSTH)."""
+        if not hasattr(self, "multi_behavior_view"):
+            return
+        names = self._multi_behavior_names()
+        was_active = self._multi_behavior_active
+        if len(names) < 2:
+            self._multi_behavior_active = False
+            self.multi_behavior_view.clear()
+            if was_active:
+                self._sync_heat_host()
+                self._refresh_results_minimum_heights()
+                self._update_trace_preview()
+            return
+        if len(names) > MAX_BEHAVIORS:
+            self.statusUpdate.emit(
+                f"Showing the first {MAX_BEHAVIORS} of {len(names)} checked behaviors side by side.", 6000)
+        entries = []
+        grouped = self.tab_sources.currentIndex() == 1 and self.tab_visual_mode.currentIndex() == 1
+        animal_rows = grouped and not self._psth_group_trial_view_enabled()
+        metric_ids = self._metric_family_ids()[:1] if self.cb_metrics.isChecked() else []
+        pre_window = (float(self.spin_metric_pre0.value()), float(self.spin_metric_pre1.value()))
+        post_window = (float(self.spin_metric_post0.value()), float(self.spin_metric_post1.value()))
+        units = self._psth_units()
+        for index, name in enumerate(names[:MAX_BEHAVIORS]):
+            entry = {"name": name, "color": behavior_color(index), "matrix": None, "tvec": None, "labels": [],
+                     "row_unit": "animals" if animal_rows else "trials", "metric": None}
+            try:
+                matrix, tvec, labels = self._compute_psth_for_behavior(name)
+            except ValueError as exc:
+                self.statusUpdate.emit(f"{name}: {exc}", 6000)
+                matrix = tvec = None
+                labels = []
+            if matrix is not None and tvec is not None and matrix.size:
+                entry.update(matrix=matrix, tvec=tvec,
+                             labels=[str(label).split(" | ")[-1] if not grouped else str(label) for label in labels])
+                if metric_ids:
+                    result = summarize_metrics(matrix, tvec, metric_ids, pre_window, post_window, units,
+                                               independent_units=(not grouped or animal_rows),
+                                               row_unit="files" if animal_rows else "trials")
+                    entry["metric"] = next(iter(result.values()), None)
+            entries.append(entry)
+        matrices = [entry["matrix"] for entry in entries if entry["matrix"] is not None]
+        if not matrices:
+            self._multi_behavior_active = False
+            self.multi_behavior_view.clear()
+            self._sync_heat_host()
+            self._refresh_results_minimum_heights()
+            return
+        # One color scale for every heatmap: limits from all behaviors together.
+        width = min(matrix.shape[1] for matrix in matrices)
+        low, high = heatmap_color_limits(np.vstack([matrix[:, :width] for matrix in matrices]),
+                                         self.combo_heat_scale.currentIndex(), self._style)
+        self._multi_behavior_active = True
+        self.multi_behavior_view.apply_theme(self._current_palette())
+        self._sync_heat_host()
+        self.multi_behavior_view.show_entries(
+            entries, color_map=heatmap_color_map(self._style), levels=(float(low), float(high)), units=units,
+            time_label=self._psth_time_axis_label(), trace_view=self._trace_view,
+            missing_mode=str(self._settings.value(missing_data.SETTINGS_KEY_MODE, missing_data.DEFAULT_MODE)
+                             or missing_data.DEFAULT_MODE),
+            missing_trim=self._settings.value(missing_data.SETTINGS_KEY_TRIM, missing_data.DEFAULT_TRIM, type=bool))
+        self._refresh_results_minimum_heights()
+        self._render_multi_behavior_events()
+
+    def _clear_multi_behavior_events(self) -> None:
+        for item in self._multi_event_items:
+            try:
+                if isinstance(item, pg.LegendItem):
+                    item.scene().removeItem(item) if item.scene() is not None else None
+                else:
+                    self.plot_trace.removeItem(item)
+            except Exception:
+                pass
+        self._multi_event_items = []
+
+    def _render_multi_behavior_events(self) -> None:
+        """Trace preview: the events of every checked behavior, each in its own color."""
+        self._clear_multi_behavior_events()
+        names = self._multi_behavior_names()[:MAX_BEHAVIORS]
+        source = getattr(self, "_trace_preview_source", None)
+        if len(names) < 2 or source is None:
+            return
+        proc, _time, signal = source
+        info = self._match_behavior_source(proc)
+        values = np.asarray(signal, float)
+        finite = values[np.isfinite(values)]
+        if not info or not finite.size:
+            return
+        low, high = float(finite.min()), float(finite.max())
+        pad = 0.03 * max(1e-12, high - low)
+        low, high = low - pad, high + pad
+        offset_aligned = self.combo_behavior_align.currentText().endswith("offset")
+        # The single-behavior markers and numbers are replaced by the colored sets.
+        self._clear_event_annotations()
+        self.curve_event_markers.setData([], [])
+        self._trace_preview_events = np.array([], float)
+        self._trace_preview_durations = np.array([], float)
+        legend = pg.LegendItem(offset=(-10, 6), verSpacing=-6)
+        legend.setParentItem(self.plot_trace.getPlotItem().getViewBox())
+        palette = self._current_palette()
+        legend.setLabelTextColor(QtGui.QColor(str(palette.get("text", "#CED8E6"))))
+        surface = QtGui.QColor(str(palette.get("surface", "#101520")))
+        surface.setAlpha(200)
+        legend.setBrush(pg.mkBrush(surface))
+        total = 0
+        for index, name in enumerate(names):
+            onsets, offsets, durations = self._extract_behavior_events(info, name)
+            events = offsets if offset_aligned else onsets
+            events, durations = self._filter_events(events, durations)
+            events = np.asarray(events, float)
+            events = events[np.isfinite(events)] if events.size else events
+            red, green, blue = behavior_color(index)
+            line_x = np.empty(events.size * 3)
+            line_y = np.empty(events.size * 3)
+            line_x[0::3], line_x[1::3], line_x[2::3] = events, events, np.nan
+            line_y[0::3], line_y[1::3], line_y[2::3] = low, high, np.nan
+            lines = pg.PlotDataItem(line_x, line_y, connect="finite",
+                                    pen=pg.mkPen(QtGui.QColor(red, green, blue, 210), width=1.3))
+            lines.setZValue(4)
+            self.plot_trace.addItem(lines, ignoreBounds=True)
+            self._multi_event_items.append(lines)
+            legend.addItem(lines, f"{name} ({events.size})")
+            total += int(events.size)
+            durations = np.asarray(durations, float) if durations is not None else np.array([], float)
+            if durations.size == events.size and events.size:
+                length = np.where(np.isfinite(durations) & (durations > 0), durations, 0.0)
+                keep = length > 0
+                if keep.any():
+                    starts = (events - length if offset_aligned else events)[keep]
+                    bouts = pg.BarGraphItem(x0=starts, x1=starts + length[keep], y0=low, y1=high,
+                                            brush=pg.mkBrush(red, green, blue, 34), pen=pg.mkPen(None))
+                    bouts.setZValue(-1)
+                    self.plot_trace.addItem(bouts, ignoreBounds=True)
+                    self._multi_event_items.append(bouts)
+        relayout_legend(legend, max(1, len(names)))
+        self._multi_event_items.append(legend)
+        self.plot_trace.setTitle(self._trace_preview_title(proc, total))
 
     @staticmethod
     def _finite_mean_sem(values: np.ndarray) -> Tuple[float, float, int]:
@@ -19448,6 +19775,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "metric": "AUC",
             "metric_group_view": DEFAULT_GROUP_VIEW,
             "metric_summary_style": DEFAULT_SUMMARY_STYLE,
+            "psth_trace_view": dict(DEFAULT_TRACE_VIEW),
             "metric_pre0": -1.0,
             "metric_pre1": 0.0,
             "metric_post0": 0.0,
@@ -19630,6 +19958,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "metric": self.combo_metric.currentText(),
             "metric_group_view": self._metric_group_view(),
             "metric_summary_style": self._metric_summary_style(),
+            "psth_trace_view": dict(self._trace_view),
             "extra_metrics": [key for key, action in self._metric_actions.items() if action.isChecked()],
             "metric_pre0": float(self.spin_metric_pre0.value()),
             "metric_pre1": float(self.spin_metric_pre1.value()),
@@ -19805,6 +20134,8 @@ class PostProcessingPanel(QtWidgets.QWidget):
             self.cb_group_keep_trials.setChecked(bool(data["psth_group_keep_trials"]))
         self._update_psth_inclusion_controls()
         self.cb_metrics.setChecked(bool(data.get("metrics_enabled", True)))
+        self._trace_view = normalize_trace_view(data.get("psth_trace_view"))
+        self._apply_trace_view()
         for combo, code in ((self.combo_metric_group_view, data.get("metric_group_view", DEFAULT_GROUP_VIEW)),
                             (self.combo_metric_style, data.get("metric_summary_style", DEFAULT_SUMMARY_STYLE))):
             with QtCore.QSignalBlocker(combo):
@@ -20668,7 +20999,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if choices.get("plot_avg") and hasattr(self, "row_avg"):
                 _start_export_step("Exporting average plot...")
                 base = os.path.join(out_dir, f"{prefix}_plot_avg")
-                self._export_widget_selective(self.row_heat, base, do_png, do_pdf)
+                self._export_widget_selective(self._psth_dashboard_widget(), base, do_png, do_pdf)
                 for index, key in enumerate(getattr(self, "_last_metric_panels", {})):
                     plot = self.plot_metrics if index == 0 else self._extra_metric_plots[key]
                     self._export_widget_selective(plot, os.path.join(out_dir, f"{prefix}_plot_metric_{key}"), do_png, do_pdf)
@@ -21062,7 +21393,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
             if choices.get("heat"):
                 export_targets.append(("heatmap_psth", self.psth_shared_card))
             if choices.get("avg"):
-                export_targets.append(("psth_dashboard", self.row_heat))
+                export_targets.append(("psth_dashboard", self._psth_dashboard_widget()))
             if choices.get("signal"):
                 export_targets.append(("signal", self.row_signal))
             if choices.get("behavior"):

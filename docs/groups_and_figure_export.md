@@ -132,6 +132,62 @@ Exports add `<prefix>_avg_psth_groups.csv` (time, mean, SEM and n per group)
 when All groups is shown, and `<prefix>_recording_groups.csv` (file id, group,
 color, source path) whenever groups exist.
 
+### Individual traces behind the mean
+
+The mean ± SEM does not show how consistent the single responses are. The mean
+PSTH plot can also draw every displayed row: each trial in Individual scope,
+each animal in Group scope (or each trial when trial rows are kept).
+
+Open **Hide/show traces** in the toolbar (Individual scope), the **Individual
+traces** submenu of **Hide/show groups** (Group scope), or right-click the mean
+PSTH and choose **Individual traces**:
+
+- **Average only** (default), **Average and individual traces**, or
+  **Individual traces only**. With both, the average is drawn thicker.
+- **Trace colors**: *Shades of the average color* fades from the first trace
+  (darkest) to the last (faintest), so a drift across trials is visible at a
+  glance; in the group view each animal takes its group color and the fade
+  restarts in every group. *One color per trace* gives separate hues to up to
+  ten traces and an ordered color scale to more.
+- **Line style**: full, dashed, dotted or dash-dot.
+- **Trace legend**: off by default. It names all traces when they are few and
+  an even selection (first and last included) when they are many, and it is
+  placed clear of the curves and of the group legend.
+
+Point at a trace to highlight it and read its name (trial number or
+recording), with or without the legend. Above 300 rows an even selection is
+drawn. This is display only: the matrix, the mean, the SEM, the metrics and
+the exports do not change. The choice is saved with the settings and the
+project.
+
+### Several behaviors side by side
+
+Check two or more behaviors in the Events panel (with **Align to: Behavior**).
+The single heatmap / PSTH row is replaced by one column per checked behavior,
+in the order of the list:
+
+- **Heatmap**: every column uses the same color limits, shown by one color bar,
+  so intensities can be compared between behaviors. The limits follow the
+  heatmap contrast setting and are computed from all shown behaviors together.
+- **Mean PSTH ± SEM**: every column uses the same y range, in the color the
+  behavior has in the comparison plot. The individual-trace options above apply
+  to each column.
+- **Metric**: the selected PSTH metric, Pre vs Post, for that behavior.
+- **Trace preview**: the events of every checked behavior are drawn in its
+  color (a line per event, a shaded span per bout), with a legend giving the
+  number of events.
+
+Each column is computed with the same function, filters, windows and
+normalization as the single-behavior view, so a column shows exactly what that
+behavior shows alone. Up to six behaviors are drawn.
+
+Nothing is cut when space is short: a column is never narrower than 300 px;
+columns that do not fit wrap onto another row and the results area scrolls.
+The y-axis label is written once per row and the behavior name is shortened
+with its full text in the tooltip. Unchecking down to one behavior restores
+the standard view with its behavior and global panels. Figure exports of the
+PSTH dashboard export the columns while they are shown.
+
 ## 3. One seamless figure with editable panels
 
 The results area is drawn as a single figure: no card outlines between panels.

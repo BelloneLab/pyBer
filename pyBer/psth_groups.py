@@ -262,15 +262,21 @@ LEGEND_POSITIONS: Tuple[Tuple[str, float, float], ...] = (
 )
 LEGEND_MARGIN_PX = 8            # gap between the legend and the plot edge
 LEGEND_SAMPLES_PER_CURVE = 600  # points tested per curve (dense traces are thinned)
+LEGEND_AVOID_PENALTY = 10 ** 9  # count added to a position that covers the rectangle to avoid
+LEGEND_ENTRY_GAP_PX = 10        # room between two legend entries on the same row
 
 
 def legend_overlap_counts(curves: Sequence[Tuple[np.ndarray, np.ndarray]], view_range,
                           view_size_px: Tuple[float, float], legend_size_px: Tuple[float, float],
-                          margin_px: float = LEGEND_MARGIN_PX) -> Dict[str, int]:
+                          margin_px: float = LEGEND_MARGIN_PX,
+                          avoid_px: Optional[Tuple[float, float, float, float]] = None) -> Dict[str, int]:
     """Number of curve samples under the legend for every candidate position.
 
     ``curves``: (x, y) arrays in data coordinates. ``view_range``: ((x0, x1),
-    (y0, y1)). Sizes are in pixels. Pure function, so the choice is testable.
+    (y0, y1)). Sizes are in pixels. ``avoid_px`` (left, top, width, height) is
+    a rectangle that must stay free, for example another legend: positions
+    that touch it get a prohibitive count. Pure function, so the choice is
+    testable.
     """
     (x0, x1), (y0, y1) = view_range
     width, height = float(view_size_px[0]), float(view_size_px[1])
@@ -278,6 +284,14 @@ def legend_overlap_counts(curves: Sequence[Tuple[np.ndarray, np.ndarray]], view_
     if width <= 0 or height <= 0 or x1 == x0 or y1 == y0:
         return counts
     legend_w, legend_h = float(legend_size_px[0]), float(legend_size_px[1])
+    if avoid_px is not None:
+        a_left, a_top, a_width, a_height = (float(v) for v in avoid_px)
+        for name, ax, ay in LEGEND_POSITIONS:
+            left = margin_px + ax * (width - legend_w - 2 * margin_px)
+            top = margin_px + ay * (height - legend_h - 2 * margin_px)
+            if (left < a_left + a_width and left + legend_w > a_left and
+                    top < a_top + a_height and top + legend_h > a_top):
+                counts[name] += LEGEND_AVOID_PENALTY
     for x, y in curves:
         x, y = np.asarray(x, float), np.asarray(y, float)
         if x.size == 0 or x.size != y.size:
@@ -302,30 +316,107 @@ def best_legend_position(counts: Dict[str, int]) -> Tuple[str, float, float]:
     return min(LEGEND_POSITIONS, key=lambda item: counts.get(item[0], 0))
 
 
+def legend_box_size(legend: pg.LegendItem, columns: int) -> Tuple[float, float]:
+    """Width and height of ``legend`` if its entries were laid out in ``columns`` columns.
+
+    Computed from the entries (no layout change), with the same rule pyqtgraph
+    uses for its own size: widest row, sum of the row heights.
+    """
+    columns = max(1, int(columns))
+    entries = list(legend.items)
+    column_widths = [0.0] * columns
+    height = 0.0
+    rows = 0
+    for first in range(0, len(entries), columns):
+        row = entries[first:first + columns]
+        rows += 1
+        height += max((max(sample.height(), _label_size(label)[1]) for sample, label in row), default=0.0)
+        for column, (sample, label) in enumerate(row):
+            column_widths[column] = max(column_widths[column],
+                                        sample.width() + _label_size(label)[0] + LEGEND_ENTRY_GAP_PX + 2)
+    spacing = float(legend.layout.verticalSpacing())
+    return float(sum(column_widths)), float(max(0.0, height + spacing * max(0, rows - 1)))
+
+
+def _label_size(label) -> Tuple[float, float]:
+    """Text size of a legend label (its geometry is stale until the layout has run)."""
+    hint = label.sizeHint(QtCore.Qt.SizeHint.PreferredSize, QtCore.QSizeF())
+    return float(max(hint.width(), 1.0)), float(max(hint.height(), 1.0))
+
+
+def relayout_legend(legend: pg.LegendItem, columns: int = 1) -> None:
+    """Lay the entries of ``legend`` out in ``columns`` columns, starting at the first grid row.
+
+    pyqtgraph appends entries after the rows a legend has ever used (a Qt grid
+    layout never shrinks), so a legend that is cleared and refilled, or whose
+    column count changes, drifts down and leaves gaps. Here every entry gets
+    an explicit cell and the unused rows and columns are collapsed.
+    """
+    columns = max(1, int(columns))
+    layout = legend.layout
+    entries = list(legend.items)
+    for index in range(layout.count() - 1, -1, -1):
+        layout.removeAt(index)
+    for index, (sample, label) in enumerate(entries):
+        row, column = divmod(index, columns)
+        layout.addItem(sample, row, column * 2)
+        layout.addItem(label, row, column * 2 + 1)
+    used_rows = -(-len(entries) // columns)
+    spacing = layout.verticalSpacing()
+    for row in range(layout.rowCount()):
+        # Rows in use keep the legend's own spacing; rows left over from an
+        # earlier layout take no room at all.
+        layout.setRowSpacing(row, spacing if row < used_rows - 1 else 0)
+        layout.setRowMaximumHeight(row, 16777215 if row < used_rows else 0)
+    for column in range(layout.columnCount()):
+        in_use = column < columns * 2
+        layout.setColumnSpacing(column, (LEGEND_ENTRY_GAP_PX if column % 2 else 2) if in_use else 0)
+        layout.setColumnMaximumWidth(column, 16777215 if in_use else 0)
+    legend.columnCount = columns
+    legend.rowCount = max(1, used_rows)
+    width, height = legend_box_size(legend, columns)
+    legend.setGeometry(0, 0, width, height)
+
+
 def place_legend_clear_of_curves(legend: pg.LegendItem, view_box: pg.ViewBox,
-                                 curves: Sequence[Tuple[np.ndarray, np.ndarray]]) -> str:
+                                 curves: Sequence[Tuple[np.ndarray, np.ndarray]],
+                                 avoid: Optional[QtCore.QRectF] = None) -> str:
     """Lay out and anchor ``legend`` where it covers the fewest curve samples.
 
-    Besides the six positions, the entries are tried in one column, two
-    columns and one row: a short, wide plot is usually clearer of curves along
-    its top or bottom edge. Layouts wider than the plot are skipped. Ties keep
-    fewer columns, then the preferred position order. Returns the position name.
+    Besides the six positions, the entries are tried in one to four columns
+    and in one row: a short, wide plot is usually clearer of curves along its
+    top or bottom edge. Layouts that do not fit inside the plot are skipped
+    (the most compact one is used if none fits). ``avoid`` is a rectangle, in
+    view-box pixels, that must stay free (another legend). Ties keep fewer
+    columns, then the preferred position order. Returns the position name.
     """
     size = view_box.size()
     entries = max(1, len(legend.items))
+    avoid_px = None if avoid is None else (avoid.left(), avoid.top(), avoid.width(), avoid.height())
     best = None
-    for columns in sorted({1, min(2, entries), entries}):
-        legend.setColumnCount(columns)
-        box = legend.boundingRect()
-        if columns > 1 and box.width() > size.width() - 2 * LEGEND_MARGIN_PX:
+    fallback = None
+    for columns in sorted({1, min(2, entries), min(3, entries), min(4, entries), entries}):
+        width, height = legend_box_size(legend, columns)
+        overflow = max(0.0, width - (size.width() - 2 * LEGEND_MARGIN_PX)) + \
+            max(0.0, height - (size.height() - 2 * LEGEND_MARGIN_PX))
+        if fallback is None or overflow < fallback[0]:
+            fallback = (overflow, columns)
+        if overflow > 0:
             continue
         counts = legend_overlap_counts(curves, view_box.viewRange(), (size.width(), size.height()),
-                                       (box.width(), box.height()))
+                                       (width, height), avoid_px=avoid_px)
         name, ax, ay = best_legend_position(counts)
         if best is None or counts[name] < best[0]:
             best = (counts[name], columns, name, ax, ay)
+    if best is None:
+        # Nothing fits: take the layout that overflows least and the preferred corner.
+        width, height = legend_box_size(legend, fallback[1])
+        counts = legend_overlap_counts(curves, view_box.viewRange(), (size.width(), size.height()),
+                                       (width, height), avoid_px=avoid_px)
+        name, ax, ay = best_legend_position(counts)
+        best = (counts[name], fallback[1], name, ax, ay)
     _count, columns, name, ax, ay = best
-    legend.setColumnCount(columns)
+    relayout_legend(legend, columns)
     offset = (LEGEND_MARGIN_PX * (1 - 2 * ax) if ax != 0.5 else 0.0, LEGEND_MARGIN_PX * (1 - 2 * ay))
     legend.anchor(itemPos=(ax, ay), parentPos=(ax, ay), offset=offset)
     return name

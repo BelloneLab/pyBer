@@ -102,7 +102,9 @@ class MissingDataGuiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(panel.btn_action_hide.isHidden())
         panel.tab_visual_mode.setCurrentIndex(0)
-        self.assertTrue(panel.btn_group_view.isHidden())
+        # Individual scope: the same button offers the trial traces.
+        self.assertFalse(panel.btn_group_view.isHidden())
+        self.assertEqual(panel.btn_group_view.text(), "Hide/show traces")
         panel.tab_visual_mode.setCurrentIndex(1)
         self.assertFalse(panel.btn_group_view.isHidden())
         self.assertEqual(panel.btn_group_view.text(), "Hide/show groups")

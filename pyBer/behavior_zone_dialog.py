@@ -840,6 +840,8 @@ class BehaviorZonePanel(QtWidgets.QWidget):
     def _selection_changed(self, item=None) -> None:
         self._selection_touched = True
         self.panel._queue_settings_save()
+        # Two or more checked behaviors are drawn side by side (and colored in the trace).
+        self.panel.queue_multi_behavior()
         if item is not None and item.checkState() == QtCore.Qt.CheckState.Checked:
             name = item.text()  # the list may be rebuilt below
             # Checking a behavior means "show its PSTH": leave Event-marker

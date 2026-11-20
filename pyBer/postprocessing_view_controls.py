@@ -1,6 +1,8 @@
 """Compact view menu and portable, named plot-splitter preferences."""
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from psth_trace_overlay import populate_trace_menu
+
 from recording_groups import UNGROUPED_COLOR, UNGROUPED_LABEL, color_dot_icon
 
 # Drawer toggle: chevron size, its distance from the button's right edge, and
@@ -224,6 +226,10 @@ def compact_results_toolbar(panel):
     def rebuild_group_menu():
         menu = panel.menu_group_view
         menu.clear()
+        if panel.tab_visual_mode.currentIndex() != 1:
+            # Individual scope: the same button offers the trial traces.
+            populate_trace_menu(menu, panel.trace_view(), panel.set_trace_view)
+            return
         hidden = panel._hidden_groups()
         for group_id, name, color in group_entries():
             action = menu.addAction(color_dot_icon(color), name)
@@ -239,15 +245,28 @@ def compact_results_toolbar(panel):
         blocks.setCheckable(True)
         blocks.setChecked(panel.cb_group_view.isChecked())
         blocks.toggled.connect(panel.cb_group_view.setChecked)
+        menu.addSeparator()
+        # One trace per animal (or per trial when trial rows are kept).
+        populate_trace_menu(menu.addMenu("Individual traces"), panel.trace_view(), panel.set_trace_view)
 
     def reflect_group_view(*_args):
         """Keep the caption and visibility in step with the groups and the scope."""
         total = len(group_entries())
         shown = total - len(panel._hidden_groups())
-        panel.btn_group_view.setText(
-            "Hide/show groups" if shown == total else f"Hide/show groups ({shown}/{total})")
+        if panel.tab_visual_mode.currentIndex() == 1:
+            panel.btn_group_view.setText(
+                "Hide/show groups" if shown == total else f"Hide/show groups ({shown}/{total})")
+            panel.btn_group_view.setToolTip(
+                "Choose which groups are shown in the heatmap, the mean traces and the metrics, "
+                "and whether each animal's trace is drawn. "
+                "Hidden groups keep their data; they are only left out of the display.")
+        else:
+            panel.btn_group_view.setText("Hide/show traces")
+            panel.btn_group_view.setToolTip(
+                "Show the average, every trial, or both in the mean PSTH plot, "
+                "and choose the colors, line style and legend of the trial traces.")
         panel.group_chip_bar.refresh_eyes()
-        panel.btn_group_view.setVisible(panel.tab_visual_mode.currentIndex() == 1)
+        panel.btn_group_view.setVisible(True)
 
     panel.menu_group_view.aboutToShow.connect(rebuild_group_menu)
     panel.menu_group_view.aboutToHide.connect(reflect_group_view)
