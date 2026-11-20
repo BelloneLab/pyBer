@@ -1199,7 +1199,7 @@ class PcaTrajectoryView(QtCore.QObject):
         if not result.get("available"):
             self._message(widget, str(result.get("note")), text_color)
             return
-        level = "animal-level" if result["level"] == "recordings" else "trial-level, exploratory"
+        level = "animal-level" if result["level"] == "recordings" else "trial-level"
         widget.setTitle(f"Separation · {level} permutation (p = {result['p']:.3g})", color=text_color, size="10pt")
         null = np.asarray(result["null"], float)
         observed = float(result["observed"])

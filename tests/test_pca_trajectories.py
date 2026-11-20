@@ -322,7 +322,7 @@ class PcaPanelTests(dashboard.GroupViewDashboardTests):
         self.assertFalse(view.separation(view.last_report)["available"])
         self.assertIn("two conditions", widget.toolTip())
 
-    def test_trial_level_permutation_is_marked_exploratory(self):
+    def test_trial_level_permutation_title_and_tooltip(self):
         panel, widget = self._panel(METHOD_LAG, slot="bout2", spec=SPEC_SEPARATION)
         view = panel.pca_trajectories
         panel.recording_groups.assign(["wt1", "wt2", "het1", "het2"], None)     # one recording left per group
@@ -332,7 +332,10 @@ class PcaPanelTests(dashboard.GroupViewDashboardTests):
         self.assertEqual(result["level"], "trials")
         self.assertEqual((result["n_a"], result["n_b"]), (EVENTS, EVENTS))
         self.assertLess(result["p"], 0.01)
-        self.assertIn("exploratory", widget.getPlotItem().titleLabel.text)
+        self.assertEqual(
+            widget.getPlotItem().titleLabel.text,
+            f"Separation · trial-level permutation (p = {result['p']:.3g})",
+        )
         self.assertIn("not independent", widget.toolTip())
 
     def test_multiple_behaviors_keep_custom_group_colors_and_have_distinct_symbols(self):
