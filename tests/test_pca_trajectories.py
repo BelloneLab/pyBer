@@ -1,5 +1,6 @@
 """PCA state-space panels: numerics against known answers, then the dashboard panels."""
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pyqtgraph as pg
@@ -13,6 +14,8 @@ from pca_trajectories import (
     METHOD_LAG,
     METHOD_RECORDINGS,
     METHOD_TRIALS,
+    LINE_STYLES,
+    PC_ALPHA,
     POOLED,
     SPEC,
     SPEC_LOADINGS,
@@ -255,7 +258,11 @@ class PcaPanelTests(dashboard.GroupViewDashboardTests):
         lines = iter(widget.listDataItems())
         for curve in report["curves"]:
             for pc in range(report["ratio"].size):
-                times, values = next(lines).getData()
+                line = next(lines)
+                times, values = line.getData()
+                pen = line.opts["pen"]
+                self.assertEqual(pen.color().name(), curve["group_color"])
+                self.assertEqual((pen.style(), pen.color().alpha()), (LINE_STYLES[pc], PC_ALPHA[pc]))
                 np.testing.assert_array_equal(times, curve["time"])
                 np.testing.assert_allclose(values, np.nanmean(curve["units"][:, :, pc], axis=0))
                 self.assertLess(times[0], -2)
@@ -264,11 +271,37 @@ class PcaPanelTests(dashboard.GroupViewDashboardTests):
         markers = [item for item in widget.getPlotItem().items if isinstance(item, pg.InfiniteLine)]
         self.assertEqual([(item.angle, item.value()) for item in markers], [(90, 0)])
 
-        # The original pooled lag loadings remain accessible from the panel menu.
+        # Each group's loadings must come from its own delay windows.
         menu = view.build_menu(widget.getPlotItem().getViewBox().menu)
         next(action for action in menu.actions() if action.text() == "Show delay-window weights").trigger()
         self.assertEqual(widget.getAxis("left").labelText, "Loading (weight)")
         self.assertEqual(widget.getAxis("bottom").labelText, "Lag inside the delay window (s)")
+        self.app.processEvents()
+        view.render(widget, "loadings")  # a second draw starts with sub-unit axis ranges
+        for side in ("bottom", "left"):
+            self.assertEqual(widget.getAxis(side).autoSIPrefixScale, 1.0)
+        grouped = view.last_report
+        self.assertEqual(len(widget.listDataItems()), 6)
+        lines = iter(widget.listDataItems())
+        for (group, color, traces), model in zip(grouped["loading_groups"], grouped["group_models"]):
+            self.assertEqual(model[0], group)
+            windows = np.lib.stride_tricks.sliding_window_view(traces, grouped["loading_delays"], axis=1)
+            _, expected, ratio = fit_pca(windows[np.isfinite(windows).all(axis=-1)])
+            for pc, weights in enumerate(expected):
+                line = next(lines)
+                pen = line.opts["pen"]
+                self.assertEqual((pen.color().name(), pen.style(), pen.color().alpha()),
+                                 (color, LINE_STYLES[pc], PC_ALPHA[pc]))
+                x, observed = line.getData()
+                np.testing.assert_array_equal(x, report["loading_axis"])
+                np.testing.assert_allclose(abs(observed), abs(weights))
+                self.assertGreaterEqual(observed @ report["components"][pc], -1e-12)
+            np.testing.assert_allclose(model[3], ratio)
+
+        # A shared fit remains available for interpreting the trajectory axes.
+        menu = view.build_menu(widget.getPlotItem().getViewBox().menu)
+        next(action for action in menu.actions() if action.text() == "Fit weights separately by group").trigger()
+        self.assertEqual(len(widget.listDataItems()), 3)
         for line, weights in zip(widget.listDataItems(), report["components"]):
             np.testing.assert_allclose(line.getData()[1], weights)
 
@@ -302,6 +335,42 @@ class PcaPanelTests(dashboard.GroupViewDashboardTests):
         self.assertIn("exploratory", widget.getPlotItem().titleLabel.text)
         self.assertIn("not independent", widget.toolTip())
 
+    def test_multiple_behaviors_keep_custom_group_colors_and_have_distinct_symbols(self):
+        panel, widget = self._panel(METHOD_LAG, slot="bout2", spec=SPEC_LOADINGS)
+        view = panel.pca_trajectories
+        panel.recording_groups.update_group(self.wt, color="#783eb6")
+        panel.recording_groups.update_group(self.het, color="#178377")
+        original, time, info = view._trial_responses(view.selected_behaviors(), False)
+        trials = next(iter(original.values()))
+        responses = {"contact": trials, "rearing": {fid: rows * 0.5 for fid, rows in trials.items()}}
+        with patch.object(view, "_trial_responses", return_value=(responses, time, info)), \
+                patch.object(view, "selected_behaviors", return_value=list(responses)):
+            view.refresh()
+        curves = view.last_report["curves"]
+        self.assertEqual(len(curves), 4)
+        lines = [item for item in widget.listDataItems() if isinstance(item, pg.PlotDataItem)]
+        symbols = [item.opts["symbol"] for item in widget.getPlotItem().items if isinstance(item, pg.ScatterPlotItem)]
+        self.assertEqual(len(lines), 12)
+        self.assertEqual(len(symbols), 12)
+        for i, curve in enumerate(curves):
+            expected = "#783eb6" if curve["group"] == "WT" else "#178377"
+            group_lines = lines[3 * i:3 * (i + 1)]
+            self.assertEqual([line.opts["pen"].color().name() for line in group_lines], [expected] * 3)
+        self.assertEqual(len(set(symbols)), 2)
+
+    def test_group_loadings_skip_flat_or_incomplete_groups_and_unsupported_pcs(self):
+        panel, _widget = self._panel(METHOD_TRIALS, slot="bout2", spec=SPEC_LOADINGS)
+        view = panel.pca_trajectories
+        groups = [("varying", "#1188aa", np.array([[-1., 0.], [1., 0.], [np.nan, 5.]])),
+                  ("flat", "#008800", np.ones((3, 2))),
+                  ("incomplete", "#993300", np.array([[np.nan, 0.], [2., 1.]]))]
+        models = view._group_weights(dict(loading_groups=groups, loading_delays=None, components=np.eye(2)))
+        self.assertEqual(len(models), 1)
+        name, _, weights, fractions = models[0]
+        self.assertEqual(name, "varying")
+        np.testing.assert_allclose(weights, [[1., 0.]])
+        np.testing.assert_allclose(fractions, [1.])
+
     def test_right_click_options_and_missing_component_pair(self):
         panel, widget = self._panel(METHOD_LAG)
         view = panel.pca_trajectories
@@ -310,7 +379,8 @@ class PcaPanelTests(dashboard.GroupViewDashboardTests):
         self.assertIn("PCA options", [action.text() for action in menu.actions()])
         options = {action.text(): action for action in menu._pyber_trajectory_menu.actions()}
         self.assertEqual(list(options), ["Method", "Behaviors", "Groups", "Show single trials / bouts",
-                                         "Delay window", "Show delay-window weights", "Axes"])
+                                         "Delay window", "Show delay-window weights",
+                                         "Fit weights separately by group", "Axes"])
         methods = [action.text() for action in options["Method"].menu().actions()]
         self.assertEqual(len(methods), 4)
         self.assertTrue(methods[0].startswith("Onset-to-offset"))

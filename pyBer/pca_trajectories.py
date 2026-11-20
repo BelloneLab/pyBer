@@ -42,7 +42,10 @@ For the lag-embedded methods a loading is a weight per lag inside the delay
 window: a flat PC1 means "local signal level", a PC2 that changes sign means
 "local slope". For event-aligned lag trajectories the panel defaults to the
 mean PC scores at successive window centers in each condition. The fixed
-lag weights are available from PCA options. For trial-response PCA a loading is a time course over the
+lag weights are available from PCA options. When comparing groups, the weights
+view can fit each group's selected trials separately. PC rank and explained
+variance then refer to that group. Trajectories always use the shared fit.
+For trial-response PCA a loading is a time course over the
 response window. For recordings as dimensions it is a weight per recording.
 
 Separation
@@ -157,6 +160,8 @@ COLORS_ON_DARK = ("#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#0ca30
 #: Line styles (fixed order) for behaviors when several groups are shown.
 LINE_STYLES = (QtCore.Qt.PenStyle.SolidLine, QtCore.Qt.PenStyle.DashLine,
                QtCore.Qt.PenStyle.DotLine, QtCore.Qt.PenStyle.DashDotLine)
+PC_ALPHA = (255, 210, 165)         # PC1, PC2, PC3 in an overlay of groups
+BEHAVIOR_SYMBOLS = ("o", "s", "t", "d", "+", "x", "star", "p", "h")
 
 
 # =============================================================================
@@ -280,6 +285,13 @@ def decimate_rows(matrix: np.ndarray, time: np.ndarray, max_points: int = MAX_TR
     return reduced, t[:usable].reshape(-1, factor).mean(axis=1)
 
 
+def _fit_delay_samples(samples, n_components, fit_max):
+    """Fit from evenly spaced complete windows, using the same cap for each PCA."""
+    if len(samples) > fit_max:
+        samples = samples[np.linspace(0, len(samples) - 1, fit_max).astype(int)]
+    return fit_pca(samples, n_components)
+
+
 def embed_units(traces: np.ndarray, n_delays: int, n_components: int = N_COMPONENTS,
                 fit_max: int = FIT_MAX_SAMPLES):
     """Lag-embed many traces and project them in one pooled PCA space.
@@ -298,9 +310,7 @@ def embed_units(traces: np.ndarray, n_delays: int, n_components: int = N_COMPONE
     samples = windows[valid]
     if samples.shape[0] < 2:
         raise ValueError("Not enough complete samples to fit the PCA.")
-    fit = samples if samples.shape[0] <= fit_max else samples[
-        np.linspace(0, samples.shape[0] - 1, fit_max).astype(int)]
-    mean, components, ratio = fit_pca(fit, n_components)
+    mean, components, ratio = _fit_delay_samples(samples, n_components, fit_max)
     scores = np.full(windows.shape[:2] + (components.shape[0],), np.nan)
     scores[valid] = (samples - mean) @ components.T
     centers = np.arange(windows.shape[1]) + (m - 1) // 2
@@ -399,7 +409,7 @@ class PcaTrajectoryView(QtCore.QObject):
         # (the groups shown by Hide/show groups, or all recordings pooled).
         self.options: Dict[str, object] = {"behaviors": [], "groups": None, "method": DEFAULT_METHOD,
                                            "span_s": DEFAULT_DELAY_SPAN_S, "axes": [0, 1], "units": True,
-                                           "show_lag_weights": False}
+                                           "show_lag_weights": False, "group_loadings": True}
         self._legends: Dict[int, pg.LegendItem] = {}
         self.last_report: Dict[str, object] = {}
         self._cache: Optional[Tuple[float, str, Dict[str, object]]] = None
@@ -695,6 +705,19 @@ class PcaTrajectoryView(QtCore.QObject):
                 report.update(loading_axis=lags, loading_label="Lag inside the delay window (s)")
         report.update(ratio=ratio, components=components)
 
+        # Blocks are contiguous by group. Keep views into the same decimated
+        # traces so fitting local weights costs nothing until that panel opens.
+        if len(groups) > 1:
+            group_rows = []
+            start = 0
+            for gi, group_blocks in itertools.groupby(blocks, key=lambda block: block["group_index"]):
+                stop = start + sum(len(block["rows"]) for block in group_blocks)
+                _key, name, color, _members = groups[gi]
+                group_rows.append((name, color or UNGROUPED_COLOR, stacked[start:stop]))
+                start = stop
+            report["loading_groups"] = group_rows
+            report["loading_delays"] = None if method == METHOD_TRIALS else n_delays
+
         several_groups = len(groups) > 1
         several_behaviors = len(behaviors) > 1
         unit_word = "bouts" if method == METHOD_BOUT else "trials"
@@ -837,9 +860,13 @@ class PcaTrajectoryView(QtCore.QObject):
         style_plot(widget, palette)
         plot_item.setAspectLocked(False)
         plot_item.getAxis("bottom").setTicks(None)
-        for axis in ("bottom", "left"):
-            plot_item.getAxis(axis).setStyle(showValues=True)
-            plot_item.getAxis(axis).enableAutoSIPrefix(False)
+        for side in ("bottom", "left"):
+            axis = plot_item.getAxis(side)
+            axis.setStyle(showValues=True)
+            # Reset any previous SI multiplier before the renderer sets its
+            # label. A visible label can keep a stale x1000 tick multiplier.
+            axis.showLabel(False)
+            axis.enableAutoSIPrefix(False)
         # These are not time series: the shortcuts of the other plots (peak
         # downsampling, clipping to the view) would redraw curves as staircases.
         plot_item.setDownsampling(ds=1, auto=False)
@@ -1007,6 +1034,41 @@ class PcaTrajectoryView(QtCore.QObject):
                     "'PCA loadings' the meaning of the axes (Change to > State-space).")
         return "\n".join(tips)
 
+    @staticmethod
+    def _pc_pen(color, pc):
+        """Preserve the group hue and encode the component twice for legibility."""
+        ink = QtGui.QColor(color)
+        ink.setAlpha(PC_ALPHA[pc])
+        return pg.mkPen(ink, width=2, style=LINE_STYLES[pc])
+
+    @staticmethod
+    def _group_weights(report):
+        """Fit each group's feature weights on demand, pooling its selected behaviors."""
+        if "group_models" in report:
+            return report["group_models"]
+        models = []
+        delays = report["loading_delays"]
+        for name, color, traces in report["loading_groups"]:
+            samples = (traces if delays is None else
+                       np.lib.stride_tricks.sliding_window_view(traces, delays, axis=1))
+            samples = samples[np.isfinite(samples).all(axis=-1)]
+            if len(samples) < 2:
+                continue
+            if delays is None:
+                _, weights, ratio = fit_pca(samples)
+            else:
+                _, weights, ratio = _fit_delay_samples(samples, N_COMPONENTS, FIT_MAX_SAMPLES)
+            # A zero-variance direction has no identifiable loading. Orient
+            # independent fits toward the shared PC of the same variance rank.
+            count = np.count_nonzero(ratio > ratio[0] * np.finfo(float).eps)
+            if count:
+                weights = weights[:count]
+                shared = report["components"][:count]
+                weights[(weights * shared).sum(axis=1) < 0] *= -1
+                models.append((name, color, weights, ratio[:count]))
+        report["group_models"] = models
+        return models
+
     def _render_loadings(self, widget, report, palette, text_color) -> None:
         if report["method"] == METHOD_LAG and not self.options["show_lag_weights"]:
             self._render_event_scores(widget, report, palette, text_color)
@@ -1019,16 +1081,26 @@ class PcaTrajectoryView(QtCore.QObject):
             return
         x = np.asarray(report.get("loading_axis"), float)
         colors = self._behavior_colors(palette)
-        legend = self._legend(widget, text_color, components.shape[0])
         ticks = report.get("loading_ticks")
-        for index, row in enumerate(components):
-            color = colors[index % len(colors)]
-            if ticks is not None:      # a weight per recording: markers joined by a thin line
-                line = widget.plot(x, row, pen=pg.mkPen(color, width=1.2), symbol="o", symbolSize=7,
-                                   symbolBrush=pg.mkBrush(color), symbolPen=pg.mkPen(None), antialias=True)
-            else:
-                line = widget.plot(x, row, pen=pg.mkPen(color, width=2.0), antialias=True)
-            legend.addItem(line, f"PC{index + 1} ({100 * ratio[index]:.0f}%)")
+        grouped = bool(report.get("loading_groups")) and self.options["group_loadings"]
+        models = self._group_weights(report) if grouped else [(None, None, components, ratio)]
+        if grouped:
+            widget.setTitle("PC loadings by group", color=text_color, size="10pt")
+        if not models:
+            self._message(widget, "No group has two complete samples with measurable variation.", text_color)
+            return
+        legend = self._legend(widget, text_color, sum(len(weights) for _, _, weights, _ in models))
+        for name, group_color, weights, fractions in models:
+            for index, row in enumerate(weights):
+                color = group_color or colors[index % len(colors)]
+                pen = self._pc_pen(color, index) if grouped else pg.mkPen(color, width=2)
+                if ticks is not None:      # a weight per recording
+                    line = widget.plot(x, row, pen=pg.mkPen(color, width=1.2), symbol="o", symbolSize=7,
+                                       symbolBrush=pg.mkBrush(color), symbolPen=pg.mkPen(None), antialias=True)
+                else:
+                    line = widget.plot(x, row, pen=pen, antialias=True)
+                prefix = f"{escape(name)} · " if grouped else ""
+                legend.addItem(line, f"{prefix}PC{index + 1} ({100 * fractions[index]:.0f}%)")
         zero = pg.InfiniteLine(pos=0.0, angle=0, pen=pg.mkPen(text_color, width=0.6, style=QtCore.Qt.PenStyle.DotLine))
         zero.setZValue(-1)
         widget.addItem(zero)
@@ -1042,7 +1114,15 @@ class PcaTrajectoryView(QtCore.QObject):
         meaning = {METHOD_BOUT: embedding, METHOD_LAG: embedding,
                    METHOD_TRIALS: "Each component is a time course: a trial scores high when its response looks like it.",
                    METHOD_RECORDINGS: "Weight of each recording in the component."}
-        widget.setToolTip(meaning.get(str(report.get("method")), ""))
+        tip = meaning.get(str(report.get("method")), "")
+        if grouped:
+            tip += (" Each group has its own PCA of the selected behaviors. PC rank and variance percentages "
+                    "are within group. Signs follow the shared component of the same rank where possible.")
+            shown = {name for name, _, _, _ in models}
+            skipped = [name for name, _, _ in report["loading_groups"] if name not in shown]
+            if skipped:
+                tip += " Insufficient variation or complete data: " + ", ".join(skipped) + "."
+        widget.setToolTip(tip)
 
     def _render_event_scores(self, widget, report, palette, text_color) -> None:
         """Draw the coordinates of the shared lag trajectories on the PSTH clock."""
@@ -1066,29 +1146,38 @@ class PcaTrajectoryView(QtCore.QObject):
 
         ratios = report["ratio"]
         colors = self._behavior_colors(palette)
-        several = len(curves) > 1
         many_behaviors = len(behaviors) > 1
-        many_groups = len({curve["group"] for curve in curves}) > 1
+        many_groups = bool(report.get("loading_groups"))
+        several = many_groups or len(curves) > 1
         legend = self._legend(widget, text_color, len(ratios) + (len(curves) if several else 0))
         for ci, curve in enumerate(curves):
-            # Match the trajectory colors when one behavior or one group is shown.
             color = self._curve_color(curve, colors)
-            if many_behaviors and many_groups:
-                color = (colors[ci] if ci < len(colors) else pg.intColor(ci, hues=len(curves)))
+            if many_groups:
+                color = curve["group_color"] or UNGROUPED_COLOR
+            # Sparse symbols distinguish behaviors when hue and dash pattern
+            # are already assigned to group and PC respectively.
+            symbol = (BEHAVIOR_SYMBOLS[curve["behavior_index"] % len(BEHAVIOR_SYMBOLS)]
+                      if many_behaviors and many_groups else None)
             for pc, fraction in enumerate(ratios):
-                pen = pg.mkPen(color if several else colors[pc], width=2,
-                               style=LINE_STYLES[pc] if several else LINE_STYLES[0])
+                pen = self._pc_pen(color, pc) if several else pg.mkPen(colors[pc], width=2)
                 line = widget.plot(curve["time"], curve["scores"][:, pc], pen=pen,
                                    connect="finite", antialias=True)
+                if symbol:
+                    stride = max(1, len(curve["time"]) // 8)
+                    times = curve["time"][::stride]
+                    values = curve["scores"][::stride, pc]
+                    ok = np.isfinite(values)
+                    widget.addItem(pg.ScatterPlotItem(times[ok], values[ok], symbol=symbol, size=5,
+                                                      brush=pen.color(), pen=None))
                 if ci == 0:
-                    # With several conditions the PC key shows only its dash pattern.
-                    key = pg.PlotDataItem(pen=pg.mkPen(text_color, width=2, style=LINE_STYLES[pc])) if several else line
+                    key = pg.PlotDataItem(pen=self._pc_pen(text_color, pc)) if several else line
                     legend.addItem(key, f"PC{pc + 1} ({100 * fraction:.0f}%)")
             if several:
                 name = " · ".join(part for part in
                                   (curve["behavior"] if many_behaviors else "", curve["group"] if many_groups else "")
                                   if part)
-                legend.addItem(pg.PlotDataItem(pen=pg.mkPen(color, width=2)), escape(name))
+                legend.addItem(pg.PlotDataItem(pen=pg.mkPen(color, width=2), symbol=symbol, symbolSize=5,
+                                               symbolBrush=color, symbolPen=None), escape(name))
 
         event_line = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen(
             text_color, width=1, style=QtCore.Qt.PenStyle.DashLine))
@@ -1205,6 +1294,13 @@ class PcaTrajectoryView(QtCore.QObject):
             weights.setCheckable(True)
             weights.setChecked(bool(self.options["show_lag_weights"]))
             weights.triggered.connect(lambda checked: self.set_option("show_lag_weights", checked))
+
+        if self.last_report.get("loading_groups"):
+            by_group = menu.addAction("Fit weights separately by group")
+            by_group.setCheckable(True)
+            by_group.setEnabled(self.last_report.get("method") != METHOD_LAG or self.options["show_lag_weights"])
+            by_group.setChecked(bool(self.options["group_loadings"]))
+            by_group.triggered.connect(lambda checked: self.set_option("group_loadings", checked))
 
         axes = menu.addMenu("Axes")
         for first, second in AXES_CHOICES:
