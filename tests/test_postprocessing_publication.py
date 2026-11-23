@@ -71,6 +71,36 @@ class PublicationRenderingTests(unittest.TestCase):
     def test_pooled_trials_export_descriptive_metrics_without_inferential_bracket(self):
         self._assert_exports(_publication_panel(pooled_trials=True))
 
+    def test_all_windows_comparison_keeps_one_metric_panel_with_every_window(self):
+        import gui_postprocessing
+        panel = _publication_panel()
+        panel.metric_windows = SimpleNamespace(summary_arguments=lambda: {
+            "pre_label": "Pre", "post_label": "Early", "extra_windows": [("w1", "Late", (1.1, 2.0))],
+            "compare": "all"})
+        panel._style_window_views = lambda results: [result.update(window_style="bars")
+                                                     for result in results.values()]
+        drawn = []
+        original = gui_postprocessing.draw_metric_matplotlib
+
+        def capture(axis, result, title=None):
+            drawn.append(result)
+            return original(axis, result, title)
+
+        with patch.object(gui_postprocessing, "draw_metric_matplotlib", capture):
+            self._assert_exports(panel)
+        self.assertEqual(len(drawn), 1)                                  # the grid has one metric column
+        self.assertEqual([w["label"] for w in drawn[0]["windows"]], ["Pre", "Early", "Late"])
+        self.assertEqual(drawn[0]["window_style"], "bars")
+        # "Each window with Pre" leaves the figure as before: the standard two-window panel.
+        panel.metric_windows.summary_arguments = lambda: {
+            "pre_label": "Pre", "post_label": "Early", "extra_windows": [("w1", "Late", (1.1, 2.0))],
+            "compare": "pre"}
+        drawn.clear()
+        with patch.object(gui_postprocessing, "draw_metric_matplotlib", capture):
+            self._assert_exports(panel)
+        self.assertEqual(len(drawn), 1)
+        self.assertNotIn("windows", drawn[0])
+
     def test_export_retains_selected_heatmap_palette_and_fixed_limits(self):
         from matplotlib.axes import Axes
         from heatmap_display import color_map

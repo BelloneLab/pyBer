@@ -294,6 +294,7 @@ class MultiBehaviorPanelTests(unittest.TestCase):
         view = panel.multi_behavior_view
         onset_means = {entry["name"]: mean_sem(entry["matrix"])[0] for entry in view.entries}
         panel.combo_behavior_align.setCurrentText("Align to offset")
+        panel.metric_windows.set_compare_mode("pre")           # one panel per window, each with Pre
         panel.metric_windows.add_button.click()
         row = panel.metric_windows._rows[0]
         row.label.set_name("After offset", emit=True)
@@ -317,6 +318,20 @@ class MultiBehaviorPanelTests(unittest.TestCase):
         self.settle()
         for column in view.columns[:2]:
             self.assertEqual(column.extra_metrics[key].result["summary"]["post_end_s"], 2.0)
+        # "All windows together": each event's own panel shows Pre, Post and the window side by side.
+        panel.metric_windows.set_compare_mode("all")
+        self.settle()
+        for entry, column in zip(view.entries, view.columns):
+            self.assertNotIn(key, column.extra_metrics)
+            result = column.metric.result
+            self.assertEqual([w["label"] for w in result["windows"]], ["Pre", "Post", "After offset"])
+            matrix, tvec, _ = panel._compute_psth_for_behavior(entry["name"])
+            np.testing.assert_allclose(result["windows"][2]["values"], metric_values(matrix, tvec, 1.25, 2.0, "auc"),
+                                       equal_nan=True)
+            ticks = [text for _x, text in column.metric.getAxis("bottom")._tickLevels[0]]
+            self.assertEqual(ticks, ["Pre", "Post", "After offset"])
+        panel.metric_windows.set_compare_mode("pre")
+        self.settle()
         row.remove_button.click()
         self.settle()
         self.assertTrue(all(key not in column.extra_metrics for column in view.columns[:2]))

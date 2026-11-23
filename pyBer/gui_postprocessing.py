@@ -38,6 +38,8 @@ from numeric_controls import DurationSpinBox, with_slider
 from adaptive_density import KEEP_ROW_PROPERTY, AdaptiveDensity, install_adaptive_density
 import missing_data
 from metric_windows import MetricWindows
+from window_comparison import window_color
+from psth_metric_panels import GRID_MAX_COLUMNS
 from pca_trajectories import FAMILY as TRAJECTORY_FAMILY, PcaTrajectoryView
 from psth_metrics import (METRICS, metric_id, summarize_metrics, draw_metric_matplotlib,
                           export_selected_metrics, write_group_comparisons)
@@ -116,6 +118,10 @@ _POST_RIGHT_PANEL_MIN_WIDTH = 260
 _POST_CENTER_PANEL_MIN_WIDTH = 400
 # Narrowest recording / behavior list in Setup that still shows a file name.
 _RECORDING_LIST_MIN_WIDTH = 120
+# Dashboard side column: smallest height kept for the bout plots above the
+# metric panels, and the gap between the two.
+SIDE_BOUT_MIN_HEIGHT = 120
+SIDE_SPACING = 6
 _SYNC_TOOL_ROOT = Path(r"C:\Analysis\app_project\barcode_reader\video_barcode_extractor")
 _FIXED_POST_RIGHT_TAB_TITLES: Dict[str, str] = {
     "setup": "Setup",
@@ -2661,13 +2667,15 @@ class PostProcessingPanel(QtWidgets.QWidget):
         metric_selection.setContentsMargins(0, 0, 0, 0)
         metric_selection.addWidget(self.combo_metric, 1)
         metric_selection.addWidget(self.btn_more_metrics)
-        metric_selection.addWidget(self.metric_windows.add_button)   # "+": add a named window
         self.metric_selection_widget = QtWidgets.QWidget()
         self.metric_selection_widget.setLayout(metric_selection)
         fm.addRow(self.lbl_metric, self.metric_selection_widget)
         fm.addRow(self.lbl_metric_pre, metric_pre_widget)
         fm.addRow(self.lbl_metric_post, metric_post_widget)
-        self.metric_windows.attach_form(fm, metric_post_widget)      # extra windows go below Post
+        # Extra windows go below Post, followed by the "+ Add window" row.
+        # "Compare windows" (all together / each with Pre) appears with the first extra window.
+        self.metric_windows.attach_form(fm, metric_post_widget)
+        _compact_combo(self.metric_windows.compare_combo, min_chars=8)
         # Representation of the metric when recording groups are compared
         # (Groups > Show: All groups, two or more groups). Also available by
         # right-clicking a metric panel.
@@ -10106,11 +10114,34 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 if hasattr(self, "row_heat_host"):
                     self.row_heat_host.setMinimumHeight(0)
             minima = ((self.trace_card, 240), heat_entry, (self.row_signal, 220), (self.row_behavior, 360))
-            visible = [(widget, height) for widget, height in minima if not widget.isHidden()]
             for widget, height in minima:
                 widget.setMinimumHeight(height)
+            self._results_rows = [widget for widget, _height in minima]
+            self._heat_row_base_height = None if multi else heat_height
+            # Ends with _reserve_side_height(): the side column and the scroll height.
             self._sync_metric_panel_layout()
-            self._results_splitter.setMinimumHeight(sum(widget.minimumHeight() for widget, _ in visible) + 6 * max(0, len(visible) - 1))
+
+    def _reserve_side_height(self) -> None:
+        """Grow the heatmap row when the side column (bout plots + metric panels) needs more.
+
+        The row has a fixed minimum, so a taller side column (several metric
+        panels) used to be squeezed into it and the panels lost their x-axis
+        labels. The results area scrolls instead.
+        """
+        if not hasattr(self, "_results_splitter") or not hasattr(self, "_results_rows"):
+            return
+        base = getattr(self, "_heat_row_base_height", None)
+        if base is not None:
+            side = 0
+            if not self.dashboard_side.isHidden():
+                if not self.row_avg.isHidden():
+                    side += self.row_avg.minimumHeight()
+                if not self.bout_shared_card.isHidden():
+                    side += SIDE_BOUT_MIN_HEIGHT + (SIDE_SPACING if side else 0)
+            self.row_heat.setMinimumHeight(max(int(base), side))
+        visible = [widget for widget in self._results_rows if not widget.isHidden()]
+        self._results_splitter.setMinimumHeight(
+            sum(widget.minimumHeight() for widget in visible) + 6 * max(0, len(visible) - 1))
 
     def _signal_file_id(self, proc: ProcessedTrial) -> str:
         """Disambiguate repeated filenames/channels in signal batch results."""
@@ -17754,7 +17785,6 @@ class PostProcessingPanel(QtWidgets.QWidget):
         animal_rows = grouped and not self._psth_group_trial_view_enabled()
         metric_ids = self._metric_family_ids() if self.cb_metrics.isChecked() else []
         selected = self._selected_metric_ids()
-        windows = self.metric_windows.summary_arguments()
         need_bouts = any(self.dashboard_panels.substitutes.get(slot, "").startswith("behavior:")
                          for slot in ("heatmap", "psth", "comparison"))
         pre_window = (float(self.spin_metric_pre0.value()), float(self.spin_metric_pre1.value()))
@@ -17791,11 +17821,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 entry.update(matrix=matrix, tvec=tvec,
                              labels=[str(label).split(" | ")[-1] if not grouped else str(label) for label in labels])
                 if metric_ids:
+                    group_layout = display is not None and self._group_blocks_for_rows(matrix, display) is not None
                     result = summarize_metrics(matrix, tvec, metric_ids, pre_window, post_window, units,
                                                independent_units=(not grouped or animal_rows),
-                                               row_unit="files" if animal_rows else "trials", **windows)
+                                               row_unit="files" if animal_rows else "trials",
+                                               **self.metric_windows.summary_arguments(group_layout=group_layout))
                     if display is not None:
                         self._attach_metric_group_comparisons(matrix, result, display=display)
+                    self._style_window_views(result)
                     entry["metric"] = next(iter(result.values()), None)
                     entry["metrics"] = result
                     entry["extra_metric_keys"] = [key for key in result if key != selected[0]
@@ -17966,10 +17999,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 (float(self.spin_metric_post0.value()), float(self.spin_metric_post1.value())),
                 self._psth_units(), independent_units=(not grouped or file_rows),
                 row_unit="files" if file_rows else "trials",
-                **self.metric_windows.summary_arguments(),
+                # Group views are built on one Pre / Post pair: windows stay in separate panels.
+                **self.metric_windows.summary_arguments(
+                    group_layout=self._group_blocks_for_rows(mat) is not None),
             )
             row_colors = self._group_row_colors(mat)
             self._attach_metric_group_comparisons(mat, self._last_metric_panels)
+            self._style_window_views(self._last_metric_panels)
             for index, (key, result) in enumerate(self._last_metric_panels.items()):
                 # Extra-window results get their own panel, created on demand.
                 plot = self.plot_metrics if index == 0 else self.metric_windows.plot_for(key)
@@ -18024,6 +18060,13 @@ class PostProcessingPanel(QtWidgets.QWidget):
             result["group_comparison"] = view["between"]
             result["group_rows"] = rows
 
+    def _style_window_views(self, results: Dict[str, Dict]) -> None:
+        """Draw the all-windows panels (Pre vs Post vs Late ...) in the selected summary style."""
+        style = self._metric_summary_style()
+        for result in results.values():
+            if result.get("window_view"):
+                result["window_style"] = style
+
     def _metric_group_view(self) -> str:
         """Selected group representation code (group_metric_views.GROUP_VIEWS)."""
         combo = getattr(self, "combo_metric_group_view", None)
@@ -18047,12 +18090,14 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self._queue_settings_save()
 
     def _install_metric_view_menu(self, plot: pg.PlotWidget, with_views: bool = True) -> None:
-        """Right-click > Group comparison / Summary style on a metric panel."""
+        """Right-click > Group comparison / Compare windows / Summary style on a metric panel."""
         menu = plot.getPlotItem().getViewBox().menu
         if menu is None or getattr(menu, "_pyber_metric_view_menus", None):
             return
         created = []
+        window_combo = self.metric_windows.compare_combo
         for title, combo, wanted in (("Group comparison", self.combo_metric_group_view, with_views),
+                                     ("Compare windows", window_combo, with_views),
                                      ("Summary style", self.combo_metric_style, True)):
             if not wanted:
                 continue
@@ -18067,6 +18112,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                                                              for i, a in enumerate(m.actions())])
             menu.addMenu(sub)
             created.append(sub)
+            if combo is window_combo:
+                # Only a choice once an extra window (Late, ...) exists.
+                menu.aboutToShow.connect(
+                    lambda s=sub: s.menuAction().setVisible(bool(self.metric_windows.valid_windows())))
         menu._pyber_metric_view_menus = created
 
     def _metric_family_ids(self) -> List[str]:
@@ -18081,7 +18130,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         return keys
 
     def _sync_metric_panel_layout(self) -> None:
-        """Keep the primary comparison beside PSTH, with optional extras three per row."""
+        """Keep the primary comparison beside PSTH; extras fill as many columns as fit (up to three)."""
         if not hasattr(self, "metric_panels_widget"):
             return
         selected = self._selected_metric_ids()
@@ -18098,18 +18147,27 @@ class PostProcessingPanel(QtWidgets.QWidget):
             grid.removeWidget(card)
             plot.setVisible(plot in visible)
             card.setVisible(plot in visible)
+        # Columns that fit the current width: a panel is never squeezed below its minimum.
+        columns = max(1, min(GRID_MAX_COLUMNS, int(self.metric_panels_widget.columns)))
         for index, plot in enumerate(visible):
             card = getattr(self, "_plot_card_by_widget", {}).get(plot, plot)
-            grid.addWidget(card, index // 3, index % 3)
-        for column in range(3):
-            grid.setColumnStretch(column, 1)
-        height = 220 * ((len(visible) + 2) // 3)
+            grid.addWidget(card, index // columns, index % columns)
+        for column in range(GRID_MAX_COLUMNS):
+            grid.setColumnStretch(column, 1 if column < columns else 0)
+        # Height of one card: the panel minimum plus the card margins, so the
+        # x-axis labels (window names) are never cut off.
+        margins = primary.layout().contentsMargins() if primary is not self.plot_metrics and primary.layout() else None
+        card_height = self.plot_metrics.minimumHeight() + (margins.top() + margins.bottom() if margins else 0)
+        rows = -(-len(visible) // columns)
+        height = card_height * rows + grid.verticalSpacing() * max(0, rows - 1)
         self.metric_panels_widget.setMinimumHeight(height)
-        self.row_avg.setMinimumHeight(220 + (height if show and visible else 0))
+        extras = show and bool(visible)
+        self.row_avg.setMinimumHeight((card_height + height + self.row_avg.layout().spacing()) if extras else 220)
         panels = getattr(self, "dashboard_panels", None)
         if panels is not None:
             panels.note_layout("comparison", show)
             panels.apply()
+        self._reserve_side_height()
 
     def _compute_global_metrics_for_trace(
         self,
@@ -21321,6 +21379,12 @@ class PostProcessingPanel(QtWidgets.QWidget):
         show_heat = "Heatmap" in pub_content
         show_avg = "Avg" in pub_content or "PSTH" in pub_content
         show_metrics = "Metrics" in pub_content
+        # Named windows: "All windows together" keeps one panel per metric, so the
+        # grid is unchanged; separate per-window panels are not part of this figure.
+        metric_windows = getattr(self, "metric_windows", None)
+        window_arguments = metric_windows.summary_arguments() if metric_windows is not None else {}
+        if window_arguments.get("compare") != "all":
+            window_arguments["extra_windows"] = []
         selected_metrics = (self._selected_metric_ids() if hasattr(self, "_selected_metric_ids")
                             else [metric_id(self.combo_metric.currentText())])
         n_cols = int(show_heat) + int(show_avg) + (len(selected_metrics) if show_metrics else 0)
@@ -21457,6 +21521,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 ax_avg.axhline(0, color="#999", linewidth=0.4, alpha=0.5)
                 ax_avg.axvspan(pre0, pre1, color="#5B8CD6", alpha=0.08)
                 ax_avg.axvspan(post0, post1, color="#D67B5B", alpha=0.08)
+                if show_metrics:
+                    # Extra windows (Late, ...) in the colors of their metric columns.
+                    for index, (_wid, _label, (w0, w1)) in enumerate(window_arguments["extra_windows"]):
+                        ax_avg.axvspan(w0, w1, color=window_color(index + 2), alpha=0.08)
                 ax_avg.set_xlim(float(tvec[0]), float(tvec[-1]))
                 if row_i == n_rows - 1:
                     ax_avg.set_xlabel("Time (s)")
@@ -21475,8 +21543,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 summaries = summarize_metrics(
                     mat, tvec, selected_metrics, (pre0, pre1), (post0, post1), self._psth_units(),
                     independent_units=(self.tab_sources.currentIndex() != 1 or file_rows),
-                    row_unit="files" if file_rows else "trials",
+                    row_unit="files" if file_rows else "trials", **window_arguments,
                 )
+                if window_arguments["extra_windows"]:
+                    self._style_window_views(summaries)   # same summary style as on screen
                 for key, result in summaries.items():
                     ax_met = fig.add_subplot(gs[row_i, col])
                     title = result["summary"]["metric"]

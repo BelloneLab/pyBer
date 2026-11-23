@@ -7,13 +7,22 @@ lets the user
 
 * rename the two standard windows by double-clicking their label
   (for example "Post" -> "Early"), and
-* add further windows with the "+" beside the metric selector, each with its
-  own label, start and end ("Late", 2 to 5 s, ...).
+* add further windows with the "+" button below the last window, each with
+  its own label, start and end ("Late", 2 to 5 s, ...). There is no limit to
+  the number of windows.
 
-Every extra window is compared with the same Pre window, exactly like Post:
-one panel per selected metric and window, the same paired test, and one Holm
-correction across all the windows and metrics that are shown together. Windows
-are compared with Pre, not with each other.
+With at least one extra window, "Compare windows" (shown below the "+" button
+and in the right-click menu of a metric panel) chooses between
+
+* "All windows together" (default): one panel per metric with Pre, Post and
+  every extra window side by side, an omnibus test and every pair of windows
+  tested (see ``window_comparison``), and
+* "Each window with Pre": one panel per selected metric and window, each
+  compared with the same Pre window exactly like Post.
+
+Both use one Holm correction across everything that is shown together. When
+recording groups are compared ("All groups", two or more groups) every window
+keeps its own panel, because the group views are built on one Pre / Post pair.
 
 The controller owns its widgets and plots; the postprocessing panel only
 places them and asks for the current windows when it computes the metrics.
@@ -26,6 +35,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from numeric_controls import DurationSpinBox
+from window_comparison import DEFAULT_WINDOW_COMPARISON, EXTRA_COLORS, WINDOW_COMPARISONS
 
 
 # =============================================================================
@@ -38,13 +48,12 @@ DEFAULT_POST_LABEL = "Post"
 FIRST_EXTRA_LABEL = "Late"
 #: Separator between a metric id and a window id in result keys ("auc@w1").
 KEY_SEPARATOR = "@"
-MAX_EXTRA_WINDOWS = 6
 LABEL_MAX_LENGTH = 24
-#: Translucent shading of each extra window on the mean PSTH (fixed order).
-REGION_BRUSHES: Tuple[Tuple[int, int, int, int], ...] = (
-    (27, 175, 122, 26), (237, 161, 0, 26), (232, 123, 164, 26),
-    (98, 80, 214, 26), (0, 131, 0, 26), (227, 73, 72, 26),
-)
+REGION_ALPHA = 26
+#: Translucent shading of each extra window on the mean PSTH (fixed order). The
+#: colors are the ones of the window columns in the all-windows metric panel.
+REGION_BRUSHES: Tuple[Tuple[int, int, int, int], ...] = tuple(
+    (*QtGui.QColor(color).getRgb()[:3], REGION_ALPHA) for color in EXTRA_COLORS)
 SPIN_MIN_WIDTH = 60
 CAPTION_MIN_WIDTH = 35      # "Start:" / "End:" captions, as in the Pre / Post rows
 
@@ -210,12 +219,33 @@ class MetricWindows(QtCore.QObject):
         self.pre_label_widget = RenamableLabel(DEFAULT_PRE_LABEL, " window")
         self.post_label_widget = RenamableLabel(DEFAULT_POST_LABEL, " window")
         self.add_button = QtWidgets.QToolButton()
-        self.add_button.setText("+")
+        self.add_button.setText("+  Add window")
         self.add_button.setAccessibleName("Add a metric window")
         self.add_button.setToolTip(
             "Add a response window (for example Early and Late for a bimodal response).\n"
-            "Each window is compared with the Pre window. Double-click a window label to rename it.")
+            "Each window is compared with the Pre window. Add as many as you need.\n"
+            "Double-click a window label to rename it.")
         self.add_button.clicked.connect(lambda: self.add_window())
+        # The button has its own form row, kept below the last window.
+        self.add_row = QtWidgets.QWidget()
+        add_layout = QtWidgets.QHBoxLayout(self.add_row)
+        add_layout.setContentsMargins(0, 0, 0, 0)
+        add_layout.addWidget(self.add_button)
+        add_layout.addStretch(1)
+        # How the windows are compared; only shown once there is an extra window.
+        self.compare_label = QtWidgets.QLabel("Compare windows")
+        self.compare_combo = QtWidgets.QComboBox()
+        for code, label in WINDOW_COMPARISONS.items():
+            self.compare_combo.addItem(label, code)
+        self.compare_combo.setAccessibleName("Compare metric windows")
+        self.compare_combo.setToolTip(
+            "All windows together: one panel per metric with every window side by side.\n"
+            "Friedman test across the windows and an exact paired sign test of every pair of\n"
+            "windows (Pre vs Post, Pre vs Late, Post vs Late, ...), Holm-adjusted.\n"
+            "Each window with Pre: one panel per window, each compared with Pre only.\n"
+            "When recording groups are compared (All groups), every window keeps its own panel.")
+        self.compare_combo.setCurrentIndex(max(0, self.compare_combo.findData(DEFAULT_WINDOW_COMPARISON)))
+        self.compare_combo.currentIndexChanged.connect(lambda _index: self._on_changed())
         # The metrics form and the widget of its Post row: extra windows are
         # inserted as form rows right below it (see attach_form).
         self._form: Optional[QtWidgets.QFormLayout] = None
@@ -229,9 +259,29 @@ class MetricWindows(QtCore.QObject):
             label.renamed.connect(lambda _name: self._on_changed())
 
     def attach_form(self, form: QtWidgets.QFormLayout, post_row_widget: QtWidgets.QWidget) -> None:
-        """Tell where the extra windows go: below the Post row of the metrics form."""
+        """Tell where the extra windows go: below the Post row of the metrics form.
+
+        The "+" row is placed right below Post; every new window is inserted
+        above it, so the button always follows the last window. The "Compare
+        windows" row comes right after the button.
+        """
         self._form = form
         self._anchor = post_row_widget
+        row, _role = form.getWidgetPosition(post_row_widget)
+        row = (row if row >= 0 else form.rowCount() - 1) + 1
+        # Spanning row: the button starts at the left edge, like the window rows when they wrap.
+        form.insertRow(row, self.add_row)
+        form.insertRow(row + 1, self.compare_label, self.compare_combo)
+        self._sync_compare_row()
+
+    def _sync_compare_row(self) -> None:
+        """Offer the comparison choice only when there is something to choose."""
+        visible = bool(self._rows) and not self._hidden
+        if self._form is not None:
+            self._form.setRowVisible(self.compare_combo, visible)
+        else:
+            self.compare_label.setVisible(visible)
+            self.compare_combo.setVisible(visible)
 
     def _insert_position(self) -> int:
         row, _role = self._form.getWidgetPosition(self._anchor)
@@ -251,13 +301,27 @@ class MetricWindows(QtCore.QObject):
         """(id, label, (start, end)) of the extra windows whose end is after their start."""
         return [(w["id"], w["label"], (w["start"], w["end"])) for w in self.windows() if w["end"] > w["start"]]
 
-    def summary_arguments(self) -> Dict[str, object]:
-        """Keyword arguments for ``psth_metrics.summarize_metrics``."""
+    def compare_mode(self) -> str:
+        """Selected comparison: "all" (every window in one panel) or "pre" (each window with Pre)."""
+        return str(self.compare_combo.currentData() or DEFAULT_WINDOW_COMPARISON)
+
+    def set_compare_mode(self, mode: str) -> None:
+        self.compare_combo.setCurrentIndex(max(0, self.compare_combo.findData(str(mode))))
+
+    def summary_arguments(self, group_layout: bool = False) -> Dict[str, object]:
+        """Keyword arguments for ``psth_metrics.summarize_metrics``.
+
+        ``group_layout``: recording groups are compared in the metric panels.
+        The group views need one Pre / Post pair per panel, so each window is
+        then compared with Pre whatever the selected comparison.
+        """
         return {"pre_label": self.pre_label(), "post_label": self.post_label(),
-                "extra_windows": self.valid_windows()}
+                "extra_windows": self.valid_windows(),
+                "compare": "pre" if group_layout else self.compare_mode()}
 
     def state(self) -> Dict[str, object]:
-        return {"pre_label": self.pre_label(), "post_label": self.post_label(), "windows": self.windows()}
+        return {"pre_label": self.pre_label(), "post_label": self.post_label(), "windows": self.windows(),
+                "compare": self.compare_mode()}
 
     def set_state(self, state: object) -> None:
         """Restore labels and windows from saved settings (missing = defaults)."""
@@ -266,9 +330,10 @@ class MetricWindows(QtCore.QObject):
         try:
             self.pre_label_widget.set_name(str(state.get("pre_label") or DEFAULT_PRE_LABEL))
             self.post_label_widget.set_name(str(state.get("post_label") or DEFAULT_POST_LABEL))
+            self.set_compare_mode(str(state.get("compare") or DEFAULT_WINDOW_COMPARISON))
             for row in list(self._rows):
                 self._remove_row(row)
-            for entry in (state.get("windows") or [])[:MAX_EXTRA_WINDOWS]:
+            for entry in (state.get("windows") or []):
                 try:
                     self.add_window(str(entry.get("label") or ""), float(entry["start"]), float(entry["end"]),
                                     window_id=str(entry.get("id") or ""))
@@ -281,9 +346,6 @@ class MetricWindows(QtCore.QObject):
     def add_window(self, label: str = "", start: Optional[float] = None, end: Optional[float] = None,
                    window_id: str = "") -> Optional[_WindowRow]:
         """Add a window. By default it starts where the last one ends, with the Post length."""
-        if len(self._rows) >= MAX_EXTRA_WINDOWS:
-            self.panel.statusUpdate.emit(f"At most {MAX_EXTRA_WINDOWS} extra metric windows.", 5000)
-            return None
         panel = self.panel
         post0, post1 = float(panel.spin_metric_post0.value()), float(panel.spin_metric_post1.value())
         last_end = self._rows[-1].end.value() if self._rows else post1
@@ -308,7 +370,11 @@ class MetricWindows(QtCore.QObject):
             self._form.insertRow(self._insert_position(), row.label, row)
         self._rows.append(row)
         row.set_row_visible(not self._hidden)
+        self._sync_compare_row()
         self._on_changed()
+        if not self._restoring and self.compare_mode() == "all" and hasattr(panel, "statusUpdate"):
+            names = " vs ".join([self.pre_label(), self.post_label()] + [str(w["label"]) for w in self.windows()])
+            panel.statusUpdate.emit(f"Metric panels now compare {names}. Change it with Compare windows.", 7000)
         return row
 
     def remove_window(self, row: _WindowRow) -> None:
@@ -326,6 +392,7 @@ class MetricWindows(QtCore.QObject):
                 widget.hide()
                 widget.deleteLater()
         self._drop_plots(row.window_id)
+        self._sync_compare_row()
 
     def _on_changed(self) -> None:
         self.update_regions()
@@ -349,6 +416,7 @@ class MetricWindows(QtCore.QObject):
 
     def set_enabled(self, enabled: bool) -> None:
         self.add_button.setEnabled(bool(enabled))
+        self.compare_combo.setEnabled(bool(enabled))
         for row in self._rows:
             row.set_row_enabled(enabled)
         self.update_regions()
@@ -356,9 +424,10 @@ class MetricWindows(QtCore.QObject):
     def set_hidden(self, hidden: bool) -> None:
         """Follow the panel's "hide metric settings" toggle."""
         self._hidden = bool(hidden)
-        self.add_button.setVisible(not hidden)
+        self.add_row.setVisible(not hidden)
         for row in self._rows:
             row.set_row_visible(not hidden)
+        self._sync_compare_row()
 
     # ------------------------------------------------------------------ plots
     def plot_for(self, key: str):

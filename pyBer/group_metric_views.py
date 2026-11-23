@@ -356,8 +356,14 @@ def draw_group_view(plot, view: Dict[str, object], text_color: str, style: str =
             stems = pg.PlotDataItem([x, x, np.nan, x, x], [low, column["q1"], np.nan, column["q3"], high],
                                     connect="finite", pen=pg.mkPen(tint(color, 220), width=1.2))
             items.extend([box, stems, median])
-        scatter = pg.ScatterPlotItem(x=x + column["jitter"][keep], y=values[keep], size=6, pen=None,
-                                     brush=pg.mkBrush(tint(color, point_alpha)))
+        # Optional one color per value (rows tinted by recording group in the windows view).
+        point_colors = column.get("point_colors")
+        if point_colors is not None and len(point_colors) == len(values):
+            brush = [pg.mkBrush(tint(pg.mkColor(shade), point_alpha))
+                     for shade, kept in zip(point_colors, keep) if kept]
+        else:
+            brush = pg.mkBrush(tint(color, point_alpha))
+        scatter = pg.ScatterPlotItem(x=x + column["jitter"][keep], y=values[keep], size=6, pen=None, brush=brush)
         items.append(scatter)
         if style == "points":
             items.append(pg.PlotDataItem([x - 0.24, x + 0.24], [column["median"]] * 2,

@@ -9,6 +9,8 @@ from __future__ import annotations
 import numpy as np
 
 from postprocessing_core import paired_summary, window_metrics
+from window_comparison import (adjust_families, build_window_view, compare_windows, pair_rows,
+                               value_rows, window_rows)
 
 # Stable identifiers keep project files independent of presentation wording.
 METRICS = {
@@ -87,7 +89,7 @@ def _describe(values):
 
 def summarize_metrics(matrix, time, selected, pre_window, post_window, signal_units,
                       independent_units=True, row_unit="trials",
-                      pre_label="Pre", post_label="Post", extra_windows=()):
+                      pre_label="Pre", post_label="Post", extra_windows=(), compare="pre"):
     """Compute matched panels and Holm-adjust their finite paired sign-test p-values.
 
     The selected family is explicit. Changing the family is exploratory and is
@@ -98,8 +100,17 @@ def summarize_metrics(matrix, time, selected, pre_window, post_window, signal_un
     beyond Post (for example an early and a late component). Each one is
     compared with the same Pre window and stored under ``"<metric>@<id>"``.
     All windows and metrics computed together form one Holm family.
+
+    ``compare``: ``"pre"`` (default) compares every response window with Pre,
+    one panel per metric and window. ``"all"`` compares all the windows with
+    each other in one panel per metric (see ``_summarize_all_windows``); it
+    only differs from ``"pre"`` when there is at least one extra window.
     """
     keys = list(dict.fromkeys(metric_id(key) for key in selected))
+    if compare == "all" and extra_windows:
+        return _summarize_all_windows(matrix, time, keys, pre_window, post_window, extra_windows,
+                                      signal_units, independent_units, row_unit,
+                                      str(pre_label), str(post_label))
     results = {}
     # Standard Post first (keys are the metric ids), then each extra window.
     windows = [("post", str(post_label), tuple(post_window), False)]
@@ -153,12 +164,74 @@ def _summarize_window(results, matrix, time, keys, pre_window, post_window, sign
                                                           "post_values": post}
 
 
+def _summarize_all_windows(matrix, time, keys, pre_window, post_window, extra_windows, signal_units,
+                           independent_units, row_unit, pre_label, post_label):
+    """One panel per metric comparing Pre, Post and every extra window with each other.
+
+    Each result keeps the standard Pre / Post fields (``summary``,
+    ``pre_values``, ``post_values``) and gains
+
+    * ``windows``: id, label, limits, per-row values and descriptive statistics
+      of every window, Pre first;
+    * ``window_comparison``: the Friedman omnibus test and the exact paired
+      sign test of every pair of windows;
+    * ``window_view``: the drawable description of the panel.
+
+    The Holm family is every pair of windows of every selected metric. The
+    omnibus tests of the selected metrics are Holm-adjusted together.
+    """
+    results = {}
+    _summarize_window(results, matrix, time, keys, pre_window, post_window, signal_units,
+                      independent_units, row_unit, pre_label, "post", post_label, False)
+    spans = [("pre", pre_label, tuple(pre_window)), ("post", post_label, tuple(post_window))]
+    spans += [(str(wid), str(label), (float(win[0]), float(win[1]))) for wid, label, win in extra_windows]
+    for key in keys:
+        result = results[key]
+        windows = []
+        for window_id, label, (start, stop) in spans:
+            if window_id == "pre":
+                values = result["pre_values"]
+            elif window_id == "post":
+                values = result["post_values"]
+            else:
+                values = metric_values(matrix, time, start, stop, key)
+            windows.append({"id": window_id, "label": label, "start": float(start), "end": float(stop),
+                            "values": values, **_describe(values)})
+        result["windows"] = windows
+        result["window_comparison"] = compare_windows(windows, independent_units, key in DURATION_SENSITIVE)
+    family = adjust_families([result["window_comparison"] for result in results.values()])
+    labels = " | ".join(label for _wid, label, _span in spans)
+    for key in keys:
+        result = results[key]
+        summary, comparison = result["summary"], result["window_comparison"]
+        omnibus = comparison["omnibus"]
+        # The Pre vs Post fields of the summary follow the family of this mode.
+        summary["paired_p_holm"] = comparison["pairs"][0]["p_holm"]
+        summary["family_size"] = family
+        summary["multiplicity_method"] = "Holm across all window pairs of the selected metrics"
+        summary.update({
+            "comparison_mode": "all windows", "window_labels": labels,
+            "omnibus_test": omnibus["test"], "omnibus_statistic": omnibus["statistic"],
+            "omnibus_df": omnibus["df"], "omnibus_p": omnibus["p"], "omnibus_p_holm": omnibus["p_holm"],
+            "omnibus_n": omnibus["n"], "omnibus_kendall_w": omnibus["kendall_w"],
+            "omnibus_note": omnibus["note"],
+        })
+        result["window_view"] = build_window_view(summary["metric"], result["windows"], comparison, row_unit)
+    return results
+
+
 def draw_metric_matplotlib(axis, result, title=None):
     """Render export panels with the same numerical summaries as the live view."""
     summary = result["summary"]
     if result.get("group_comparison"):
         _draw_groups_matplotlib(axis, summary, result["group_comparison"], title,
                                 result.get("group_view"), result.get("group_style", "points"))
+        return
+    if result.get("window_view"):
+        # All windows in one panel: same view description as on screen.
+        from group_metric_views import draw_group_view_matplotlib
+        draw_group_view_matplotlib(axis, result["window_view"], result.get("window_style", "points"),
+                                   title, summary["units"])
         return
     pre, post = result["pre_values"], result["post_values"]
     pairs = np.isfinite(pre) & np.isfinite(post)
@@ -182,7 +255,7 @@ def draw_metric_matplotlib(axis, result, title=None):
     axis.text(0.5, 1.015, f"{note}\nline: median  ·  diamond: mean ± SEM", transform=axis.transAxes,
               ha="center", va="bottom", fontsize=6.5, color="#546274", clip_on=False)
     axis.margins(y=0.28)
-    axis.set_xticks([0, 1], ["Pre", "Post"])
+    axis.set_xticks([0, 1], [str(summary.get("pre_label", "Pre")), str(summary.get("post_label", "Post"))])
     axis.set_xlim(-0.45, 1.5)
     axis.set_ylabel(summary["units"], fontsize=8)
     axis.spines[["top", "right"]].set_visible(False)
@@ -219,6 +292,17 @@ def export_selected_metrics(results, prefix, write_csv=True, write_h5=True):
                 for row, (pre, post) in enumerate(zip(result["pre_values"], result["post_values"]), 1):
                     writer.writerow([key, row, summary["row_unit"], summary["units"], pre, post, post - pre])
     if write_csv:
+        # All-windows comparison: descriptive table, pairwise tests and per-row values.
+        for suffix, rows in (
+                ("_windows", [row for key, result in results.items() for row in window_rows(key, result)]),
+                ("_window_pairs", [row for key, result in results.items() for row in pair_rows(key, result)]),
+                ("_window_rows", [row for key, result in results.items() for row in value_rows(key, result)])):
+            if rows:
+                with open(base + suffix + ".csv", "w", newline="", encoding="utf-8-sig") as stream:
+                    writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+                    writer.writeheader()
+                    writer.writerows(rows)
+    if write_csv:
         views = [result["group_view"] for result in results.values() if result.get("group_view")]
         write_group_comparisons({key: result["group_comparison"] for key, result in results.items()
                                  if result.get("group_comparison")},
@@ -244,6 +328,18 @@ def export_selected_metrics(results, prefix, write_csv=True, write_h5=True):
                                          dtype=h5py.string_dtype("utf-8") if isinstance(value, str) else None)
                 group.create_dataset("pre_values", data=result["pre_values"])
                 group.create_dataset("post_values", data=result["post_values"])
+                # All-windows comparison: per-row values of each window and the pairwise tests.
+                text = h5py.string_dtype("utf-8")
+                for window in result.get("windows", []):
+                    node = group.create_group(f"windows/{window['id']}")
+                    node.create_dataset("values", data=np.asarray(window["values"], float))
+                    for name in ("label", "start", "end", "n", "mean", "median", "sem"):
+                        node.create_dataset(name, data=window[name],
+                                            dtype=text if isinstance(window[name], str) else None)
+                for pair in (result.get("window_comparison") or {}).get("pairs", []):
+                    node = group.create_group(f"window_pairs/{pair['a']}_vs_{pair['b']}")
+                    for name, value in pair.items():
+                        node.create_dataset(name, data=value, dtype=text if isinstance(value, str) else None)
 
 
 def write_group_comparisons(comparisons, base, id_field, quantity, rows=None):

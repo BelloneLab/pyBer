@@ -215,9 +215,12 @@ class GroupViewGuiTests(unittest.TestCase):
     def test_right_click_menu_and_settings_roundtrip(self):
         panel = self.show_groups()
         menus = panel.plot_metrics.getPlotItem().getViewBox().menu._pyber_metric_view_menus
-        self.assertEqual([m.title() for m in menus], ["Group comparison", "Summary style"])
+        self.assertEqual([m.title() for m in menus], ["Group comparison", "Compare windows", "Summary style"])
         menus[0].actions()[list(GROUP_VIEWS).index("post")].trigger()
-        menus[1].actions()[list(SUMMARY_STYLES).index("box")].trigger()
+        menus[2].actions()[list(SUMMARY_STYLES).index("box")].trigger()
+        # "Compare windows" is only offered once an extra metric window exists.
+        panel.plot_metrics.getPlotItem().getViewBox().menu.aboutToShow.emit()
+        self.assertFalse(menus[1].menuAction().isVisible())
         self.app.processEvents()
         self.assertEqual(panel._metric_group_view(), "post")
         self.assertEqual(panel._metric_summary_style(), "box")

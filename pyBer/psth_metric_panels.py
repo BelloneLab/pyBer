@@ -6,8 +6,20 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
+# =============================================================================
+# Configuration
+# =============================================================================
+
+PANEL_MIN_SIZE = (230, 230)       # smallest legible metric panel (pixels)
+GRID_MAX_COLUMNS = 3              # extra metric panels per row at most
+GRID_CELL_MIN_WIDTH = 262         # panel + card margins + grid spacing
+TITLE_MIN_POINT_SIZE = 7.0        # long titles ("AUC: Pre vs Early vs Late") shrink down to this
+TITLE_POINT_STEP = 0.5
+TITLE_RIGHT_MARGIN = 8            # pixels kept free at the right of a fitted title
+
+
 class MetricGrid(QtWidgets.QWidget):
-    """Use one legible column in a narrow results drawer and two when space allows."""
+    """As many columns (one to three) as fit without squeezing a panel below its minimum width."""
     columnsChanged = QtCore.Signal()
 
     def __init__(self, parent=None):
@@ -16,7 +28,7 @@ class MetricGrid(QtWidgets.QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        columns = 1 if self.width() < 650 else 2
+        columns = max(1, min(GRID_MAX_COLUMNS, self.width() // GRID_CELL_MIN_WIDTH))
         if columns != self.columns:
             self.columns = columns
             self.columnsChanged.emit()
@@ -27,7 +39,7 @@ class MetricPanel(pg.PlotWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent=parent, title="PSTH metrics")
-        self.setMinimumSize(230, 230)
+        self.setMinimumSize(*PANEL_MIN_SIZE)
         self.bars = [pg.BarGraphItem(x=[x], height=[0], width=0.25) for x in (0, 1)]
         self.pairs = self.plot(connect="finite", pen=pg.mkPen("#8893A1", width=0.8))
         self.points = [self.plot(pen=None, symbol="o", symbolSize=4) for _ in (0, 1)]
@@ -56,8 +68,13 @@ class MetricPanel(pg.PlotWidget):
         self._note_wanted = False
         # Summary style of the group views: points | bars | box (group_metric_views).
         self.summary_style = "points"
+        # Titles of the group / window views are fitted to the panel width;
+        # the base size is the one set by the plot style (read on first use).
+        self._title_fit = False
+        self._title_base = None
         self.set_colors({"text": "#CED8E6", "accent": "#4D93BD"})
         self.getViewBox().sigResized.connect(self._fit_note)
+        self.getViewBox().sigResized.connect(self._fit_title)
         self.getViewBox().sigXRangeChanged.connect(self._fit_note)
         self.getPlotItem().visibleChanged.connect(self._fit_note)
 
@@ -87,6 +104,45 @@ class MetricPanel(pg.PlotWidget):
             self.note.setPos(float(np.mean(view.viewRange()[0])),
                              bottom + extent * (1. - 4. / height))
 
+    def _fit_title(self, *_args):
+        """Shrink a long view title to the panel width instead of letting it widen the plot.
+
+        A pyqtgraph title reserves its full text width, so a title longer than
+        the panel pushes the right side of the plot out of view. The size is
+        chosen from font metrics (no trial layouts) and the reserved width is
+        released.
+        """
+        if not self._title_fit:
+            return
+        label = self.getPlotItem().titleLabel
+        if self._title_base is None:
+            self._title_base = str(label.opts.get("size", "10pt"))
+        available = self.width() - label.geometry().left() - TITLE_RIGHT_MARGIN
+        if available <= 20 or not label.text:
+            return
+        try:
+            size = float(self._title_base.replace("pt", ""))
+        except ValueError:
+            size = 10.0
+        font = QtGui.QFont(label.item.font())
+        font.setBold(bool(label.opts.get("bold", False)))
+        while size > TITLE_MIN_POINT_SIZE:
+            font.setPointSizeF(size)
+            if QtGui.QFontMetricsF(font).horizontalAdvance(label.text) <= available:
+                break
+            size -= TITLE_POINT_STEP
+        wanted = f"{size:g}pt"
+        if label.opts.get("size") != wanted:
+            label.setText(label.text, size=wanted)
+        label.setMinimumWidth(0)
+
+    def _restore_title(self):
+        """Give the title its style size back before a plain (unfitted) title is shown."""
+        self._title_fit = False
+        label = self.getPlotItem().titleLabel
+        if self._title_base is not None and label.opts.get("size") != self._title_base:
+            label.setText(label.text, size=self._title_base)
+
     def set_colors(self, palette):
         """Respect the active plot palette without confusing summary encodings."""
         colors = [QtGui.QColor(palette["accent"]), QtGui.QColor("#D28A64")]
@@ -105,7 +161,8 @@ class MetricPanel(pg.PlotWidget):
         self.pairs.setPen(pg.mkPen(faint, width=0.7))
         self.note.setColor(text)
         if getattr(self, "result", None) is not None and (
-                getattr(self, "_row_colors", None) is not None or "group_comparison" in self.result):
+                getattr(self, "_row_colors", None) is not None or "group_comparison" in self.result
+                or "window_view" in self.result):
             # A theme change must not drop the per-recording group tint.
             self.show_result(self.result, row_colors=self._row_colors)
 
@@ -119,6 +176,7 @@ class MetricPanel(pg.PlotWidget):
         self.result = result
         self._row_colors = row_colors
         self._data_bounds = None
+        self._restore_title()
         self.pairs.setData([], [])
         for item in self.points + self.medians + self.means:
             item.setData([], [])
@@ -138,6 +196,10 @@ class MetricPanel(pg.PlotWidget):
         if result.get("group_comparison"):
             self.summary_style = result.get("group_style", self.summary_style)
             self._show_groups(result)
+            return
+        if result.get("window_view"):
+            self.summary_style = result.get("window_style", self.summary_style)
+            self._show_windows(result, row_colors)
             return
         summary = result["summary"]
         # Window names chosen by the user (Pre / Post unless renamed or extra).
@@ -199,14 +261,38 @@ class MetricPanel(pg.PlotWidget):
         The view description carries the per-animal values, the statistics
         that match the representation and the annotation text.
         """
-        from group_metric_views import draw_group_view, view_note, view_from_comparison
+        from group_metric_views import view_from_comparison
         summary = result["summary"]
         view = result.get("group_view")
         if view is None:   # results attached by older callers: Post - Pre comparison only
             view = view_from_comparison(result["group_comparison"], f"{summary['metric']}: Post \u2212 Pre")
             view["zero_line"] = True
+        self._show_view(result, view)
+
+    def _show_windows(self, result, row_colors=None):
+        """All metric windows in one panel (Pre, Post, Late, ...), rows joined by lines.
+
+        The view description comes from ``window_comparison.build_window_view``:
+        one column per window, the Friedman test in the note and one bracket
+        per tested pair of windows. ``row_colors`` tints the points by
+        recording group; the summaries then use the neutral text color.
+        """
+        view = result["window_view"]
+        columns = view["columns"]
+        if row_colors is not None and columns and len(row_colors) == len(columns[0]["values"]):
+            neutral = self._text_color.name()
+            view = {**view, "columns": [{**column, "color": neutral, "point_colors": list(row_colors)}
+                                        for column in columns]}
+        self._show_view(result, view)
+
+    def _show_view(self, result, view):
+        """Draw one view description (groups or windows) with its title, note and tooltip."""
+        from group_metric_views import draw_group_view, view_note
+        summary = result["summary"]
         self._group_items = draw_group_view(self, view, self._text_color.name(), self.summary_style)
         self.setTitle(view["title"])
+        self._title_fit = True
+        self._fit_title()
         self.setLabel("left", summary["units"])
         self.setToolTip(view["tooltip"])
         bounds = view.get("_drawn_bounds")
