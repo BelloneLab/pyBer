@@ -21,8 +21,11 @@ and in the right-click menu of a metric panel) chooses between
   compared with the same Pre window exactly like Post.
 
 Both use one Holm correction across everything that is shown together. When
-recording groups are compared ("All groups", two or more groups) every window
-keeps its own panel, because the group views are built on one Pre / Post pair.
+recording groups are compared ("All groups", two or more groups), the group
+comparison "Pre and Post side by side" shows every window per group (Pre, Post,
+Late, ... for each group, see ``group_metric_views.build_group_window_view``).
+The other group comparisons show one quantity per group, so every window keeps
+its own panel there.
 
 The controller owns its widgets and plots; the postprocessing panel only
 places them and asks for the current windows when it computes the metrics.
@@ -243,7 +246,8 @@ class MetricWindows(QtCore.QObject):
             "Friedman test across the windows and an exact paired sign test of every pair of\n"
             "windows (Pre vs Post, Pre vs Late, Post vs Late, ...), Holm-adjusted.\n"
             "Each window with Pre: one panel per window, each compared with Pre only.\n"
-            "When recording groups are compared (All groups), every window keeps its own panel.")
+            "When recording groups are compared (All groups), Group comparison = \"Pre and Post side\n"
+            "by side\" shows every window per group; the other group comparisons keep one panel per window.")
         self.compare_combo.setCurrentIndex(max(0, self.compare_combo.findData(DEFAULT_WINDOW_COMPARISON)))
         self.compare_combo.currentIndexChanged.connect(lambda _index: self._on_changed())
         # The metrics form and the widget of its Post row: extra windows are
@@ -311,9 +315,9 @@ class MetricWindows(QtCore.QObject):
     def summary_arguments(self, group_layout: bool = False) -> Dict[str, object]:
         """Keyword arguments for ``psth_metrics.summarize_metrics``.
 
-        ``group_layout``: recording groups are compared in the metric panels.
-        The group views need one Pre / Post pair per panel, so each window is
-        then compared with Pre whatever the selected comparison.
+        ``group_layout``: recording groups are compared with a representation
+        that needs one Pre / Post pair per panel, so each window is then
+        compared with Pre whatever the selected comparison.
         """
         return {"pre_label": self.pre_label(), "post_label": self.post_label(),
                 "extra_windows": self.valid_windows(),

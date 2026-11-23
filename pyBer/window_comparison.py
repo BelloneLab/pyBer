@@ -30,7 +30,7 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 
-from group_metric_views import ALPHA, _column, significance_stars
+from group_metric_views import ALPHA, _column, bracket_levels, significance_stars
 from group_stats import MIN_TEST_N, _holm
 from postprocessing_core import paired_summary
 
@@ -176,23 +176,6 @@ def adjust_families(comparisons: Sequence[Dict[str, object]]) -> int:
 # View description (drawn by group_metric_views)
 # =============================================================================
 
-def _bracket_levels(spans: Sequence[tuple]) -> List[int]:
-    """Lowest free level of each (x0, x1) bracket; short brackets are placed first."""
-    order = sorted(range(len(spans)), key=lambda index: (spans[index][1] - spans[index][0], spans[index][0]))
-    taken: List[List[tuple]] = []
-    levels = [0] * len(spans)
-    for index in order:
-        x0, x1 = spans[index]
-        level = 0
-        while level < len(taken) and any(x0 < other1 and other0 < x1 for other0, other1 in taken[level]):
-            level += 1
-        if level == len(taken):
-            taken.append([])
-        taken[level].append((x0, x1))
-        levels[index] = level
-    return levels
-
-
 def build_window_view(metric_label: str, windows: Sequence[Dict[str, object]],
                       comparison: Dict[str, object], row_unit: str = "trials") -> Dict[str, object]:
     """Describe the all-windows panel: one column per window, rows joined by lines.
@@ -217,7 +200,7 @@ def build_window_view(metric_label: str, windows: Sequence[Dict[str, object]],
         tested = [pair for pair in tested if pair["p_holm"] < ALPHA]
     shown = sorted(tested, key=lambda pair: pair["p_holm"])[:MAX_BRACKETS]
     spans = [(pair["a_index"] + BRACKET_INSET, pair["b_index"] - BRACKET_INSET) for pair in shown]
-    for pair, (x0, x1), level in zip(shown, spans, _bracket_levels(spans)):
+    for pair, (x0, x1), level in zip(shown, spans, bracket_levels(spans)):
         view["brackets"].append({"x0": x0, "x1": x1, "level": level,
                                  "text": f"{significance_stars(pair['p_holm'])} p={pair['p_holm']:.2g}"})
     labels = [str(window["label"]) for window in windows]

@@ -56,6 +56,7 @@ ALPHA = 0.05                 # significance level for assumption checks and star
 MAX_BRACKETS = 3             # pairwise brackets drawn (most significant first)
 JITTER = 0.14                # half-width of the point cloud of one column
 PAIR_GAP = 2.6               # x distance between two groups in the paired view
+GROUP_WINDOW_GAP = 0.8       # free space between two groups in the all-windows view (in columns)
 #: Short quantity name written to the CSV exports.
 QUANTITY = {"delta": "post_minus_pre", "post": "post", "pre": "pre", "paired": "post_minus_pre"}
 
@@ -151,12 +152,123 @@ def _pairwise_brackets(comparison: Dict[str, object], x_of: Dict[str, float]) ->
     return brackets[:MAX_BRACKETS]
 
 
-def build_group_view(mode: str, groups: Sequence[Dict[str, object]], metric_label: str = "") -> Dict[str, object]:
+def bracket_levels(spans: Sequence[tuple]) -> List[int]:
+    """Lowest free level of each (x0, x1) bracket; short brackets are placed first."""
+    order = sorted(range(len(spans)), key=lambda index: (spans[index][1] - spans[index][0], spans[index][0]))
+    taken: List[List[tuple]] = []
+    levels = [0] * len(spans)
+    for index in order:
+        x0, x1 = spans[index]
+        level = 0
+        while level < len(taken) and any(x0 < other1 and other0 < x1 for other0, other1 in taken[level]):
+            level += 1
+        if level == len(taken):
+            taken.append([])
+        taken[level].append((x0, x1))
+        levels[index] = level
+    return levels
+
+
+def build_group_window_view(groups: Sequence[Dict[str, object]], labels: Sequence[str],
+                            metric_label: str = "") -> Dict[str, object]:
+    """Every metric window side by side within each group (Pre, Post, Late, ...).
+
+    The paired Pre / Post view extended to any number of windows: one cluster
+    of columns per group, one tick per window, each animal joined by a line
+    across its windows.
+
+    ``groups``: dicts with ``name``, ``color``, ``windows`` (one array per
+    window, one value per animal, same animal order), ``pre`` and ``post``
+    (the first two windows), optional ``ids`` and ``tested``. ``labels``: the
+    window names, Pre first.
+
+    Statistics (unit = animal): within each group every pair of windows gets
+    the paired test of ``paired_test`` (t-test or Wilcoxon), Holm-adjusted
+    across all pairs and groups. Between groups, the change from the first
+    window (Post - Pre, Late - Pre, ...) is compared with ``compare_groups``,
+    Holm-adjusted across windows.
+    """
+    labels = [str(label) for label in labels]
+    count = len(labels)
+    gap = count + GROUP_WINDOW_GAP
+    view: Dict[str, object] = {"mode": "group_windows", "quantity": QUANTITY["paired"], "within": [],
+                               "columns": [], "links": [], "ticks": [], "brackets": [], "zero_line": False}
+    within: List[Dict[str, object]] = []
+    for index, group in enumerate(groups):
+        base, color = index * gap, group.get("color", "#888888")
+        values = [np.asarray(window, float) for window in group["windows"]]
+        columns = [_column(base + w, values[w], color, labels[w], group["name"], "window", faded=(w == 0))
+                   for w in range(count)]
+        view["columns"].extend(columns)
+        for w in range(count - 1):
+            view["links"].append({"x0": base + w, "x1": base + w + 1.0, "y0": values[w], "y1": values[w + 1],
+                                  "jitter": columns[w]["jitter"], "color": color})
+        complete = int(np.count_nonzero(np.all(np.isfinite(np.vstack(values)), axis=0))) if values[0].size else 0
+        caption = f"{group['name']}\nn={complete}"
+        middle = (count - 1) // 2 if count % 2 else None
+        for w in range(count):
+            # The group caption goes under the middle window (odd count) or between the two middle ones.
+            view["ticks"].append((base + w, f"{labels[w]}\n{caption}" if w == middle else labels[w]))
+        if middle is None:
+            view["ticks"].append((base + (count - 1) / 2.0, "\n" + caption))
+        for first in range(count):
+            for second in range(first + 1, count):
+                test = paired_test(values[first], values[second])
+                test.update(group=f"{group['name']}: {labels[first]} vs {labels[second]}",
+                            tested=bool(group.get("tested", True)), x0=base + first, x1=base + second)
+                within.append(test)
+    tested = [item for item in within if item["tested"]]
+    for item, adjusted in zip(tested, _holm([item["p"] for item in tested])):
+        item["p_holm"] = adjusted
+    shown = [item for item in tested if np.isfinite(float(item["p_holm"]))]
+    if count > 3:   # many windows: only the significant pairs, to keep the panel readable
+        shown = [item for item in shown if item["p_holm"] < ALPHA]
+    spans = [(item["x0"] + 0.08, item["x1"] - 0.08) for item in shown]
+    for item, (x0, x1), level in zip(shown, spans, bracket_levels(spans)):
+        # Stars only: neighbouring brackets are one column wide, a p-value would overlap the next
+        # label. The exact values are in the tooltip-free CSV export (..._group_paired.csv).
+        view["brackets"].append({"x0": x0, "x1": x1, "level": level,
+                                 "text": significance_stars(item["p_holm"])})
+    view["within"] = within
+    # Between groups: the change from the first window, one test per later window.
+    between = []
+    for w in range(1, count):
+        between.append(compare_groups([
+            {"name": g["name"], "color": g.get("color", "#888888"), "ids": g.get("ids", []),
+             "tested": g.get("tested", True),
+             "values": np.asarray(g["windows"][w], float) - np.asarray(g["windows"][0], float)} for g in groups]))
+    adjusted = _holm([float(item.get("p", np.nan)) for item in between])
+    view["between"] = between[0]
+    view["between_windows"] = [{"window": labels[w + 1], "comparison": item, "p_holm": p}
+                               for w, (item, p) in enumerate(zip(between, adjusted))]
+    suffix = " vs ".join(labels) if count <= 3 else f"{count} windows"
+    view["title"] = f"{metric_label}: {suffix}" if metric_label else suffix
+    lines = []
+    families = sorted({str(item["test"]) for item in tested if np.isfinite(float(item["p"]))})
+    if families:
+        lines.append("Within group: " + " / ".join(families) + ", Holm")
+    changes = [f"{entry['window']} p={entry['p_holm']:.2g}" for entry in view["between_windows"]
+               if np.isfinite(entry["p_holm"])]
+    if changes:
+        lines.append(f"Change from {labels[0]} between groups (Holm): " + ", ".join(changes))
+    view["note"] = "\n".join(lines)
+    view["tooltip"] = ("Each line joins the values of one animal across the windows (trials averaged per "
+                       "recording). Brackets: paired test of two windows within a group, Holm-adjusted across "
+                       "all pairs and groups (no bracket: not tested, fewer than 3 animals or ungrouped). "
+                       f"Between groups: the change from {labels[0]} is compared for each later window, "
+                       "Holm-adjusted across windows. " + str(between[0]["note"]))
+    return view
+
+
+def build_group_view(mode: str, groups: Sequence[Dict[str, object]], metric_label: str = "",
+                     pre_label: str = "Pre", post_label: str = "Post") -> Dict[str, object]:
     """Describe one representation: columns, paired lines, statistics and annotations.
 
     ``groups``: dicts with ``name``, ``color``, ``pre`` and ``post`` (one value
     per animal, same order), optional ``ids`` and ``tested`` (False for
-    "Ungrouped": summarized, never tested).
+    "Ungrouped": summarized, never tested). ``pre_label`` / ``post_label``:
+    the window names shown on the axis and in the title (renamed or extra
+    windows).
     """
     mode = mode if mode in GROUP_VIEWS else DEFAULT_GROUP_VIEW
     prepared = []
@@ -168,20 +280,21 @@ def build_group_view(mode: str, groups: Sequence[Dict[str, object]], metric_labe
                                "ids": g.get("ids", []), "tested": g.get("tested", True)} for g in prepared])
     view: Dict[str, object] = {"mode": mode, "quantity": QUANTITY[mode], "between": between, "within": [],
                                "columns": [], "links": [], "ticks": [], "brackets": [], "zero_line": False}
-    suffix = {"delta": "Post − Pre", "post": "Post", "pre": "Pre", "paired": "Pre vs Post"}[mode]
+    suffix = {"delta": f"{post_label} − {pre_label}", "post": post_label, "pre": pre_label,
+              "paired": f"{pre_label} vs {post_label}"}[mode]
     view["title"] = f"{metric_label}: {suffix}" if metric_label else suffix
     unit_note = "animals · "
     if mode == "paired":
         within = []
         for index, group in enumerate(prepared):
             x_pre, x_post = index * PAIR_GAP, index * PAIR_GAP + 1.0
-            pre_col = _column(x_pre, group["pre"], group.get("color", "#888888"), "Pre", group["name"], "pre", True)
-            post_col = _column(x_post, group["post"], group.get("color", "#888888"), "Post", group["name"], "post")
+            pre_col = _column(x_pre, group["pre"], group.get("color", "#888888"), pre_label, group["name"], "pre", True)
+            post_col = _column(x_post, group["post"], group.get("color", "#888888"), post_label, group["name"], "post")
             view["columns"].extend([pre_col, post_col])
             view["links"].append({"x0": x_pre, "x1": x_post, "y0": group["pre"], "y1": group["post"],
                                   "jitter": pre_col["jitter"], "color": group.get("color", "#888888")})
             n_pairs = int(np.count_nonzero(np.isfinite(group["pre"]) & np.isfinite(group["post"])))
-            view["ticks"].extend([(x_pre, "Pre"), (x_post, "Post"),
+            view["ticks"].extend([(x_pre, pre_label), (x_post, post_label),
                                   ((x_pre + x_post) / 2, f"\n{group['name']}\nn={n_pairs}")])
             test = paired_test(group["pre"], group["post"])
             test.update(group=group["name"], tested=bool(group.get("tested", True)))
@@ -200,7 +313,8 @@ def build_group_view(mode: str, groups: Sequence[Dict[str, object]], metric_labe
         # "descriptive only" line carries no information.
         lines = []
         if families:
-            lines.append("Pre vs Post within group: " + " / ".join(families) + ", Holm across groups")
+            lines.append(f"{pre_label} vs {post_label} within group: " + " / ".join(families)
+                         + ", Holm across groups")
         if _was_tested(between):
             lines.append(f"Change between groups: {stats_label(between)}")
         view["note"] = "\n".join(lines)

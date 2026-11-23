@@ -56,7 +56,7 @@ from psth_groups import (HeatmapGroupBands, build_group_display, block_summaries
                          relayout_legend)
 from group_stats import compare_groups, per_file_means, stats_label, comparison_rows
 from group_metric_views import (GROUP_VIEWS, DEFAULT_GROUP_VIEW, SUMMARY_STYLES, DEFAULT_SUMMARY_STYLE,
-                                build_group_view)
+                                build_group_view, build_group_window_view)
 from psth_mean_band import sem_band, style_mean_band
 from psth_trace_overlay import (DEFAULT_TRACE_VIEW, TraceOverlay,
                                 normalize_trace_view, populate_trace_menu)
@@ -17825,7 +17825,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     result = summarize_metrics(matrix, tvec, metric_ids, pre_window, post_window, units,
                                                independent_units=(not grouped or animal_rows),
                                                row_unit="files" if animal_rows else "trials",
-                                               **self.metric_windows.summary_arguments(group_layout=group_layout))
+                                               **self._metric_window_arguments(group_layout))
                     if display is not None:
                         self._attach_metric_group_comparisons(matrix, result, display=display)
                     self._style_window_views(result)
@@ -17999,9 +17999,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
                 (float(self.spin_metric_post0.value()), float(self.spin_metric_post1.value())),
                 self._psth_units(), independent_units=(not grouped or file_rows),
                 row_unit="files" if file_rows else "trials",
-                # Group views are built on one Pre / Post pair: windows stay in separate panels.
-                **self.metric_windows.summary_arguments(
-                    group_layout=self._group_blocks_for_rows(mat) is not None),
+                **self._metric_window_arguments(self._group_blocks_for_rows(mat) is not None),
             )
             row_colors = self._group_row_colors(mat)
             self._attach_metric_group_comparisons(mat, self._last_metric_panels)
@@ -18044,21 +18042,47 @@ class PostProcessingPanel(QtWidgets.QWidget):
         for key, result in results.items():
             pre = np.asarray(result["pre_values"], float)
             post = np.asarray(result["post_values"], float)
+            # "All windows together": Pre, Post and every extra window, per animal and group.
+            windows = result.get("windows") or []
             groups, rows = [], []
             for block in blocks:
                 ids = file_ids[block.start:block.stop]
                 order, pre_f = per_file_means(pre[block.start:block.stop], ids)
                 _, post_f = per_file_means(post[block.start:block.stop], ids)
+                per_window = [per_file_means(np.asarray(window["values"], float)[block.start:block.stop], ids)[1]
+                              for window in windows]
                 groups.append({"name": block.name, "color": block.color, "pre": pre_f, "post": post_f,
-                               "ids": order, "tested": block.group_id is not None})
-                rows.extend({"metric_id": key, "file_id": fid, "group": block.name, "pre": a, "post": b,
-                             "post_minus_pre": b - a} for fid, a, b in zip(order, pre_f, post_f))
-            view = build_group_view(self._metric_group_view(), groups, result["summary"]["metric"])
+                               "ids": order, "tested": block.group_id is not None, "windows": per_window})
+                for index, (fid, a, b) in enumerate(zip(order, pre_f, post_f)):
+                    row = {"metric_id": key, "file_id": fid, "group": block.name, "pre": a, "post": b,
+                           "post_minus_pre": b - a}
+                    # One more column per extra window (Late, ...), named by its label.
+                    row.update({str(window["label"]): values[index]
+                                for window, values in list(zip(windows, per_window))[2:]})
+                    rows.append(row)
+            summary = result["summary"]
+            if windows:
+                view = build_group_window_view(groups, [window["label"] for window in windows], summary["metric"])
+                result.pop("window_view", None)      # the group view replaces the pooled windows panel
+            else:
+                view = build_group_view(self._metric_group_view(), groups, summary["metric"],
+                                        str(summary.get("pre_label", "Pre")), str(summary.get("post_label", "Post")))
             result["group_view"] = view
             result["group_style"] = self._metric_summary_style()
             # The between-group test of the chosen quantity (Post - Pre for the paired view).
             result["group_comparison"] = view["between"]
             result["group_rows"] = rows
+
+    def _metric_window_arguments(self, group_layout: bool) -> Dict[str, object]:
+        """Window arguments of summarize_metrics for the current display.
+
+        When recording groups are compared, "All windows together" needs the
+        side-by-side group representation (Pre, Post, Late ... per group). The
+        other group comparisons show one quantity per group, so each window
+        keeps its own panel there.
+        """
+        separate = bool(group_layout) and self._metric_group_view() != "paired"
+        return self.metric_windows.summary_arguments(group_layout=separate)
 
     def _style_window_views(self, results: Dict[str, Dict]) -> None:
         """Draw the all-windows panels (Pre vs Post vs Late ...) in the selected summary style."""

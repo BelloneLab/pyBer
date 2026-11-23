@@ -423,10 +423,49 @@ class MetricWindowsPanelTests(dashboard.GroupViewDashboardTests):
         self.app.processEvents()
         primary = next(iter(panel._last_metric_panels))
         key = result_key(primary, windows._rows[0].window_id)
-        self.assertIn(key, panel._last_metric_panels)                    # group views need one Pre / Post pair
+        self.assertIn(key, panel._last_metric_panels)                    # one quantity per group: one Pre / Post pair
         for name in (primary, key):
             self.assertIn("group_view", panel._last_metric_panels[name])
             self.assertNotIn("window_view", panel._last_metric_panels[name])
+        self.assertTrue(panel._last_metric_panels[key]["group_view"]["title"].endswith("Late − Pre"))
+        panel._psth_timer.stop()
+
+    def test_paired_group_view_shows_every_window_per_group(self):
+        panel, windows = self._ready()
+        windows.add_window("Late", 2.0, 4.0)
+        panel.cb_group_view.setChecked(True)                             # All groups: WT vs Het
+        panel.combo_metric_group_view.setCurrentIndex(panel.combo_metric_group_view.findData("paired"))
+        panel._psth_timer.stop()
+        panel._compute_psth_impl()
+        self.app.processEvents()
+        primary = next(iter(panel._last_metric_panels))
+        self.assertEqual([k for k in panel._last_metric_panels if is_window_key(k)], [])   # one panel per metric
+        result = panel._last_metric_panels[primary]
+        view = result["group_view"]
+        self.assertNotIn("window_view", result)
+        self.assertEqual(view["mode"], "group_windows")
+        self.assertTrue(view["title"].endswith("Pre vs Post vs Late"))
+        # Pre, Post, Late for each of the two groups; the group caption sits under the middle window.
+        self.assertEqual([text.split("\n")[0] for _x, text in view["ticks"]], ["Pre", "Post", "Late"] * 2)
+        self.assertEqual([text for _x, text in view["ticks"] if "\n" in text],
+                         [f"Post\nWT\nn={dashboard.N_PER_GROUP}", f"Post\nHet\nn={dashboard.N_PER_GROUP}"])
+        self.assertEqual((len(view["columns"]), len(view["links"])), (6, 4))
+        # One value per animal in every window column, taken from the same window values.
+        late_columns = view["columns"][2::3]
+        self.assertEqual([column["n"] for column in late_columns], [dashboard.N_PER_GROUP] * 2)
+        late = np.asarray(result["windows"][2]["values"], float)
+        if late.size == 2 * dashboard.N_PER_GROUP:                       # rows are animals: identical values
+            np.testing.assert_allclose(np.sort(np.concatenate([column["values"] for column in late_columns])),
+                                       np.sort(late))
+        # Three pairs per group tested within group; change from Pre compared between groups per window.
+        self.assertEqual(len(view["within"]), 6)
+        self.assertEqual([entry["window"] for entry in view["between_windows"]], ["Post", "Late"])
+        self.assertIn("Late", result["group_rows"][0])                   # per-animal export has the extra window
+        ticks = [text.split("\n")[0] for _x, text in panel.plot_metrics.getAxis("bottom")._tickLevels[0]]
+        self.assertEqual(ticks, ["Pre", "Post", "Late"] * 2)
+        # Another group comparison shows one quantity per group: back to one panel per window.
+        panel.combo_metric_group_view.setCurrentIndex(panel.combo_metric_group_view.findData("delta"))
+        self.assertIn(result_key(primary, windows._rows[0].window_id), panel._last_metric_panels)
         panel._psth_timer.stop()
 
     def test_invalid_window_is_ignored_and_metrics_off_disables_the_rows(self):
