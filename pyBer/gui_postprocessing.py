@@ -2688,6 +2688,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
             "Post only / Pre only: one window, tested between groups.\n"
             "Pre and Post side by side: each animal joined by a line; paired Pre vs Post test "
             "within each group (Holm across groups) and the change tested between groups.\n"
+            "Groups overlaid: one mean \u00b1 SEM line per group across the windows, animals as thin lines, "
+            "and the group \u00d7 window interaction.\n"
+            "With extra windows (Late, ...) and Compare windows = All windows together, the last two "
+            "representations show every window.\n"
             "One point is one animal (trials are averaged per recording).")
         self.combo_metric_style = QtWidgets.QComboBox()
         for code, label in SUMMARY_STYLES.items():
@@ -18062,7 +18066,10 @@ class PostProcessingPanel(QtWidgets.QWidget):
                     rows.append(row)
             summary = result["summary"]
             if windows:
-                view = build_group_window_view(groups, [window["label"] for window in windows], summary["metric"])
+                view = build_group_window_view(
+                    groups, [window["label"] for window in windows], summary["metric"],
+                    overlay=self._metric_group_view() == "overlay",
+                    limits=[(window["start"], window["end"]) for window in windows])
                 result.pop("window_view", None)      # the group view replaces the pooled windows panel
             else:
                 view = build_group_view(self._metric_group_view(), groups, summary["metric"],
@@ -18081,7 +18088,7 @@ class PostProcessingPanel(QtWidgets.QWidget):
         other group comparisons show one quantity per group, so each window
         keeps its own panel there.
         """
-        separate = bool(group_layout) and self._metric_group_view() != "paired"
+        separate = bool(group_layout) and self._metric_group_view() not in ("paired", "overlay")
         return self.metric_windows.summary_arguments(group_layout=separate)
 
     def _style_window_views(self, results: Dict[str, Dict]) -> None:

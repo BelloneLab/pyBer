@@ -12,6 +12,8 @@ post       Post per group                                between groups (on Post
 pre        Pre per group                                 between groups (on Pre, baseline check)
 paired     Pre next to Post per group, same animal       within group: paired Pre vs Post (Holm
            joined by a line                              across groups); between groups: on change
+overlay    groups share the window ticks: bold mean      group x window interaction (mixed ANOVA,
+           +/- SEM line per group, thin animal lines     Greenhouse-Geisser beyond two windows)
 =========  ============================================  ==========================================
 
 Between-group tests are chosen by ``group_stats.compare_groups`` (Welch t /
@@ -30,7 +32,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from group_stats import MIN_TEST_N, _holm, compare_groups, describe, stats_label
+from group_stats import MIN_TEST_N, _holm, compare_groups, describe, stats_label, window_interaction
 
 # =============================================================================
 # Configuration
@@ -42,6 +44,7 @@ GROUP_VIEWS: Dict[str, str] = {
     "post": "Post only per group",
     "pre": "Pre only per group",
     "paired": "Pre and Post side by side, paired lines",
+    "overlay": "Groups overlaid, mean ± SEM line per group",
 }
 DEFAULT_GROUP_VIEW = "delta"
 #: Summary style code -> label.
@@ -57,8 +60,12 @@ MAX_BRACKETS = 3             # pairwise brackets drawn (most significant first)
 JITTER = 0.14                # half-width of the point cloud of one column
 PAIR_GAP = 2.6               # x distance between two groups in the paired view
 GROUP_WINDOW_GAP = 0.8       # free space between two groups in the all-windows view (in columns)
+OVERLAY_DODGE = 0.07         # x offset between neighbouring groups in the overlaid view
+OVERLAY_LINE_WIDTH = 2.6     # group mean line of the overlaid view
+OVERLAY_MARKER_SIZE = 9      # group mean marker (pixels on screen)
 #: Short quantity name written to the CSV exports.
-QUANTITY = {"delta": "post_minus_pre", "post": "post", "pre": "pre", "paired": "post_minus_pre"}
+QUANTITY = {"delta": "post_minus_pre", "post": "post", "pre": "pre", "paired": "post_minus_pre",
+            "overlay": "post_minus_pre"}
 
 
 # =============================================================================
@@ -170,47 +177,75 @@ def bracket_levels(spans: Sequence[tuple]) -> List[int]:
 
 
 def build_group_window_view(groups: Sequence[Dict[str, object]], labels: Sequence[str],
-                            metric_label: str = "") -> Dict[str, object]:
-    """Every metric window side by side within each group (Pre, Post, Late, ...).
+                            metric_label: str = "", overlay: bool = False,
+                            limits: Optional[Sequence[tuple]] = None) -> Dict[str, object]:
+    """Every metric window for each group (Pre, Post, Late, ...), in one of two layouts.
 
-    The paired Pre / Post view extended to any number of windows: one cluster
-    of columns per group, one tick per window, each animal joined by a line
-    across its windows.
+    * side by side (default): the paired Pre / Post view extended to any number
+      of windows. One cluster of columns per group, one tick per window, each
+      animal joined by a line across its windows, in the chosen summary style.
+    * ``overlay``: the groups share one set of window ticks. Each group is a
+      bold mean +/- SEM line across the windows; the animals are thin faint
+      lines behind it. The groups are named in a colored legend.
 
     ``groups``: dicts with ``name``, ``color``, ``windows`` (one array per
-    window, one value per animal, same animal order), ``pre`` and ``post``
-    (the first two windows), optional ``ids`` and ``tested``. ``labels``: the
-    window names, Pre first.
+    window, one value per animal, same animal order), optional ``ids`` and
+    ``tested``. ``labels``: the window names, Pre first. ``limits``: optional
+    (start, end) in seconds of each window, written under its tick in the
+    overlaid layout.
 
     Statistics (unit = animal): within each group every pair of windows gets
     the paired test of ``paired_test`` (t-test or Wilcoxon), Holm-adjusted
-    across all pairs and groups. Between groups, the change from the first
-    window (Post - Pre, Late - Pre, ...) is compared with ``compare_groups``,
-    Holm-adjusted across windows.
+    across all pairs and groups (brackets in the side-by-side layout). Between
+    groups, the change from the first window (Post - Pre, Late - Pre, ...) is
+    compared with ``compare_groups``, Holm-adjusted across windows, and the
+    group x window interaction is tested by ``group_stats.window_interaction``
+    (annotated in the overlaid layout, exported in both).
     """
     labels = [str(label) for label in labels]
     count = len(labels)
     gap = count + GROUP_WINDOW_GAP
-    view: Dict[str, object] = {"mode": "group_windows", "quantity": QUANTITY["paired"], "within": [],
-                               "columns": [], "links": [], "ticks": [], "brackets": [], "zero_line": False}
+    view: Dict[str, object] = {"mode": "overlay" if overlay else "group_windows",
+                               "quantity": QUANTITY["paired"], "within": [], "columns": [], "links": [],
+                               "ticks": [], "brackets": [], "zero_line": False}
     within: List[Dict[str, object]] = []
+    if overlay:
+        view["mean_lines"], view["legend"] = [], []
+        for w in range(count):
+            span = limits[w] if limits is not None and w < len(limits) else None
+            view["ticks"].append((float(w), f"{labels[w]}\n{span[0]:g} to {span[1]:g} s" if span else labels[w]))
     for index, group in enumerate(groups):
-        base, color = index * gap, group.get("color", "#888888")
+        color = group.get("color", "#888888")
         values = [np.asarray(window, float) for window in group["windows"]]
-        columns = [_column(base + w, values[w], color, labels[w], group["name"], "window", faded=(w == 0))
-                   for w in range(count)]
+        complete = int(np.count_nonzero(np.all(np.isfinite(np.vstack(values)), axis=0))) if values[0].size else 0
+        if overlay:
+            # Groups are dodged slightly around each window so their error bars do not hide each other.
+            base = (index - (len(groups) - 1) / 2.0) * OVERLAY_DODGE
+            columns = [_column(base + w, values[w], color, labels[w], group["name"], "window", faded=True)
+                       for w in range(count)]
+            for column in columns:
+                column["jitter"] = np.zeros(column["values"].size)     # one animal = one straight thin line
+                column["summary"] = False                              # the group mean line is the summary
+            view["mean_lines"].append({"x": [column["x"] for column in columns],
+                                       "mean": [column["mean"] for column in columns],
+                                       "sem": [column["sem"] for column in columns],
+                                       "color": color, "name": str(group["name"])})
+            view["legend"].append({"name": f"{group['name']}, n={complete}", "color": color})
+        else:
+            base = index * gap
+            columns = [_column(base + w, values[w], color, labels[w], group["name"], "window", faded=(w == 0))
+                       for w in range(count)]
+            caption = f"{group['name']}\nn={complete}"
+            middle = (count - 1) // 2 if count % 2 else None
+            for w in range(count):
+                # The group caption goes under the middle window (odd count) or between the two middle ones.
+                view["ticks"].append((base + w, f"{labels[w]}\n{caption}" if w == middle else labels[w]))
+            if middle is None:
+                view["ticks"].append((base + (count - 1) / 2.0, "\n" + caption))
         view["columns"].extend(columns)
         for w in range(count - 1):
             view["links"].append({"x0": base + w, "x1": base + w + 1.0, "y0": values[w], "y1": values[w + 1],
-                                  "jitter": columns[w]["jitter"], "color": color})
-        complete = int(np.count_nonzero(np.all(np.isfinite(np.vstack(values)), axis=0))) if values[0].size else 0
-        caption = f"{group['name']}\nn={complete}"
-        middle = (count - 1) // 2 if count % 2 else None
-        for w in range(count):
-            # The group caption goes under the middle window (odd count) or between the two middle ones.
-            view["ticks"].append((base + w, f"{labels[w]}\n{caption}" if w == middle else labels[w]))
-        if middle is None:
-            view["ticks"].append((base + (count - 1) / 2.0, "\n" + caption))
+                                  "jitter": columns[w]["jitter"], "color": color, "faint": overlay})
         for first in range(count):
             for second in range(first + 1, count):
                 test = paired_test(values[first], values[second])
@@ -220,7 +255,8 @@ def build_group_window_view(groups: Sequence[Dict[str, object]], labels: Sequenc
     tested = [item for item in within if item["tested"]]
     for item, adjusted in zip(tested, _holm([item["p"] for item in tested])):
         item["p_holm"] = adjusted
-    shown = [item for item in tested if np.isfinite(float(item["p_holm"]))]
+    # Overlaid groups share the ticks: a bracket could not say which group it belongs to.
+    shown = [] if overlay else [item for item in tested if np.isfinite(float(item["p_holm"]))]
     if count > 3:   # many windows: only the significant pairs, to keep the panel readable
         shown = [item for item in shown if item["p_holm"] < ALPHA]
     spans = [(item["x0"] + 0.08, item["x1"] - 0.08) for item in shown]
@@ -229,6 +265,16 @@ def build_group_window_view(groups: Sequence[Dict[str, object]], labels: Sequenc
         # label. The exact values are in the tooltip-free CSV export (..._group_paired.csv).
         view["brackets"].append({"x0": x0, "x1": x1, "level": level,
                                  "text": significance_stars(item["p_holm"])})
+    # Group x window interaction (tested groups, animals with every window). Stored with the
+    # within-group tests so it is exported with them; it never gets a bracket.
+    interaction = window_interaction([np.column_stack([np.asarray(window, float) for window in group["windows"]])
+                                      for group in groups if group.get("tested", True)])
+    view["interaction"] = interaction
+    within.append({"group": "Group x window interaction", "tested": True, "n_pairs": interaction["n"],
+                   "mean_difference": np.nan, "test": interaction["test"], "statistic": interaction["statistic"],
+                   "p": interaction["p"], "p_holm": np.nan, "effect_name": interaction["effect_name"],
+                   "effect": interaction["effect"], "normality": interaction["normality"],
+                   "note": interaction["note"]})
     view["within"] = within
     # Between groups: the change from the first window, one test per later window.
     between = []
@@ -245,18 +291,31 @@ def build_group_window_view(groups: Sequence[Dict[str, object]], labels: Sequenc
     view["title"] = f"{metric_label}: {suffix}" if metric_label else suffix
     lines = []
     families = sorted({str(item["test"]) for item in tested if np.isfinite(float(item["p"]))})
-    if families:
-        lines.append("Within group: " + " / ".join(families) + ", Holm")
     changes = [f"{entry['window']} p={entry['p_holm']:.2g}" for entry in view["between_windows"]
                if np.isfinite(entry["p_holm"])]
-    if changes:
-        lines.append(f"Change from {labels[0]} between groups (Holm): " + ", ".join(changes))
+    interaction_text = ""
+    if np.isfinite(float(interaction["p"])):
+        interaction_text = (f"Group × window: F({interaction['df1']:.3g}, {interaction['df2']:.3g})="
+                            f"{interaction['statistic']:.3g}, p={interaction['p']:.3g}")
+    if overlay:
+        if interaction_text:
+            lines.append(interaction_text)
+        view["tooltip"] = ("Bold lines: group mean ± SEM in each window. Thin lines: one animal each (trials "
+                           "averaged per recording). Group × window tests whether the groups follow different "
+                           "courses across the windows. " + str(interaction["note"])
+                           + (" " + str(interaction["normality"]) if interaction["normality"] else ""))
+    else:
+        if families:
+            lines.append("Within group: " + " / ".join(families) + ", Holm")
+        if changes:
+            lines.append(f"Change from {labels[0]} between groups (Holm): " + ", ".join(changes))
+        view["tooltip"] = ("Each line joins the values of one animal across the windows (trials averaged per "
+                           "recording). Brackets: paired test of two windows within a group, Holm-adjusted "
+                           "across all pairs and groups (no bracket: not tested, fewer than 3 animals or "
+                           f"ungrouped). Between groups: the change from {labels[0]} is compared for each later "
+                           "window, Holm-adjusted across windows. " + str(between[0]["note"])
+                           + (" " + interaction_text + "." if interaction_text else ""))
     view["note"] = "\n".join(lines)
-    view["tooltip"] = ("Each line joins the values of one animal across the windows (trials averaged per "
-                       "recording). Brackets: paired test of two windows within a group, Holm-adjusted across "
-                       "all pairs and groups (no bracket: not tested, fewer than 3 animals or ungrouped). "
-                       f"Between groups: the change from {labels[0]} is compared for each later window, "
-                       "Holm-adjusted across windows. " + str(between[0]["note"]))
     return view
 
 
@@ -271,6 +330,9 @@ def build_group_view(mode: str, groups: Sequence[Dict[str, object]], metric_labe
     windows).
     """
     mode = mode if mode in GROUP_VIEWS else DEFAULT_GROUP_VIEW
+    if mode == "overlay":   # the overlaid layout with the two standard windows
+        return build_group_window_view([{**group, "windows": [group["pre"], group["post"]]} for group in groups],
+                                       [pre_label, post_label], metric_label, overlay=True)
     prepared = []
     for group in groups:
         pre, post = np.asarray(group["pre"], float), np.asarray(group["post"], float)
@@ -433,6 +495,8 @@ def draw_group_view(plot, view: Dict[str, object], text_color: str, style: str =
     import pyqtgraph as pg
     from PySide6 import QtGui
     style = style if style in SUMMARY_STYLES else DEFAULT_SUMMARY_STYLE
+    if view.get("mean_lines"):
+        style = DEFAULT_SUMMARY_STYLE          # the overlaid view has its own summary: the mean line
     items: list = []
 
     def tint(color: str, alpha: int) -> QtGui.QColor:
@@ -447,13 +511,19 @@ def draw_group_view(plot, view: Dict[str, object], text_color: str, style: str =
                 xs.extend([link["x0"] + jitter, link["x1"] + jitter, np.nan])
                 ys.extend([a, b, np.nan])
         if xs:
-            items.append(pg.PlotDataItem(xs, ys, connect="finite", pen=pg.mkPen(tint(link["color"], 110), width=1.0)))
+            alpha = 70 if link.get("faint") else 110
+            items.append(pg.PlotDataItem(xs, ys, connect="finite", pen=pg.mkPen(tint(link["color"], alpha), width=1.0)))
     for column in view["columns"]:
         x, values = column["x"], column["values"]
         keep = np.isfinite(values)
         if not keep.any():
             continue
         color = column["color"]
+        if column.get("summary") is False:
+            # Overlaid view: the animals are small open markers behind the group mean line.
+            items.append(pg.ScatterPlotItem(x=x + column["jitter"][keep], y=values[keep], size=5,
+                                            pen=pg.mkPen(tint(color, 120), width=1), brush=pg.mkBrush(tint(color, 30))))
+            continue
         point_alpha = 150 if column["faded"] else 255
         mean, sem = column["mean"], column["sem"] if np.isfinite(column["sem"]) else 0.0
         if style == "bars":
@@ -488,6 +558,21 @@ def draw_group_view(plot, view: Dict[str, object], text_color: str, style: str =
                                                 brush=pg.mkBrush(text_color)))
                 items.append(pg.ErrorBarItem(x=np.array([x + offset]), y=np.array([mean]), top=np.array([sem]),
                                              bottom=np.array([sem]), beam=0.1, pen=pg.mkPen(text_color, width=1)))
+    for line in view.get("mean_lines", []):
+        # Group mean +/- SEM across the windows (overlaid view), drawn above the animals.
+        xs, means = np.asarray(line["x"], float), np.asarray(line["mean"], float)
+        sems = np.nan_to_num(np.asarray(line["sem"], float), nan=0.0)
+        ok = np.isfinite(means)
+        if not ok.any():
+            continue
+        curve = pg.PlotDataItem(xs[ok], means[ok], pen=pg.mkPen(line["color"], width=OVERLAY_LINE_WIDTH),
+                                symbol="o", symbolSize=OVERLAY_MARKER_SIZE, symbolBrush=pg.mkBrush(line["color"]),
+                                symbolPen=pg.mkPen(line["color"]))
+        error = pg.ErrorBarItem(x=xs[ok], y=means[ok], top=sems[ok], bottom=sems[ok], beam=0.09,
+                                pen=pg.mkPen(line["color"], width=2))
+        for item in (error, curve):
+            item.setZValue(5)
+            items.append(item)
     bounds = view_bounds(view, style)
     if bounds is not None:
         low, high = bounds
@@ -527,18 +612,33 @@ def draw_group_view_matplotlib(axis, view: Dict[str, object], style: str = DEFAU
                                title: Optional[str] = None, units: str = "") -> None:
     """Publication panel of ``view`` with the same numbers and annotations as on screen."""
     style = style if style in SUMMARY_STYLES else DEFAULT_SUMMARY_STYLE
+    if view.get("mean_lines"):
+        style = DEFAULT_SUMMARY_STYLE          # the overlaid view has its own summary: the mean line
     neutral = "#526371"
     for link in view["links"]:
         for jitter, a, b in zip(link["jitter"], link["y0"], link["y1"]):
             if np.isfinite(a) and np.isfinite(b):
                 axis.plot([link["x0"] + jitter, link["x1"] + jitter], [a, b], color=link["color"],
-                          alpha=0.4, linewidth=0.7, zorder=1)
+                          alpha=0.28 if link.get("faint") else 0.4, linewidth=0.7, zorder=1)
+    for line, entry in zip(view.get("mean_lines", []), view.get("legend", [])):
+        # Group mean +/- SEM across the windows (overlaid view), with its legend entry.
+        xs, means = np.asarray(line["x"], float), np.asarray(line["mean"], float)
+        sems = np.nan_to_num(np.asarray(line["sem"], float), nan=0.0)
+        ok = np.isfinite(means)
+        if ok.any():
+            axis.errorbar(xs[ok], means[ok], yerr=sems[ok], color=line["color"], linewidth=1.8, marker="o",
+                          markersize=5, capsize=2.5, elinewidth=1.4, zorder=6, label=entry["name"])
     for column in view["columns"]:
         x, values = column["x"], column["values"]
         keep = np.isfinite(values)
         if not keep.any():
             continue
         color, alpha = column["color"], (0.55 if column["faded"] else 0.85)
+        if column.get("summary") is False:
+            # Overlaid view: the animals are small open markers behind the group mean line.
+            axis.scatter(x + column["jitter"][keep], values[keep], s=9, facecolors="none", edgecolors=color,
+                         alpha=0.45, linewidths=0.6, zorder=2)
+            continue
         mean, sem = column["mean"], column["sem"] if np.isfinite(column["sem"]) else None
         if style == "bars":
             axis.bar(x, mean, width=0.62, color=color, alpha=0.28, edgecolor=color, linewidth=0.9, zorder=1)
@@ -575,6 +675,8 @@ def draw_group_view_matplotlib(axis, view: Dict[str, object], style: str = DEFAU
     if note:
         axis.text(0.5, 1.015, note, transform=axis.transAxes, ha="center", va="bottom",
                   fontsize=6.5, color="#546274", clip_on=False)
+    if view.get("mean_lines") and axis.get_legend_handles_labels()[0]:
+        axis.legend(loc="best", frameon=False, fontsize=7, handlelength=1.6)
     positions = [tick[0] for tick in view["ticks"]]
     axis.set_xticks(positions, [tick[1] for tick in view["ticks"]])
     xs = [column["x"] for column in view["columns"]] or [0.0]

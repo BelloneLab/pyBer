@@ -297,9 +297,18 @@ class MetricPanel(pg.PlotWidget):
         self.setToolTip(view["tooltip"])
         bounds = view.get("_drawn_bounds")
         note = view_note(view, self.summary_style)
-        if bounds is not None and note:
+        legend = view.get("legend") or []
+        if bounds is not None and (note or legend):
             self._data_bounds = bounds
-            self.note.setText(note)
+            if legend:
+                # Overlaid groups: a colored legend line, then the statistics.
+                import html
+                entries = "&nbsp;&nbsp;&nbsp;".join(
+                    f'<span style="color:{entry["color"]}">●</span> {html.escape(str(entry["name"]))}'
+                    for entry in legend)
+                self.note.setHtml(entries + "".join("<br>" + html.escape(line) for line in note.split("\n") if line))
+            else:
+                self.note.setText(note)
             self.note.show()
             self._note_wanted = True
             self._fit_note()

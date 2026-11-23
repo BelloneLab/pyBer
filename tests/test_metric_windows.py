@@ -458,11 +458,22 @@ class MetricWindowsPanelTests(dashboard.GroupViewDashboardTests):
             np.testing.assert_allclose(np.sort(np.concatenate([column["values"] for column in late_columns])),
                                        np.sort(late))
         # Three pairs per group tested within group; change from Pre compared between groups per window.
-        self.assertEqual(len(view["within"]), 6)
+        self.assertEqual(len(view["within"]), 7)                         # six pairs + the interaction row
+        self.assertEqual(view["within"][-1]["group"], "Group x window interaction")
         self.assertEqual([entry["window"] for entry in view["between_windows"]], ["Post", "Late"])
         self.assertIn("Late", result["group_rows"][0])                   # per-animal export has the extra window
         ticks = [text.split("\n")[0] for _x, text in panel.plot_metrics.getAxis("bottom")._tickLevels[0]]
         self.assertEqual(ticks, ["Pre", "Post", "Late"] * 2)
+        # Overlaid: the groups share the three window ticks, one mean line each.
+        panel.combo_metric_group_view.setCurrentIndex(panel.combo_metric_group_view.findData("overlay"))
+        overlay = panel._last_metric_panels[primary]["group_view"]
+        self.assertEqual([text.splitlines()[0] for _x, text in overlay["ticks"]], ["Pre", "Post", "Late"])
+        self.assertEqual([entry["name"] for entry in overlay["legend"]],
+                         [f"WT, n={dashboard.N_PER_GROUP}", f"Het, n={dashboard.N_PER_GROUP}"])
+        self.assertEqual(len(overlay["mean_lines"]), 2)
+        self.assertIn("WT, n=", panel.plot_metrics.note.toPlainText())
+        ticks = [text.splitlines()[0] for _x, text in panel.plot_metrics.getAxis("bottom")._tickLevels[0]]
+        self.assertEqual(ticks, ["Pre", "Post", "Late"])
         # Another group comparison shows one quantity per group: back to one panel per window.
         panel.combo_metric_group_view.setCurrentIndex(panel.combo_metric_group_view.findData("delta"))
         self.assertIn(result_key(primary, windows._rows[0].window_id), panel._last_metric_panels)

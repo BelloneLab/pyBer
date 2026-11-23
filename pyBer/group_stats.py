@@ -174,3 +174,71 @@ def comparison_rows(comparison: Dict[str, object], **fixed) -> List[Dict[str, ob
                      "effect": comparison["effect"], "normality": comparison["normality"],
                      "variance": comparison["variance"], "note": comparison["note"]})
     return rows
+
+
+def window_interaction(groups: Sequence[np.ndarray], alpha: float = 0.05) -> Dict[str, object]:
+    """Group x window interaction of a mixed (split-plot) ANOVA.
+
+    Question: do the groups follow different courses across the windows (Pre,
+    Post, Late, ...)? ``groups``: one array per tested group, shape
+    (animals, windows); an animal with a missing window is left out.
+
+    Each animal's own mean is removed, then the remaining window profiles are
+    compared between groups: F = MS(group x window) / MS(animal x window within
+    group), with (G-1)(k-1) and (N-G)(k-1) degrees of freedom. With more than
+    two windows the test assumes sphericity, so both degrees of freedom are
+    multiplied by the Greenhouse-Geisser epsilon of the pooled within-group
+    covariance (epsilon = 1 for two windows, where the test is the pooled
+    t-test of the Post - Pre change). Residual normality is reported
+    (Shapiro-Wilk), not enforced: there is no rank-based equivalent here.
+
+    Descriptive only (p = NaN) with fewer than two groups or two windows, or a
+    group with fewer than ``MIN_TEST_N`` complete animals.
+    """
+    from scipy import stats
+    arrays = []
+    for values in groups:
+        data = np.atleast_2d(np.asarray(values, float))
+        arrays.append(data[np.all(np.isfinite(data), axis=1)] if data.size else data.reshape(0, 0))
+    windows = arrays[0].shape[1] if arrays and arrays[0].ndim == 2 else 0
+    total = int(sum(len(data) for data in arrays))
+    result: Dict[str, object] = {"test": "Descriptive only", "statistic": np.nan, "p": np.nan, "df1": np.nan,
+                                 "df2": np.nan, "epsilon": np.nan, "effect_name": "", "effect": np.nan,
+                                 "n": total, "normality": "", "note": ""}
+    if len(arrays) < 2 or windows < 2:
+        result["note"] = "An interaction needs at least two groups and two windows."
+        return result
+    if any(len(data) < MIN_TEST_N for data in arrays):
+        result["note"] = f"A group has fewer than {MIN_TEST_N} animals with every window: descriptive only."
+        return result
+    # Remove each animal's mean: what is left is its profile across the windows.
+    centered = [data - data.mean(axis=1, keepdims=True) for data in arrays]
+    pooled = np.vstack(centered)
+    overall = pooled.mean(axis=0)
+    ss_effect = float(sum(len(data) * np.sum((data.mean(axis=0) - overall) ** 2) for data in centered))
+    residuals = np.vstack([data - data.mean(axis=0) for data in centered])
+    ss_error = float(np.sum(residuals ** 2))
+    df1, df2 = (len(arrays) - 1) * (windows - 1), (total - len(arrays)) * (windows - 1)
+    if ss_error <= 0 or df2 <= 0:
+        result["note"] = "No variability between animals within the groups: no test."
+        return result
+    # Greenhouse-Geisser epsilon from the pooled within-group covariance (double-centered).
+    covariance = sum((data - data.mean(axis=0)).T @ (data - data.mean(axis=0)) for data in arrays)
+    covariance = covariance / (total - len(arrays))
+    center = np.eye(windows) - 1.0 / windows
+    contrast = center @ covariance @ center
+    epsilon = float(np.trace(contrast) ** 2 / ((windows - 1) * np.sum(contrast * contrast)))
+    epsilon = min(1.0, max(1.0 / (windows - 1), epsilon))
+    statistic = (ss_effect / df1) / (ss_error / df2)
+    shapiro_p = float(stats.shapiro(residuals.ravel()).pvalue) if residuals.size >= 3 else np.nan
+    corrected = windows > 2
+    result.update(
+        test="Mixed ANOVA interaction" + (" (Greenhouse-Geisser)" if corrected else ""),
+        statistic=float(statistic), df1=df1 * epsilon, df2=df2 * epsilon, epsilon=epsilon,
+        p=float(stats.f.sf(statistic, df1 * epsilon, df2 * epsilon)),
+        effect_name="partial eta squared", effect=ss_effect / (ss_effect + ss_error),
+        normality=f"Shapiro-Wilk p (residuals)={shapiro_p:.3g}",
+        note=("Group x window interaction: animals with every window only. Assumes normal residuals"
+              + ("" if not np.isfinite(shapiro_p) or shapiro_p > alpha else " (rejected here: interpret with care)")
+              + (" and sphericity, corrected by Greenhouse-Geisser." if corrected else ".")))
+    return result

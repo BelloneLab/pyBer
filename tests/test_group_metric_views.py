@@ -123,6 +123,79 @@ class GroupViewStatisticsTests(unittest.TestCase):
         no_difference = build_group_view("pre", _groups())
         self.assertEqual(no_difference["brackets"], [])
 
+    def test_group_by_window_interaction_matches_a_least_squares_model_comparison(self):
+        from group_stats import window_interaction
+        rng = np.random.default_rng(11)
+        sizes, windows = (5, 7, 4), 4                                  # unbalanced groups, four windows
+        data = [rng.normal(0, 1, (n, 1)) + rng.normal(0, 0.6, (n, windows)) + g * np.linspace(0, 1.5, windows)
+                for g, n in enumerate(sizes)]
+        result = window_interaction(data)
+        # Independent reference: animal + window model against animal + group-specific window model.
+        y = np.concatenate([block.ravel() for block in data])
+        animal = np.repeat(np.arange(sum(sizes)), windows)
+        group = np.repeat(np.repeat(np.arange(len(sizes)), sizes), windows)
+        window = np.tile(np.arange(windows), sum(sizes))
+        dummies = lambda codes: (codes[:, None] == np.unique(codes)[None, :]).astype(float)
+        reduced = np.hstack([dummies(animal), dummies(window)])
+        full = np.hstack([dummies(animal), dummies(group * windows + window)])
+        rss = lambda design: float(np.sum((y - design @ np.linalg.lstsq(design, y, rcond=None)[0]) ** 2))
+        df1, df2 = (len(sizes) - 1) * (windows - 1), (sum(sizes) - len(sizes)) * (windows - 1)
+        reference = ((rss(reduced) - rss(full)) / df1) / (rss(full) / df2)
+        self.assertAlmostEqual(result["statistic"], reference, places=8)
+        # Greenhouse-Geisser: both degrees of freedom shrink by the same epsilon in [1/(k-1), 1].
+        self.assertTrue(1 / (windows - 1) <= result["epsilon"] <= 1)
+        self.assertAlmostEqual(result["df1"] / df1, result["epsilon"])
+        self.assertAlmostEqual(result["p"], stats.f.sf(reference, df1 * result["epsilon"], df2 * result["epsilon"]))
+        # Two groups and two windows: exactly the pooled t-test of the Post - Pre change.
+        two = [block[:, :2] for block in data[:2]]
+        pair = window_interaction(two)
+        t_test = stats.ttest_ind(two[0][:, 1] - two[0][:, 0], two[1][:, 1] - two[1][:, 0])
+        self.assertAlmostEqual(pair["statistic"], t_test.statistic ** 2, places=8)
+        self.assertAlmostEqual(pair["p"], t_test.pvalue, places=10)
+        self.assertEqual(pair["epsilon"], 1.0)
+        # Too few animals, or one group: descriptive only.
+        self.assertTrue(np.isnan(window_interaction([data[0][:2], data[1]])["p"]))
+        self.assertTrue(np.isnan(window_interaction([data[0]])["p"]))
+
+    def test_overlaid_view_draws_one_mean_line_per_group_on_shared_window_ticks(self):
+        from group_metric_views import build_group_window_view
+        rng = np.random.default_rng(2)
+        groups = []
+        for name, color, course in (("WT", "#1f77b4", (0.0, 1.3, 2.2)), ("Het", "#ff7f0e", (0.0, 0.3, 0.3))):
+            base = rng.normal(0, 0.3, (6, 1))
+            values = base + np.asarray(course) + rng.normal(0, 0.3, (6, 3))
+            groups.append({"name": name, "color": color, "windows": list(values.T), "ids": [f"{name}{i}" for i in range(6)]})
+        labels, limits = ["Pre", "Post", "Late"], [(-1, 0), (0, 1), (1, 2)]
+        view = build_group_window_view(groups, labels, "AUC", overlay=True, limits=limits)
+        self.assertEqual(view["ticks"], [(0.0, "Pre\n-1 to 0 s"), (1.0, "Post\n0 to 1 s"), (2.0, "Late\n1 to 2 s")])
+        self.assertEqual([entry["name"] for entry in view["legend"]], ["WT, n=6", "Het, n=6"])
+        self.assertEqual(len(view["mean_lines"]), 2)
+        np.testing.assert_allclose(view["mean_lines"][0]["mean"], [np.mean(w) for w in groups[0]["windows"]])
+        np.testing.assert_allclose(view["mean_lines"][1]["sem"],
+                                   [np.std(w, ddof=1) / np.sqrt(6) for w in groups[1]["windows"]])
+        self.assertEqual(view["brackets"], [])                         # shared ticks: no per-group brackets
+        self.assertTrue(all(column["summary"] is False for column in view["columns"]))
+        self.assertLess(view["interaction"]["p"], 0.05)                # the two courses clearly differ
+        self.assertTrue(view["note"].startswith("Group × window: F("))
+        self.assertEqual(view["within"][-1]["group"], "Group x window interaction")   # exported with the tests
+        # The side-by-side layout has the same statistics, drawn as clusters with brackets.
+        clusters = build_group_window_view(groups, labels, "AUC")
+        self.assertEqual(clusters["interaction"]["p"], view["interaction"]["p"])
+        self.assertEqual(len(clusters["ticks"]), 6)
+        self.assertNotIn("mean_lines", clusters)
+        # Export rendering: one legend entry per group, window ticks only.
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        figure, axis = plt.subplots()
+        draw_group_view_matplotlib(axis, view, "box", units="z")       # the style does not change this view
+        self.assertEqual([text.get_text() for text in axis.get_legend().get_texts()], ["WT, n=6", "Het, n=6"])
+        self.assertEqual(len(axis.get_xticks()), 3)
+        plt.close(figure)
+        # With the two standard windows, the Group comparison choice alone gives the overlaid view.
+        simple = build_group_view("overlay", _groups(), "AUC")
+        self.assertEqual((simple["mode"], [text for _x, text in simple["ticks"]]), ("overlay", ["Pre", "Post"]))
+
     def test_matplotlib_panels_draw_every_view_and_style(self):
         import matplotlib
         matplotlib.use("Agg")
@@ -303,6 +376,10 @@ class GroupViewGuiTests(unittest.TestCase):
             result = next(iter(panel._last_metric_panels.values()))
             self.assertTrue(np.isnan(result["group_comparison"]["p"]))
             self.assertEqual(result["group_view"]["brackets"], [])
+            if mode == "overlay":                            # only the group legend, no statistics line
+                self.assertEqual(result["group_view"]["note"], "")
+                self.assertEqual(panel.plot_metrics.note.toPlainText().count("n=2"), 3)   # WT, Het, Ungrouped
+                continue
             self.assertFalse(panel.plot_metrics._note_wanted)
             self.assertFalse(panel.plot_metrics.note.isVisibleTo(panel.plot_metrics.getPlotItem()))
             self.assertTrue(panel.plot_metrics._group_items)     # the data are still drawn
