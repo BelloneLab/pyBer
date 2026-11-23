@@ -189,11 +189,12 @@ class ProcessingParams:
     rlm_max_iter: int = 50
     rlm_tol: float = 1e-6
 
-    # Prominence normalization options. The "baseline" is the segment used
-    # to estimate the peak-prominence scale. Multiple sources are supported:
-    #   - "events": exclude windows around DIO trigger rising edges
-    #   - "window": use an explicit [start, end] interval (e.g. 5 min before task)
-    #   - "file":   exclude windows around event times loaded from a CSV/XLSX
+    # Event-scale ("prominence normalized") options. The "baseline" is the
+    # region whose events set the scale (see event_scale_normalization.py):
+    #   - "events": outside (or inside) windows around A/D (DIO) bouts
+    #   - "window": an explicit [start, end] interval (e.g. 5 min before task)
+    #   - "file":   outside (or inside) windows around events of an event /
+    #               behavior file (EthoVision, binary states, onset tables)
     #   - "whole":  the entire trace
     prominence_baseline_source: str = "events"
     prominence_baseline_start_s: float = 0.0
@@ -203,8 +204,20 @@ class ProcessingParams:
     prominence_exclude_before_s: float = 0.0
     prominence_exclude_after_s: float = 0.0
     prominence_min_peak: float = 0.0
-    prominence_max_peak: float = 1e6
+    prominence_max_peak: float = 0.0  # <= 0 means no upper limit
     prominence_show_peaks_overlay: bool = True
+    # Event-size measure: "prominence" (median-centred, MATLAB workflow) or
+    # "amplitude" (dF/F peak value, divide only; Pascoli et al. 2026).
+    prominence_method: str = "prominence"
+    # Units of min/max prominence and min amplitude: "absolute" dF/F, or
+    # "noise" = multiples of the robust baseline noise sigma (scale-free).
+    prominence_threshold_units: str = "absolute"
+    prominence_min_amplitude: float = 0.0
+    prominence_min_distance_s: float = 0.0
+    # Event-file label to use ("" = every label) and the role of event
+    # windows: "exclude" (spontaneous baseline) or "include" (evoked peaks).
+    prominence_event_label: str = ""
+    prominence_event_role: str = "exclude"
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -433,6 +446,8 @@ class ProcessedTrial:
     prominence_baseline_intervals: Optional[List[Tuple[float, float]]] = None
     prominence_threshold: float = float("nan")
     prominence_baseline_source: str = ""
+    # Complete scale report (event_scale_normalization.normalize_by_event_scale).
+    prominence_stats: Dict[str, Any] = field(default_factory=dict)
 
     # Optional synchronized timebase. When present, postprocessing can use this
     # camera/behavior-aligned time column instead of the original photometry time.
@@ -3996,160 +4011,25 @@ def prominence_normalize(
     event_times: np.ndarray,
     params: ProcessingParams,
     fs_used: float,
-) -> Tuple[np.ndarray, Dict[str, float]]:
+    event_offsets: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
-    Normalize a trace by baseline peak prominence.
+    Normalize a trace by the mean size of its top baseline events.
 
-    This mirrors the supplied MATLAB workflow:
-    1) create a to_consider mask by excluding samples around events;
-    2) detect peaks using MinPeakProminence, keep peaks in to_consider, drop
-       peaks above maxpeak, and average the top percentage of prominences.
+    Thin wrapper kept for backward compatibility; the implementation (both the
+    prominence recipe of the original MATLAB workflow and the spontaneous-event
+    amplitude recipe of Pascoli et al. 2026) lives in event_scale_normalization.
 
-    The returned trace is centered by the baseline median and divided by the
-    mean selected prominence, making it z-score-like but peak-scale based.
+    ``event_times`` / ``event_offsets`` are the A/D (DIO) event onsets/offsets
+    used when the baseline source is "events" (or as fallback for "file").
     """
-    y = np.asarray(signal, float)
-    t = np.asarray(time, float)
-    if y.size == 0 or t.size != y.size:
-        return np.full_like(y, np.nan), {
-            "duration_s": 0.0,
-            "mean_amplitude": np.nan,
-            "sem_amplitude": np.nan,
-            "n_peaks": 0.0,
-            "baseline_median": np.nan,
-        }
+    from event_scale_normalization import normalize_by_event_scale
 
-    source = str(getattr(params, "prominence_baseline_source", "events") or "events").lower()
-    before = float(getattr(params, "prominence_exclude_before_s", 0.0))
-    after = float(getattr(params, "prominence_exclude_after_s", 0.0))
-    if source == "window":
-        # Explicit baseline window [start, end]; end=0 means "to end of trace".
-        start_s = float(getattr(params, "prominence_baseline_start_s", 0.0))
-        end_s = float(getattr(params, "prominence_baseline_end_s", 0.0))
-        finite_t = np.isfinite(t)
-        if not np.any(finite_t):
-            keep = np.zeros_like(t, dtype=bool)
-        else:
-            t_lo = float(np.nanmin(t[finite_t]))
-            abs_start = t_lo + max(0.0, start_s)
-            abs_end = t_lo + max(0.0, end_s) if end_s > 0 else float(np.nanmax(t[finite_t]))
-            if abs_end <= abs_start:
-                # User configured an empty window - fall back to whole trace.
-                keep = finite_t.copy()
-            else:
-                keep = finite_t & (t >= abs_start) & (t <= abs_end)
-    elif source == "file":
-        file_events = _load_event_times_csv(str(getattr(params, "prominence_event_file_path", "") or ""))
-        # If the file produced no events, fall back to whatever event_times the
-        # caller supplied (typically DIO rising edges) so we never silently use
-        # the whole trace.
-        if file_events.size == 0:
-            file_events = np.asarray(event_times, float)
-        keep = _baseline_mask_excluding_events(t, file_events, before, after)
-    elif source == "whole":
-        keep = np.isfinite(t)
-    else:  # "events" (legacy DIO-driven)
-        keep = _baseline_mask_excluding_events(t, np.asarray(event_times, float), before, after)
-    finite_keep = keep & np.isfinite(y)
-    baseline_median = float(np.nanmedian(y[finite_keep])) if np.any(finite_keep) else float(np.nanmedian(y))
-
-    # Center by baseline median BEFORE peak detection so prominences reflect
-    # transient amplitude above baseline (matches MATLAB data_norm.data input).
-    y_centered = y - baseline_median
-
-    min_peak = float(getattr(params, "prominence_min_peak", 0.0))
-    max_peak = float(getattr(params, "prominence_max_peak", 1e6))
-    top_fraction = float(getattr(params, "prominence_percent_top", 0.10))
-
-    amplitudes, idx_peak, _top_peaks = prominence_peaks_detection(
-        y_centered,
-        top_fraction,
-        keep,
-        min_peak,
-        max_peak,
+    return normalize_by_event_scale(
+        signal, time, params, fs_used,
+        dio_onsets=np.asarray(event_times, float),
+        dio_offsets=None if event_offsets is None else np.asarray(event_offsets, float),
     )
-    scale_source = "baseline_peak_prominence"
-    n_peaks = int(amplitudes.size)
-    effective_min_peak = float(min_peak)
-
-    # Fallback 1: retry without the user's min-prominence floor in case the
-    # configured threshold is too aggressive for this trace.
-    if n_peaks == 0 and min_peak > 0.0:
-        amplitudes_retry, idx_peak_retry, _t2 = prominence_peaks_detection(
-            y_centered, top_fraction, keep, 0.0, max_peak,
-        )
-        if amplitudes_retry.size:
-            amplitudes = amplitudes_retry
-            idx_peak = idx_peak_retry
-            n_peaks = int(amplitudes.size)
-            scale_source = "baseline_peak_prominence_no_min_floor"
-            effective_min_peak = 0.0
-
-    mean_amp = float(np.nanmean(amplitudes)) if n_peaks else np.nan
-
-    # Fallback 2: still nothing? Use a MAD-noise estimate of the baseline.
-    # Better than emitting an all-NaN output that hides every transient.
-    mad_sigma = float("nan")
-    if (not np.isfinite(mean_amp) or mean_amp <= 1e-12):
-        base_arr = y_centered[finite_keep] if np.any(finite_keep) else y_centered[np.isfinite(y_centered)]
-        if base_arr.size >= 5:
-            mad = float(np.nanmedian(np.abs(base_arr - np.nanmedian(base_arr))))
-            if np.isfinite(mad) and mad > 1e-12:
-                mad_sigma = 1.4826 * mad
-                # Use a peak-equivalent scale: mean of |samples| above 2*sigma.
-                # Falls back to mad_sigma itself if no such samples exist.
-                tail = np.abs(base_arr)
-                tail = tail[tail >= 2.0 * mad_sigma]
-                mean_amp = float(np.nanmean(tail)) if tail.size else float(mad_sigma)
-                scale_source = "mad_noise_fallback"
-
-    if n_peaks > 1:
-        sem_amp = float(np.nanstd(amplitudes, ddof=1) / np.sqrt(n_peaks))
-    elif n_peaks == 1:
-        sem_amp = 0.0
-    else:
-        sem_amp = float("nan")
-
-    fs = float(fs_used)
-    if not np.isfinite(fs) or fs <= 0:
-        fs = 1.0 / float(np.nanmedian(np.diff(t))) if t.size > 2 else np.nan
-    duration = float(np.sum(keep) / fs) if np.isfinite(fs) and fs > 0 else np.nan
-
-    if not np.isfinite(mean_amp) or mean_amp <= 1e-12 or not np.isfinite(baseline_median):
-        # Absolute last resort: leave the trace centered by baseline median
-        # so the user at least sees the data, instead of a flat-line NaN.
-        out = y - baseline_median
-        scale_source = "centered_only_no_scale"
-        mean_amp = float("nan")
-    else:
-        out = (y - baseline_median) / mean_amp
-
-    # Peak times / values for the raw-signal overlay.
-    if idx_peak is not None and len(idx_peak) > 0:
-        idx_arr = np.asarray(idx_peak, int)
-        idx_arr = idx_arr[(idx_arr >= 0) & (idx_arr < t.size)]
-        peak_times = t[idx_arr].astype(float)
-        peak_values = y[idx_arr].astype(float)
-    else:
-        peak_times = np.array([], float)
-        peak_values = np.array([], float)
-
-    baseline_intervals = _baseline_intervals_from_mask(t, keep)
-
-    return out, {
-        "duration_s": duration,
-        "mean_amplitude": mean_amp,
-        "sem_amplitude": sem_amp,
-        "n_peaks": float(n_peaks),
-        "baseline_median": baseline_median,
-        "scale_source": scale_source,
-        "mad_noise_sigma": mad_sigma,
-        "peak_times": peak_times,
-        "peak_values": peak_values,
-        "baseline_intervals": baseline_intervals,
-        "effective_min_peak": effective_min_peak,
-        "baseline_source": source,
-    }
 
 
 def ols_fit(x: np.ndarray, y: np.ndarray) -> Tuple[float, float]:
@@ -5036,8 +4916,12 @@ class PhotometryProcessor:
             else:
                 dff_fit = dff_sig
                 no_reference_fallback = True
-            event_times = _trigger_rising_edges(t2, dio2)
-            out, prominence_stats = prominence_normalize(dff_fit, t2, event_times, params, fs_used)
+            from event_scale_normalization import dio_bouts
+
+            dio_on, dio_off = dio_bouts(t2, dio2)
+            out, prominence_stats = prominence_normalize(
+                dff_fit, t2, dio_on, params, fs_used, event_offsets=dio_off,
+            )
 
         elif mode == "Raw signal (465)":
             # (11) raw signal (processed 465 trace)
@@ -5089,20 +4973,9 @@ class PhotometryProcessor:
                     context_parts.append("Iso polarity: inverted before fit")
             context_parts.append(baseline_desc)
             if prominence_stats is not None:
-                mean_amp = prominence_stats.get("mean_amplitude", np.nan)
-                sem_amp = prominence_stats.get("sem_amplitude", np.nan)
-                n_peaks = int(prominence_stats.get("n_peaks", 0.0))
-                duration = prominence_stats.get("duration_s", np.nan)
-                scale_source = str(prominence_stats.get("scale_source", "baseline_peak_prominence"))
-                context_parts.append(
-                    f"Prominence scale [{scale_source}]: "
-                    f"mean={mean_amp:.3g}, sem={sem_amp:.3g}, n={n_peaks}, "
-                    f"baseline={duration:.3g}s, top={float(getattr(params, 'prominence_percent_top', 0.10)):.3g}, "
-                    f"exclude=-{float(getattr(params, 'prominence_exclude_before_s', 0.0)):.3g}/+"
-                    f"{float(getattr(params, 'prominence_exclude_after_s', 0.0)):.3g}s, "
-                    f"min={float(getattr(params, 'prominence_min_peak', 0.0)):.3g}, "
-                    f"max={float(getattr(params, 'prominence_max_peak', 1e6)):.3g}"
-                )
+                from event_scale_normalization import context_text
+
+                context_parts.append(context_text(prominence_stats))
         if bool(getattr(params, "smoothing_enabled", False)):
             sm_method = str(getattr(params, "smoothing_method", "Savitzky-Golay") or "Savitzky-Golay")
             sm_win = float(getattr(params, "smoothing_window_s", 0.0))
@@ -5170,6 +5043,7 @@ class PhotometryProcessor:
                 str(prominence_stats.get("baseline_source", ""))
                 if prominence_stats is not None else ""
             ),
+            prominence_stats=dict(prominence_stats) if prominence_stats is not None else {},
             fs_actual=float(fs),
             fs_target=float(target_fs),
             fs_used=float(fs_used),

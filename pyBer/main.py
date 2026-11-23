@@ -8140,6 +8140,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_status_message(log_msg, 10000)
         self.param_panel.set_fs_info(processed.fs_actual, processed.fs_target, processed.fs_used)
         self._update_plot_status(fs_actual=float(processed.fs_actual), fs_target=float(processed.fs_target))
+        # Event-scale normalization report (empty for every other output mode).
+        self.param_panel.set_prominence_summary(getattr(processed, "prominence_stats", None))
 
         # Inform post tab that current processed changed
         self.post_tab.notify_preprocessing_updated(processed)
