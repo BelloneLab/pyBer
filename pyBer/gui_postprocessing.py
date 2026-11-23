@@ -18445,6 +18445,11 @@ class PostProcessingPanel(QtWidgets.QWidget):
         self.metrics_p_text.setColor(palette["text"])
         self.metrics_p_text.setFont(QtGui.QFont("Segoe UI", 9))
         for plot in [self.plot_metrics, *self._extra_metric_plots.values()]:
+            # Window panels ("Late", ...) are created on demand and are not
+            # plot_* attributes: restyle them too so a theme/preset change
+            # never leaves the default dark frame around a light plot.
+            style_plot(plot, palette)
+            plot.showGrid(x=False, y=grid_enabled, alpha=grid_alpha)
             plot.set_colors(palette)
         for error_bar in (self.metrics_err_pre, self.metrics_err_post, self.global_err_amp, self.global_err_freq):
             error_bar.setData(pen=pg.mkPen(palette["text"], width=1.2))

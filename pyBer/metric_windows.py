@@ -439,9 +439,14 @@ class MetricWindows(QtCore.QObject):
             from psth_metric_panels import MetricPanel
             plot = MetricPanel(panel.metric_panels_widget)
             _opt_plot(plot)
-            # Look exactly like the metric panels it sits beside.
+            # Look exactly like the metric panels it sits beside: style_plot
+            # also removes the application's dark rounded QGraphicsView frame,
+            # which otherwise shows around light (Paper/Sand) plots.
+            from postprocessing_style import style_plot
+            palette = panel._current_palette()
+            style_plot(plot, palette)
             plot.setBackground(panel.plot_metrics.backgroundBrush())
-            plot.set_colors(panel._current_palette())
+            plot.set_colors(palette)
             panel._install_metric_view_menu(plot)
             plot.hide()
             panel._extra_metric_plots[key] = plot
